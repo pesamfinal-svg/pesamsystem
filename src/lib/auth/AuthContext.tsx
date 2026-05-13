@@ -1,3 +1,4 @@
+// src/lib/auth/AuthContext.tsx
 "use client";
 
 import {
@@ -23,6 +24,10 @@ export interface PesamUser {
     firstName: string;
     lastName: string;
     roleId: string;
+    roleName?: string;
+    rolePermissions?: Record<string, boolean>; // <--- DODANE (Uprawnienia z Roli)
+    permissionOverrides?: Record<string, boolean>; // <--- DODANE (Wyjątki)
+    assignedSites?: string[]; // <--- DODANE (Przypisane budowy)
 }
 
 interface AuthContextType {
@@ -48,7 +53,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 try {
                     const userDoc = await getDoc(doc(db, "users", fbUser.uid));
                     if (userDoc.exists()) {
-                        setUser({ uid: fbUser.uid, email: fbUser.email!, ...userDoc.data() } as PesamUser);
+                        const userData = userDoc.data();
+                        let fetchedRoleName = userData.roleId;
+                        let fetchedRolePermissions = {};
+
+                        // Pobieramy ładną nazwę i domyślne uprawnienia z kolekcji 'roles'
+                        if (userData.roleId) {
+                            try {
+                                const roleDoc = await getDoc(doc(db, "roles", userData.roleId));
+                                if (roleDoc.exists()) {
+                                    fetchedRoleName = roleDoc.data().name;
+                                    fetchedRolePermissions = roleDoc.data().permissions || {};
+                                }
+                            } catch (e) {
+                                console.error("Nie udało się pobrać danych roli:", e);
+                            }
+                        }
+
+                        setUser({
+                            uid: fbUser.uid,
+                            email: fbUser.email!,
+                            roleName: fetchedRoleName,
+                            rolePermissions: fetchedRolePermissions,
+                            permissionOverrides: userData.permissionOverrides || {},
+                            assignedSites: userData.assignedSites || [],
+                            ...userData
+                        } as PesamUser);
                     } else {
                         console.error("Brak dokumentu użytkownika w Firestore!");
                         setUser(null);
@@ -87,4 +117,4 @@ export function useAuth() {
         throw new Error("useAuth must be used within an AuthProvider");
     }
     return context;
-}
+}
