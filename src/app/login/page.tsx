@@ -12,21 +12,25 @@ export default function LoginPage() {
     const [password, setPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // Zabezpieczenie: jeśli AuthContext nie jest jeszcze gotowy, nie renderuj formularza
+    // Zabezpieczenie przed brakiem kontekstu
     if (!authContext) return null;
 
     const { signIn } = authContext;
 
     async function handleSubmit(e: React.FormEvent) {
-        e.preventDefault();
+        e.preventDefault(); // Zatrzymuje domyślne odświeżenie strony po kliknięciu submit
+        console.log("Próba logowania dla:", email);
+
         setIsSubmitting(true);
         try {
             await signIn(email, password);
-            // Jeśli signIn się powiedzie, przekieruj do dashboardu
+            console.log("Logowanie w Firebase zakończone sukcesem!");
+            // Po sukcesie przenosimy użytkownika do panelu
             router.push("/dashboard");
-        } catch (err) {
-            console.error(err);
-            alert("Błędny email lub hasło!");
+        } catch (err: any) {
+            console.error("Błąd podczas logowania:", err);
+            // Wyświetlamy błąd z Firebase, żebyś wiedział, co poszło nie tak
+            alert("Błąd logowania: " + (err.message || "Nieznany błąd"));
         } finally {
             setIsSubmitting(false);
         }
