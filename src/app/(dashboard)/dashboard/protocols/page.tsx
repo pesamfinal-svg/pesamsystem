@@ -1,17 +1,34 @@
+// src/app/(dashboard)/protocols/page.tsx
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, query, orderBy, runTransaction, addDoc } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
+import { hasPermission } from "@/lib/auth/permissions";
 
 // --- INTERFEJSY ---
 interface Site { id: string; name: string; status: string; }
 interface InventoryItem {
     id: string; name: string; type: "UNIQUE" | "BULK"; inventoryNumber: string;
     category: string; availableQuantity: number; totalQuantity: number;
+    currentLocation: string; status: string; allocations: Record<string, number>;
 }
-interface CartItem extends InventoryItem { issueQty: number; }
+interface Accessory { id: string; name: string; quantity: number; mustReturn: boolean; }
+interface CartItem {
+    cartItemId: string; isManual: boolean; dbId?: string; type?: "UNIQUE" | "BULK";
+    inventoryNumber?: string; availableQuantity?: number; currentLocation?: string; status?: string;
+    name: string; issueQty: number; accessories: Accessory[];
+}
+
+// Interfejsy dla ZWROTÓW
+interface ReturnAccessory { name: string; mustReturn: boolean; isReturning: boolean; quantity: number; }
+interface ReturnCartItem {
+    dbId: string; name: string; type: "UNIQUE" | "BULK"; inventoryNumber: string;
+    maxQty: number; returnQty: number;
+    declaredStatus: string;
+    accessories: ReturnAccessory[];
+}
 
 export default function ProtocolsHub() {
     const { user } = useAuth();
@@ -19,286 +36,774 @@ export default function ProtocolsHub() {
     const [inventory, setInventory] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(true);
 
-    // Stany dla Modala WYDANIA
+    // Stany dla WYDANIA
     const [isIssueModalOpen, setIsIssueModalOpen] = useState(false);
-    const [issueSiteInput, setIssueSiteInput] = useState(""); // Dla datalist (wybór lub wpis ręczny)
+    const [issueSiteInput, setIssueSiteInput] = useState("");
     const [cart, setCart] = useState<CartItem[]>([]);
-    const [searchItem, setSearchItem] = useState("");
+
+    // Stany dla ZWROTU
+    const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
+    const [returnSiteId, setReturnSiteId] = useState("");
+    const [returnCart, setReturnCart] = useState<ReturnCartItem[]>([]);
+
+    // Stany dla AKCEPTACJI ZWROTÓW
+    const [isAcceptModalOpen, setIsAcceptModalOpen] = useState(false);
+    const [pendingProtocols, setPendingProtocols] = useState<any[]>([]);
+    const [selectedProtocol, setSelectedProtocol] = useState<any | null>(null);
+    const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string }>>({});
+
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    useEffect(() => {
-        const fetchData = async () => {
-            setLoading(true);
+    // Filtry
+    const [searchName, setSearchName] = useState("");
+    const [searchInvNumber, setSearchInvNumber] = useState("");
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
+
+    // Stany dla formularza osprzętu
+    const [accessoryFormOpenFor, setAccessoryFormOpenFor] = useState<string | null>(null);
+    const [accName, setAccName] = useState("");
+    const [accQty, setAccQty] = useState(1);
+    const [accMustReturn, setAccMustReturn] = useState(true);
+
+    const fetchData = async () => {
+        setLoading(true);
+        try {
             const sitesSnap = await getDocs(query(collection(db, "sites"), orderBy("name", "asc")));
             setSites(sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[]);
 
             const invSnap = await getDocs(query(collection(db, "inventory"), orderBy("name", "asc")));
             setInventory(invSnap.docs.map(d => ({ id: d.id, ...d.data() })) as InventoryItem[]);
+        } catch (error) {
+            console.error("Błąd podczas pobierania danych:", error);
+        } finally {
             setLoading(false);
-        };
-        fetchData();
-    }, []);
-
-    // --- LOGIKA KOSZYKA WYDANIA ---
-    const addToCart = (item: InventoryItem) => {
-        if (cart.find(i => i.id === item.id)) return;
-        setCart([...cart, { ...item, issueQty: 1 }]);
-    };
-
-    const removeFromCart = (id: string) => setCart(cart.filter(i => i.id !== id));
-
-    const updateCartQty = (id: string, qty: number) => {
-        setCart(cart.map(i => i.id === id ? { ...i, issueQty: qty } : i));
-    };
-
-    // --- TRANSAKCJA WYDANIA SPRZĘTU ---
-    const handleIssueSubmit = async () => {
-        if (!issueSiteInput.trim() || cart.length === 0) {
-            return alert("Podaj budowę i wybierz co najmniej jeden przedmiot!");
         }
+    };
+
+    useEffect(() => { fetchData(); }, []);
+
+    const fetchPendingProtocols = async () => {
+        try {
+            const q = query(collection(db, "protocols"), where("status", "==", "OCZEKUJACY"), where("type", "==", "ZWROT"));
+            const snap = await getDocs(q);
+            setPendingProtocols(snap.docs.map(d => ({ dbId: d.id, ...d.data() })));
+        } catch (error) {
+            console.error("Błąd pobierania oczekujących protokołów:", error);
+        }
+    };
+
+    const closeModal = () => {
+        setIsIssueModalOpen(false);
+        setIsReturnModalOpen(false);
+        setIsAcceptModalOpen(false);
+        setCart([]);
+        setReturnCart([]);
+        setIssueSiteInput("");
+        setReturnSiteId("");
+        setSelectedProtocol(null);
+        setAcceptInputs({});
+        setAccessoryFormOpenFor(null);
+    };
+
+    const userSites = sites.filter(s => {
+        const sitesArray = user?.assignedSites || [];
+        return sitesArray.includes("ALL") || sitesArray.includes(s.id);
+    });
+
+    // -------------------------------------------------------------------------
+    // LOGIKA KOSZYKA WYDANIA
+    // -------------------------------------------------------------------------
+    const addToCart = (item: InventoryItem) => {
+        if (item.availableQuantity <= 0) return alert(`Przedmiot w lokalizacji: ${item.currentLocation}. Najpierw zrób zwrot!`);
+        if (item.status !== "sprawne") return alert(`Przedmiot ma status: ${item.status.toUpperCase()}!`);
+        if (cart.find(i => i.dbId === item.id)) return;
+
+        setCart([...cart, {
+            cartItemId: Date.now().toString(), isManual: false, dbId: item.id, type: item.type,
+            inventoryNumber: item.inventoryNumber, availableQuantity: item.availableQuantity,
+            currentLocation: item.currentLocation, status: item.status, name: item.name,
+            issueQty: 1, accessories: []
+        }]);
+    };
+
+    const addManualItemToCart = () => {
+        const name = prompt("Wpisz nazwę przedmiotu (np. Drut fi 12):");
+        if (!name) return;
+        const qtyStr = prompt("Podaj ilość:");
+        const qty = parseInt(qtyStr || "0");
+        if (isNaN(qty) || qty <= 0) return alert("Nieprawidłowa ilość!");
+
+        setCart([...cart, {
+            cartItemId: Date.now().toString(), isManual: true, name: name, issueQty: qty, accessories: []
+        }]);
+    };
+
+    const removeFromCart = (cartItemId: string) => setCart(cart.filter(i => i.cartItemId !== cartItemId));
+    const updateCartQty = (cartItemId: string, qty: number) => setCart(cart.map(i => i.cartItemId === cartItemId ? { ...i, issueQty: qty } : i));
+
+    const saveAccessory = (cartItemId: string) => {
+        if (!accName.trim()) return;
+        setCart(cart.map(item => {
+            if (item.cartItemId === cartItemId) {
+                return {
+                    ...item,
+                    accessories: [...item.accessories, { id: Date.now().toString(), name: accName, quantity: accQty, mustReturn: accMustReturn }]
+                };
+            }
+            return item;
+        }));
+        setAccessoryFormOpenFor(null);
+        setAccName(""); setAccQty(1); setAccMustReturn(true);
+    };
+
+    const removeAccessory = (cartItemId: string, accId: string) => {
+        setCart(cart.map(item => item.cartItemId === cartItemId ? { ...item, accessories: item.accessories.filter(a => a.id !== accId) } : item));
+    };
+
+    const handleIssueSubmit = async () => {
+        if (!issueSiteInput.trim() || cart.length === 0) return alert("Podaj budowę i wybierz przedmioty!");
 
         setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
-                // 1. Sprawdzenie / Tworzenie Budowy (Logika "Usterki")
                 let siteId = "";
                 let siteName = issueSiteInput.trim();
                 const existingSite = sites.find(s => s.name.toLowerCase() === siteName.toLowerCase());
 
                 if (existingSite) {
                     siteId = existingSite.id;
-                    siteName = existingSite.name; // Normalizacja nazwy
+                    siteName = existingSite.name;
                 } else {
-                    // Budowa nie istnieje - tworzymy nową ze statusem "usterka"
                     const newSiteRef = doc(collection(db, "sites"));
                     siteId = newSiteRef.id;
                     transaction.set(newSiteRef, {
-                        name: siteName,
-                        location: "Dodano z protokołu",
-                        status: "usterka",
-                        createdAt: new Date().toISOString()
+                        name: siteName, location: "Wpis ręczny", status: "aktywna", createdAt: new Date().toISOString()
                     });
                 }
 
-                // 2. Generowanie ID Protokołu
                 const protocolRef = doc(collection(db, "protocols"));
                 const protocolId = `WYD-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
 
-                // 3. Aktualizacja Stanów Magazynowych (Inventory)
                 for (const cartItem of cart) {
-                    const itemRef = doc(db, "inventory", cartItem.id);
+                    if (cartItem.isManual) continue;
+
+                    const itemRef = doc(db, "inventory", cartItem.dbId!);
                     const itemDoc = await transaction.get(itemRef);
 
                     if (!itemDoc.exists()) throw `Przedmiot ${cartItem.name} nie istnieje!`;
 
                     const data = itemDoc.data();
                     const newAvailable = data.availableQuantity - cartItem.issueQty;
-
                     if (newAvailable < 0) throw `Brak wystarczającej ilości dla: ${data.name}`;
 
-                    // Aktualizacja przypisań (allocations)
                     const currentAllocations = data.allocations || {};
-                    const newAllocations = {
-                        ...currentAllocations,
-                        [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty
-                    };
+                    const newAllocations = { ...currentAllocations, [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty };
 
-                    transaction.update(itemRef, {
-                        availableQuantity: newAvailable,
-                        allocations: newAllocations
-                    });
+                    const updateData: any = { availableQuantity: newAvailable, allocations: newAllocations };
+                    if (data.type === "UNIQUE") updateData.currentLocation = siteName;
 
-                    // Dodanie historii dla narzędzi UNIQUE
+                    transaction.update(itemRef, updateData);
+
                     if (data.type === "UNIQUE") {
-                        const historyRef = doc(collection(db, `inventory/${cartItem.id}/history`));
+                        const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
                         transaction.set(historyRef, {
-                            date: new Date().toISOString(),
-                            type: "WYDANIE",
-                            description: `Wydano na budowę: ${siteName}`,
-                            status: data.status,
-                            user: `${user?.firstName} ${user?.lastName}`
+                            date: new Date().toISOString(), type: "WYDANIE", description: `Wydano na budowę: ${siteName}`,
+                            status: data.status, user: `${user?.firstName} ${user?.lastName}`
                         });
                     }
                 }
 
-                // 4. Zapisanie Protokołu
                 transaction.set(protocolRef, {
-                    protocolId,
-                    type: "WYDANIE",
-                    sourceId: "MAGAZYN",
-                    destinationId: siteId,
-                    destinationName: siteName,
-                    createdBy: user?.uid,
-                    createdByName: `${user?.firstName} ${user?.lastName}`,
-                    status: "ZAAKCEPTOWANY", // Wydanie z magazynu od razu jest wiążące
+                    protocolId, type: "WYDANIE", sourceId: "MAGAZYN", destinationId: siteId, destinationName: siteName,
+                    createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
                     items: cart.map(i => ({
-                        inventoryId: i.id,
+                        inventoryId: i.isManual ? null : i.dbId,
+                        isManual: i.isManual,
                         name: i.name,
-                        inventoryNumber: i.inventoryNumber,
-                        quantity: i.issueQty
+                        inventoryNumber: i.inventoryNumber || "",
+                        quantity: i.issueQty,
+                        accessories: i.accessories
                     }))
                 });
             });
 
-            alert("Protokół wydania został pomyślnie utworzony!");
-            setIsIssueModalOpen(false);
-            setCart([]);
-            setIssueSiteInput("");
-
-            // Opcjonalnie: Tutaj wywołamy funkcję generującą PDF
-            // generatePDF(); 
-
-            window.location.reload(); // Odśwież, by pobrać nowe stany
+            alert("Protokół wydania został utworzony!");
+            closeModal();
+            fetchData();
         } catch (error: any) {
-            alert("Błąd wystawiania protokołu: " + error);
+            alert("Błąd: " + error);
         } finally {
             setIsSubmitting(false);
         }
     };
 
+    // -------------------------------------------------------------------------
+    // ZGŁASZANIE ZWROTU (Kierownik -> Magazyn)
+    // -------------------------------------------------------------------------
+    const openReturnModal = () => {
+        if (userSites.length === 1) setReturnSiteId(userSites[0].id);
+        setIsReturnModalOpen(true);
+    };
+
+    const fetchItemAccessoriesFromLastIssue = async (itemId: string, siteId: string) => {
+        try {
+            const q = query(collection(db, "protocols"), where("destinationId", "==", siteId), where("type", "==", "WYDANIE"), orderBy("createdAt", "desc"), limit(10));
+            const snap = await getDocs(q);
+
+            for (const docSnap of snap.docs) {
+                const protocol = docSnap.data();
+                const foundItem = protocol.items.find((i: any) => i.inventoryId === itemId);
+                if (foundItem && foundItem.accessories && foundItem.accessories.length > 0) {
+                    return foundItem.accessories
+                        .filter((acc: any) => acc.mustReturn)
+                        .map((acc: any) => ({ name: acc.name, mustReturn: true, isReturning: false, quantity: acc.quantity || 1 }));
+                }
+            }
+        } catch (error) { console.error("Błąd podczas wyszukiwania osprzętu", error); }
+        return [];
+    };
+
+    const addToReturnCart = async (item: InventoryItem) => {
+        if (returnCart.find(i => i.dbId === item.id)) return;
+        const expectedAccessories = await fetchItemAccessoriesFromLastIssue(item.id, returnSiteId);
+
+        setReturnCart(prev => [...prev, {
+            dbId: item.id, name: item.name, type: item.type, inventoryNumber: item.inventoryNumber,
+            maxQty: item.allocations[returnSiteId], returnQty: 1, declaredStatus: "sprawne", accessories: expectedAccessories
+        }]);
+    };
+
+    const handleReturnSubmit = async () => {
+        if (!returnSiteId || returnCart.length === 0) return alert("Wybierz budowę i przedmioty do zwrotu!");
+        setIsSubmitting(true);
+        try {
+            const siteName = sites.find(s => s.id === returnSiteId)?.name || "Nieznana budowa";
+            const protocolRef = doc(collection(db, "protocols"));
+            const protocolId = `ZWR-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
+
+            await setDoc(protocolRef, {
+                protocolId, type: "ZWROT", documentSource: "APP_ELECTRONIC", sourceId: returnSiteId, sourceName: siteName, destinationId: "MAGAZYN",
+                createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "OCZEKUJACY", createdAt: new Date().toISOString(),
+                items: returnCart.map(i => ({
+                    inventoryId: i.dbId, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber,
+                    declaredQty: i.returnQty, declaredStatus: i.type === "UNIQUE" ? i.declaredStatus : null, accessories: i.accessories
+                }))
+            });
+            alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
+            closeModal();
+        } catch (error: any) { alert("Błąd: " + error.message); } finally { setIsSubmitting(false); }
+    };
+
+    // -------------------------------------------------------------------------
+    // AKCEPTACJA ZWROTU PRZEZ MAGAZYNIERA (Magia tworzenia zaległości)
+    // -------------------------------------------------------------------------
+    const openAcceptModal = () => {
+        fetchPendingProtocols();
+        setIsAcceptModalOpen(true);
+    };
+
+    const openProtocolDetails = (protocol: any) => {
+        const initialInputs: Record<string, { receivedQty: number, finalStatus: string, notes: string }> = {};
+        protocol.items.forEach((i: any) => {
+            initialInputs[i.inventoryId] = {
+                receivedQty: i.declaredQty,
+                finalStatus: i.declaredStatus || "sprawne",
+                notes: ""
+            };
+        });
+        setAcceptInputs(initialInputs);
+        setSelectedProtocol(protocol);
+    };
+
+    const handleAcceptSubmit = async () => {
+        if (!selectedProtocol) return;
+        setIsSubmitting(true);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const protocolRef = doc(db, "protocols", selectedProtocol.dbId);
+                const protocolDoc = await transaction.get(protocolRef);
+
+                if (!protocolDoc.exists() || protocolDoc.data().status !== "OCZEKUJACY") {
+                    throw "Ten protokół został już przetworzony lub nie istnieje.";
+                }
+
+                const updatedItemsForProtocol = [];
+
+                for (const item of selectedProtocol.items) {
+                    const itemRef = doc(db, "inventory", item.inventoryId);
+                    const itemDoc = await transaction.get(itemRef);
+                    if (!itemDoc.exists()) continue;
+
+                    const itemData = itemDoc.data();
+                    const workerInput = acceptInputs[item.inventoryId];
+
+                    // TWORZENIE ZALEGŁOŚCI Z BRAKUJĄCEGO OSPRZĘTU NA BUDOWIE
+                    let missingAccessoriesNote = "";
+                    if (item.accessories && item.accessories.length > 0) {
+                        const missing = item.accessories.filter((a: any) => !a.isReturning);
+                        if (missing.length > 0) {
+                            missingAccessoriesNote = ` | ZALEGŁOŚCI OSPRZĘTU: ${missing.map((a: any) => a.name).join(", ")}`;
+
+                            // Tworzymy dla każdego brakującego elementu nowy "BULK" przedmiot w inwentarzu
+                            for (const mAcc of missing) {
+                                const debtRef = doc(collection(db, "inventory"));
+                                transaction.set(debtRef, {
+                                    name: `[Zaległy osprzęt] ${mAcc.name} (od: ${item.name} ${item.inventoryNumber ? 'nr ' + item.inventoryNumber : ''})`,
+                                    type: "BULK",
+                                    inventoryNumber: "",
+                                    category: "Zaległości z budowy",
+                                    availableQuantity: 0,
+                                    totalQuantity: mAcc.quantity || 1,
+                                    status: "sprawne",
+                                    allocations: {
+                                        [selectedProtocol.sourceId]: mAcc.quantity || 1 // Zostawiamy ten osprzęt na stanie budowy!
+                                    }
+                                });
+                            }
+                        }
+                    }
+
+                    if (itemData.type === "BULK") {
+                        const currentAllocations = itemData.allocations || {};
+                        const currentSiteQty = currentAllocations[selectedProtocol.sourceId] || 0;
+                        const newSiteQty = Math.max(0, currentSiteQty - workerInput.receivedQty);
+                        const newAvailable = itemData.availableQuantity + workerInput.receivedQty;
+
+                        transaction.update(itemRef, {
+                            [`allocations.${selectedProtocol.sourceId}`]: newSiteQty,
+                            availableQuantity: newAvailable
+                        });
+                    } else if (itemData.type === "UNIQUE") {
+                        // Aktualizacja maszyny po zwrocie
+                        transaction.update(itemRef, {
+                            currentLocation: "MAGAZYN",
+                            status: workerInput.finalStatus,
+                            availableQuantity: 1,
+                            [`allocations.${selectedProtocol.sourceId}`]: 0
+                        });
+
+                        const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+                        transaction.set(historyRef, {
+                            date: new Date().toISOString(), type: "ZWROT",
+                            description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}`,
+                            status: workerInput.finalStatus, user: `${user?.firstName} ${user?.lastName}`
+                        });
+                    }
+
+                    updatedItemsForProtocol.push({
+                        ...item,
+                        receivedQty: workerInput.receivedQty,
+                        finalStatus: workerInput.finalStatus,
+                        warehouseNotes: workerInput.notes + missingAccessoriesNote
+                    });
+                }
+
+                transaction.update(protocolRef, {
+                    status: "ZAAKCEPTOWANY",
+                    acceptedBy: user?.uid,
+                    acceptedByName: `${user?.firstName} ${user?.lastName}`,
+                    acceptedAt: new Date().toISOString(),
+                    items: updatedItemsForProtocol
+                });
+            });
+
+            alert("Zwrot został pomyślnie przyjęty, a zaległy osprzęt dodano do stanów budowy!");
+            setSelectedProtocol(null);
+            fetchPendingProtocols();
+            fetchData();
+        } catch (error: any) {
+            alert("Błąd akceptacji: " + error);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+
     if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie modułu protokołów...</div>;
+
+    const filteredInventory = inventory.filter(item => {
+        if (item.type !== activeTab) return false;
+        const matchesName = item.name.toLowerCase().includes(searchName.toLowerCase());
+        let matchesInvNum = true;
+        if (searchInvNumber) matchesInvNum = (item.inventoryNumber || "").toLowerCase().includes(searchInvNumber.toLowerCase());
+        return matchesName && matchesInvNum;
+    });
+
+    const inventoryOnSelectedSite = inventory.filter(i => returnSiteId && i.allocations && i.allocations[returnSiteId] > 0);
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto animate-fade-in">
             <h1 className="text-3xl font-bold text-slate-800 tracking-tight mb-8">Centrum Protokołów</h1>
 
-            {/* KAFELKI AKCJI ZALEŻNE OD ROLI */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
-                {/* Wszyscy uprawnieni mogą wydawać */}
-                <div
-                    onClick={() => setIsIssueModalOpen(true)}
-                    className="bg-green-50 hover:bg-green-100 border border-green-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group"
-                >
-                    <div className="text-3xl mb-2 group-hover:scale-110 transition">📤</div>
-                    <h3 className="font-bold text-green-900">Wystaw Wydanie</h3>
-                    <p className="text-xs text-green-700 mt-1">Z magazynu na budowę</p>
-                </div>
-
-                {/* Kierownik (i Admin) - Wystawia zwrot elektroniczny */}
-                <div className="bg-blue-50 hover:bg-blue-100 border border-blue-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
-                    <div className="text-3xl mb-2 group-hover:scale-110 transition">📲</div>
-                    <h3 className="font-bold text-blue-900">Wystaw Zwrot</h3>
-                    <p className="text-xs text-blue-700 mt-1">Zgłoś zwrot z budowy</p>
-                </div>
-
-                {/* Magazynier (i Admin) - Wprowadza papierowy lub z zewnątrz */}
-                <div className="bg-orange-50 hover:bg-orange-100 border border-orange-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
-                    <div className="text-3xl mb-2 group-hover:scale-110 transition">📝</div>
-                    <h3 className="font-bold text-orange-900">Wprowadź Zwrot</h3>
-                    <p className="text-xs text-orange-700 mt-1">Przepisz z papieru</p>
-                </div>
-
-                {/* Magazynier (i Admin) - Akceptuje elektroniczne */}
-                <div className="bg-purple-50 hover:bg-purple-100 border border-purple-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group relative">
-                    <div className="absolute top-4 right-4 bg-red-500 text-white text-xs font-bold w-6 h-6 flex items-center justify-center rounded-full shadow-lg">3</div>
-                    <div className="text-3xl mb-2 group-hover:scale-110 transition">✅</div>
-                    <h3 className="font-bold text-purple-900">Akceptuj Zwroty</h3>
-                    <p className="text-xs text-purple-700 mt-1">Weryfikuj zgłoszenia</p>
-                </div>
+                {user && hasPermission("issueProtocols", user.rolePermissions, user.permissionOverrides) && (
+                    <div onClick={() => setIsIssueModalOpen(true)} className="bg-green-50 hover:bg-green-100 border border-green-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
+                        <div className="text-3xl mb-2 group-hover:scale-110 transition">📤</div><h3 className="font-bold text-green-900">Wystaw Wydanie</h3><p className="text-xs text-green-700 mt-1">Z magazynu na budowę</p>
+                    </div>
+                )}
+                {user && hasPermission("issueProtocols", user.rolePermissions, user.permissionOverrides) && (
+                    <div onClick={openReturnModal} className="bg-blue-50 hover:bg-blue-100 border border-blue-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
+                        <div className="text-3xl mb-2 group-hover:scale-110 transition">📲</div><h3 className="font-bold text-blue-900">Zgłoś Zwrot</h3><p className="text-xs text-blue-700 mt-1">Kierownik: z budowy do magazynu</p>
+                    </div>
+                )}
+                {user && hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides) && (
+                    <div onClick={() => alert("Moduł wkrótce będzie dostępny")} className="bg-orange-50 hover:bg-orange-100 border border-orange-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
+                        <div className="text-3xl mb-2 group-hover:scale-110 transition">📝</div><h3 className="font-bold text-orange-900">Wprowadź Zwrot</h3><p className="text-xs text-orange-700 mt-1">Przepisz z papieru</p>
+                    </div>
+                )}
+                {user && hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides) && (
+                    <div onClick={openAcceptModal} className="bg-purple-50 hover:bg-purple-100 border border-purple-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group relative">
+                        <div className="text-3xl mb-2 group-hover:scale-110 transition">✅</div><h3 className="font-bold text-purple-900">Akceptuj Zwroty</h3><p className="text-xs text-purple-700 mt-1">Magazyn: weryfikacja i przyjęcie</p>
+                    </div>
+                )}
             </div>
 
-            {/* HISTORIA OSTATNICH PROTOKOŁÓW (W kolejnym etapie dodamy tu tabelę) */}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center text-slate-500">
-                Tabela historii protokołów pojawi się tutaj...
+                Lista ostatnio wystawionych protokołów pojawi się tutaj... (Faza 4)
             </div>
 
             {/* ======================================================== */}
-            {/* MODAL WYDANIA NA BUDOWĘ */}
+            {/* MODAL 1: WYDANIE NA BUDOWĘ                               */}
             {/* ======================================================== */}
             {isIssueModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
                         <div className="p-6 bg-slate-50 border-b flex justify-between items-center">
                             <h2 className="text-2xl font-black text-slate-800">Wystaw Protokół Wydania</h2>
-                            <button onClick={() => setIsIssueModalOpen(false)} className="text-3xl text-slate-400 hover:text-slate-900">&times;</button>
+                            <button onClick={closeModal} className="text-4xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
 
                         <div className="flex-1 flex overflow-hidden">
-                            {/* LEWA STRONA: WYBÓR SPRZĘTU */}
-                            <div className="w-1/2 border-r flex flex-col bg-white">
-                                <div className="p-4 border-b">
-                                    <input
-                                        type="text"
-                                        placeholder="Szukaj w magazynie (nazwa lub kod)..."
-                                        className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 bg-slate-50"
-                                        value={searchItem}
-                                        onChange={(e) => setSearchItem(e.target.value)}
-                                    />
-                                </div>
-                                <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                                    {inventory.filter(i => i.availableQuantity > 0 && (i.name.toLowerCase().includes(searchItem.toLowerCase()) || i.inventoryNumber.toLowerCase().includes(searchItem.toLowerCase()))).map(item => (
-                                        <div key={item.id} className="flex justify-between items-center p-3 border rounded-xl hover:bg-slate-50 transition shadow-sm">
-                                            <div>
-                                                <p className="font-bold text-sm text-slate-800">{item.name}</p>
-                                                <p className="text-[10px] text-slate-500 font-mono">Kod: {item.inventoryNumber} | Dostępne: <b className="text-green-600">{item.availableQuantity}</b></p>
-                                            </div>
-                                            <button onClick={() => addToCart(item)} className="bg-slate-100 hover:bg-green-100 text-green-700 p-2 rounded-lg font-bold text-xl leading-none transition">
-                                                +
-                                            </button>
+                            <div className="w-[55%] border-r flex flex-col bg-white">
+                                <div className="p-6 border-b bg-slate-50">
+                                    <div className="flex gap-2 mb-4 bg-slate-200 p-1 rounded-xl w-fit">
+                                        <button onClick={() => setActiveTab("UNIQUE")} className={`px-6 py-2 rounded-lg text-sm font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500'}`}>NARZĘDZIA</button>
+                                        <button onClick={() => setActiveTab("BULK")} className={`px-6 py-2 rounded-lg text-sm font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-md' : 'text-slate-500'}`}>RUSZTOWANIA</button>
+                                    </div>
+                                    <div className="flex gap-4">
+                                        <div className="flex-1">
+                                            <input type="text" placeholder="Szukaj po nazwie..." className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 bg-white" value={searchName} onChange={(e) => setSearchName(e.target.value)} />
                                         </div>
-                                    ))}
+                                        <div className="w-1/3">
+                                            <input type="text" placeholder="Szukaj po Nr Mag..." className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500 bg-white font-mono" value={searchInvNumber} onChange={(e) => setSearchInvNumber(e.target.value)} />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
+                                    {filteredInventory.map(item => {
+                                        const isAvailable = item.availableQuantity > 0;
+                                        const isBroken = item.status !== "sprawne";
+                                        return (
+                                            <div key={item.id} className={`flex justify-between items-center p-3 border rounded-xl shadow-sm ${isAvailable ? 'bg-white' : 'bg-slate-100 opacity-60'} ${isBroken ? 'border-red-300 bg-red-50' : ''}`}>
+                                                <div>
+                                                    <p className="font-bold text-sm text-slate-800">{item.name}</p>
+                                                    <p className="text-[11px] font-mono text-blue-600">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                    {!isAvailable && <p className="text-[10px] text-red-600 font-bold uppercase">📍 Poza magazynem: {item.currentLocation}</p>}
+                                                    {isAvailable && <p className="text-[10px] text-green-600 font-bold">Dostępne: {item.availableQuantity}</p>}
+                                                </div>
+                                                {isAvailable && !isBroken ? (
+                                                    <button onClick={() => addToCart(item)} className="bg-slate-100 hover:bg-green-600 hover:text-white text-green-600 w-10 h-10 rounded-lg font-black text-xl transition">+</button>
+                                                ) : <div className="text-[10px] text-red-500 font-bold text-center uppercase leading-tight">Zablokowane</div>}
+                                            </div>
+                                        )
+                                    })}
                                 </div>
                             </div>
 
-                            {/* PRAWA STRONA: KOSZYK I BUDOWA */}
-                            <div className="w-1/2 flex flex-col bg-slate-50">
-                                <div className="p-6 border-b">
-                                    <label className="block text-xs font-black text-slate-400 uppercase mb-2">1. Wybierz lub wpisz budowę</label>
-                                    {/* DATALIST - Rozwiązuje problem listy vs wpisywania ręcznego */}
-                                    <input
-                                        list="sites-list"
-                                        placeholder="Wybierz z listy lub wpisz nową usterkę..."
-                                        value={issueSiteInput}
-                                        onChange={(e) => setIssueSiteInput(e.target.value)}
-                                        className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 font-bold"
-                                    />
-                                    <datalist id="sites-list">
-                                        {sites.map(s => <option key={s.id} value={s.name} />)}
-                                    </datalist>
-                                    <p className="text-[10px] text-slate-400 mt-2">Jeśli wpiszesz nazwę spoza listy, system utworzy ją automatycznie ze statusem "usterka".</p>
+                            <div className="w-[45%] flex flex-col bg-white">
+                                <div className="p-6 border-b bg-slate-50">
+                                    <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Wybierz lub wpisz budowę</label>
+                                    <input list="sites-list" placeholder="Wybierz z listy lub wpisz nową usterkę..." value={issueSiteInput} onChange={(e) => setIssueSiteInput(e.target.value)} className="w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 font-bold shadow-sm" />
+                                    <datalist id="sites-list">{sites.map(s => <option key={s.id} value={s.name} />)}</datalist>
                                 </div>
 
                                 <div className="flex-1 p-6 overflow-y-auto">
-                                    <label className="block text-xs font-black text-slate-400 uppercase mb-4">2. Lista wydawanych przedmiotów</label>
+                                    <div className="flex justify-between items-center mb-4">
+                                        <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest">2. Koszyk wydania</label>
+                                        <button onClick={addManualItemToCart} className="bg-orange-100 text-orange-800 px-3 py-1.5 rounded-lg text-xs font-bold">+ Wpis ręczny</button>
+                                    </div>
+
                                     {cart.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">Wybierz przedmioty z lewej strony</div>
+                                        <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">KOSZYK PUSTY</div>
                                     ) : (
                                         <div className="space-y-3">
                                             {cart.map(cItem => (
-                                                <div key={cItem.id} className="bg-white p-3 border rounded-xl shadow-sm flex items-center justify-between gap-4">
-                                                    <div className="flex-1">
-                                                        <p className="font-bold text-sm text-slate-800 leading-tight">{cItem.name}</p>
-                                                        <p className="text-[10px] text-slate-400 font-mono">{cItem.inventoryNumber}</p>
+                                                <div key={cItem.cartItemId} className={`p-4 border rounded-xl shadow-sm ${cItem.isManual ? 'bg-orange-50 border-orange-200' : 'bg-slate-50'}`}>
+                                                    <div className="flex items-center justify-between gap-4">
+                                                        <div className="flex-1">
+                                                            <p className="font-bold text-sm text-slate-800">{cItem.name} {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Ręczny</span>}</p>
+                                                            {!cItem.isManual && <p className="text-[10px] text-slate-500 font-mono">Nr Mag: {cItem.inventoryNumber || "-"}</p>}
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            {cItem.type === "BULK" || cItem.isManual ? (
+                                                                <input type="number" min="1" max={cItem.isManual ? 9999 : cItem.availableQuantity} value={cItem.issueQty} onChange={(e) => updateCartQty(cItem.cartItemId, Number(e.target.value))} className="w-16 p-2 border rounded-lg text-center font-bold outline-none" />
+                                                            ) : <span className="font-bold text-sm bg-white px-3 py-2 rounded-lg border">1 szt.</span>}
+                                                            <button onClick={() => removeFromCart(cItem.cartItemId)} className="bg-red-100 hover:bg-red-500 text-red-600 hover:text-white w-8 h-8 rounded-lg font-bold">&times;</button>
+                                                        </div>
                                                     </div>
-                                                    <div className="flex items-center gap-2">
-                                                        {cItem.type === "BULK" ? (
-                                                            <input
-                                                                type="number" min="1" max={cItem.availableQuantity}
-                                                                value={cItem.issueQty}
-                                                                onChange={(e) => updateCartQty(cItem.id, Number(e.target.value))}
-                                                                className="w-16 p-2 border rounded text-center font-bold"
-                                                            />
-                                                        ) : (
-                                                            <span className="font-bold px-3">1 szt.</span>
-                                                        )}
-                                                        <button onClick={() => removeFromCart(cItem.id)} className="text-red-400 hover:text-red-600 text-xl font-bold ml-2">&times;</button>
+
+                                                    {/* OSPRZĘT */}
+                                                    <div className="mt-3 pl-4 border-l-2 border-blue-200">
+                                                        {cItem.accessories.map(acc => (
+                                                            <div key={acc.id} className="flex justify-between items-center text-xs bg-white p-2 rounded border mb-1">
+                                                                <span>↳ {acc.name} <b>({acc.quantity} szt.)</b></span>
+                                                                <div className="flex gap-3">
+                                                                    <span className={acc.mustReturn ? "text-red-600 font-bold" : "text-slate-400"}>{acc.mustReturn ? "Musi wrócić!" : "Zużywalny"}</span>
+                                                                    <button onClick={() => removeAccessory(cItem.cartItemId, acc.id)} className="text-red-400 font-bold">X</button>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                        {accessoryFormOpenFor === cItem.cartItemId ? (
+                                                            <div className="flex items-center gap-2 mt-2 bg-blue-50 p-2 rounded border border-blue-100">
+                                                                <input type="text" placeholder="Nazwa (np. Klucz)" className="flex-1 p-1.5 text-xs border" value={accName} onChange={e => setAccName(e.target.value)} />
+                                                                <input type="number" min="1" className="w-12 p-1.5 text-xs text-center border" value={accQty} onChange={e => setAccQty(Number(e.target.value))} />
+                                                                <label className="text-[10px] font-bold flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={accMustReturn} onChange={e => setAccMustReturn(e.target.checked)} /> Ma wrócić?</label>
+                                                                <button onClick={() => saveAccessory(cItem.cartItemId)} className="bg-blue-600 text-white text-xs font-bold px-3 py-1.5 rounded">OK</button>
+                                                                <button onClick={() => setAccessoryFormOpenFor(null)} className="text-slate-500 text-xs">Anuluj</button>
+                                                            </div>
+                                                        ) : <button onClick={() => setAccessoryFormOpenFor(cItem.cartItemId)} className="text-[10px] font-bold text-blue-600 hover:underline mt-2">+ Dodaj osprzęt</button>}
                                                     </div>
                                                 </div>
                                             ))}
                                         </div>
                                     )}
                                 </div>
-
-                                <div className="p-6 border-t bg-white">
-                                    <button
-                                        onClick={handleIssueSubmit}
-                                        disabled={isSubmitting || cart.length === 0 || !issueSiteInput.trim()}
-                                        className="w-full py-4 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl text-lg shadow-xl transition disabled:bg-slate-300"
-                                    >
-                                        {isSubmitting ? "ZAPISYWANIE..." : "ZAPISZ I WYGENERUJ PROTOKÓŁ"}
+                                <div className="p-6 border-t bg-slate-50 flex gap-4">
+                                    <button onClick={closeModal} className="w-1/3 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl">ANULUJ</button>
+                                    <button onClick={handleIssueSubmit} disabled={isSubmitting || cart.length === 0 || !issueSiteInput.trim()} className="w-2/3 py-4 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300 disabled:shadow-none">
+                                        {isSubmitting ? "ZAPISYWANIE..." : "ZATWIERDŹ I WYDAJ"}
                                     </button>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ======================================================== */}
+            {/* MODAL 2: ZGŁOSZENIE ZWROTU (Kierownik)                   */}
+            {/* ======================================================== */}
+            {isReturnModalOpen && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
+                        <div className="p-6 bg-slate-50 border-b flex justify-between items-center">
+                            <div><h2 className="text-2xl font-black text-blue-600">Zgłoś Zwrot Sprzętu</h2><p className="text-sm text-slate-500">Wybierz co zjeżdża z budowy na magazyn.</p></div>
+                            <button onClick={closeModal} className="text-4xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
+                        </div>
+
+                        <div className="flex-1 flex overflow-hidden">
+                            <div className="w-[50%] border-r flex flex-col bg-white">
+                                <div className="p-6 border-b bg-blue-50">
+                                    <label className="block text-[11px] font-black text-blue-800 uppercase tracking-widest mb-2">1. Z jakiej budowy zwracasz?</label>
+                                    <select value={returnSiteId} onChange={(e) => { setReturnSiteId(e.target.value); setReturnCart([]); }} className="w-full p-4 border-2 border-blue-200 rounded-xl outline-none focus:border-blue-500 font-bold bg-white">
+                                        <option value="" disabled>-- Wybierz budowę --</option>
+                                        {userSites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
+                                    {!returnSiteId ? (
+                                        <div className="text-center p-10 text-slate-400">Wybierz budowę z listy powyżej.</div>
+                                    ) : inventoryOnSelectedSite.length === 0 ? (
+                                        <div className="text-center p-10 text-slate-400">Brak sprzętu na tej budowie w bazie.</div>
+                                    ) : inventoryOnSelectedSite.map(item => (
+                                        <div key={item.id} className="flex justify-between items-center p-3 border rounded-xl bg-white hover:border-blue-300 transition shadow-sm">
+                                            <div>
+                                                <p className="font-bold text-sm text-slate-800">{item.name}</p>
+                                                <p className="text-[11px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "-"} | Na budowie: <b className="text-blue-600">{item.allocations[returnSiteId]}</b> szt.</p>
+                                            </div>
+                                            <button onClick={() => addToReturnCart(item)} className="bg-slate-100 hover:bg-blue-600 hover:text-white text-blue-600 w-10 h-10 rounded-lg font-black text-xl transition">+</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="w-[50%] flex flex-col bg-white">
+                                <div className="flex-1 p-6 overflow-y-auto">
+                                    <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-4">2. Koszyk Zwrotu</label>
+                                    {returnCart.length === 0 ? (
+                                        <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">Wybierz przedmioty z lewej strony</div>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            {returnCart.map(cItem => (
+                                                <div key={cItem.dbId} className="bg-slate-50 p-4 border rounded-xl shadow-sm">
+                                                    <div className="flex items-start justify-between gap-4 mb-2">
+                                                        <div className="flex-1">
+                                                            <p className="font-bold text-sm text-slate-800">{cItem.name}</p>
+                                                            <p className="text-[10px] text-slate-500 font-mono mb-2">Nr Mag: {cItem.inventoryNumber || "-"}</p>
+
+                                                            {cItem.type === "UNIQUE" && (
+                                                                <select
+                                                                    value={cItem.declaredStatus}
+                                                                    onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, declaredStatus: e.target.value } : i))}
+                                                                    className="text-xs p-1 border rounded bg-white text-slate-700 outline-none"
+                                                                >
+                                                                    <option value="sprawne">✅ Sprawne</option>
+                                                                    <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                                                    <option value="uszkodzone">❌ Uszkodzone</option>
+                                                                </select>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            {cItem.type === "BULK" ? (
+                                                                <div className="flex items-center gap-1">
+                                                                    <span className="text-[10px] text-slate-400">Szt:</span>
+                                                                    <input type="number" min="1" max={cItem.maxQty} value={cItem.returnQty} onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, returnQty: Number(e.target.value) } : i))} className="w-16 p-2 border rounded-lg text-center font-bold outline-none" />
+                                                                </div>
+                                                            ) : <span className="font-bold text-sm bg-white px-3 py-2 rounded-lg border">1 szt.</span>}
+                                                            <button onClick={() => setReturnCart(returnCart.filter(i => i.dbId !== cItem.dbId))} className="bg-red-100 text-red-600 hover:bg-red-500 hover:text-white transition w-8 h-8 rounded-lg font-bold">&times;</button>
+                                                        </div>
+                                                    </div>
+                                                    {cItem.accessories.length > 0 && (
+                                                        <div className="mt-3 pl-4 border-l-2 border-orange-300 bg-orange-50 p-3 rounded-r-lg">
+                                                            <p className="text-[10px] font-black text-orange-800 uppercase mb-2">⚠️ Pamiętaj o osprzęcie z wydania:</p>
+                                                            {cItem.accessories.map((acc, idx) => (
+                                                                <label key={idx} className="flex items-center gap-2 cursor-pointer mb-1">
+                                                                    <input type="checkbox" checked={acc.isReturning} onChange={(e) => { const newCart = [...returnCart]; const targetItem = newCart.find(i => i.dbId === cItem.dbId); if (targetItem) targetItem.accessories[idx].isReturning = e.target.checked; setReturnCart(newCart); }} className="w-4 h-4" />
+                                                                    <span className="text-sm">Zwracam: {acc.name} ({acc.quantity} szt.)</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="p-6 border-t bg-slate-50 flex gap-4">
+                                    <button onClick={closeModal} className="w-1/3 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl">ANULUJ</button>
+                                    <button onClick={handleReturnSubmit} disabled={isSubmitting || returnCart.length === 0} className="w-2/3 py-4 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-lg shadow-xl disabled:bg-slate-300">WYŚLIJ ZGŁOSZENIE ZWROTU</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ======================================================== */}
+            {/* MODAL 3: AKCEPTACJA ZWROTU (Magazynier)                  */}
+            {/* ======================================================== */}
+            {isAcceptModalOpen && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
+                        <div className="p-6 bg-purple-50 border-b flex justify-between items-center">
+                            <div><h2 className="text-2xl font-black text-purple-900">Akceptacja Zwrotów</h2><p className="text-sm text-purple-700">Weryfikuj ilości i statusy tego, co zjechało z budowy.</p></div>
+                            <button onClick={closeModal} className="text-4xl text-purple-400 hover:text-purple-900 leading-none">&times;</button>
+                        </div>
+
+                        <div className="flex-1 flex overflow-hidden">
+                            <div className="w-[35%] border-r flex flex-col bg-slate-50 p-4 overflow-y-auto space-y-3">
+                                {pendingProtocols.length === 0 ? (
+                                    <div className="text-center p-10 text-slate-400">Brak oczekujących zwrotów.</div>
+                                ) : (
+                                    pendingProtocols.map(p => (
+                                        <div key={p.dbId} onClick={() => openProtocolDetails(p)} className={`p-4 rounded-xl border cursor-pointer transition ${selectedProtocol?.dbId === p.dbId ? 'bg-purple-100 border-purple-400 shadow-md' : 'bg-white border-slate-200 hover:border-purple-300 shadow-sm'}`}>
+                                            <div className="flex justify-between items-start mb-2">
+                                                <span className="font-bold text-sm text-slate-800">{p.protocolId}</span>
+                                                <span className="text-[10px] bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded font-bold uppercase">{p.status}</span>
+                                            </div>
+                                            <p className="text-xs text-slate-600 mb-1">Z budowy: <b className="text-slate-800">{p.sourceName}</b></p>
+                                            <p className="text-[10px] text-slate-400">Zgłosił: {p.createdByName} • {new Date(p.createdAt).toLocaleDateString()}</p>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+
+                            <div className="w-[65%] flex flex-col bg-white">
+                                {!selectedProtocol ? (
+                                    <div className="flex-1 flex items-center justify-center text-slate-400">Wybierz protokół z listy po lewej.</div>
+                                ) : (
+                                    <>
+                                        <div className="flex-1 p-6 overflow-y-auto bg-white">
+                                            <h3 className="font-black text-lg text-slate-800 mb-4 border-b pb-2">Pozycje w protokole: {selectedProtocol.protocolId}</h3>
+                                            <div className="space-y-4">
+                                                {selectedProtocol.items.map((item: any) => {
+                                                    const inputState = acceptInputs[item.inventoryId] || { receivedQty: item.declaredQty, finalStatus: item.declaredStatus || "sprawne", notes: "" };
+                                                    const isQtyDifferent = item.type === "BULK" && inputState.receivedQty !== item.declaredQty;
+                                                    const isStatusDifferent = item.type === "UNIQUE" && inputState.finalStatus !== item.declaredStatus;
+
+                                                    return (
+                                                        <div key={item.inventoryId} className={`p-4 border rounded-xl shadow-sm ${isQtyDifferent || isStatusDifferent ? 'bg-orange-50 border-orange-300' : 'bg-slate-50'}`}>
+                                                            <div className="flex justify-between items-start mb-3">
+                                                                <div>
+                                                                    <p className="font-bold text-slate-800">{item.name}</p>
+                                                                    <p className="text-[10px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "BRAK"}</p>
+                                                                </div>
+                                                                <div className="text-right">
+                                                                    <p className="text-[10px] text-slate-500 uppercase">Kierownik Zgłosił:</p>
+                                                                    {item.type === "BULK" ? (
+                                                                        <p className="font-black text-slate-700">{item.declaredQty} szt.</p>
+                                                                    ) : (
+                                                                        <p className="font-bold text-sm">Status: {item.declaredStatus}</p>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="bg-white p-3 rounded border border-slate-200 flex flex-wrap gap-4 items-center">
+                                                                <div className="text-xs font-bold text-purple-800 uppercase w-full mb-1">Weryfikacja Magazynu:</div>
+
+                                                                {item.type === "BULK" && (
+                                                                    <div className="flex items-center gap-2">
+                                                                        <label className="text-xs text-slate-600">Przyjęto szt:</label>
+                                                                        <input
+                                                                            type="number" min="0"
+                                                                            value={inputState.receivedQty}
+                                                                            onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, receivedQty: Number(e.target.value) } })}
+                                                                            className={`w-20 p-1.5 border rounded text-center font-bold outline-none ${isQtyDifferent ? 'bg-orange-100 text-orange-900 border-orange-400' : 'bg-slate-50'}`}
+                                                                        />
+                                                                    </div>
+                                                                )}
+
+                                                                {item.type === "UNIQUE" && (
+                                                                    <div className="flex items-center gap-2">
+                                                                        <label className="text-xs text-slate-600">Ostateczny status:</label>
+                                                                        <select
+                                                                            value={inputState.finalStatus}
+                                                                            onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, finalStatus: e.target.value } })}
+                                                                            className={`p-1.5 border rounded text-xs font-bold outline-none ${isStatusDifferent ? 'bg-orange-100 text-orange-900 border-orange-400' : 'bg-slate-50'}`}
+                                                                        >
+                                                                            <option value="sprawne">✅ Sprawne</option>
+                                                                            <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                                                            <option value="uszkodzone">❌ Uszkodzone</option>
+                                                                        </select>
+                                                                    </div>
+                                                                )}
+
+                                                                <div className="flex-1">
+                                                                    <input
+                                                                        type="text" placeholder="Notatka magazyniera (np. brak wtyczki)..."
+                                                                        value={inputState.notes}
+                                                                        onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, notes: e.target.value } })}
+                                                                        className="w-full text-xs p-1.5 border rounded bg-slate-50 outline-none"
+                                                                    />
+                                                                </div>
+                                                            </div>
+
+                                                            {item.accessories && item.accessories.length > 0 && (
+                                                                <div className="mt-3 p-2 bg-orange-50 border border-orange-200 rounded text-xs">
+                                                                    <p className="font-bold text-orange-800 mb-1">Osprzęt oznaczony przez kierownika do zwrotu:</p>
+                                                                    <ul className="list-disc pl-5 text-slate-700">
+                                                                        {item.accessories.map((acc: any, i: number) => (
+                                                                            <li key={i}>
+                                                                                {acc.name} - {acc.isReturning ? "✅ Zwrócono" : "❌ NIE ZWRÓCONO (utworzy zaległość na budowie)"}
+                                                                            </li>
+                                                                        ))}
+                                                                    </ul>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
+                                        </div>
+                                        <div className="p-6 border-t bg-slate-50 flex gap-4 items-center">
+                                            <p className="text-xs text-slate-400 flex-1">Kliknięcie "AKCEPTUJ" fizycznie zdejmie podane ilości z budowy i przywróci je na stan magazynu. Brakujący osprzęt zostanie na stanie budowy jako dług.</p>
+                                            <button onClick={handleAcceptSubmit} disabled={isSubmitting} className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300">
+                                                {isSubmitting ? "ZAPISYWANIE..." : "AKCEPTUJ ZWROT"}
+                                            </button>
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         </div>
                     </div>

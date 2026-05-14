@@ -34,6 +34,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     // Definiujemy menu i przypisujemy Klucze Uprawnień do odpowiednich modułów
     const menuItems: MenuItem[] = [
         { name: "Pulpit", path: "/dashboard", icon: "📊" }, // Brak wymogów, pulpit widzi każdy
+        { name: "Twoja budowa", path: "/dashboard/my-site", icon: "🏠" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
         { name: "Protokoły", path: "/dashboard/protocols", icon: "📝", requiredPermission: "issueProtocols" },
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
