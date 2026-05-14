@@ -10,50 +10,63 @@ export default function ImportPage() {
     const [importType, setImportType] = useState<"UNIQUE" | "BULK">("UNIQUE");
     const [sitesMap, setSitesMap] = useState<Record<string, string>>({});
 
-    // Pobranie budów do mapowania lokalizacji (Nazwa -> ID)
+    // Pobieramy mapę budów (Nazwa -> ID), aby automatycznie przypisać lokalizację
     useEffect(() => {
         const fetchSites = async () => {
-            const snap = await getDocs(collection(db, "sites"));
-            const mapping: Record<string, string> = {};
-            snap.docs.forEach(d => {
-                mapping[d.data().name.toUpperCase().trim()] = d.id;
-            });
-            setSitesMap(mapping);
+            try {
+                const snap = await getDocs(collection(db, "sites"));
+                const mapping: Record<string, string> = {};
+                snap.docs.forEach(d => {
+                    const siteName = d.data().name;
+                    if (siteName) {
+                        mapping[siteName.toUpperCase().trim()] = d.id;
+                    }
+                });
+                setSitesMap(mapping);
+            } catch (error) {
+                console.error("Błąd pobierania budów:", error);
+            }
         };
         fetchSites();
     }, []);
 
     const handleImport = async () => {
-        if (!inputText.trim()) return alert("Wklej dane z arkusza!");
+        if (!inputText.trim()) return alert("Wklej najpierw dane z arkusza!");
         setLoading(true);
 
         try {
             const batch = writeBatch(db);
             const rows = inputText.split("\n").filter(row => row.trim() !== "");
-            // Pomijamy nagłówek jeśli jest
-            const dataRows = (rows[0].toLowerCase().includes("id") || rows[0].toLowerCase().includes("nazwa")) ? rows.slice(1) : rows;
+
+            // Wykrywanie nagłówka i pomijanie go
+            const firstRow = rows[0].toLowerCase();
+            const dataRows = (firstRow.includes("id") || firstRow.includes("nazwa")) ? rows.slice(1) : rows;
 
             dataRows.forEach((row) => {
-                const columns = row.split("\t");
-                if (columns.length < 2) return;
+                const cols = row.split("\t");
+                if (cols.length < 2) return;
 
                 if (importType === "UNIQUE") {
-                    // --- LOGIKA NARZĘDZIA (UNIQUE) ---
-                    const name = columns[1]?.trim();
-                    const inv = columns[2]?.trim();
-                    const rawLoc = columns[3]?.trim() || "MAGAZYN PESAM";
-                    const status = columns[4]?.trim().toLowerCase() || "sprawne";
-                    const category = columns[5]?.trim() || "Inne";
+                    // --- LOGIKA DLA NARZĘDZI (BEZ ZMIAN) ---
+                    const name = cols[1]?.trim() || "Bez nazwy";
+                    const inv = cols[2]?.trim() || "";
+                    const rawLoc = cols[3]?.trim() || "MAGAZYN PESAM";
+                    const status = cols[4]?.trim().toLowerCase() || "sprawne";
+                    const category = cols[5]?.trim() || "Inne";
+                    const subcategory = cols[7]?.trim() || "";
+                    const imageUrl = cols[9]?.trim() || cols[8]?.trim() || cols[6]?.trim() || "";
+                    const purchasePrice = parseFloat(cols[10]?.replace(",", ".")) || 0;
 
                     let availableQty = 1;
+                    let currentLocation = "MAGAZYN PESAM";
                     let allocations: Record<string, number> = {};
 
-                    // Jeśli lokalizacja to NIE magazyn, szukamy budowy
                     if (!rawLoc.toUpperCase().includes("MAGAZYN")) {
                         const siteId = sitesMap[rawLoc.toUpperCase().trim()];
                         if (siteId) {
-                            availableQty = 0; // Nie ma na magazynie
-                            allocations[siteId] = 1; // Jest na budowie
+                            availableQty = 0;
+                            currentLocation = rawLoc;
+                            allocations[siteId] = 1;
                         }
                     }
 
@@ -63,34 +76,52 @@ export default function ImportPage() {
                         inventoryNumber: inv,
                         type: "UNIQUE",
                         category,
+                        subcategory,
+                        imageUrl,
                         status,
+                        currentLocation,
                         totalQuantity: 1,
                         availableQuantity: availableQty,
                         allocations,
+                        purchasePrice,
+                        purchaseDate: "",
+                        invoiceNumber: "",
+                        additionalInfo: "",
                         createdAt: new Date().toISOString()
                     });
 
                 } else {
-                    // --- LOGIKA RUSZTOWANIA (BULK) ---
-                    // ID(0) | Nazwa(1) | Typ(2) | ID_Gl(3) | StanPocz(4) | Zdjęcie(5)
-                    const name = columns[1]?.trim();
-                    const inv = columns[0]?.trim(); // Używamy ID (np. ru01-01) jako nr magazynowego
-                    const qty = parseInt(columns[4]) || 0;
-                    const imageUrl = columns[5]?.trim() || "";
+                    // --- NOWA LOGIKA DLA RUSZTOWAŃ (BULK) ---
+                    // Kolumny: 0:ID, 1:Nazwa, 2:Typ, 3:ID_Głównej, 4:StanPocz, 5:Zdjęcie
+                    const id = cols[0]?.trim();
+                    const name = cols[1]?.trim();
+                    const bulkType = cols[2]?.trim(); // "Główna kategoria" lub "Podpozycja"
+                    const mainCategoryId = cols[3]?.trim() || "";
+                    const qty = parseInt(cols[4]) || 0;
+                    const imageUrl = cols[5]?.trim() || "";
 
-                    if (!name || isNaN(qty)) return;
+                    if (!id || !name) return;
 
-                    const ref = doc(collection(db, "inventory"));
+                    // Używamy ID z Excela (np. st01, ru01-01) jako ID dokumentu w Firestore
+                    const ref = doc(db, "inventory", id);
+
                     batch.set(ref, {
                         name,
-                        inventoryNumber: inv,
+                        inventoryNumber: id,
                         type: "BULK",
-                        category: "Rusztowania",
-                        status: "sprawne",
-                        totalQuantity: qty,
-                        availableQuantity: qty, // Rusztowania domyślnie na magazyn
-                        allocations: {},
+                        // Rozróżniamy czy to folder (MAIN_CAT) czy przedmiot (SUB_ITEM)
+                        subType: bulkType === "Główna kategoria" ? "MAIN_CAT" : "SUB_ITEM",
+                        mainCategoryId: mainCategoryId,
+                        category: "Rusztowania i inne",
+                        subcategory: "",
                         imageUrl,
+                        status: "sprawne",
+                        currentLocation: "MAGAZYN PESAM",
+                        totalQuantity: qty,
+                        availableQuantity: qty,
+                        allocations: {},
+                        purchasePrice: 0,
+                        additionalInfo: "",
                         createdAt: new Date().toISOString()
                     });
                 }
@@ -100,7 +131,7 @@ export default function ImportPage() {
             alert(`Pomyślnie zaimportowano ${dataRows.length} pozycji!`);
             setInputText("");
         } catch (error: any) {
-            console.error(error);
+            console.error("Błąd podczas importu:", error);
             alert("Błąd: " + error.message);
         } finally {
             setLoading(false);
@@ -108,47 +139,57 @@ export default function ImportPage() {
     };
 
     return (
-        <div className="p-10 max-w-5xl mx-auto">
-            <h1 className="text-3xl font-bold mb-2 text-slate-800">Magiczna Migracja PESAM v2</h1>
-            <p className="text-slate-500 mb-8">Wklej dane z odpowiedniego arkusza. System sam rozpozna lokalizację narzędzi.</p>
+        <div className="p-6 md:p-10 max-w-5xl mx-auto animate-fade-in">
+            <h1 className="text-3xl font-bold mb-2 text-slate-800">Pełna Migracja PESAM v3</h1>
+            <p className="text-slate-500 mb-8 font-medium">Ujednolicony import Narzędzi i Rusztowań</p>
 
-            <div className="bg-white rounded-2xl shadow-xl p-8 border border-slate-200">
-                <div className="flex gap-4 mb-6">
+            <div className="bg-white p-8 rounded-3xl shadow-xl border border-slate-200">
+                <div className="flex gap-4 mb-8">
                     <button
                         onClick={() => { setImportType("UNIQUE"); setInputText(""); }}
-                        className={`flex-1 py-4 rounded-xl font-bold transition-all ${importType === 'UNIQUE' ? 'bg-indigo-600 text-white shadow-lg scale-105' : 'bg-slate-100 text-slate-500'}`}
+                        className={`flex-1 py-4 rounded-2xl font-black transition-all ${importType === 'UNIQUE' ? 'bg-indigo-600 text-white shadow-lg scale-105' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}
                     >
-                        📦 Importuj NARZĘDZIA
+                        📦 NARZĘDZIA (UNIQUE)
                     </button>
                     <button
                         onClick={() => { setImportType("BULK"); setInputText(""); }}
-                        className={`flex-1 py-4 rounded-xl font-bold transition-all ${importType === 'BULK' ? 'bg-orange-600 text-white shadow-lg scale-105' : 'bg-slate-100 text-slate-500'}`}
+                        className={`flex-1 py-4 rounded-2xl font-black transition-all ${importType === 'BULK' ? 'bg-orange-600 text-white shadow-lg scale-105' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}
                     >
-                        🏗️ Importuj RUSZTOWANIA
+                        🏗️ RUSZTOWANIA (BULK)
                     </button>
                 </div>
 
-                <div className="mb-4 p-4 bg-blue-50 border-l-4 border-blue-400 text-blue-700 text-sm">
-                    {importType === "UNIQUE"
-                        ? "Wskazówka: Kopiuj kolumny od ID do Category. System sprawdzi kolumnę LOKALIZACJA."
-                        : "Wskazówka: Kopiuj kolumny od ID do Zdjęcia. Stan początkowy trafi na magazyn."}
+                <div className="mb-6 p-4 bg-blue-50 border-l-4 border-blue-500 rounded-r-xl">
+                    <p className="text-blue-800 text-sm leading-relaxed">
+                        {importType === "UNIQUE" ? (
+                            <span><b>Narzędzia:</b> Kopiuj kolumny od <b>ID</b> do <b>Cena zakupu</b>. System przypisze lokalizacje na podstawie bazy budów.</span>
+                        ) : (
+                            <span><b>Rusztowania:</b> Kopiuj kolumny od <b>ID</b> do <b>Zdjęcie</b>. System zachowa strukturę Główna Kategoria &rarr; Podpozycja.</span>
+                        )}
+                    </p>
                 </div>
 
                 <textarea
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Wklej tutaj dane skopiowane z arkusza..."
-                    className="w-full h-80 p-4 border rounded-xl font-mono text-[10px] mb-6 focus:ring-2 outline-none bg-slate-50"
+                    placeholder={importType === "UNIQUE" ? "Wklej dane narzędzi (kolumny A-K)..." : "Wklej dane rusztowań (kolumny A-F)..."}
+                    className="w-full h-80 p-6 border-2 border-slate-100 rounded-3xl font-mono text-[10px] bg-slate-50 mb-8 focus:border-blue-500 focus:ring-0 outline-none transition-all"
                 />
 
                 <button
-                    disabled={loading}
                     onClick={handleImport}
-                    className={`w-full py-4 text-white font-black rounded-xl text-lg shadow-xl transition-all ${loading ? 'bg-slate-400' : (importType === 'UNIQUE' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-orange-600 hover:bg-orange-700')}`}
+                    disabled={loading}
+                    className={`w-full py-5 text-white font-black rounded-2xl text-xl shadow-2xl transition-all active:scale-95 ${loading ? 'bg-slate-400 cursor-not-allowed' : (importType === 'UNIQUE' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-orange-600 hover:bg-orange-700')}`}
                 >
-                    {loading ? "PROSZĘ CZEKAĆ, TRWA ZAPIS W CHMURZE..." : `🚀 IMPORTUJ DANE (${importType === 'UNIQUE' ? 'NARZĘDZIA' : 'RUSZTOWANIA'})`}
+                    {loading ? "TRWA PRZETWARZANIE..." : `ZAPISZ ${dataRowsCount(inputText)} POZYCJI W BAZIE`}
                 </button>
             </div>
         </div>
     );
+}
+
+function dataRowsCount(text: string) {
+    if (!text.trim()) return 0;
+    const lines = text.split("\n").filter(l => l.trim() !== "");
+    return (lines[0].toLowerCase().includes("id") || lines[0].toLowerCase().includes("nazwa")) ? lines.length - 1 : lines.length;
 }

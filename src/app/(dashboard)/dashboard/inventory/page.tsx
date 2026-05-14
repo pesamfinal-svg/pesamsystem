@@ -1,33 +1,84 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, query, orderBy, addDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
+import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch } from "firebase/firestore";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { db, storage } from "@/lib/firebase/config";
+import { useAuth } from "@/lib/auth/AuthContext";
+
+// --- INTERFEJSY ---
+interface HistoryEntry {
+    date: string;
+    type: string;
+    description: string;
+    status: string;
+    user: string;
+}
 
 interface InventoryItem {
     id: string;
     name: string;
-    type: "UNIQUE" | "BULK"; // Narzędzia vs Rusztowania
-    inventoryNumber: string;  // Dla UNIQUE: np. "120", dla BULK: np. "R-LAY-01"
-    totalQuantity: number;    // Dla UNIQUE zawsze 1
+    type: "UNIQUE" | "BULK";
+    subType?: "MAIN_CAT" | "SUB_ITEM";
+    mainCategoryId?: string; // ID rodzica
+    inventoryNumber: string;
+    category: string;
+    subcategory: string;
+    status: string;
+    imageUrl: string;
+    currentLocation: string;
+    totalQuantity: number;
     availableQuantity: number;
-    allocations: Record<string, number>; // { "id_budowy": ilosc }
-    status: "sprawne" | "w naprawie" | "zlom";
+    purchasePrice: number;
+    purchaseDate: string;
+    invoiceNumber: string;
+    additionalInfo: string;
+    allocations: Record<string, number>;
+    createdAt: string;
 }
+
+const INITIAL_FORM_STATE: Partial<InventoryItem> = {
+    name: "",
+    type: "UNIQUE",
+    subType: "SUB_ITEM",
+    mainCategoryId: "",
+    inventoryNumber: "",
+    category: "",
+    subcategory: "",
+    currentLocation: "MAGAZYN PESAM",
+    status: "sprawne",
+    totalQuantity: 1,
+    purchasePrice: 0,
+    purchaseDate: "",
+    invoiceNumber: "",
+    imageUrl: "",
+    additionalInfo: ""
+};
 
 export default function InventoryPage() {
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(true);
-    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
 
-    const [formData, setFormData] = useState({
-        name: "",
-        type: "UNIQUE" as "UNIQUE" | "BULK",
-        inventoryNumber: "",
-        totalQuantity: 1
-    });
+    // FILTRY
+    const [searchTerm, setSearchTerm] = useState("");
+    const [locFilter, setLocFilter] = useState("ALL");
+    const [statusFilter, setStatusFilter] = useState("ALL");
 
-    const fetchInventory = async () => {
+    // MODALE I FORMULARZ
+    const [isFormOpen, setIsFormOpen] = useState(false);
+    const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+    const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
+    const [showSpecs, setShowSpecs] = useState(false);
+
+    const [imageFile, setImageFile] = useState<File | null>(null);
+    const [isUploading, setIsUploading] = useState(false);
+
+    const [itemHistory, setItemHistory] = useState<HistoryEntry[]>([]);
+    const [historyLoading, setItemHistoryLoading] = useState(false);
+    const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
+
+    const fetchItems = async () => {
         setLoading(true);
         const q = query(collection(db, "inventory"), orderBy("name", "asc"));
         const snap = await getDocs(q);
@@ -35,86 +86,368 @@ export default function InventoryPage() {
         setLoading(false);
     };
 
-    useEffect(() => { fetchInventory(); }, []);
+    useEffect(() => { fetchItems(); }, []);
+
+    const uploadImage = async (file: File) => {
+        const storageRef = ref(storage, `inventory/${Date.now()}_${file.name}`);
+        const snapshot = await uploadBytes(storageRef, file);
+        return await getDownloadURL(snapshot.ref);
+    };
+
+    const generateBulkId = (name: string, type: "MAIN_CAT" | "SUB_ITEM", parentId: string) => {
+        if (type === "MAIN_CAT") {
+            const prefix = name.split(" ").map(w => w.substring(0, 2)).join("").toLowerCase().substring(0, 4);
+            const count = items.filter(i => i.subType === "MAIN_CAT" && i.inventoryNumber.startsWith(prefix)).length;
+            return `${prefix}${String(count + 1).padStart(2, '0')}`;
+        } else {
+            const parent = items.find(i => i.id === parentId);
+            const parentPrefix = parent ? parent.inventoryNumber : "item";
+            const count = items.filter(i => i.mainCategoryId === parentId).length;
+            return `${parentPrefix}-${String(count + 1).padStart(2, '0')}`;
+        }
+    };
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
-        const qty = formData.type === "UNIQUE" ? 1 : Number(formData.totalQuantity);
+        setIsUploading(true);
+        try {
+            let finalImageUrl = formData.imageUrl || "";
+            if (imageFile) finalImageUrl = await uploadImage(imageFile);
 
-        await addDoc(collection(db, "inventory"), {
-            ...formData,
-            totalQuantity: qty,
-            availableQuantity: qty,
-            allocations: {},
-            status: "sprawne",
-            createdAt: new Date().toISOString()
-        });
+            let finalInvNumber = formData.inventoryNumber || "";
+            let generatedDocId = "";
 
-        setIsModalOpen(false);
-        fetchInventory();
+            if (formData.type === "BULK" && !finalInvNumber) {
+                finalInvNumber = generateBulkId(formData.name || "", formData.subType as "MAIN_CAT" | "SUB_ITEM", formData.mainCategoryId || "");
+                generatedDocId = finalInvNumber;
+            }
+
+            let finalCategory = formData.category;
+            let finalSubcategory = formData.subcategory;
+
+            if (formData.type === "BULK" && formData.subType === "SUB_ITEM") {
+                const parent = items.find(i => i.id === formData.mainCategoryId);
+                finalCategory = parent?.name || "Rusztowania i inne";
+                finalSubcategory = formData.name;
+            }
+
+            const qty = formData.type === "UNIQUE" ? 1 : (formData.subType === "MAIN_CAT" ? 0 : Number(formData.totalQuantity));
+
+            if (editingItem) {
+                const { availableQuantity, allocations, createdAt } = editingItem;
+                await updateDoc(doc(db, "inventory", editingItem.id), {
+                    ...formData,
+                    inventoryNumber: finalInvNumber || editingItem.inventoryNumber,
+                    category: finalCategory,
+                    subcategory: finalSubcategory,
+                    imageUrl: finalImageUrl,
+                    totalQuantity: qty,
+                    availableQuantity,
+                    allocations,
+                    createdAt
+                });
+            } else {
+                const newDocData = {
+                    ...formData,
+                    inventoryNumber: finalInvNumber,
+                    category: finalCategory,
+                    subcategory: finalSubcategory,
+                    imageUrl: finalImageUrl,
+                    totalQuantity: qty,
+                    availableQuantity: qty,
+                    allocations: {},
+                    createdAt: new Date().toISOString()
+                };
+
+                if (generatedDocId) {
+                    await setDoc(doc(db, "inventory", generatedDocId), newDocData);
+                } else {
+                    await addDoc(collection(db, "inventory"), newDocData);
+                }
+            }
+
+            setIsFormOpen(false);
+            setEditingItem(null);
+            setImageFile(null);
+            setFormData(INITIAL_FORM_STATE);
+            fetchItems();
+        } catch (error: any) {
+            alert("Błąd zapisu: " + error.message);
+        } finally {
+            setIsUploading(false);
+        }
     };
 
-    return (
-        <div className="p-6 md:p-10 max-w-7xl mx-auto">
-            <div className="flex justify-between items-center mb-8">
-                <div>
-                    <h1 className="text-2xl font-bold text-slate-800">Katalog Sprzętu</h1>
-                    <p className="text-slate-500 text-sm">Narzędzia (UNIQUE) oraz Rusztowania (BULK)</p>
-                </div>
-                <div className="flex gap-2">
-                    <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-medium">+ Dodaj Sprzęt</button>
-                </div>
-            </div>
+    // --- INTELIGENTNE USUWANIE ---
+    const handleDelete = async (item: InventoryItem) => {
+        if (item.type === "BULK" && item.subType === "MAIN_CAT") {
+            // Jeśli usuwamy całą główną kategorię (System)
+            if (confirm(`UWAGA! Usunięcie systemu "${item.name}" spowoduje bezpowrotne usunięcie wszystkich przypisanych do niego elementów.\n\nCzy na pewno chcesz kontynuować?`)) {
+                try {
+                    const batch = writeBatch(db);
 
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                <table className="w-full text-left border-collapse">
-                    <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200">
-                            <th className="p-4 font-semibold text-slate-700">Nazwa urządzenia</th>
-                            <th className="p-4 font-semibold text-slate-700">Nr Magazynowy</th>
-                            <th className="p-4 font-semibold text-slate-700 text-center">Typ</th>
-                            <th className="p-4 font-semibold text-slate-700 text-center">Łącznie</th>
-                            <th className="p-4 font-semibold text-slate-700 text-center text-green-600">Magazyn</th>
-                            <th className="p-4 font-semibold text-slate-700 text-center text-blue-600">Budowy</th>
-                        </tr>
+                    // Usuwamy rodzica
+                    batch.delete(doc(db, "inventory", item.id));
+
+                    // Usuwamy wszystkie dzieci
+                    const subItems = items.filter(i => i.mainCategoryId === item.id);
+                    subItems.forEach(sub => {
+                        batch.delete(doc(db, "inventory", sub.id));
+                    });
+
+                    await batch.commit();
+                    fetchItems();
+                } catch (error: any) {
+                    alert("Błąd podczas usuwania systemu: " + error.message);
+                }
+            }
+        } else {
+            // Zwykłe usunięcie (narzędzie lub pojedynczy element)
+            if (confirm(`Czy na pewno usunąć "${item.name}" trwale z bazy?`)) {
+                try {
+                    await deleteDoc(doc(db, "inventory", item.id));
+                    fetchItems();
+                } catch (error: any) {
+                    alert("Błąd podczas usuwania: " + error.message);
+                }
+            }
+        }
+    };
+
+    const openItemCard = async (item: InventoryItem) => {
+        setSelectedItem(item);
+        setShowSpecs(false);
+        setItemHistoryLoading(true);
+        try {
+            const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
+            setItemHistory(historySnap.docs.map(d => d.data() as HistoryEntry));
+        } catch (e) { setItemHistory([]); } finally { setItemHistoryLoading(false); }
+    };
+
+    // LOGIKA FILTROWANIA
+    const filteredItems = items.filter(item => {
+        if (item.type !== activeTab) return false;
+        const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || item.inventoryNumber.toLowerCase().includes(searchTerm.toLowerCase());
+        const matchesLoc = locFilter === "ALL" || item.currentLocation === locFilter;
+        const matchesStatus = statusFilter === "ALL" || item.status === statusFilter;
+        return matchesSearch && matchesLoc && matchesStatus;
+    });
+
+    const uniqueLocations = Array.from(new Set(items.filter(i => i.type === activeTab).map(i => i.currentLocation))).sort();
+    const mainSystems = items.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
+
+    const renderBulkGroups = () => {
+        const mainCats = filteredItems.filter(i => i.subType === "MAIN_CAT");
+        const subs = filteredItems.filter(i => i.subType === "SUB_ITEM");
+
+        return mainCats.map(main => (
+            <div key={main.id} className="mb-6 border rounded-2xl overflow-hidden shadow-sm bg-white animate-fade-in">
+                <div className="bg-slate-800 text-white p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                        <img src={main.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-lg border border-slate-600" alt="kat" />
+                        <div>
+                            <h2 className="text-lg font-black uppercase tracking-tight">{main.name}</h2>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">System / Kod: {main.inventoryNumber}</p>
+                        </div>
+                    </div>
+                    <div className="flex gap-2">
+                        <button onClick={() => { setEditingItem(main); setFormData({ ...main }); setIsFormOpen(true); }} className="text-xs bg-slate-700 text-white px-3 py-1 rounded hover:bg-slate-600 transition font-bold">Edytuj System</button>
+                        <button onClick={() => handleDelete(main)} className="text-xs bg-red-900 text-red-100 px-3 py-1 rounded hover:bg-red-800 transition font-bold">Usuń System</button>
+                    </div>
+                </div>
+                <table className="w-full text-left">
+                    <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
+                        <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Element / Podkategoria</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
                     </thead>
-                    <tbody>
-                        {items.map(item => (
-                            <tr key={item.id} className="border-b border-slate-100 hover:bg-slate-50 transition">
-                                <td className="p-4 font-bold text-slate-800">{item.name}</td>
-                                <td className="p-4 font-mono text-xs">{item.inventoryNumber}</td>
-                                <td className="p-4 text-center">
-                                    <span className={`px-2 py-1 rounded text-[10px] font-bold ${item.type === 'UNIQUE' ? 'bg-indigo-100 text-indigo-700' : 'bg-orange-100 text-orange-700'}`}>
-                                        {item.type === 'UNIQUE' ? 'NARZĘDZIE' : 'MASOWY'}
-                                    </span>
+                    <tbody className="text-sm">
+                        {subs.filter(s => s.mainCategoryId === main.id).map(sub => (
+                            <tr key={sub.id} className="border-b last:border-0 hover:bg-slate-50 transition">
+                                <td className="p-3"><img src={sub.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                <td className="p-4 cursor-pointer" onClick={() => openItemCard(sub)}>
+                                    <p className="font-bold text-slate-700">{sub.name}</p>
+                                    <p className="text-[10px] text-slate-400">{sub.category} / {sub.subcategory}</p>
                                 </td>
-                                <td className="p-4 text-center font-medium">{item.totalQuantity}</td>
-                                <td className="p-4 text-center font-bold text-green-600">{item.availableQuantity}</td>
-                                <td className="p-4 text-center font-bold text-blue-600">{item.totalQuantity - item.availableQuantity}</td>
+                                <td className="p-4 text-center font-mono text-xs text-blue-600 font-bold">{sub.inventoryNumber}</td>
+                                <td className="p-4 text-center font-black">{sub.availableQuantity} / {sub.totalQuantity}</td>
+                                <td className="p-4 text-right space-x-3">
+                                    <button onClick={() => { setEditingItem(sub); setFormData({ ...sub }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                    <button onClick={() => handleDelete(sub)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                </td>
                             </tr>
                         ))}
                     </tbody>
                 </table>
             </div>
+        ));
+    };
 
-            {/* Modal - Dodawanie */}
-            {isModalOpen && (
-                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
-                        <h2 className="text-xl font-bold mb-6">Dodaj nowy sprzęt</h2>
-                        <form onSubmit={handleSave} className="space-y-4">
-                            <div className="flex bg-slate-100 p-1 rounded-lg">
-                                <button type="button" onClick={() => setFormData({ ...formData, type: 'UNIQUE' })} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition ${formData.type === 'UNIQUE' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>NARZĘDZIE</button>
-                                <button type="button" onClick={() => setFormData({ ...formData, type: 'BULK' })} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition ${formData.type === 'BULK' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>RUSZTOWANIE / MASOWY</button>
+    return (
+        <div className="p-6 md:p-10 max-w-7xl mx-auto">
+            <div className="flex justify-between items-center mb-8">
+                <h1 className="text-3xl font-bold text-slate-800 tracking-tighter">Katalog Sprzętu PESAM</h1>
+                <button onClick={() => { setEditingItem(null); setFormData(INITIAL_FORM_STATE); setIsFormOpen(true); }} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold shadow-lg transition hover:bg-blue-700">
+                    + Dodaj Sprzęt
+                </button>
+            </div>
+
+            <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-2xl w-fit border shadow-inner">
+                <button onClick={() => setActiveTab("UNIQUE")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>NARZĘDZIA</button>
+                <button onClick={() => setActiveTab("BULK")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>RUSZTOWANIA</button>
+            </div>
+
+            <div className="bg-white p-4 rounded-xl mb-6 shadow-sm border border-slate-200 grid grid-cols-1 md:grid-cols-3 gap-4">
+                <input type="text" placeholder="Szukaj..." className="p-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                <select className="p-2 border rounded-lg bg-white" value={locFilter} onChange={(e) => setLocFilter(e.target.value)}>
+                    <option value="ALL">Wszystkie lokalizacje</option>
+                    {uniqueLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                </select>
+                <select className="p-2 border rounded-lg bg-white" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                    <option value="ALL">Wszystkie statusy</option>
+                    <option value="sprawne">Sprawne</option>
+                    <option value="do naprawy">Do naprawy</option>
+                    <option value="złom">Złom</option>
+                </select>
+            </div>
+
+            {loading ? <div className="p-20 text-center animate-pulse">Ładowanie bazy danych...</div> : (
+                activeTab === "UNIQUE" ? (
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                        <table className="w-full text-left border-collapse">
+                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
+                                <tr><th className="p-4">Zdjęcie</th><th className="p-4">Nazwa Urządzenia</th><th className="p-4 text-center">Nr Mag.</th><th className="p-4">Status</th><th className="p-4">Lokalizacja</th><th className="p-4 text-center">Stan</th><th className="p-4 text-right">Akcje</th></tr>
+                            </thead>
+                            <tbody className="text-sm">
+                                {filteredItems.map(item => (
+                                    <tr key={item.id} className="border-b border-slate-100 hover:bg-slate-50 transition">
+                                        <td className="p-4"><img src={item.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-md border" /></td>
+                                        <td className="p-4 cursor-pointer font-bold text-slate-800" onClick={() => openItemCard(item)}>
+                                            {item.name}
+                                            <p className="text-[10px] text-slate-400 font-bold uppercase">{item.category} / {item.subcategory}</p>
+                                        </td>
+                                        <td className="p-4 text-center font-mono font-bold text-blue-600">{item.inventoryNumber}</td>
+                                        <td className="p-4"><span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${item.status === 'sprawne' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{item.status}</span></td>
+                                        <td className="p-4 text-slate-600">{item.currentLocation}</td>
+                                        <td className="p-4 text-center font-bold">{item.availableQuantity} / {item.totalQuantity}</td>
+                                        <td className="p-4 text-right space-x-3">
+                                            <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                            <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline text-xs font-bold">Usuń</button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                ) : (
+                    <div>{renderBulkGroups()}</div>
+                )
+            )}
+
+            {/* MODALE KARTY I EDYCJI ZOSTAJĄ BEZ ZMIAN PONIŻEJ */}
+            {selectedItem && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex justify-end" onClick={() => setSelectedItem(null)}>
+                    <div className="bg-white w-full max-w-xl h-full p-8 shadow-2xl animate-slide-in overflow-y-auto" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-start mb-6">
+                            <h2 className="text-2xl font-black text-slate-800">{selectedItem.name}</h2>
+                            <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900">&times;</button>
+                        </div>
+                        <div className="relative mb-8">
+                            <img src={selectedItem.imageUrl || 'https://via.placeholder.com/400x300'} className="w-full h-64 object-cover rounded-2xl shadow-lg border" />
+                            <button onClick={() => setShowSpecs(!showSpecs)} className="absolute bottom-4 right-4 bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center font-serif italic text-xl shadow-lg hover:scale-110 transition"> i </button>
+                        </div>
+                        {showSpecs && (
+                            <div className="bg-blue-50 border border-blue-200 p-5 rounded-2xl mb-8 animate-fade-in">
+                                <h4 className="text-xs font-bold text-blue-800 uppercase mb-2">Specyfikacja:</h4>
+                                <p className="text-sm text-blue-900 whitespace-pre-wrap">{selectedItem.additionalInfo || "Brak informacji."}</p>
                             </div>
-                            <input placeholder="Nazwa przedmiotu" required value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} className="w-full p-2 border rounded-lg" />
-                            <input placeholder="Numer Magazynowy" required value={formData.inventoryNumber} onChange={e => setFormData({ ...formData, inventoryNumber: e.target.value })} className="w-full p-2 border rounded-lg font-mono" />
+                        )}
+                        <div className="grid grid-cols-2 gap-4 mb-10 bg-slate-50 p-6 rounded-2xl border text-sm">
+                            <div><p className="text-[10px] font-bold text-slate-400 uppercase">Nr Magazynowy</p><p className="font-mono font-bold text-lg">{selectedItem.inventoryNumber}</p></div>
+                            <div><p className="text-[10px] font-bold text-slate-400 uppercase">Status</p><p className={`font-black ${selectedItem.status === 'sprawne' ? 'text-green-600' : 'text-red-600'}`}>{selectedItem.status.toUpperCase()}</p></div>
+                            <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Cena / Faktura</p><p className="font-bold text-slate-800 text-xs">{selectedItem.purchasePrice} zł / {selectedItem.invoiceNumber || 'Brak'}</p></div>
+                            <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Data zakupu</p><p className="font-bold text-slate-800">{selectedItem.purchaseDate || "---"}</p></div>
+                        </div>
+                        <h3 className="font-bold uppercase text-[10px] text-slate-400 mb-4 tracking-widest text-center border-b pb-2">Historia zdarzeń</h3>
+                        <div className="border rounded-xl overflow-hidden text-[11px]">
+                            <table className="w-full text-left">
+                                <thead className="bg-slate-100 border-b"><tr><th className="p-3">Data</th><th className="p-3">Typ</th><th className="p-3">Opis</th><th className="p-3">Osoba</th></tr></thead>
+                                <tbody>{itemHistory.map((h, i) => (<tr key={i} className="border-b last:border-0 hover:bg-slate-50"><td className="p-3">{h.date}</td><td className="p-3 font-bold">{h.type}</td><td className="p-3">{h.description}</td><td className="p-3 text-slate-400">{h.user}</td></tr>))}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {isFormOpen && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-8 max-h-[90vh] overflow-y-auto animate-fade-in">
+                        <h2 className="text-2xl font-bold mb-6 text-slate-800">{editingItem ? "Edytuj dane" : "Dodaj sprzęt"}</h2>
+                        <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                            <div className="md:col-span-2 flex bg-slate-100 p-1 rounded-xl mb-2">
+                                <button type="button" disabled={!!editingItem} onClick={() => setFormData({ ...formData, type: "UNIQUE" })} className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${formData.type === 'UNIQUE' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>NARZĘDZIE (UNIQUE)</button>
+                                <button type="button" disabled={!!editingItem} onClick={() => setFormData({ ...formData, type: "BULK", subType: "SUB_ITEM" })} className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${formData.type === 'BULK' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>RUSZTOWANIE (BULK)</button>
+                            </div>
+
                             {formData.type === "BULK" && (
-                                <input type="number" placeholder="Ilość całkowita" required value={formData.totalQuantity} onChange={e => setFormData({ ...formData, totalQuantity: Number(e.target.value) })} className="w-full p-2 border rounded-lg" />
+                                <div className="md:col-span-2 flex gap-4 p-4 bg-orange-50 border border-orange-100 rounded-xl mb-2 text-sm">
+                                    <label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="subType" checked={formData.subType === "MAIN_CAT"} onChange={() => setFormData({ ...formData, subType: "MAIN_CAT" })} /><span className="font-bold text-orange-800">To jest System (np. PR firmy)</span></label>
+                                    <label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="subType" checked={formData.subType === "SUB_ITEM"} onChange={() => setFormData({ ...formData, subType: "SUB_ITEM" })} /><span className="font-bold text-orange-800">To jest Element (np. Maszt)</span></label>
+                                </div>
                             )}
-                            <div className="flex gap-2 pt-4">
-                                <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 py-2 text-slate-500">Anuluj</button>
-                                <button type="submit" className="flex-1 py-2 bg-blue-600 text-white font-bold rounded-lg">Zapisz</button>
+
+                            {formData.type === "BULK" && formData.subType === "SUB_ITEM" && (
+                                <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase">Wybierz System (Rodzica)</label>
+                                    <select required value={formData.mainCategoryId} onChange={e => setFormData({ ...formData, mainCategoryId: e.target.value })} className="w-full p-2 border rounded-xl bg-white outline-none">
+                                        <option value="" disabled>-- Wybierz system z listy --</option>
+                                        {mainSystems.map(sys => <option key={sys.id} value={sys.id}>{sys.name}</option>)}
+                                    </select>
+                                </div>
+                            )}
+
+                            <div className="md:col-span-2"><label className="text-[10px] font-bold text-slate-400 uppercase">Wgraj zdjęcie (Plik)</label><input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files ? e.target.files[0] : null)} className="w-full p-2 border rounded-xl bg-slate-50 text-xs" /></div>
+
+                            <div className="md:col-span-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">
+                                    {formData.subType === "MAIN_CAT" ? "Nazwa Systemu" : "Nazwa urządzenia / Elementu"}
+                                </label>
+                                <input required value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} className="w-full p-3 border rounded-xl outline-none focus:ring-2" />
+                            </div>
+
+                            {formData.type === "UNIQUE" && (
+                                <>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria</label><input value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria</label><input value={formData.subcategory} onChange={e => setFormData({ ...formData, subcategory: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Nr Mag.</label><input required value={formData.inventoryNumber} onChange={e => setFormData({ ...formData, inventoryNumber: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Lokalizacja</label><input required value={formData.currentLocation} onChange={e => setFormData({ ...formData, currentLocation: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                </>
+                            )}
+
+                            {formData.type === "BULK" && formData.subType === "SUB_ITEM" && (
+                                <>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Kod Elementu (Opcjonalnie)</label>
+                                        <input value={formData.inventoryNumber} onChange={e => setFormData({ ...formData, inventoryNumber: e.target.value })} placeholder="Automatyczny" className="w-full p-2 border rounded-xl bg-slate-50" />
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Ilość całkowita</label>
+                                        <input type="number" required value={formData.totalQuantity} onChange={e => setFormData({ ...formData, totalQuantity: Number(e.target.value) })} className="w-full p-2 border rounded-xl" />
+                                    </div>
+                                </>
+                            )}
+
+                            {formData.subType !== "MAIN_CAT" && (
+                                <>
+                                    <div className="md:col-span-2 mt-4 border-t pt-4"><h3 className="font-bold text-sm text-slate-800">Dane Finansowe & Info</h3></div>
+                                    <div className="md:col-span-2"><label className="text-[10px] font-bold text-slate-400 uppercase">Specyfikacja (Pole "i")</label><textarea value={formData.additionalInfo} onChange={e => setFormData({ ...formData, additionalInfo: e.target.value })} className="w-full p-3 border rounded-xl text-sm h-16" /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Cena netto</label><input type="number" step="0.01" value={formData.purchasePrice} onChange={e => setFormData({ ...formData, purchasePrice: Number(e.target.value) })} className="w-full p-2 border rounded-xl" /></div>
+                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Numer Faktury</label><input value={formData.invoiceNumber} onChange={e => setFormData({ ...formData, invoiceNumber: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                    <div className="md:col-span-2"><label className="text-[10px] font-bold text-slate-400 uppercase">Data zakupu</label><input type="date" value={formData.purchaseDate} onChange={e => setFormData({ ...formData, purchaseDate: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                </>
+                            )}
+
+                            <div className="md:col-span-2 flex gap-3 pt-6 border-t mt-2">
+                                <button type="button" onClick={() => setIsFormOpen(false)} className="flex-1 py-3 text-slate-500 border rounded-2xl font-bold">Anuluj</button>
+                                <button type="submit" disabled={isUploading} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700">{isUploading ? "WGRYWANIE..." : "ZAPISZ"}</button>
                             </div>
                         </form>
                     </div>
