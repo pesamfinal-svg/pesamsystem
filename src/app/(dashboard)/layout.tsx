@@ -33,23 +33,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
     // Definiujemy menu i przypisujemy Klucze Uprawnień do odpowiednich modułów
     const menuItems: MenuItem[] = [
-        { name: "Pulpit", path: "/dashboard", icon: "📊" }, // Brak wymogów, pulpit widzi każdy
-        { name: "Twoja budowa", path: "/dashboard/my-site", icon: "🏠" },
+        { name: "Pulpit", path: "/dashboard", icon: "📊" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
         { name: "Protokoły", path: "/dashboard/protocols", icon: "📝", requiredPermission: "issueProtocols" },
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
         { name: "Zarządzanie Pracownikami", path: "/dashboard/admin/users", icon: "👥", requiredPermission: "manageUsers" },
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },
-        { name: "Import Danych", path: "/dashboard/admin/import", icon: "📥" },
+        { name: "Sąd PESAM", path: "/dashboard/claims", icon: "⚖️", requiredPermission: "viewClaims" },
     ];
 
     // Funkcja filtrująca menu
+    // Funkcja filtrująca menu - CZYSTA LOGIKA UPRAWNIEŃ (Zero sztywnego admina)
     const canViewMenuItem = (item: MenuItem) => {
         if (!item.requiredPermission) return true; // Zawsze widoczne (np. Pulpit)
-        if (user.roleId === "admin" || user.roleId.includes("admin")) return true; // Admin widzi wszystko
 
-        // Zwraca true jeśli Rola na to pozwala ALBO jeśli jest wyjątek na "true"
+        // System sprawdza wyłącznie, czy przypisana Rola (lub wyjątek) pozwala na ten widok
         return hasPermission(item.requiredPermission, user.rolePermissions, user.permissionOverrides);
     };
 

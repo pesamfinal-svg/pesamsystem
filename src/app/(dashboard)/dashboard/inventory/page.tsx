@@ -1,7 +1,8 @@
+// src/app/(dashboard)/inventory/page.tsx
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -20,7 +21,7 @@ interface InventoryItem {
     name: string;
     type: "UNIQUE" | "BULK";
     subType?: "MAIN_CAT" | "SUB_ITEM";
-    mainCategoryId?: string; // ID rodzica
+    mainCategoryId?: string;
     inventoryNumber: string;
     category: string;
     subcategory: string;
@@ -56,6 +57,7 @@ const INITIAL_FORM_STATE: Partial<InventoryItem> = {
 };
 
 export default function InventoryPage() {
+    const { user } = useAuth();
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
@@ -65,11 +67,16 @@ export default function InventoryPage() {
     const [locFilter, setLocFilter] = useState("ALL");
     const [statusFilter, setStatusFilter] = useState("ALL");
 
-    // MODALE I FORMULARZ
+    // MODALE I FORMULARZ GŁÓWNY
     const [isFormOpen, setIsFormOpen] = useState(false);
     const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
     const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
     const [showSpecs, setShowSpecs] = useState(false);
+
+    // MODAL SERWISOWY (NOWOŚĆ)
+    const [isServiceModalOpen, setIsServiceModalOpen] = useState(false);
+    const [serviceData, setServiceData] = useState({ newStatus: "sprawne", description: "", cost: "" });
+    const [isServiceSubmitting, setIsServiceSubmitting] = useState(false);
 
     const [imageFile, setImageFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
@@ -178,23 +185,16 @@ export default function InventoryPage() {
         }
     };
 
-    // --- INTELIGENTNE USUWANIE ---
     const handleDelete = async (item: InventoryItem) => {
         if (item.type === "BULK" && item.subType === "MAIN_CAT") {
-            // Jeśli usuwamy całą główną kategorię (System)
             if (confirm(`UWAGA! Usunięcie systemu "${item.name}" spowoduje bezpowrotne usunięcie wszystkich przypisanych do niego elementów.\n\nCzy na pewno chcesz kontynuować?`)) {
                 try {
                     const batch = writeBatch(db);
-
-                    // Usuwamy rodzica
                     batch.delete(doc(db, "inventory", item.id));
-
-                    // Usuwamy wszystkie dzieci
                     const subItems = items.filter(i => i.mainCategoryId === item.id);
                     subItems.forEach(sub => {
                         batch.delete(doc(db, "inventory", sub.id));
                     });
-
                     await batch.commit();
                     fetchItems();
                 } catch (error: any) {
@@ -202,7 +202,6 @@ export default function InventoryPage() {
                 }
             }
         } else {
-            // Zwykłe usunięcie (narzędzie lub pojedynczy element)
             if (confirm(`Czy na pewno usunąć "${item.name}" trwale z bazy?`)) {
                 try {
                     await deleteDoc(doc(db, "inventory", item.id));
@@ -222,6 +221,86 @@ export default function InventoryPage() {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
             setItemHistory(historySnap.docs.map(d => d.data() as HistoryEntry));
         } catch (e) { setItemHistory([]); } finally { setItemHistoryLoading(false); }
+    };
+
+    // =========================================================================
+    // NOWE FUNKCJE DO KARTY URZĄDZENIA: SERWIS i SZKODY
+    // =========================================================================
+
+    const openServiceModal = () => {
+        if (!selectedItem) return;
+        setServiceData({
+            newStatus: selectedItem.status || "sprawne",
+            description: "",
+            cost: ""
+        });
+        setIsServiceModalOpen(true);
+    };
+
+    const handleServiceSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedItem) return;
+
+        setIsServiceSubmitting(true);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const itemRef = doc(db, "inventory", selectedItem.id);
+                const historyRef = doc(collection(db, `inventory/${selectedItem.id}/history`));
+
+                transaction.update(itemRef, { status: serviceData.newStatus.toLowerCase() });
+
+                let desc = serviceData.description.trim() || "Zmiana statusu / Wpis serwisowy";
+                if (serviceData.cost.trim()) {
+                    desc += ` | Koszt naprawy: ${serviceData.cost} PLN`;
+                }
+
+                transaction.set(historyRef, {
+                    date: new Date().toISOString(),
+                    type: "SERWIS",
+                    description: desc,
+                    status: serviceData.newStatus.toLowerCase(),
+                    user: `${user?.firstName} ${user?.lastName}`
+                });
+            });
+
+            alert("Wpis serwisowy został dodany!");
+            const updatedItem = { ...selectedItem, status: serviceData.newStatus.toLowerCase() };
+
+            // Odświeżenie interfejsu bez przeładowywania strony
+            setSelectedItem(updatedItem);
+            setIsServiceModalOpen(false);
+            fetchItems();
+            openItemCard(updatedItem); // Odświeża historię
+        } catch (error) {
+            alert("Błąd: " + error);
+        } finally {
+            setIsServiceSubmitting(false);
+        }
+    };
+
+    const handleReportClaim = async (item: InventoryItem) => {
+        const reason = prompt(`Zgłaszasz sprzęt "${item.name}" do Sądu PESAM (Centrum Likwidacji Szkód).\n\nPodaj powód / krótki opis uszkodzenia:`);
+        if (!reason) return;
+
+        try {
+            await setDoc(doc(collection(db, "claims")), {
+                claimId: `SZK-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`,
+                inventoryId: item.id,
+                inventoryName: item.name,
+                inventoryNumber: item.inventoryNumber || "",
+                protocolId: "Zgłoszenie ręczne z magazynu",
+                siteId: "MAGAZYN",
+                siteName: "Wykryto na magazynie",
+                reportedBy: user?.uid,
+                reportedByName: `${user?.firstName} ${user?.lastName}`,
+                description: reason,
+                status: "NOWA",
+                createdAt: new Date().toISOString()
+            });
+            alert("Pomyślnie utworzono sprawę w Sądzie PESAM!");
+        } catch (error) {
+            alert("Błąd zgłaszania sprawy: " + error);
+        }
     };
 
     // LOGIKA FILTROWANIA
@@ -304,7 +383,8 @@ export default function InventoryPage() {
                 <select className="p-2 border rounded-lg bg-white" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                     <option value="ALL">Wszystkie statusy</option>
                     <option value="sprawne">Sprawne</option>
-                    <option value="do naprawy">Do naprawy</option>
+                    <option value="do przeglądu">Do przeglądu</option>
+                    <option value="uszkodzone">Uszkodzone</option>
                     <option value="złom">Złom</option>
                 </select>
             </div>
@@ -325,7 +405,14 @@ export default function InventoryPage() {
                                             <p className="text-[10px] text-slate-400 font-bold uppercase">{item.category} / {item.subcategory}</p>
                                         </td>
                                         <td className="p-4 text-center font-mono font-bold text-blue-600">{item.inventoryNumber}</td>
-                                        <td className="p-4"><span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${item.status === 'sprawne' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{item.status}</span></td>
+                                        <td className="p-4">
+                                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase 
+                                                ${item.status === 'sprawne' ? 'bg-green-100 text-green-700' :
+                                                    item.status === 'uszkodzone' ? 'bg-red-100 text-red-700' :
+                                                        item.status === 'do przeglądu' ? 'bg-yellow-100 text-yellow-800' : 'bg-slate-100 text-slate-700'}`}>
+                                                {item.status}
+                                            </span>
+                                        </td>
                                         <td className="p-4 text-slate-600">{item.currentLocation}</td>
                                         <td className="p-4 text-center font-bold">{item.availableQuantity} / {item.totalQuantity}</td>
                                         <td className="p-4 text-right space-x-3">
@@ -342,14 +429,34 @@ export default function InventoryPage() {
                 )
             )}
 
-            {/* MODALE KARTY I EDYCJI ZOSTAJĄ BEZ ZMIAN PONIŻEJ */}
+            {/* KARTA URZĄDZENIA */}
             {selectedItem && (
-                <div className="fixed inset-0 bg-black/60 z-50 flex justify-end" onClick={() => setSelectedItem(null)}>
+                <div className="fixed inset-0 bg-black/60 z-40 flex justify-end" onClick={() => setSelectedItem(null)}>
                     <div className="bg-white w-full max-w-xl h-full p-8 shadow-2xl animate-slide-in overflow-y-auto" onClick={e => e.stopPropagation()}>
                         <div className="flex justify-between items-start mb-6">
                             <h2 className="text-2xl font-black text-slate-800">{selectedItem.name}</h2>
                             <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900">&times;</button>
                         </div>
+
+                        {/* ZMIANA: PRZYCISKI DO OBSŁUGI SERWISU I SZKÓD */}
+                        <div className="flex flex-wrap gap-2 mb-6">
+                            <button
+                                onClick={openServiceModal}
+                                className="bg-blue-100 text-blue-700 hover:bg-blue-200 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition"
+                            >
+                                <span>🛠️</span> Dodaj wpis serwisowy / Zmień stan
+                            </button>
+
+                            {selectedItem.status !== 'sprawne' && (
+                                <button
+                                    onClick={() => handleReportClaim(selectedItem)}
+                                    className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition shadow-sm"
+                                >
+                                    <span>⚖️</span> Zgłoś do Sądu (Szkoda)
+                                </button>
+                            )}
+                        </div>
+
                         <div className="relative mb-8">
                             <img src={selectedItem.imageUrl || 'https://via.placeholder.com/400x300'} className="w-full h-64 object-cover rounded-2xl shadow-lg border" />
                             <button onClick={() => setShowSpecs(!showSpecs)} className="absolute bottom-4 right-4 bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center font-serif italic text-xl shadow-lg hover:scale-110 transition"> i </button>
@@ -362,21 +469,112 @@ export default function InventoryPage() {
                         )}
                         <div className="grid grid-cols-2 gap-4 mb-10 bg-slate-50 p-6 rounded-2xl border text-sm">
                             <div><p className="text-[10px] font-bold text-slate-400 uppercase">Nr Magazynowy</p><p className="font-mono font-bold text-lg">{selectedItem.inventoryNumber}</p></div>
-                            <div><p className="text-[10px] font-bold text-slate-400 uppercase">Status</p><p className={`font-black ${selectedItem.status === 'sprawne' ? 'text-green-600' : 'text-red-600'}`}>{selectedItem.status.toUpperCase()}</p></div>
+                            <div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Status</p>
+                                <p className={`font-black uppercase 
+                                    ${selectedItem.status === 'sprawne' ? 'text-green-600' :
+                                        selectedItem.status === 'uszkodzone' ? 'text-red-600' :
+                                            selectedItem.status === 'do przeglądu' ? 'text-yellow-600' : 'text-slate-600'}`}>
+                                    {selectedItem.status}
+                                </p>
+                            </div>
                             <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Cena / Faktura</p><p className="font-bold text-slate-800 text-xs">{selectedItem.purchasePrice} zł / {selectedItem.invoiceNumber || 'Brak'}</p></div>
                             <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Data zakupu</p><p className="font-bold text-slate-800">{selectedItem.purchaseDate || "---"}</p></div>
                         </div>
                         <h3 className="font-bold uppercase text-[10px] text-slate-400 mb-4 tracking-widest text-center border-b pb-2">Historia zdarzeń</h3>
-                        <div className="border rounded-xl overflow-hidden text-[11px]">
-                            <table className="w-full text-left">
-                                <thead className="bg-slate-100 border-b"><tr><th className="p-3">Data</th><th className="p-3">Typ</th><th className="p-3">Opis</th><th className="p-3">Osoba</th></tr></thead>
-                                <tbody>{itemHistory.map((h, i) => (<tr key={i} className="border-b last:border-0 hover:bg-slate-50"><td className="p-3">{h.date}</td><td className="p-3 font-bold">{h.type}</td><td className="p-3">{h.description}</td><td className="p-3 text-slate-400">{h.user}</td></tr>))}</tbody>
-                            </table>
-                        </div>
+
+                        {historyLoading ? (
+                            <div className="text-center p-4 text-slate-400 animate-pulse">Ładowanie historii...</div>
+                        ) : (
+                            <div className="border rounded-xl overflow-hidden text-[11px]">
+                                <table className="w-full text-left">
+                                    <thead className="bg-slate-100 border-b"><tr><th className="p-3">Data</th><th className="p-3">Typ</th><th className="p-3">Opis</th><th className="p-3">Osoba</th></tr></thead>
+                                    <tbody>
+                                        {itemHistory.length === 0 ? (
+                                            <tr><td colSpan={4} className="p-4 text-center text-slate-400">Brak historii operacji.</td></tr>
+                                        ) : (
+                                            itemHistory.map((h, i) => (
+                                                <tr key={i} className="border-b last:border-0 hover:bg-slate-50">
+                                                    <td className="p-3 whitespace-nowrap">{new Date(h.date).toLocaleDateString()}</td>
+                                                    <td className={`p-3 font-bold ${h.type.includes("SERWIS") ? 'text-blue-600' : ''}`}>{h.type}</td>
+                                                    <td className="p-3">{h.description}</td>
+                                                    <td className="p-3 text-slate-400">{h.user}</td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
 
+            {/* NOWOŚĆ: MODAL SERWISOWY (Elegancki formularz zamiast prompta) */}
+            {isServiceModalOpen && selectedItem && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-black text-slate-800">🛠️ Wpis Serwisowy</h2>
+                            <button onClick={() => setIsServiceModalOpen(false)} className="text-2xl text-slate-400 hover:text-slate-800">&times;</button>
+                        </div>
+
+                        <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                            <p className="text-xs text-slate-500 uppercase font-bold mb-1">Wybrane urządzenie:</p>
+                            <p className="font-bold text-slate-800">{selectedItem.name} <span className="text-blue-600 font-mono text-sm">(Nr: {selectedItem.inventoryNumber})</span></p>
+                        </div>
+
+                        <form onSubmit={handleServiceSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Nowy status urządzenia:</label>
+                                <select
+                                    value={serviceData.newStatus}
+                                    onChange={(e) => setServiceData({ ...serviceData, newStatus: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 font-bold bg-white"
+                                >
+                                    <option value="sprawne">✅ Sprawne</option>
+                                    <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                    <option value="uszkodzone">❌ Uszkodzone</option>
+                                    <option value="złom">🗑️ Złom / Likwidacja</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Opis operacji / Co zostało zrobione? (Opcjonalnie):</label>
+                                <textarea
+                                    rows={3}
+                                    placeholder="np. Wymieniono szczotki, wyczyszczono filtry..."
+                                    value={serviceData.description}
+                                    onChange={(e) => setServiceData({ ...serviceData, description: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Koszt naprawy w PLN (Opcjonalnie):</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    placeholder="np. 45.50"
+                                    value={serviceData.cost}
+                                    onChange={(e) => setServiceData({ ...serviceData, cost: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                />
+                            </div>
+
+                            <div className="flex gap-3 pt-4 border-t border-slate-100">
+                                <button type="button" onClick={() => setIsServiceModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                                <button type="submit" disabled={isServiceSubmitting} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md transition disabled:opacity-50">
+                                    {isServiceSubmitting ? "ZAPISYWANIE..." : "ZAPISZ WPIS"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* FORMULARZ DODAWANIA/EDYCJI (GŁÓWNY) */}
             {isFormOpen && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-8 max-h-[90vh] overflow-y-auto animate-fade-in">

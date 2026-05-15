@@ -12,7 +12,10 @@ export const ALL_PERMISSIONS = {
     manageOrders: "Magazyn: Realizacja zamówień",
     issueProtocols: "Protokoły: Wystawianie wydań i zwrotów",
     acceptReturns: "Protokoły: Akceptacja zwrotów",
-    viewSiteState: "Podgląd: Stany na budowach"
+    viewSiteState: "Podgląd: Stany na budowach",
+    viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
+    viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
+    manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

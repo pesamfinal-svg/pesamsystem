@@ -6,7 +6,7 @@ import { collection, getDocs, doc, setDoc, updateDoc } from "firebase/firestore"
 import { initializeApp } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signOut } from "firebase/auth";
 import { db } from "@/lib/firebase/config";
-import { ALL_PERMISSIONS } from "@/lib/auth/permissions";
+import { ALL_PERMISSIONS, hasPermission } from "@/lib/auth/permissions"; // Dodano hasPermission
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 
@@ -59,10 +59,12 @@ export default function UsersManagementPage() {
         permissionOverrides: {} as Record<string, boolean>
     });
 
-    // Zabezpieczenie trasy
+    // =========================================================================
+    // ZABEZPIECZENIE TRASY: DYNAMICZNE (Zamiast sztywnego słowa "admin")
+    // =========================================================================
     useEffect(() => {
-        if (user && !user.roleId.includes("admin")) {
-            alert("Brak uprawnień do widoku użytkowników.");
+        if (user && !hasPermission("manageUsers", user.rolePermissions, user.permissionOverrides)) {
+            alert("Brak uprawnień do widoku zarządzania pracownikami.");
             router.push("/dashboard");
         }
     }, [user, router]);
@@ -96,7 +98,7 @@ export default function UsersManagementPage() {
 
     // Otwieranie formularza
     const openModal = (u?: UserDoc) => {
-        setSiteSearch(""); // Czyszczenie wyszukiwarki
+        setSiteSearch("");
         if (u) {
             setEditingUser(u);
             setFormData({
@@ -117,7 +119,7 @@ export default function UsersManagementPage() {
         setIsModalOpen(true);
     };
 
-    // Logika zarządzania WYJĄTKAMI uprawnień
+    // Zarządzanie wyjątkami uprawnień
     const selectedRole = roles.find(r => r.id === formData.roleId);
 
     const handlePermissionToggle = (permKey: string) => {
@@ -143,7 +145,7 @@ export default function UsersManagementPage() {
         });
     };
 
-    // Logika przypisywania budów
+    // Logika Pills (Tagów) budów
     const handleSiteToggle = (siteId: string) => {
         setFormData(prev => {
             let newSites = [...prev.assignedSites];
@@ -231,7 +233,7 @@ export default function UsersManagementPage() {
             <div className="flex justify-between items-center mb-8">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-800">Pracownicy i Uprawnienia</h1>
-                    <p className="text-slate-500 text-sm mt-1">Dodawaj pracowników i definiuj zindywidualizowane wyjątki od ról</p>
+                    <p className="text-slate-500 text-sm mt-1">Zarządzaj dostępem pracowników do systemu</p>
                 </div>
                 <button
                     onClick={() => openModal()}
@@ -251,7 +253,7 @@ export default function UsersManagementPage() {
                                 <th className="p-4 font-semibold text-slate-700">Imię i Nazwisko</th>
                                 <th className="p-4 font-semibold text-slate-700">Email</th>
                                 <th className="p-4 font-semibold text-slate-700">Rola</th>
-                                <th className="p-4 font-semibold text-slate-700">Przypisane Budowy</th>
+                                <th className="p-4 font-semibold text-slate-700">Dostęp do Budów</th>
                                 <th className="p-4 font-semibold text-slate-700 text-center">Wyjątki</th>
                                 <th className="p-4 font-semibold text-slate-700 text-right">Akcje</th>
                             </tr>
@@ -268,7 +270,7 @@ export default function UsersManagementPage() {
                                         : <span className="text-slate-400">Brak</span>;
 
                                 return (
-                                    <tr key={u.uid} className="border-b border-slate-100 hover:bg-slate-50">
+                                    <tr key={u.uid} className="border-b border-slate-100 hover:bg-slate-50 transition">
                                         <td className="p-4 font-medium text-slate-800">{u.firstName} {u.lastName}</td>
                                         <td className="p-4 text-slate-500">{u.email}</td>
                                         <td className="p-4 text-blue-700 font-medium">{roleName}</td>
@@ -303,7 +305,7 @@ export default function UsersManagementPage() {
                             <h2 className="text-xl font-bold text-slate-800">
                                 {editingUser ? `Edycja: ${editingUser.firstName}` : "Nowy Pracownik"}
                             </h2>
-                            <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-2xl">&times;</button>
+                            <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
                         </div>
 
                         <form onSubmit={handleSaveUser} className="p-6 overflow-y-auto flex-1">
@@ -314,26 +316,26 @@ export default function UsersManagementPage() {
                                     <div className="flex gap-4">
                                         <div className="flex-1">
                                             <label className="block text-sm font-medium text-slate-700 mb-1">Imię</label>
-                                            <input type="text" required value={formData.firstName} onChange={e => setFormData({ ...formData, firstName: e.target.value })} className="w-full p-2 border rounded-lg focus:ring-2 outline-none" />
+                                            <input type="text" required value={formData.firstName} onChange={e => setFormData({ ...formData, firstName: e.target.value })} className="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                                         </div>
                                         <div className="flex-1">
                                             <label className="block text-sm font-medium text-slate-700 mb-1">Nazwisko</label>
-                                            <input type="text" required value={formData.lastName} onChange={e => setFormData({ ...formData, lastName: e.target.value })} className="w-full p-2 border rounded-lg focus:ring-2 outline-none" />
+                                            <input type="text" required value={formData.lastName} onChange={e => setFormData({ ...formData, lastName: e.target.value })} className="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                                         </div>
                                     </div>
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
-                                        <input type="email" required disabled={!!editingUser} value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} className="w-full p-2 border rounded-lg outline-none disabled:bg-slate-100" />
+                                        <input type="email" required disabled={!!editingUser} value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} className="w-full p-2 border rounded-lg outline-none disabled:bg-slate-100 focus:ring-2 focus:ring-blue-500" />
                                     </div>
                                     {!editingUser && (
                                         <div>
                                             <label className="block text-sm font-medium text-slate-700 mb-1">Hasło startowe</label>
-                                            <input type="password" required value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} className="w-full p-2 border rounded-lg focus:ring-2 outline-none" />
+                                            <input type="password" required value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} className="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                                         </div>
                                     )}
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 mb-1">Przypisana Rola w Systemie</label>
-                                        <select required value={formData.roleId} onChange={e => setFormData({ ...formData, roleId: e.target.value, permissionOverrides: {} })} className="w-full p-2 border rounded-lg focus:ring-2 outline-none bg-white">
+                                        <select required value={formData.roleId} onChange={e => setFormData({ ...formData, roleId: e.target.value, permissionOverrides: {} })} className="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
                                             <option value="" disabled>-- Wybierz rolę --</option>
                                             {roles.map(r => (
                                                 <option key={r.id} value={r.id}>{r.name}</option>
@@ -341,11 +343,10 @@ export default function UsersManagementPage() {
                                         </select>
                                     </div>
 
-                                    {/* SEKCJA: Dostęp do Budów (NOWOCZESNA) */}
+                                    {/* SEKCJA: Dostęp do Budów (NOWOCZESNA Z PILLS) */}
                                     <div className="mt-6">
                                         <label className="block text-sm font-semibold text-slate-800 mb-2 border-b pb-1">Dostęp do Budów</label>
 
-                                        {/* Główny przełącznik na wszystko */}
                                         <label className={`flex items-center cursor-pointer p-3 border rounded-lg transition mb-4 ${isAllSitesSelected ? 'bg-blue-50 border-blue-300' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}`}>
                                             <input
                                                 type="checkbox"
@@ -358,14 +359,11 @@ export default function UsersManagementPage() {
                                             </span>
                                         </label>
 
-                                        {/* Wybór konkretnych budów (ukryte jeśli zaznaczono ALL) */}
                                         {!isAllSitesSelected && (
                                             <div className="bg-slate-50 border border-slate-200 p-4 rounded-lg space-y-3">
-
-                                                {/* Wyświetlanie przypisanych w postaci tagów (pills) */}
                                                 <div className="flex flex-wrap gap-2">
                                                     {formData.assignedSites.length === 0 ? (
-                                                        <span className="text-sm text-slate-500 italic">Nie przypisano jeszcze żadnej budowy. Wyszukaj i dodaj poniżej.</span>
+                                                        <span className="text-sm text-slate-500 italic">Nie przypisano jeszcze żadnej budowy.</span>
                                                     ) : (
                                                         formData.assignedSites.map(siteId => {
                                                             const s = sites.find(x => x.id === siteId);
@@ -385,7 +383,6 @@ export default function UsersManagementPage() {
                                                     )}
                                                 </div>
 
-                                                {/* Wyszukiwarka do dodawania kolejnych */}
                                                 <div className="pt-2">
                                                     <input
                                                         type="text"
@@ -394,11 +391,9 @@ export default function UsersManagementPage() {
                                                         onChange={(e) => setSiteSearch(e.target.value)}
                                                         className="w-full text-sm p-2.5 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none mb-2"
                                                     />
-
-                                                    {/* Mała lista wyników poniżej inputa */}
                                                     <div className="max-h-[140px] overflow-y-auto border border-slate-200 rounded-md bg-white shadow-inner">
                                                         {availableSitesToSelect.length === 0 ? (
-                                                            <div className="p-3 text-xs text-slate-500 text-center">Brak dostępnych budów do dodania.</div>
+                                                            <div className="p-3 text-xs text-slate-500 text-center">Brak wyników.</div>
                                                         ) : (
                                                             availableSitesToSelect.map(site => (
                                                                 <div

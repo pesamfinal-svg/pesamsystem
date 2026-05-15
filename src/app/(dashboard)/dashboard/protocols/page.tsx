@@ -50,8 +50,9 @@ export default function ProtocolsHub() {
     const [isAcceptModalOpen, setIsAcceptModalOpen] = useState(false);
     const [pendingProtocols, setPendingProtocols] = useState<any[]>([]);
     const [selectedProtocol, setSelectedProtocol] = useState<any | null>(null);
-    const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string }>>({});
 
+    // ZMIANA: Dodano `verifiedAccessories` do stanu magazyniera
+    const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Filtry
@@ -304,14 +305,26 @@ export default function ProtocolsHub() {
     };
 
     const openProtocolDetails = (protocol: any) => {
-        const initialInputs: Record<string, { receivedQty: number, finalStatus: string, notes: string }> = {};
+        // ZMIANA: Inicjalizacja verifiedAccessories na podstawie deklaracji kierownika
+        const initialInputs: Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }> = {};
+
         protocol.items.forEach((i: any) => {
+            const verAcc: Record<number, boolean> = {};
+            if (i.accessories) {
+                i.accessories.forEach((a: any, idx: number) => {
+                    verAcc[idx] = a.isReturning; // Domyślnie bierzemy to co zgłosił kierownik
+                });
+            }
+
             initialInputs[i.inventoryId] = {
                 receivedQty: i.declaredQty,
                 finalStatus: i.declaredStatus || "sprawne",
-                notes: ""
+                notes: "",
+                createClaim: false,
+                verifiedAccessories: verAcc
             };
         });
+
         setAcceptInputs(initialInputs);
         setSelectedProtocol(protocol);
     };
@@ -338,14 +351,26 @@ export default function ProtocolsHub() {
                     const itemData = itemDoc.data();
                     const workerInput = acceptInputs[item.inventoryId];
 
-                    // TWORZENIE ZALEGŁOŚCI Z BRAKUJĄCEGO OSPRZĘTU NA BUDOWIE
+                    // TWORZENIE ZALEGŁOŚCI OSPRZĘTU (Bazując na ostatecznej weryfikacji MAGAZYNIERA)
                     let missingAccessoriesNote = "";
+                    const finalizedAccessories = [];
+
                     if (item.accessories && item.accessories.length > 0) {
-                        const missing = item.accessories.filter((a: any) => !a.isReturning);
+                        const missing = [];
+                        for (let idx = 0; idx < item.accessories.length; idx++) {
+                            const acc = item.accessories[idx];
+                            const isVerifiedReturning = workerInput.verifiedAccessories[idx]; // Weryfikacja
+
+                            finalizedAccessories.push({ ...acc, verifiedReturning: isVerifiedReturning });
+
+                            if (!isVerifiedReturning) {
+                                missing.push(acc);
+                            }
+                        }
+
                         if (missing.length > 0) {
                             missingAccessoriesNote = ` | ZALEGŁOŚCI OSPRZĘTU: ${missing.map((a: any) => a.name).join(", ")}`;
 
-                            // Tworzymy dla każdego brakującego elementu nowy "BULK" przedmiot w inwentarzu
                             for (const mAcc of missing) {
                                 const debtRef = doc(collection(db, "inventory"));
                                 transaction.set(debtRef, {
@@ -357,11 +382,31 @@ export default function ProtocolsHub() {
                                     totalQuantity: mAcc.quantity || 1,
                                     status: "sprawne",
                                     allocations: {
-                                        [selectedProtocol.sourceId]: mAcc.quantity || 1 // Zostawiamy ten osprzęt na stanie budowy!
-                                    }
+                                        [selectedProtocol.sourceId]: mAcc.quantity || 1
+                                    },
+                                    createdAt: new Date().toISOString()
                                 });
                             }
                         }
+                    }
+
+                    // TWORZENIE SPRAWY W CENTRUM LIKWIDACJI SZKÓD (SĄD)
+                    if (itemData.type === "UNIQUE" && workerInput.finalStatus === "uszkodzone" && workerInput.createClaim) {
+                        const claimRef = doc(collection(db, "claims"));
+                        transaction.set(claimRef, {
+                            claimId: `SZK-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`,
+                            inventoryId: item.inventoryId,
+                            inventoryName: item.name,
+                            inventoryNumber: item.inventoryNumber || "",
+                            protocolId: selectedProtocol.protocolId,
+                            siteId: selectedProtocol.sourceId,
+                            siteName: selectedProtocol.sourceName,
+                            reportedBy: user?.uid,
+                            reportedByName: `${user?.firstName} ${user?.lastName}`,
+                            description: workerInput.notes || "Zgłoszono uszkodzenie przy przyjęciu z budowy.",
+                            status: "NOWA",
+                            createdAt: new Date().toISOString()
+                        });
                     }
 
                     if (itemData.type === "BULK") {
@@ -375,7 +420,6 @@ export default function ProtocolsHub() {
                             availableQuantity: newAvailable
                         });
                     } else if (itemData.type === "UNIQUE") {
-                        // Aktualizacja maszyny po zwrocie
                         transaction.update(itemRef, {
                             currentLocation: "MAGAZYN",
                             status: workerInput.finalStatus,
@@ -386,7 +430,7 @@ export default function ProtocolsHub() {
                         const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
                         transaction.set(historyRef, {
                             date: new Date().toISOString(), type: "ZWROT",
-                            description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}`,
+                            description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${workerInput.createClaim ? ' [Zgłoszono do Centrum Likwidacji Szkód]' : ''}`,
                             status: workerInput.finalStatus, user: `${user?.firstName} ${user?.lastName}`
                         });
                     }
@@ -395,7 +439,8 @@ export default function ProtocolsHub() {
                         ...item,
                         receivedQty: workerInput.receivedQty,
                         finalStatus: workerInput.finalStatus,
-                        warehouseNotes: workerInput.notes + missingAccessoriesNote
+                        warehouseNotes: workerInput.notes + missingAccessoriesNote,
+                        accessories: finalizedAccessories // Podmieniamy na to co faktycznie zatwierdził magazyn
                     });
                 }
 
@@ -408,7 +453,7 @@ export default function ProtocolsHub() {
                 });
             });
 
-            alert("Zwrot został pomyślnie przyjęty, a zaległy osprzęt dodano do stanów budowy!");
+            alert("Zwrot został pomyślnie przyjęty!");
             setSelectedProtocol(null);
             fetchPendingProtocols();
             fetchData();
@@ -463,9 +508,7 @@ export default function ProtocolsHub() {
                 Lista ostatnio wystawionych protokołów pojawi się tutaj... (Faza 4)
             </div>
 
-            {/* ======================================================== */}
-            {/* MODAL 1: WYDANIE NA BUDOWĘ                               */}
-            {/* ======================================================== */}
+            {/* MODAL 1: WYDANIE */}
             {isIssueModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
@@ -473,7 +516,6 @@ export default function ProtocolsHub() {
                             <h2 className="text-2xl font-black text-slate-800">Wystaw Protokół Wydania</h2>
                             <button onClick={closeModal} className="text-4xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
-
                         <div className="flex-1 flex overflow-hidden">
                             <div className="w-[55%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-slate-50">
@@ -510,20 +552,17 @@ export default function ProtocolsHub() {
                                     })}
                                 </div>
                             </div>
-
                             <div className="w-[45%] flex flex-col bg-white">
                                 <div className="p-6 border-b bg-slate-50">
                                     <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Wybierz lub wpisz budowę</label>
                                     <input list="sites-list" placeholder="Wybierz z listy lub wpisz nową usterkę..." value={issueSiteInput} onChange={(e) => setIssueSiteInput(e.target.value)} className="w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 font-bold shadow-sm" />
                                     <datalist id="sites-list">{sites.map(s => <option key={s.id} value={s.name} />)}</datalist>
                                 </div>
-
                                 <div className="flex-1 p-6 overflow-y-auto">
                                     <div className="flex justify-between items-center mb-4">
                                         <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest">2. Koszyk wydania</label>
                                         <button onClick={addManualItemToCart} className="bg-orange-100 text-orange-800 px-3 py-1.5 rounded-lg text-xs font-bold">+ Wpis ręczny</button>
                                     </div>
-
                                     {cart.length === 0 ? (
                                         <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">KOSZYK PUSTY</div>
                                     ) : (
@@ -542,8 +581,6 @@ export default function ProtocolsHub() {
                                                             <button onClick={() => removeFromCart(cItem.cartItemId)} className="bg-red-100 hover:bg-red-500 text-red-600 hover:text-white w-8 h-8 rounded-lg font-bold">&times;</button>
                                                         </div>
                                                     </div>
-
-                                                    {/* OSPRZĘT */}
                                                     <div className="mt-3 pl-4 border-l-2 border-blue-200">
                                                         {cItem.accessories.map(acc => (
                                                             <div key={acc.id} className="flex justify-between items-center text-xs bg-white p-2 rounded border mb-1">
@@ -581,9 +618,7 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-            {/* ======================================================== */}
-            {/* MODAL 2: ZGŁOSZENIE ZWROTU (Kierownik)                   */}
-            {/* ======================================================== */}
+            {/* MODAL 2: ZGŁOSZENIE ZWROTU */}
             {isReturnModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
@@ -591,7 +626,6 @@ export default function ProtocolsHub() {
                             <div><h2 className="text-2xl font-black text-blue-600">Zgłoś Zwrot Sprzętu</h2><p className="text-sm text-slate-500">Wybierz co zjeżdża z budowy na magazyn.</p></div>
                             <button onClick={closeModal} className="text-4xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
-
                         <div className="flex-1 flex overflow-hidden">
                             <div className="w-[50%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-blue-50">
@@ -617,7 +651,6 @@ export default function ProtocolsHub() {
                                     ))}
                                 </div>
                             </div>
-
                             <div className="w-[50%] flex flex-col bg-white">
                                 <div className="flex-1 p-6 overflow-y-auto">
                                     <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-4">2. Koszyk Zwrotu</label>
@@ -631,13 +664,8 @@ export default function ProtocolsHub() {
                                                         <div className="flex-1">
                                                             <p className="font-bold text-sm text-slate-800">{cItem.name}</p>
                                                             <p className="text-[10px] text-slate-500 font-mono mb-2">Nr Mag: {cItem.inventoryNumber || "-"}</p>
-
                                                             {cItem.type === "UNIQUE" && (
-                                                                <select
-                                                                    value={cItem.declaredStatus}
-                                                                    onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, declaredStatus: e.target.value } : i))}
-                                                                    className="text-xs p-1 border rounded bg-white text-slate-700 outline-none"
-                                                                >
+                                                                <select value={cItem.declaredStatus} onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, declaredStatus: e.target.value } : i))} className="text-xs p-1 border rounded bg-white text-slate-700 outline-none">
                                                                     <option value="sprawne">✅ Sprawne</option>
                                                                     <option value="do przeglądu">⚠️ Do przeglądu</option>
                                                                     <option value="uszkodzone">❌ Uszkodzone</option>
@@ -680,9 +708,7 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-            {/* ======================================================== */}
-            {/* MODAL 3: AKCEPTACJA ZWROTU (Magazynier)                  */}
-            {/* ======================================================== */}
+            {/* MODAL 3: AKCEPTACJA ZWROTU (Weryfikacja przez Magazyn) */}
             {isAcceptModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
@@ -718,7 +744,7 @@ export default function ProtocolsHub() {
                                             <h3 className="font-black text-lg text-slate-800 mb-4 border-b pb-2">Pozycje w protokole: {selectedProtocol.protocolId}</h3>
                                             <div className="space-y-4">
                                                 {selectedProtocol.items.map((item: any) => {
-                                                    const inputState = acceptInputs[item.inventoryId] || { receivedQty: item.declaredQty, finalStatus: item.declaredStatus || "sprawne", notes: "" };
+                                                    const inputState = acceptInputs[item.inventoryId] || { receivedQty: item.declaredQty, finalStatus: item.declaredStatus || "sprawne", notes: "", createClaim: false, verifiedAccessories: {} };
                                                     const isQtyDifferent = item.type === "BULK" && inputState.receivedQty !== item.declaredQty;
                                                     const isStatusDifferent = item.type === "UNIQUE" && inputState.finalStatus !== item.declaredStatus;
 
@@ -755,21 +781,35 @@ export default function ProtocolsHub() {
                                                                 )}
 
                                                                 {item.type === "UNIQUE" && (
-                                                                    <div className="flex items-center gap-2">
-                                                                        <label className="text-xs text-slate-600">Ostateczny status:</label>
-                                                                        <select
-                                                                            value={inputState.finalStatus}
-                                                                            onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, finalStatus: e.target.value } })}
-                                                                            className={`p-1.5 border rounded text-xs font-bold outline-none ${isStatusDifferent ? 'bg-orange-100 text-orange-900 border-orange-400' : 'bg-slate-50'}`}
-                                                                        >
-                                                                            <option value="sprawne">✅ Sprawne</option>
-                                                                            <option value="do przeglądu">⚠️ Do przeglądu</option>
-                                                                            <option value="uszkodzone">❌ Uszkodzone</option>
-                                                                        </select>
+                                                                    <div className="flex flex-col gap-2">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <label className="text-xs text-slate-600">Ostateczny status:</label>
+                                                                            <select
+                                                                                value={inputState.finalStatus}
+                                                                                onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, finalStatus: e.target.value } })}
+                                                                                className={`p-1.5 border rounded text-xs font-bold outline-none ${isStatusDifferent ? 'bg-orange-100 text-orange-900 border-orange-400' : 'bg-slate-50'}`}
+                                                                            >
+                                                                                <option value="sprawne">✅ Sprawne</option>
+                                                                                <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                                                                <option value="uszkodzone">❌ Uszkodzone</option>
+                                                                            </select>
+                                                                        </div>
+                                                                        {/* ZGŁOSZENIE SZKODY DO SĄDU */}
+                                                                        {inputState.finalStatus === "uszkodzone" && (
+                                                                            <label className="flex items-center gap-2 p-2 bg-red-50 border border-red-200 rounded cursor-pointer mt-1 animate-fade-in">
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked={inputState.createClaim || false}
+                                                                                    onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, createClaim: e.target.checked } })}
+                                                                                    className="w-4 h-4 text-red-600 rounded border-red-300 focus:ring-red-500"
+                                                                                />
+                                                                                <span className="text-xs font-bold text-red-800">⚖️ Zgłoś od razu do Centrum Likwidacji Szkód</span>
+                                                                            </label>
+                                                                        )}
                                                                     </div>
                                                                 )}
 
-                                                                <div className="flex-1">
+                                                                <div className="flex-1 min-w-[200px]">
                                                                     <input
                                                                         type="text" placeholder="Notatka magazyniera (np. brak wtyczki)..."
                                                                         value={inputState.notes}
@@ -779,16 +819,31 @@ export default function ProtocolsHub() {
                                                                 </div>
                                                             </div>
 
+                                                            {/* ZMIANA: Interaktywna lista osprzętu dla Magazyniera */}
                                                             {item.accessories && item.accessories.length > 0 && (
-                                                                <div className="mt-3 p-2 bg-orange-50 border border-orange-200 rounded text-xs">
-                                                                    <p className="font-bold text-orange-800 mb-1">Osprzęt oznaczony przez kierownika do zwrotu:</p>
-                                                                    <ul className="list-disc pl-5 text-slate-700">
+                                                                <div className="mt-3 p-3 bg-orange-50 border border-orange-200 rounded text-xs">
+                                                                    <p className="font-bold text-orange-800 mb-2">Fizyczna weryfikacja osprzętu z wydania:</p>
+                                                                    <div className="space-y-1">
                                                                         {item.accessories.map((acc: any, i: number) => (
-                                                                            <li key={i}>
-                                                                                {acc.name} - {acc.isReturning ? "✅ Zwrócono" : "❌ NIE ZWRÓCONO (utworzy zaległość na budowie)"}
-                                                                            </li>
+                                                                            <label key={i} className="flex items-center gap-2 cursor-pointer p-1 hover:bg-orange-100 rounded transition">
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked={inputState.verifiedAccessories[i] !== undefined ? inputState.verifiedAccessories[i] : acc.isReturning}
+                                                                                    onChange={(e) => {
+                                                                                        const newVerified = { ...inputState.verifiedAccessories, [i]: e.target.checked };
+                                                                                        setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, verifiedAccessories: newVerified } });
+                                                                                    }}
+                                                                                    className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500"
+                                                                                />
+                                                                                <span className={`text-sm ${inputState.verifiedAccessories[i] !== undefined ? (inputState.verifiedAccessories[i] ? 'text-slate-800' : 'text-slate-500 line-through') : (acc.isReturning ? 'text-slate-800' : 'text-slate-500 line-through')}`}>
+                                                                                    {acc.name} ({acc.quantity || 1} szt.)
+                                                                                </span>
+                                                                                <span className={`text-[10px] ml-auto px-1.5 py-0.5 rounded ${acc.isReturning ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                                                                    Kierownik: {acc.isReturning ? "✅ Zgłosił" : "❌ Brak"}
+                                                                                </span>
+                                                                            </label>
                                                                         ))}
-                                                                    </ul>
+                                                                    </div>
                                                                 </div>
                                                             )}
                                                         </div>

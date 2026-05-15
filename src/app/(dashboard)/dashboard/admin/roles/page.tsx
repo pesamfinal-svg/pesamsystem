@@ -1,9 +1,10 @@
+// src/app/(dashboard)/dashboard/admin/roles/page.tsx
 "use client";
 
 import { useState, useEffect } from "react";
 import { collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
-import { ALL_PERMISSIONS } from "@/lib/auth/permissions";
+import { ALL_PERMISSIONS, hasPermission } from "@/lib/auth/permissions";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 
@@ -33,10 +34,11 @@ export default function RolesManagementPage() {
         permissions: {} as Record<string, boolean>
     });
 
-    // Upewniamy się, że użytkownik, który próbuje tu wejść, to admin
+    // Zabezpieczenie trasy: Wpuszcza tylko tych, co mają uprawnienie 'manageRoles'
+    // Znika na stałe sztywne sprawdzanie słowa "admin"!
     useEffect(() => {
-        if (user && user.roleId !== "admin") {
-            alert("Brak uprawnień. Tylko admin może przeglądać tę stronę.");
+        if (user && !hasPermission("manageRoles", user.rolePermissions, user.permissionOverrides)) {
+            alert("Brak uprawnień. Tylko osoby z uprawnieniem 'Zarządzanie rolami' mogą przeglądać tę stronę.");
             router.push("/dashboard");
         }
     }, [user, router]);

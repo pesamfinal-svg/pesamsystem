@@ -17,7 +17,7 @@ import {
 import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase/config";
 
-// Definicja typu użytkownika
+// ZAKTUALIZOWANY INTERFEJS
 export interface PesamUser {
     uid: string;
     email: string;
@@ -25,9 +25,9 @@ export interface PesamUser {
     lastName: string;
     roleId: string;
     roleName?: string;
-    rolePermissions?: Record<string, boolean>; // <--- DODANE (Uprawnienia z Roli)
-    permissionOverrides?: Record<string, boolean>; // <--- DODANE (Wyjątki)
-    assignedSites?: string[]; // <--- DODANE (Przypisane budowy)
+    rolePermissions: Record<string, boolean>; // Dane z kolekcji 'roles'
+    permissionOverrides: Record<string, boolean>; // Dane z dokumentu użytkownika
+    assignedSites?: string[];
 }
 
 interface AuthContextType {
@@ -51,40 +51,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (fbUser) {
                 setFirebaseUser(fbUser);
                 try {
+                    // 1. Pobierz dokument użytkownika
                     const userDoc = await getDoc(doc(db, "users", fbUser.uid));
                     if (userDoc.exists()) {
                         const userData = userDoc.data();
-                        let fetchedRoleName = userData.roleId;
+
+                        let fetchedRoleName = "Brak roli";
                         let fetchedRolePermissions = {};
 
-                        // Pobieramy ładną nazwę i domyślne uprawnienia z kolekcji 'roles'
+                        // 2. Pobierz dokument roli na podstawie roleId użytkownika
                         if (userData.roleId) {
-                            try {
-                                const roleDoc = await getDoc(doc(db, "roles", userData.roleId));
-                                if (roleDoc.exists()) {
-                                    fetchedRoleName = roleDoc.data().name;
-                                    fetchedRolePermissions = roleDoc.data().permissions || {};
-                                }
-                            } catch (e) {
-                                console.error("Nie udało się pobrać danych roli:", e);
+                            const roleDoc = await getDoc(doc(db, "roles", userData.roleId));
+                            if (roleDoc.exists()) {
+                                fetchedRoleName = roleDoc.data().name || "Bez nazwy";
+                                fetchedRolePermissions = roleDoc.data().permissions || {};
                             }
                         }
 
+                        // 3. Złóż to w jeden obiekt użytkownika PESAM
                         setUser({
                             uid: fbUser.uid,
                             email: fbUser.email!,
                             roleName: fetchedRoleName,
                             rolePermissions: fetchedRolePermissions,
                             permissionOverrides: userData.permissionOverrides || {},
-                            assignedSites: userData.assignedSites || [],
                             ...userData
                         } as PesamUser);
                     } else {
-                        console.error("Brak dokumentu użytkownika w Firestore!");
                         setUser(null);
                     }
                 } catch (error) {
-                    console.error("Błąd pobierania danych:", error);
+                    console.error("Błąd pobierania profilu:", error);
                     setUser(null);
                 }
             } else {
@@ -113,8 +110,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
     const context = useContext(AuthContext);
-    if (!context) {
-        throw new Error("useAuth must be used within an AuthProvider");
-    }
+    if (!context) throw new Error("useAuth must be used within an AuthProvider");
     return context;
 }
