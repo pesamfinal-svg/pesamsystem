@@ -16,14 +16,15 @@ export async function POST(req: Request) {
         // Musisz mieć ustawioną zmienną GOOGLE_APPLICATION_CREDENTIALS w systemie lub .env.local
         const vertexAI = new VertexAI({
             project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-            location: 'us-central1'
+            location: 'europe-west1'
         });
 
         const model = vertexAI.getGenerativeModel({
-            model: 'gemini-1.5-flash-001',
+            model: 'gemini-1.5-flash',
             systemInstruction: {
                 role: 'system',
-                parts: [{ text: `Jesteś bezwzględnym, ale profesjonalnym Asystentem Śledczym w firmie budowlanej PESAM. 
+                parts: [{
+                    text: `Jesteś bezwzględnym, ale profesjonalnym Asystentem Śledczym w firmie budowlanej PESAM. 
                 Twoim szefem jest Dyrektor, a Twoim celem jest ustalenie prawdy o zniszczonym sprzęcie.
                 
                 Znasz się wybitnie na:
@@ -48,7 +49,7 @@ export async function POST(req: Request) {
         }
 
         // Analiza toczącej się rozmowy
-        const formattedHistory = (messages || []).map((m: any) => 
+        const formattedHistory = (messages || []).map((m: any) =>
             `[${m.senderRole}] ${m.senderName}: ${m.text}`
         ).join("\n\n");
 

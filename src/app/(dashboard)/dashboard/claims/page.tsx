@@ -48,7 +48,15 @@ export default function ClaimsCenter() {
     const [messageText, setMessageText] = useState("");
     const [visibleToWarehouse, setVisibleToWarehouse] = useState(false);
     const [isSending, setIsSending] = useState(false);
+
+    // DORADCA AI
     const [aiGenerating, setAiGenerating] = useState(false);
+    const [aiAdvice, setAiAdvice] = useState<string | null>(null);
+    const [showAiDrawer, setShowAiDrawer] = useState(false);
+
+    // MODAL WYROKU
+    const [isVerdictModalOpen, setIsVerdictModalOpen] = useState(false);
+    const [verdictData, setVerdictData] = useState({ internal: "", warehouse: "" });
 
     const canManageClaims = user ? hasPermission("manageClaims", user.rolePermissions, user.permissionOverrides) : false;
     const canViewAllClaims = user ? hasPermission("viewAllClaims", user.rolePermissions, user.permissionOverrides) : false;
@@ -79,13 +87,9 @@ export default function ClaimsCenter() {
     useEffect(() => { if (user) fetchData(); }, [user]);
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [selectedClaim?.messages]);
 
-    // =========================================================================
-    // START ŚLEDZTWA: Dyrektor przypisuje osobę -> Prawdziwe AI generuje atak
-    // =========================================================================
     const assignManagerAndStartInvestigation = async (managerUid: string) => {
         if (!selectedClaim || !managerUid) return;
         setAiGenerating(true);
-
         try {
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',
@@ -111,15 +115,11 @@ export default function ClaimsCenter() {
                 messages: arrayUnion(aiInitialMessage)
             });
 
-            alert("Kierownik przypisany! AI rozpoczęło przesłuchanie.");
             fetchData();
             setSelectedClaim({ ...selectedClaim, assignedManagers: [managerUid], status: "W_TOKU", messages: [...(selectedClaim.messages || []), aiInitialMessage] });
-        } catch (e) { alert("Błąd AI: " + e); } finally { setAiGenerating(false); }
+        } catch (e) { alert("Błąd AI"); } finally { setAiGenerating(false); }
     };
 
-    // =========================================================================
-    // ANALIZA AI: Gemini analizuje tłumaczenia kierownika
-    // =========================================================================
     const askAiForHelp = async () => {
         if (!selectedClaim) return;
         setAiGenerating(true);
@@ -127,15 +127,11 @@ export default function ClaimsCenter() {
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    inventoryName: selectedClaim.inventoryName,
-                    messages: selectedClaim.messages
-                })
+                body: JSON.stringify({ inventoryName: selectedClaim.inventoryName, messages: selectedClaim.messages })
             });
             const data = await response.json();
-            if (response.ok) setMessageText(data.reply);
-            else alert("Błąd serwera AI.");
-        } catch (error) { alert("Brak połączenia z AI."); }
+            if (response.ok) { setAiAdvice(data.reply); setShowAiDrawer(true); }
+        } catch (error) { console.error(error); }
         finally { setAiGenerating(false); }
     };
 
@@ -154,44 +150,49 @@ export default function ClaimsCenter() {
         try {
             await updateDoc(doc(db, "claims", selectedClaim.id), { messages: arrayUnion(newMsg) });
             setSelectedClaim({ ...selectedClaim, messages: [...(selectedClaim.messages || []), newMsg] });
-            setMessageText("");
-            setVisibleToWarehouse(false);
-        } catch (e) { alert("Błąd: " + e); } finally { setIsSending(false); }
+            setMessageText(""); setVisibleToWarehouse(false);
+        } catch (e) { console.error(e); } finally { setIsSending(false); }
     };
 
-    const handleFinalDecision = async () => {
-        const intDec = prompt("DECYZJA WEWNĘTRZNA (Kary finansowe):", selectedClaim?.decisionInternal || "");
-        if (intDec === null) return;
-        const warDec = prompt("DECYZJA DLA MAGAZYNU (Np. Złomuj):", selectedClaim?.decisionWarehouse || "");
-        if (warDec === null) return;
+    // WYDAWANIE WYROKU - FORMULARZ
+    const handleVerdictSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedClaim) return;
+
         try {
-            await updateDoc(doc(db, "claims", selectedClaim!.id), { decisionInternal: intDec, decisionWarehouse: warDec, status: "ZAMKNIETA" });
-            alert("Sprawa zakończona!"); fetchData(); setSelectedClaim(null);
-        } catch (e) { alert("Błąd zapisu: " + e); }
+            await updateDoc(doc(db, "claims", selectedClaim.id), {
+                decisionInternal: verdictData.internal,
+                decisionWarehouse: verdictData.warehouse,
+                status: "ZAMKNIETA"
+            });
+            alert("Wyrok został wydany. Sprawa została zamknięta.");
+            setIsVerdictModalOpen(false);
+            fetchData();
+            setSelectedClaim(null);
+        } catch (e) { alert("Błąd zapisu wyroku."); }
     };
 
-    if (loading) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Wczytywanie wokandy Sądu PESAM...</div>;
+    if (loading) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Wczytywanie wokandy...</div>;
 
     return (
-        <div className="p-6 md:p-10 max-w-7xl mx-auto h-[90vh] flex flex-col animate-fade-in">
+        <div className="p-6 md:p-10 max-w-7xl mx-auto h-[90vh] flex flex-col animate-fade-in relative">
             <div className="flex items-center gap-4 mb-6">
                 <div className="text-4xl shadow-lg bg-white w-14 h-14 flex items-center justify-center rounded-full">⚖️</div>
                 <div>
                     <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Wewnętrzny Sąd PESAM</h1>
-                    <p className="text-slate-500 text-sm font-medium italic">Sprawiedliwość i ewidencja szkód</p>
+                    <p className="text-slate-500 text-sm font-medium italic">Centrum Likwidacji Szkód</p>
                 </div>
             </div>
 
-            <div className="flex-1 flex gap-6 overflow-hidden">
+            <div className="flex-1 flex gap-6 overflow-hidden relative">
                 {/* LISTA SPRAW */}
-                <div className="w-1/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden">
+                <div className="w-1/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden font-sans">
                     <div className="p-5 border-b bg-slate-50 font-black text-slate-400 uppercase text-[10px] tracking-widest">Wokanda</div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                        {claims.length === 0 && <p className="text-center text-slate-400 mt-10">Brak otwartych spraw.</p>}
                         {claims.map(claim => (
-                            <div key={claim.id} onClick={() => setSelectedClaim(claim)} className={`p-4 border rounded-2xl cursor-pointer transition ${selectedClaim?.id === claim.id ? 'bg-blue-50 border-blue-400 shadow-md scale-[1.02]' : 'bg-white hover:border-slate-300 shadow-sm'}`}>
-                                <div className="flex justify-between items-start mb-2"><span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span><span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{claim.status}</span></div>
-                                <p className="text-[10px] text-slate-500 font-mono">ID: {claim.claimId} • Budowa: {claim.siteName}</p>
+                            <div key={claim.id} onClick={() => { setSelectedClaim(claim); setShowAiDrawer(false); }} className={`p-4 border rounded-2xl cursor-pointer transition ${selectedClaim?.id === claim.id ? 'bg-blue-50 border-blue-400 shadow-md scale-[1.02]' : 'bg-white hover:border-slate-300 shadow-sm'}`}>
+                                <div className="flex justify-between items-start mb-2"><span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span><span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-100 text-red-700' : claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>{claim.status}</span></div>
+                                <p className="text-[10px] text-slate-500 font-mono italic">ID: {claim.claimId} • {claim.siteName}</p>
                             </div>
                         ))}
                     </div>
@@ -203,15 +204,34 @@ export default function ClaimsCenter() {
                         <div className="flex-1 flex flex-col items-center justify-center text-slate-400"><div className="text-6xl mb-4 opacity-20">🔨</div><p>Wybierz sprawę z wokandy.</p></div>
                     ) : (
                         <>
-                            <div className="p-6 border-b bg-slate-50 shadow-sm z-10 flex justify-between items-center">
-                                <div><h2 className="text-xl font-black text-slate-800 uppercase">{selectedClaim.inventoryName} (Nr: {selectedClaim.inventoryNumber})</h2><p className="text-sm font-bold text-red-600 mt-1">Zarzut: {selectedClaim.description}</p></div>
-                                {canManageClaims && selectedClaim.status !== "ZAMKNIETA" && <button onClick={handleFinalDecision} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition">Wydaj Wyrok</button>}
+                            {/* BOCZNY PANEL AI (DRAWER) */}
+                            <div className={`absolute top-0 right-0 h-full w-80 bg-slate-900 text-white z-30 shadow-2xl transition-transform duration-300 transform ${showAiDrawer ? 'translate-x-0' : 'translate-x-full'}`}>
+                                <div className="p-6 h-full flex flex-col">
+                                    <div className="flex justify-between items-center mb-6">
+                                        <h3 className="text-purple-400 font-black uppercase text-xs tracking-widest">✨ Podpowiedź AI</h3>
+                                        <button onClick={() => setShowAiDrawer(false)} className="text-slate-400 hover:text-white">✕</button>
+                                    </div>
+                                    <div className="flex-1 overflow-y-auto text-sm leading-relaxed text-slate-300 italic">
+                                        {aiAdvice ? (
+                                            <div className="space-y-4">
+                                                <p className="bg-slate-800 p-4 rounded-xl border border-slate-700">{aiAdvice}</p>
+                                                <button onClick={() => { setMessageText(aiAdvice.split('"')[1] || aiAdvice); setShowAiDrawer(false); }} className="w-full py-2 bg-purple-600 text-white font-bold text-xs rounded-lg transition">Użyj tej podpowiedzi</button>
+                                            </div>
+                                        ) : 'Analizuję...'}
+                                    </div>
+                                </div>
                             </div>
 
-                            {/* PRZYPISANIE OSÓB */}
+                            <div className="p-6 border-b bg-slate-50 shadow-sm z-10 flex justify-between items-center">
+                                <div><h2 className="text-xl font-black text-slate-800 uppercase">{selectedClaim.inventoryName} (Nr: {selectedClaim.inventoryNumber})</h2><p className="text-sm font-bold text-red-600 mt-1">Zarzut: {selectedClaim.description}</p></div>
+                                {canManageClaims && selectedClaim.status !== "ZAMKNIETA" && (
+                                    <button onClick={() => { setVerdictData({ internal: "", warehouse: "" }); setIsVerdictModalOpen(true); }} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition">Wydaj Wyrok</button>
+                                )}
+                            </div>
+
                             {canManageClaims && selectedClaim.assignedManagers.length === 0 && (
                                 <div className="bg-orange-50 border-b border-orange-200 p-4 animate-pulse">
-                                    <p className="text-xs font-black text-orange-800 mb-2 uppercase">🚨 Sprawa wymaga przypisania oskarżonego kierownika:</p>
+                                    <p className="text-xs font-black text-orange-800 mb-2 uppercase">🚨 Sprawa wymaga przypisania kierownika:</p>
                                     <select onChange={(e) => assignManagerAndStartInvestigation(e.target.value)} className="p-2.5 text-sm border border-orange-300 rounded-xl font-bold bg-white outline-none">
                                         <option value="">-- Wybierz kierownika do przesłuchania --</option>
                                         {managers.map(m => <option key={m.uid} value={m.uid}>{m.name}</option>)}
@@ -219,7 +239,6 @@ export default function ClaimsCenter() {
                                 </div>
                             )}
 
-                            {/* KOMUNIKATOR */}
                             <div className="flex-1 p-6 overflow-y-auto bg-slate-50/50 space-y-4">
                                 {selectedClaim.messages?.map(msg => {
                                     if (user?.roleId === "magazynier" && !msg.visibleToWarehouse) return null;
@@ -236,29 +255,40 @@ export default function ClaimsCenter() {
                                 <div ref={chatEndRef} />
                             </div>
 
-                            {/* WYROK (Dla zamkniętych spraw) */}
+                            {/* WYNIK SPRAWY - WIDOK FINALNY */}
                             {selectedClaim.status === "ZAMKNIETA" && (
-                                <div className="p-6 bg-slate-900 text-white">
-                                    <h3 className="font-black text-red-500 text-lg mb-2">⚖️ ORZECZENIE SĄDU</h3>
-                                    {canManageClaims && <p className="text-sm mb-2 text-slate-300 font-bold border-l-2 border-red-500 pl-4">Kary/Wnioski: {selectedClaim.decisionInternal}</p>}
-                                    <p className="text-sm text-green-400 font-bold border-l-2 border-green-500 pl-4">Instrukcja dla Magazynu: {selectedClaim.decisionWarehouse}</p>
+                                <div className="p-8 bg-slate-900 text-white border-t-4 border-red-600">
+                                    <h3 className="font-black text-red-500 text-xl mb-4 tracking-tighter uppercase">⚖️ PRAWOMOCNE ORZECZENIE SĄDU PESAM</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
+                                            <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">Decyzja Wewnętrzna / Kadrowa</h4>
+                                            <p className="text-sm text-slate-200 leading-relaxed">{selectedClaim.decisionInternal || "Brak danych."}</p>
+                                        </div>
+                                        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
+                                            <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">Wytyczne dla Magazynu</h4>
+                                            <p className="text-sm text-slate-200 leading-relaxed">{selectedClaim.decisionWarehouse || "Brak danych."}</p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-6 text-center opacity-30 text-[10px] uppercase font-black">Sprawa zamknięta i zarchiwizowana</div>
                                 </div>
                             )}
 
-                            {/* PANEL WPISYWANIA */}
                             {selectedClaim.status !== "ZAMKNIETA" && selectedClaim.assignedManagers.length > 0 && (
                                 <div className="p-5 bg-white border-t border-slate-200">
                                     {canManageClaims && (
                                         <div className="flex justify-between items-center mb-3">
-                                            <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border"><input type="checkbox" checked={visibleToWarehouse} onChange={e => setVisibleToWarehouse(e.target.checked)} className="w-4 h-4 text-blue-600 rounded" /><span className="text-[10px] font-black text-slate-600 uppercase">Widoczne dla Magazynu</span></label>
-                                            <button onClick={askAiForHelp} disabled={aiGenerating} className="text-xs font-black text-purple-700 bg-purple-100 hover:bg-purple-200 px-4 py-2 rounded-xl flex items-center gap-2 transition">
-                                                {aiGenerating ? <div className="w-3 h-3 border-2 border-purple-700 border-t-transparent rounded-full animate-spin"></div> : '✨ Analiza AI'}
+                                            <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border">
+                                                <input type="checkbox" checked={visibleToWarehouse} onChange={e => setVisibleToWarehouse(e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
+                                                <span className="text-[10px] font-black text-slate-600 uppercase">Widoczne dla Magazynu</span>
+                                            </label>
+                                            <button onClick={askAiForHelp} disabled={aiGenerating} className={`text-xs font-black px-4 py-2 rounded-xl flex items-center gap-2 transition ${showAiDrawer ? 'bg-purple-600 text-white' : 'text-purple-700 bg-purple-100'}`}>
+                                                {aiGenerating ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : '✨ Analiza AI'}
                                             </button>
                                         </div>
                                     )}
                                     <div className="flex gap-3">
                                         <textarea value={messageText} onChange={e => setMessageText(e.target.value)} placeholder={canManageClaims ? "Zadaj pytanie kierownikowi..." : "Złóż wyjaśnienia..."} className="flex-1 border border-slate-300 rounded-2xl p-4 text-sm outline-none focus:ring-2 focus:ring-blue-500 resize-none h-20 shadow-inner" />
-                                        <button onClick={sendMessage} disabled={!messageText.trim() || isSending} className="bg-blue-600 hover:bg-blue-700 text-white font-black px-8 rounded-2xl shadow-lg transition disabled:opacity-50">{isSending ? '...' : 'Wyślij'}</button>
+                                        <button onClick={sendMessage} disabled={!messageText.trim() || isSending} className="bg-blue-600 hover:bg-blue-700 text-white font-black px-8 rounded-2xl shadow-lg transition">Wyślij</button>
                                     </div>
                                 </div>
                             )}
@@ -266,6 +296,49 @@ export default function ClaimsCenter() {
                     )}
                 </div>
             </div>
+
+            {/* MODAL WYDAWANIA WYROKU */}
+            {isVerdictModalOpen && selectedClaim && (
+                <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-fade-in border-4 border-red-600">
+                        <div className="p-6 bg-red-600 text-white flex justify-between items-center">
+                            <h2 className="text-2xl font-black uppercase tracking-tighter">Wydawanie Wyroku: {selectedClaim.inventoryName}</h2>
+                            <button onClick={() => setIsVerdictModalOpen(false)} className="text-white opacity-60 hover:opacity-100">✕</button>
+                        </div>
+
+                        <form onSubmit={handleVerdictSubmit} className="p-8 space-y-6">
+                            <div>
+                                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">1. Decyzja Kadrowo-Finansowa (Widzi tylko Zarząd i Kierownik)</label>
+                                <textarea
+                                    required
+                                    rows={4}
+                                    placeholder="Np. Obciążyć kosztami naprawy w 50% pracownika Jana Kowalskiego. Naganę wpisać do akt."
+                                    value={verdictData.internal}
+                                    onChange={e => setVerdictData({ ...verdictData, internal: e.target.value })}
+                                    className="w-full p-4 border-2 border-slate-200 rounded-2xl outline-none focus:border-red-500 text-sm transition-all"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">2. Wytyczne dla Magazynu (Widoczne dla magazynierów)</label>
+                                <textarea
+                                    required
+                                    rows={4}
+                                    placeholder="Np. Sprzęt nie nadaje się do naprawy. Złomować natychmiast. Zamówić nowy egzemplarz modelu Hilti."
+                                    value={verdictData.warehouse}
+                                    onChange={e => setVerdictData({ ...verdictData, warehouse: e.target.value })}
+                                    className="w-full p-4 border-2 border-slate-200 rounded-2xl outline-none focus:border-blue-500 text-sm transition-all"
+                                />
+                            </div>
+
+                            <div className="flex gap-4 pt-4">
+                                <button type="button" onClick={() => setIsVerdictModalOpen(false)} className="flex-1 py-4 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition">Anuluj</button>
+                                <button type="submit" className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition uppercase tracking-widest">Podpisz i ogłoś wyrok</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
