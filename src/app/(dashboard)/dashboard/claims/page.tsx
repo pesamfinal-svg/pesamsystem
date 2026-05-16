@@ -45,6 +45,9 @@ export default function ClaimsCenter() {
     const [selectedClaim, setSelectedClaim] = useState<Claim | null>(null);
     const [loading, setLoading] = useState(true);
 
+    // ZMIANA: Zakładki w lewym panelu
+    const [activeTab, setActiveTab] = useState<"AKTYWNE" | "ARCHIWUM">("AKTYWNE");
+
     const [messageText, setMessageText] = useState("");
     const [visibleToWarehouse, setVisibleToWarehouse] = useState(false);
     const [isSending, setIsSending] = useState(false);
@@ -154,7 +157,6 @@ export default function ClaimsCenter() {
         } catch (e) { console.error(e); } finally { setIsSending(false); }
     };
 
-    // WYDAWANIE WYROKU - FORMULARZ
     const handleVerdictSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedClaim) return;
@@ -168,11 +170,16 @@ export default function ClaimsCenter() {
             alert("Wyrok został wydany. Sprawa została zamknięta.");
             setIsVerdictModalOpen(false);
             fetchData();
-            setSelectedClaim(null);
+            setSelectedClaim(null); // Zamknięcie widoku po wydaniu wyroku
         } catch (e) { alert("Błąd zapisu wyroku."); }
     };
 
     if (loading) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Wczytywanie wokandy...</div>;
+
+    // Filtrowanie spraw na aktywne i zamknięte
+    const activeClaims = claims.filter(c => c.status !== "ZAMKNIETA");
+    const archivedClaims = claims.filter(c => c.status === "ZAMKNIETA");
+    const displayedClaims = activeTab === "AKTYWNE" ? activeClaims : archivedClaims;
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto h-[90vh] flex flex-col animate-fade-in relative">
@@ -187,11 +194,35 @@ export default function ClaimsCenter() {
             <div className="flex-1 flex gap-6 overflow-hidden relative">
                 {/* LISTA SPRAW */}
                 <div className="w-1/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden font-sans">
-                    <div className="p-5 border-b bg-slate-50 font-black text-slate-400 uppercase text-[10px] tracking-widest">Wokanda</div>
-                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                        {claims.map(claim => (
+
+                    {/* ZAKŁADKI */}
+                    <div className="flex bg-slate-100 p-2 m-4 rounded-xl shadow-inner">
+                        <button
+                            onClick={() => { setActiveTab("AKTYWNE"); setSelectedClaim(null); }}
+                            className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'AKTYWNE' ? 'bg-white text-blue-600 shadow' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                            Wokanda ({activeClaims.length})
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab("ARCHIWUM"); setSelectedClaim(null); }}
+                            className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'ARCHIWUM' ? 'bg-white text-slate-800 shadow' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                            Archiwum ({archivedClaims.length})
+                        </button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3 pt-0">
+                        {displayedClaims.length === 0 && (
+                            <p className="text-center text-slate-400 mt-10 text-sm italic">
+                                {activeTab === "AKTYWNE" ? "Brak aktywnych spraw." : "Brak zamkniętych spraw."}
+                            </p>
+                        )}
+                        {displayedClaims.map(claim => (
                             <div key={claim.id} onClick={() => { setSelectedClaim(claim); setShowAiDrawer(false); }} className={`p-4 border rounded-2xl cursor-pointer transition ${selectedClaim?.id === claim.id ? 'bg-blue-50 border-blue-400 shadow-md scale-[1.02]' : 'bg-white hover:border-slate-300 shadow-sm'}`}>
-                                <div className="flex justify-between items-start mb-2"><span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span><span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-100 text-red-700' : claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>{claim.status}</span></div>
+                                <div className="flex justify-between items-start mb-2">
+                                    <span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span>
+                                    <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-100 text-red-700' : claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'}`}>{claim.status === "ZAMKNIETA" ? "ZAMKNIĘTA" : claim.status}</span>
+                                </div>
                                 <p className="text-[10px] text-slate-500 font-mono italic">ID: {claim.claimId} • {claim.siteName}</p>
                             </div>
                         ))}
@@ -201,7 +232,10 @@ export default function ClaimsCenter() {
                 {/* OBSZAR ROZPRAWY */}
                 <div className="w-2/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden relative">
                     {!selectedClaim ? (
-                        <div className="flex-1 flex flex-col items-center justify-center text-slate-400"><div className="text-6xl mb-4 opacity-20">🔨</div><p>Wybierz sprawę z wokandy.</p></div>
+                        <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
+                            <div className="text-6xl mb-4 opacity-20">🔨</div>
+                            <p>Wybierz sprawę z listy po lewej stronie.</p>
+                        </div>
                     ) : (
                         <>
                             {/* BOCZNY PANEL AI (DRAWER) */}
@@ -215,7 +249,7 @@ export default function ClaimsCenter() {
                                         {aiAdvice ? (
                                             <div className="space-y-4">
                                                 <p className="bg-slate-800 p-4 rounded-xl border border-slate-700">{aiAdvice}</p>
-                                                <button onClick={() => { setMessageText(aiAdvice.split('"')[1] || aiAdvice); setShowAiDrawer(false); }} className="w-full py-2 bg-purple-600 text-white font-bold text-xs rounded-lg transition">Użyj tej podpowiedzi</button>
+                                                <button onClick={() => { setMessageText(aiAdvice.split('"')[1] || aiAdvice); setShowAiDrawer(false); }} className="w-full py-2 bg-purple-600 text-white font-bold text-xs rounded-lg transition hover:bg-purple-500">Użyj tej podpowiedzi</button>
                                             </div>
                                         ) : 'Analizuję...'}
                                     </div>
@@ -223,13 +257,16 @@ export default function ClaimsCenter() {
                             </div>
 
                             <div className="p-6 border-b bg-slate-50 shadow-sm z-10 flex justify-between items-center">
-                                <div><h2 className="text-xl font-black text-slate-800 uppercase">{selectedClaim.inventoryName} (Nr: {selectedClaim.inventoryNumber})</h2><p className="text-sm font-bold text-red-600 mt-1">Zarzut: {selectedClaim.description}</p></div>
+                                <div>
+                                    <h2 className="text-xl font-black text-slate-800 uppercase">{selectedClaim.inventoryName} (Nr: {selectedClaim.inventoryNumber})</h2>
+                                    <p className="text-sm font-bold text-red-600 mt-1">Zarzut: {selectedClaim.description}</p>
+                                </div>
                                 {canManageClaims && selectedClaim.status !== "ZAMKNIETA" && (
                                     <button onClick={() => { setVerdictData({ internal: "", warehouse: "" }); setIsVerdictModalOpen(true); }} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition">Wydaj Wyrok</button>
                                 )}
                             </div>
 
-                            {canManageClaims && selectedClaim.assignedManagers.length === 0 && (
+                            {canManageClaims && selectedClaim.assignedManagers.length === 0 && selectedClaim.status !== "ZAMKNIETA" && (
                                 <div className="bg-orange-50 border-b border-orange-200 p-4 animate-pulse">
                                     <p className="text-xs font-black text-orange-800 mb-2 uppercase">🚨 Sprawa wymaga przypisania kierownika:</p>
                                     <select onChange={(e) => assignManagerAndStartInvestigation(e.target.value)} className="p-2.5 text-sm border border-orange-300 rounded-xl font-bold bg-white outline-none">
@@ -257,8 +294,8 @@ export default function ClaimsCenter() {
 
                             {/* WYNIK SPRAWY - WIDOK FINALNY */}
                             {selectedClaim.status === "ZAMKNIETA" && (
-                                <div className="p-8 bg-slate-900 text-white border-t-4 border-red-600">
-                                    <h3 className="font-black text-red-500 text-xl mb-4 tracking-tighter uppercase">⚖️ PRAWOMOCNE ORZECZENIE SĄDU PESAM</h3>
+                                <div className="p-8 bg-slate-900 text-white border-t-4 border-slate-600">
+                                    <h3 className="font-black text-slate-400 text-xl mb-4 tracking-tighter uppercase">📁 ZARCHIWIZOWANE ORZECZENIE SĄDU</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                                         <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
                                             <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">Decyzja Wewnętrzna / Kadrowa</h4>
@@ -269,7 +306,6 @@ export default function ClaimsCenter() {
                                             <p className="text-sm text-slate-200 leading-relaxed">{selectedClaim.decisionWarehouse || "Brak danych."}</p>
                                         </div>
                                     </div>
-                                    <div className="mt-6 text-center opacity-30 text-[10px] uppercase font-black">Sprawa zamknięta i zarchiwizowana</div>
                                 </div>
                             )}
 
@@ -281,14 +317,14 @@ export default function ClaimsCenter() {
                                                 <input type="checkbox" checked={visibleToWarehouse} onChange={e => setVisibleToWarehouse(e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
                                                 <span className="text-[10px] font-black text-slate-600 uppercase">Widoczne dla Magazynu</span>
                                             </label>
-                                            <button onClick={askAiForHelp} disabled={aiGenerating} className={`text-xs font-black px-4 py-2 rounded-xl flex items-center gap-2 transition ${showAiDrawer ? 'bg-purple-600 text-white' : 'text-purple-700 bg-purple-100'}`}>
+                                            <button onClick={askAiForHelp} disabled={aiGenerating} className={`text-xs font-black px-4 py-2 rounded-xl flex items-center gap-2 transition ${showAiDrawer ? 'bg-purple-600 text-white shadow-inner' : 'text-purple-700 bg-purple-100 hover:bg-purple-200'}`}>
                                                 {aiGenerating ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : '✨ Analiza AI'}
                                             </button>
                                         </div>
                                     )}
                                     <div className="flex gap-3">
                                         <textarea value={messageText} onChange={e => setMessageText(e.target.value)} placeholder={canManageClaims ? "Zadaj pytanie kierownikowi..." : "Złóż wyjaśnienia..."} className="flex-1 border border-slate-300 rounded-2xl p-4 text-sm outline-none focus:ring-2 focus:ring-blue-500 resize-none h-20 shadow-inner" />
-                                        <button onClick={sendMessage} disabled={!messageText.trim() || isSending} className="bg-blue-600 hover:bg-blue-700 text-white font-black px-8 rounded-2xl shadow-lg transition">Wyślij</button>
+                                        <button onClick={sendMessage} disabled={!messageText.trim() || isSending} className="bg-blue-600 hover:bg-blue-700 text-white font-black px-8 rounded-2xl shadow-lg transition disabled:opacity-50">{isSending ? '...' : 'Wyślij'}</button>
                                     </div>
                                 </div>
                             )}

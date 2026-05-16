@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction, where, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -78,12 +78,18 @@ export default function InventoryPage() {
     const [serviceData, setServiceData] = useState({ newStatus: "sprawne", description: "", cost: "" });
     const [isServiceSubmitting, setIsServiceSubmitting] = useState(false);
 
+    // MODAL ZGŁOSZENIA SZKODY
+    const [isClaimModalOpen, setIsClaimModalOpen] = useState(false);
+    const [claimReason, setClaimReason] = useState("");
+    const [isClaimSubmitting, setIsClaimSubmitting] = useState(false);
+
     const [imageFile, setImageFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
 
     const [itemHistory, setItemHistory] = useState<HistoryEntry[]>([]);
     const [historyLoading, setItemHistoryLoading] = useState(false);
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
+    const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
 
     const fetchItems = async () => {
         setLoading(true);
@@ -217,10 +223,32 @@ export default function InventoryPage() {
         setSelectedItem(item);
         setShowSpecs(false);
         setItemHistoryLoading(true);
+        setHasOpenClaim(false);
         try {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
             setItemHistory(historySnap.docs.map(d => d.data() as HistoryEntry));
-        } catch (e) { setItemHistory([]); } finally { setItemHistoryLoading(false); }
+
+            // ZMIANA: Usunęliśmy filtr 'where("status", "in", ...)'
+            // Teraz szukamy jakiejkolwiek sprawy, niezależnie od jej statusu.
+            const claimsQ = query(
+                collection(db, "claims"),
+                where("inventoryId", "==", item.id),
+                orderBy("createdAt", "desc"),
+                limit(1)
+            );
+            const claimsSnap = await getDocs(claimsQ);
+
+            if (!claimsSnap.empty) {
+                const latestClaim = claimsSnap.docs[0].data();
+                setHasOpenClaim(latestClaim.status); // Zapisujemy "NOWA", "W_TOKU" lub "ZAMKNIETA"
+            }
+
+        } catch (e) {
+            setItemHistory([]);
+            console.error("Błąd podczas otwierania karty urządzenia:", e);
+        } finally {
+            setItemHistoryLoading(false);
+        }
     };
 
     // =========================================================================
@@ -278,28 +306,34 @@ export default function InventoryPage() {
         }
     };
 
-    const handleReportClaim = async (item: InventoryItem) => {
-        const reason = prompt(`Zgłaszasz sprzęt "${item.name}" do Sądu PESAM (Centrum Likwidacji Szkód).\n\nPodaj powód / krótki opis uszkodzenia:`);
-        if (!reason) return;
+    const handleReportClaim = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedItem || !claimReason.trim()) return;
 
+        setIsClaimSubmitting(true);
         try {
-            await setDoc(doc(collection(db, "claims")), {
+            await addDoc(collection(db, "claims"), {
                 claimId: `SZK-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`,
-                inventoryId: item.id,
-                inventoryName: item.name,
-                inventoryNumber: item.inventoryNumber || "",
-                protocolId: "Zgłoszenie ręczne z magazynu",
-                siteId: "MAGAZYN",
-                siteName: "Wykryto na magazynie",
+                inventoryId: selectedItem.id,
+                inventoryName: selectedItem.name,
+                inventoryNumber: selectedItem.inventoryNumber || "",
+                siteName: "Zgłoszenie z magazynu",
                 reportedBy: user?.uid,
                 reportedByName: `${user?.firstName} ${user?.lastName}`,
-                description: reason,
+                description: claimReason,
                 status: "NOWA",
-                createdAt: new Date().toISOString()
+                createdAt: new Date().toISOString(),
+                messages: [],
+                assignedManagers: []
             });
             alert("Pomyślnie utworzono sprawę w Sądzie PESAM!");
+            setIsClaimModalOpen(false);
+            setSelectedItem(null);
+            fetchItems();
         } catch (error) {
             alert("Błąd zgłaszania sprawy: " + error);
+        } finally {
+            setIsClaimSubmitting(false);
         }
     };
 
@@ -438,22 +472,27 @@ export default function InventoryPage() {
                             <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900">&times;</button>
                         </div>
 
-                        {/* ZMIANA: PRZYCISKI DO OBSŁUGI SERWISU I SZKÓD */}
-                        <div className="flex flex-wrap gap-2 mb-6">
-                            <button
-                                onClick={openServiceModal}
-                                className="bg-blue-100 text-blue-700 hover:bg-blue-200 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition"
-                            >
-                                <span>🛠️</span> Dodaj wpis serwisowy / Zmień stan
-                            </button>
+                        {/* AKCJE SERWISOWE I SĄDOWE - Z ROZDZIAŁEM NA STATUS SPRAWY */}
+                        <div className="flex flex-wrap gap-3 mb-8">
+                            <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Dodaj wpis serwisowy / Zmień stan</button>
 
-                            {selectedItem.status !== 'sprawne' && (
-                                <button
-                                    onClick={() => handleReportClaim(selectedItem)}
-                                    className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition shadow-sm"
-                                >
-                                    <span>⚖️</span> Zgłoś do Sądu (Szkoda)
-                                </button>
+                            {/* Przycisk widoczny tylko jeśli status jest inny niż 'sprawne' i NIE MA ŻADNEJ SPRAWY */}
+                            {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
+                                <button onClick={() => { setClaimReason(""); setIsClaimModalOpen(true); }} className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black">⚖️ Zgłoś do Sądu (Szkoda)</button>
+                            )}
+
+                            {/* Komunikat, gdy sprawa jest W TOKU */}
+                            {(hasOpenClaim === 'NOWA' || hasOpenClaim === 'W_TOKU') && (
+                                <div className="flex-1 py-3 bg-orange-100 text-orange-800 border border-orange-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
+                                    <span>⏳</span> Sprawa w Sądzie w toku
+                                </div>
+                            )}
+
+                            {/* Komunikat, gdy sprawa jest ZAMKNIĘTA */}
+                            {hasOpenClaim === 'ZAMKNIETA' && (
+                                <div className="flex-1 py-3 bg-slate-100 text-slate-500 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
+                                    <span>📁</span> Sprawa została zamknięta
+                                </div>
                             )}
                         </div>
 
@@ -506,70 +545,6 @@ export default function InventoryPage() {
                                 </table>
                             </div>
                         )}
-                    </div>
-                </div>
-            )}
-
-            {/* NOWOŚĆ: MODAL SERWISOWY (Elegancki formularz zamiast prompta) */}
-            {isServiceModalOpen && selectedItem && (
-                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in">
-                        <div className="flex justify-between items-center mb-6">
-                            <h2 className="text-xl font-black text-slate-800">🛠️ Wpis Serwisowy</h2>
-                            <button onClick={() => setIsServiceModalOpen(false)} className="text-2xl text-slate-400 hover:text-slate-800">&times;</button>
-                        </div>
-
-                        <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
-                            <p className="text-xs text-slate-500 uppercase font-bold mb-1">Wybrane urządzenie:</p>
-                            <p className="font-bold text-slate-800">{selectedItem.name} <span className="text-blue-600 font-mono text-sm">(Nr: {selectedItem.inventoryNumber})</span></p>
-                        </div>
-
-                        <form onSubmit={handleServiceSubmit} className="space-y-4">
-                            <div>
-                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Nowy status urządzenia:</label>
-                                <select
-                                    value={serviceData.newStatus}
-                                    onChange={(e) => setServiceData({ ...serviceData, newStatus: e.target.value })}
-                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 font-bold bg-white"
-                                >
-                                    <option value="sprawne">✅ Sprawne</option>
-                                    <option value="do przeglądu">⚠️ Do przeglądu</option>
-                                    <option value="uszkodzone">❌ Uszkodzone</option>
-                                    <option value="złom">🗑️ Złom / Likwidacja</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Opis operacji / Co zostało zrobione? (Opcjonalnie):</label>
-                                <textarea
-                                    rows={3}
-                                    placeholder="np. Wymieniono szczotki, wyczyszczono filtry..."
-                                    value={serviceData.description}
-                                    onChange={(e) => setServiceData({ ...serviceData, description: e.target.value })}
-                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Koszt naprawy w PLN (Opcjonalnie):</label>
-                                <input
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    placeholder="np. 45.50"
-                                    value={serviceData.cost}
-                                    onChange={(e) => setServiceData({ ...serviceData, cost: e.target.value })}
-                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                                />
-                            </div>
-
-                            <div className="flex gap-3 pt-4 border-t border-slate-100">
-                                <button type="button" onClick={() => setIsServiceModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
-                                <button type="submit" disabled={isServiceSubmitting} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md transition disabled:opacity-50">
-                                    {isServiceSubmitting ? "ZAPISYWANIE..." : "ZAPISZ WPIS"}
-                                </button>
-                            </div>
-                        </form>
                     </div>
                 </div>
             )}
@@ -646,6 +621,101 @@ export default function InventoryPage() {
                             <div className="md:col-span-2 flex gap-3 pt-6 border-t mt-2">
                                 <button type="button" onClick={() => setIsFormOpen(false)} className="flex-1 py-3 text-slate-500 border rounded-2xl font-bold">Anuluj</button>
                                 <button type="submit" disabled={isUploading} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700">{isUploading ? "WGRYWANIE..." : "ZAPISZ"}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* NOWOŚĆ: MODAL SERWISOWY (Elegancki formularz zamiast prompta) */}
+            {isServiceModalOpen && selectedItem && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-black text-slate-800">🛠️ Wpis Serwisowy</h2>
+                            <button onClick={() => setIsServiceModalOpen(false)} className="text-2xl text-slate-400 hover:text-slate-800">&times;</button>
+                        </div>
+
+                        <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                            <p className="text-xs text-slate-500 uppercase font-bold mb-1">Wybrane urządzenie:</p>
+                            <p className="font-bold text-slate-800">{selectedItem.name} <span className="text-blue-600 font-mono text-sm">(Nr: {selectedItem.inventoryNumber})</span></p>
+                        </div>
+
+                        <form onSubmit={handleServiceSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Nowy status urządzenia:</label>
+                                <select
+                                    value={serviceData.newStatus}
+                                    onChange={(e) => setServiceData({ ...serviceData, newStatus: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 font-bold bg-white"
+                                >
+                                    <option value="sprawne">✅ Sprawne</option>
+                                    <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                    <option value="uszkodzone">❌ Uszkodzone</option>
+                                    <option value="złom">🗑️ Złom / Likwidacja</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Opis operacji / Co zostało zrobione? (Opcjonalnie):</label>
+                                <textarea
+                                    rows={3}
+                                    placeholder="np. Wymieniono szczotki, wyczyszczono filtry..."
+                                    value={serviceData.description}
+                                    onChange={(e) => setServiceData({ ...serviceData, description: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Koszt naprawy w PLN (Opcjonalnie):</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    placeholder="np. 45.50"
+                                    value={serviceData.cost}
+                                    onChange={(e) => setServiceData({ ...serviceData, cost: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                />
+                            </div>
+
+                            <div className="flex gap-3 pt-4 border-t border-slate-100">
+                                <button type="button" onClick={() => setIsServiceModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                                <button type="submit" disabled={isServiceSubmitting} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md transition disabled:opacity-50">
+                                    {isServiceSubmitting ? "ZAPISYWANIE..." : "ZAPISZ WPIS"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* NOWOŚĆ: MODAL ZGŁOSZENIA SZKODY DO SĄDU */}
+            {isClaimModalOpen && selectedItem && (
+                <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-8 animate-fade-in border-t-8 border-red-600">
+                        <h2 className="text-2xl font-black text-slate-800 mb-2 uppercase tracking-tighter">⚖️ Zgłoś Szkodę do Sądu</h2>
+                        <p className="text-xs text-slate-500 mb-6 font-bold uppercase">{selectedItem.name} (Nr: {selectedItem.inventoryNumber})</p>
+
+                        <form onSubmit={handleReportClaim} className="space-y-5">
+                            <div>
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Powód zgłoszenia / Opis usterki</label>
+                                <textarea
+                                    required
+                                    rows={4}
+                                    placeholder="Opisz dokładnie, co się stało ze sprzętem. Np. pęknięta obudowa, ślady upadku z wysokości, próby nieautoryzowanej naprawy..."
+                                    value={claimReason}
+                                    onChange={(e) => setClaimReason(e.target.value)}
+                                    className="w-full p-3 border-2 border-slate-100 rounded-xl bg-slate-50 outline-none focus:border-red-500 text-sm transition-all"
+                                />
+                            </div>
+
+                            <div className="flex gap-4 pt-4">
+                                <button type="button" onClick={() => setIsClaimModalOpen(false)} className="flex-1 py-4 text-slate-500 font-bold uppercase tracking-widest">Anuluj</button>
+                                <button type="submit" disabled={isClaimSubmitting} className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition disabled:bg-slate-300 uppercase">
+                                    {isClaimSubmitting ? "ZGŁASZANIE..." : "Wyślij Zgłoszenie"}
+                                </button>
                             </div>
                         </form>
                     </div>
