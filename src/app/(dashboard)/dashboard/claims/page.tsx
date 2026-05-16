@@ -107,9 +107,18 @@ export default function ClaimsCenter() {
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ inventoryName: selectedClaim.inventoryName, isInitial: true })
+                body: JSON.stringify({
+                    inventoryName: selectedClaim.inventoryName,
+                    inventoryNumber: selectedClaim.inventoryNumber,
+                    siteName: selectedClaim.siteName,
+                    // KLUCZ: Przekazujemy podsumowanie techniczne od magazyniera!
+                    warehouseSummary: selectedClaim.description,
+                    isInitial: true
+                })
             });
             const data = await response.json();
+
+            // ... (reszta kodu bez zmian) ...
 
             const aiInitialMessage: ChatMessage = {
                 id: Date.now().toString(),
@@ -321,10 +330,10 @@ export default function ClaimsCenter() {
                                     return (
                                         <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                                             <div className={`p-4 rounded-2xl shadow-sm max-w-[85%] ${isMe
-                                                    ? 'bg-blue-600 text-white rounded-br-sm'
-                                                    : msg.senderRole === 'AI'
-                                                        ? 'bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm'
-                                                        : 'bg-white border border-slate-200 text-slate-800 rounded-bl-sm'
+                                                ? 'bg-blue-600 text-white rounded-br-sm'
+                                                : msg.senderRole === 'AI'
+                                                    ? 'bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm'
+                                                    : 'bg-white border border-slate-200 text-slate-800 rounded-bl-sm'
                                                 }`}>
 
                                                 {/* Nagłówek: Nazwa nadawcy i Rola */}
