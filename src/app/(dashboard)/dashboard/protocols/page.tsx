@@ -337,11 +337,11 @@ export default function ProtocolsHub() {
         setSelectedProtocol(protocol);
     };
 
-    const handleAcceptSubmit = async () => {
+    const handleAcceptSubmit = async (skipInvestigationCheck = false) => {
         if (!selectedProtocol) return;
 
         // NOWE: Znajdź przedmioty wymagające śledztwa AI
-        if (!investigationDone) {
+        if (!investigationDone && !skipInvestigationCheck) {
             const itemNeedingInvestigation = selectedProtocol.items.find((item: any) => {
                 const input = acceptInputs[item.inventoryId];
                 return item.type === "UNIQUE" && input?.finalStatus === "uszkodzone" && input?.createClaim;
@@ -881,7 +881,7 @@ export default function ProtocolsHub() {
                                         </div>
                                         <div className="p-6 border-t bg-slate-50 flex gap-4 items-center">
                                             <p className="text-xs text-slate-400 flex-1">Kliknięcie "AKCEPTUJ" fizycznie zdejmie podane ilości z budowy i przywróci je na stan magazynu. Brakujący osprzęt zostanie na stanie budowy jako dług.</p>
-                                            <button onClick={handleAcceptSubmit} disabled={isSubmitting} className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300">
+                                            <button onClick={() => handleAcceptSubmit(false)} disabled={isSubmitting} className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300">
                                                 {isSubmitting ? "ZAPISYWANIE..." : "AKCEPTUJ ZWROT"}
                                             </button>
                                         </div>
@@ -909,7 +909,7 @@ export default function ProtocolsHub() {
                     onClaimCreated={(_claimId, _docId) => {
                         setInvestigationData(null);
                         setInvestigationDone(true);
-                        setTimeout(() => handleAcceptSubmit(), 100);
+                        setTimeout(() => handleAcceptSubmit(true), 100);
                     }}
                     inventoryId={investigationData.inventoryId}
                     inventoryName={investigationData.inventoryName}
