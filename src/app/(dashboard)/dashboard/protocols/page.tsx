@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { collection, getDocs, doc, setDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
+import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal";
 import { hasPermission } from "@/lib/auth/permissions";
 
 // --- INTERFEJSY ---
@@ -54,6 +55,13 @@ export default function ProtocolsHub() {
     // ZMIANA: Dodano `verifiedAccessories` do stanu magazyniera
     const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [investigationData, setInvestigationData] = useState<{
+        inventoryId: string;
+        inventoryName: string;
+        inventoryNumber: string;
+        siteName: string;
+    } | null>(null);
+    const [investigationDone, setInvestigationDone] = useState(false);
 
     // Filtry
     const [searchName, setSearchName] = useState("");
@@ -331,6 +339,25 @@ export default function ProtocolsHub() {
 
     const handleAcceptSubmit = async () => {
         if (!selectedProtocol) return;
+
+        // NOWE: Znajdź przedmioty wymagające śledztwa AI
+        if (!investigationDone) {
+            const itemNeedingInvestigation = selectedProtocol.items.find((item: any) => {
+                const input = acceptInputs[item.inventoryId];
+                return item.type === "UNIQUE" && input?.finalStatus === "uszkodzone" && input?.createClaim;
+            });
+
+            if (itemNeedingInvestigation) {
+                setInvestigationData({
+                    inventoryId: itemNeedingInvestigation.inventoryId,
+                    inventoryName: itemNeedingInvestigation.name,
+                    inventoryNumber: itemNeedingInvestigation.inventoryNumber || "",
+                    siteName: selectedProtocol.sourceName,
+                });
+                return;
+            }
+        }
+
         setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
@@ -403,24 +430,7 @@ export default function ProtocolsHub() {
                         }
                     }
 
-                    // TWORZENIE SPRAWY W CENTRUM LIKWIDACJI SZKÓD
-                    if (itemData.type === "UNIQUE" && workerInput.finalStatus === "uszkodzone" && workerInput.createClaim) {
-                        const claimRef = doc(collection(db, "claims"));
-                        transaction.set(claimRef, {
-                            claimId: `SZK-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`,
-                            inventoryId: item.inventoryId,
-                            inventoryName: item.name,
-                            inventoryNumber: item.inventoryNumber || "",
-                            protocolId: selectedProtocol.protocolId,
-                            siteId: selectedProtocol.sourceId,
-                            siteName: selectedProtocol.sourceName,
-                            reportedBy: user?.uid,
-                            reportedByName: `${user?.firstName} ${user?.lastName}`,
-                            description: workerInput.notes || "Zgłoszono uszkodzenie przy przyjęciu z budowy.",
-                            status: "NOWA",
-                            createdAt: new Date().toISOString()
-                        });
-                    }
+
 
                     // AKTUALIZACJA STANU MAGAZYNOWEGO
                     if (itemData.type === "BULK") {
@@ -472,6 +482,7 @@ export default function ProtocolsHub() {
 
             alert("Zwrot został pomyślnie przyjęty!");
             setSelectedProtocol(null);
+            setInvestigationDone(false);
             fetchPendingProtocols();
             fetchData();
         } catch (error: any) {
@@ -880,6 +891,33 @@ export default function ProtocolsHub() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {investigationData && (
+                <ClaimInvestigationModal
+                    isOpen={!!investigationData}
+                    onClose={() => {
+                        setAcceptInputs(prev => ({
+                            ...prev,
+                            [investigationData.inventoryId]: {
+                                ...prev[investigationData.inventoryId],
+                                createClaim: false
+                            }
+                        }));
+                        setInvestigationData(null);
+                    }}
+                    onClaimCreated={(_claimId, _docId) => {
+                        setInvestigationData(null);
+                        setInvestigationDone(true);
+                        setTimeout(() => handleAcceptSubmit(), 100);
+                    }}
+                    inventoryId={investigationData.inventoryId}
+                    inventoryName={investigationData.inventoryName}
+                    inventoryNumber={investigationData.inventoryNumber}
+                    siteName={investigationData.siteName}
+                    reportedByUid={user?.uid || ""}
+                    reportedByName={`${user?.firstName} ${user?.lastName}`}
+                />
             )}
         </div>
     );
