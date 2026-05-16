@@ -3245,13 +3245,17 @@ export default function ProtocolsHub() {
 }
 "use client";
 
-import { useState, useEffect } from "react";
-import { collection, getDocs, query, orderBy } from "firebase/firestore";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+    collection, getDocs, query, orderBy,
+    doc, setDoc, getDoc, deleteDoc,
+} from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 
-// --- INTERFEJSY ---
+// â”€â”€â”€ TYPY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 interface InventoryItem {
     id: string;
     name: string;
@@ -3277,7 +3281,16 @@ interface CartItem {
     maxQty?: number;
 }
 
-// â”€â”€â”€ KOMPONENT: Edytor pozycji rÄ™cznych â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Draft zapisywany do Firestore (wszystko co potrzeba do przywrĂłcenia koszyka)
+interface CartDraft {
+    cart: CartItem[];
+    selectedSiteId: string;
+    orderNotes: string;
+    updatedAt: string;
+}
+
+// â”€â”€â”€ KOMPONENT: Edytor pozycji rÄ™cznych â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 function ManualEntryModal({
     initialText,
     onSave,
@@ -3287,16 +3300,13 @@ function ManualEntryModal({
     onSave: (text: string) => void;
     onCancel: () => void;
 }) {
-    // KaĹĽda pozycja to osobny string (moĹĽe mieÄ‡ wiele linii wizualnych)
-    const parse = (raw: string) =>
-        raw.split("\n").length > 0 ? raw.split("\n") : [""];
-
     const [entries, setEntries] = useState<string[]>(() => {
-        const parsed = initialText.split("\n");
+        const parsed = initialText.split("\n").filter(l => l.trim() !== "");
         return parsed.length > 0 ? parsed : [""];
     });
 
-    const refs = useState<(HTMLTextAreaElement | null)[]>([])[0];
+    // Tablica ref-Ăłw dla textarea-Ăłw
+    const textareaRefs = useRef<(HTMLTextAreaElement | null)[]>([]);
 
     const updateEntry = (i: number, val: string) => {
         setEntries(prev => {
@@ -3309,14 +3319,12 @@ function ManualEntryModal({
     const handleKeyDown = (i: number, e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === "Enter") {
             e.preventDefault();
-            // Nowa pozycja po aktualnej
             setEntries(prev => {
                 const next = [...prev];
                 next.splice(i + 1, 0, "");
                 return next;
             });
-            // Focus na nowÄ… pozycjÄ™ po re-renderze
-            setTimeout(() => refs[i + 1]?.focus(), 30);
+            setTimeout(() => textareaRefs.current[i + 1]?.focus(), 30);
         }
         if (e.key === "Backspace" && entries[i] === "" && entries.length > 1) {
             e.preventDefault();
@@ -3325,37 +3333,33 @@ function ManualEntryModal({
                 next.splice(i, 1);
                 return next;
             });
-            setTimeout(() => refs[Math.max(0, i - 1)]?.focus(), 30);
+            setTimeout(() => textareaRefs.current[Math.max(0, i - 1)]?.focus(), 30);
         }
     };
 
     const nonEmpty = entries.filter(e => e.trim() !== "").length;
+
     const handleSave = () => {
         const joined = entries.filter(e => e.trim() !== "").join("\n");
         onSave(joined);
     };
 
     return (
-        <div
-            className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 backdrop-blur-sm"
-            style={{ zIndex: 9999999 }}
-        >
-            <div
-                className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden border-t-4 border-orange-500 flex flex-col"
-                style={{ height: "80vh" }}
-            >
-                {/* NAGĹĂ“WEK */}
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 backdrop-blur-sm" style={{ zIndex: 9999999 }}>
+            <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden border-t-4 border-orange-500 flex flex-col" style={{ height: "80vh" }}>
+
+                {/* NagĹ‚Ăłwek */}
                 <div className="p-5 bg-orange-50 border-b border-orange-100 flex justify-between items-center flex-shrink-0">
                     <div>
                         <h3 className="font-black text-orange-800 uppercase tracking-tight text-xl">đź“ť Wpis rÄ™czny</h3>
                         <p className="text-xs text-orange-600 mt-0.5">
-                            <b>Enter</b> = nowa pozycja &nbsp;Â·&nbsp; KaĹĽda pozycja moĹĽe zajmowaÄ‡ wiele wierszy
+                            <b>Enter</b> = nowa pozycja Â· KaĹĽda pozycja moĹĽe zajmowaÄ‡ wiele wierszy
                         </p>
                     </div>
                     <button onClick={onCancel} className="text-3xl text-slate-400 hover:text-red-500 w-10 h-10 flex items-center justify-center rounded-full hover:bg-red-50 transition leading-none">&times;</button>
                 </div>
 
-                {/* LICZNIK */}
+                {/* Licznik */}
                 <div className="px-5 py-2 bg-slate-800 flex items-center gap-3 flex-shrink-0">
                     <span className="text-[11px] text-slate-400 uppercase tracking-widest font-mono">Pozycje:</span>
                     <div className="flex gap-1.5 flex-wrap flex-1">
@@ -3369,21 +3373,15 @@ function ManualEntryModal({
                     <span className="text-orange-400 font-black text-sm flex-shrink-0">{nonEmpty} poz.</span>
                 </div>
 
-                {/* LISTA POZYCJI */}
+                {/* Lista pozycji */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
                     {entries.map((entry, i) => (
                         <div key={i} className="flex gap-3 items-start group">
-                            {/* Numer pozycji */}
-                            <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black mt-1 transition-colors ${entry.trim() !== ""
-                                    ? "bg-orange-500 text-white shadow-sm"
-                                    : "bg-slate-200 text-slate-400"
-                                }`}>
+                            <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black mt-1 transition-colors ${entry.trim() !== "" ? "bg-orange-500 text-white shadow-sm" : "bg-slate-200 text-slate-400"}`}>
                                 {i + 1}
                             </div>
-
-                            {/* Textarea dla tej pozycji */}
                             <textarea
-                                ref={el => { refs[i] = el; }}
+                                ref={el => { textareaRefs.current[i] = el; }}
                                 value={entry}
                                 onChange={e => updateEntry(i, e.target.value)}
                                 onKeyDown={e => handleKeyDown(i, e)}
@@ -3391,31 +3389,21 @@ function ManualEntryModal({
                                 autoFocus={i === entries.length - 1 && i > 0}
                                 placeholder={i === 0 ? "np. 10 par rÄ™kawic roboczych, rozmiar L..." : `Pozycja ${i + 1}...`}
                                 className="flex-1 p-2.5 border-2 border-slate-200 rounded-xl text-sm bg-white outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-400/20 resize-none leading-relaxed transition-all placeholder-slate-300"
-                                style={{
-                                    minHeight: "40px",
-                                    height: "auto",
-                                    overflow: "hidden",
-                                }}
+                                style={{ minHeight: "40px", height: "auto", overflow: "hidden" }}
                                 onInput={e => {
                                     const t = e.currentTarget;
                                     t.style.height = "auto";
                                     t.style.height = t.scrollHeight + "px";
                                 }}
                             />
-
-                            {/* UsuĹ„ pozycjÄ™ */}
                             {entries.length > 1 && (
                                 <button
                                     onClick={() => setEntries(prev => prev.filter((_, j) => j !== i))}
                                     className="flex-shrink-0 w-8 h-8 mt-1 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 flex items-center justify-center text-lg font-bold transition opacity-0 group-hover:opacity-100"
-                                >
-                                    &times;
-                                </button>
+                                >&times;</button>
                             )}
                         </div>
                     ))}
-
-                    {/* Dodaj kolejnÄ… pozycjÄ™ */}
                     <button
                         onClick={() => setEntries(prev => [...prev, ""])}
                         className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl text-[11px] font-black text-slate-400 hover:border-orange-400 hover:text-orange-500 transition uppercase tracking-widest mt-2"
@@ -3424,14 +3412,12 @@ function ManualEntryModal({
                     </button>
                 </div>
 
-                {/* STOPKA */}
+                {/* Stopka */}
                 <div className="p-4 border-t border-slate-200 bg-white flex items-center gap-3 flex-shrink-0">
                     <p className="text-[10px] text-slate-400 flex-1">
                         đź’ˇ <b>Backspace</b> na pustej pozycji usuwa jÄ… Â· <b>Enter</b> tworzy nowÄ…
                     </p>
-                    <button onClick={onCancel} className="px-6 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition text-sm">
-                        Anuluj
-                    </button>
+                    <button onClick={onCancel} className="px-6 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition text-sm">Anuluj</button>
                     <button
                         onClick={handleSave}
                         disabled={nonEmpty === 0}
@@ -3445,136 +3431,204 @@ function ManualEntryModal({
     );
 }
 
+// â”€â”€â”€ STRONA GĹĂ“WNA: SKLEP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 export default function ShopPage() {
     const { user } = useAuth();
     const router = useRouter();
+
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [sites, setSites] = useState<Site[]>([]);
     const [loading, setLoading] = useState(true);
 
+    // Filtrowanie katalogu
     const [searchTerm, setSearchTerm] = useState("");
     const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
     const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
 
+    // Koszyk i zamĂłwienie
     const [cart, setCart] = useState<CartItem[]>([]);
     const [isCartOpen, setIsCartOpen] = useState(false);
     const [selectedSiteId, setSelectedSiteId] = useState("");
     const [orderNotes, setOrderNotes] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+    const [draftSaving, setDraftSaving] = useState(false);
 
-    // Stany dla Modala WpisĂłw RÄ™cznych
+    // UI
+    const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
     const [isManualModalOpen, setIsManualModalOpen] = useState(false);
     const [manualText, setManualText] = useState("");
 
+    // Debounce ref dla zapisu draftu
+    const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // â”€â”€ Pobieranie danych + wczytanie draftu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     useEffect(() => {
+        if (!user) return;
         const fetchData = async () => {
             setLoading(true);
-            const invSnap = await getDocs(query(collection(db, "inventory"), orderBy("name", "asc")));
-            setItems(invSnap.docs.map(d => ({ id: d.id, ...d.data() })) as InventoryItem[]);
+            try {
+                // Katalog
+                const invSnap = await getDocs(query(collection(db, "inventory"), orderBy("name", "asc")));
+                setItems(invSnap.docs.map(d => ({ id: d.id, ...d.data() })) as InventoryItem[]);
 
-            const sitesSnap = await getDocs(query(collection(db, "sites"), orderBy("name", "asc")));
-            const allSites = sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[];
-            const userAssigned = user?.assignedSites || [];
-            setSites(allSites.filter(s => userAssigned.includes("ALL") || userAssigned.includes(s.id)));
-            setLoading(false);
+                // Budowy filtrowane wg uprawnieĹ„
+                const sitesSnap = await getDocs(query(collection(db, "sites"), orderBy("name", "asc")));
+                const allSites = sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[];
+                const userAssigned = user?.assignedSites || [];
+                const filteredSites = allSites.filter(s =>
+                    userAssigned.includes("ALL") || userAssigned.includes(s.id)
+                );
+                setSites(filteredSites);
+
+                // Wczytaj draft koszyka z Firestore
+                const draftRef = doc(db, "cartDrafts", user.uid);
+                const draftSnap = await getDoc(draftRef);
+                if (draftSnap.exists()) {
+                    const draft = draftSnap.data() as CartDraft;
+                    setCart(draft.cart || []);
+                    setOrderNotes(draft.orderNotes || "");
+
+                    // PrzywrĂłÄ‡ zapisanÄ… budowÄ™ tylko jeĹ›li nadal jest dostÄ™pna
+                    if (draft.selectedSiteId) {
+                        const stillAssigned = filteredSites.some(s => s.id === draft.selectedSiteId);
+                        if (stillAssigned) setSelectedSiteId(draft.selectedSiteId);
+                    }
+                }
+
+                // JeĹ›li kierownik ma tylko 1 budowÄ™ â€” wybierz jÄ… automatycznie
+                if (filteredSites.length === 1) {
+                    setSelectedSiteId(filteredSites[0].id);
+                }
+            } catch (error) {
+                console.error("BĹ‚Ä…d pobierania danych sklepu:", error);
+            } finally {
+                setLoading(false);
+            }
         };
         fetchData();
     }, [user]);
 
+    // â”€â”€ Zapis draftu do Firestore (debounced 1.2s) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const saveDraft = useCallback((
+        cartData: CartItem[],
+        siteId: string,
+        notes: string,
+    ) => {
+        if (!user) return;
+        if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+        setDraftSaving(true);
+        draftTimerRef.current = setTimeout(async () => {
+            try {
+                const draft: CartDraft = {
+                    cart: cartData,
+                    selectedSiteId: siteId,
+                    orderNotes: notes,
+                    updatedAt: new Date().toISOString(),
+                };
+                await setDoc(doc(db, "cartDrafts", user.uid), draft);
+            } catch (err) {
+                console.error("BĹ‚Ä…d zapisu draftu:", err);
+            } finally {
+                setDraftSaving(false);
+            }
+        }, 1200);
+    }, [user]);
+
+    // â”€â”€ Helpery koszyka (kaĹĽda zmiana â†’ zapis draftu) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
     const addToCart = (item: InventoryItem) => {
         if (item.availableQuantity <= 0) return alert("Brak na magazynie gĹ‚Ăłwnym.");
         if (cart.find(i => i.dbId === item.id)) return;
-
-        setCart([...cart, {
-            cartId: Date.now().toString(), isManual: false, dbId: item.id, name: item.name,
-            type: item.type, inventoryNumber: item.inventoryNumber, quantity: 1, imageUrl: item.imageUrl, maxQty: item.availableQuantity
-        }]);
+        const newCart: CartItem[] = [...cart, {
+            cartId: Date.now().toString(),
+            isManual: false,
+            dbId: item.id,
+            name: item.name,
+            type: item.type,
+            inventoryNumber: item.inventoryNumber,
+            quantity: 1,
+            imageUrl: item.imageUrl,
+            maxQty: item.availableQuantity,
+        }];
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
     };
 
-    // --- LOGIKA Wpisu RÄ™cznego ---
+    const removeFromCart = (cartId: string) => {
+        const newCart = cart.filter(i => i.cartId !== cartId);
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+    };
+
+    const updateQty = (cartId: string, qty: number) => {
+        const safeQty = Math.max(1, qty);
+        const newCart = cart.map(i => i.cartId === cartId ? { ...i, quantity: safeQty } : i);
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+    };
+
+    const handleSiteChange = (siteId: string) => {
+        setSelectedSiteId(siteId);
+        saveDraft(cart, siteId, orderNotes);
+    };
+
+    const handleNotesChange = (notes: string) => {
+        setOrderNotes(notes);
+        saveDraft(cart, selectedSiteId, notes);
+    };
+
+    // â”€â”€ Wpis rÄ™czny â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
     const openManualModal = () => {
         const existing = cart.find(item => item.isManual);
         setManualText(existing ? existing.name : "");
         setIsManualModalOpen(true);
     };
 
-    const saveManualEntry = (text?: string) => {
-        const finalText = text ?? manualText;
-        if (!finalText.trim()) {
+    const saveManualEntry = (text: string) => {
+        if (!text.trim()) {
             setIsManualModalOpen(false);
             return;
         }
-
         const existingManual = cart.find(item => item.isManual);
-
+        let newCart: CartItem[];
         if (existingManual) {
-            setCart(prevCart =>
-                prevCart.map(item =>
-                    item.cartId === existingManual.cartId
-                        ? { ...item, name: finalText }
-                        : item
-                )
+            newCart = cart.map(item =>
+                item.cartId === existingManual.cartId ? { ...item, name: text } : item
             );
         } else {
-            setCart(prevCart => [
-                ...prevCart,
-                {
-                    cartId: crypto.randomUUID(),
-                    isManual: true,
-                    name: finalText,
-                    quantity: 1
-                }
-            ]);
+            newCart = [...cart, {
+                cartId: crypto.randomUUID(),
+                isManual: true,
+                name: text,
+                quantity: 1,
+            }];
         }
-
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
         setIsManualModalOpen(false);
     };
 
-    const removeFromCart = (cartId: string) => {
-        setCart(cart.filter(i => i.cartId !== cartId));
-    };
-
-    const updateQty = (cartId: string, qty: number) => {
-        const safeQty = Math.max(1, qty);
-        setCart(cart.map(i =>
-            i.cartId === cartId
-                ? { ...i, quantity: safeQty }
-                : i
-        ));
-    };
-
-    const updateManualName = (cartId: string, newName: string) => {
-        setCart(cart.map(item =>
-            item.cartId === cartId
-                ? { ...item, name: newName }
-                : item
-        ));
-    };
+    // â”€â”€ WysyĹ‚ka zamĂłwienia â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     const handleSubmitOrder = async () => {
         if (!selectedSiteId) return alert("Wybierz budowÄ™!");
         if (cart.length === 0) return alert("Koszyk jest pusty!");
-
         const emptyManuals = cart.filter(i => i.isManual && !i.name.trim());
         if (emptyManuals.length > 0) return alert("UzupeĹ‚nij wpisy rÄ™czne lub je usuĹ„ z koszyka!");
 
         setIsSubmitting(true);
-
         const orderId = `ZAM-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`;
 
         try {
-            // Grupujemy pozycje w 3 sekcje dla dokumentu PDF
             const narzedzia = cart
                 .filter(i => !i.isManual && i.type === "UNIQUE")
                 .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: 1, section: "NARZÄDZIA" }));
-
             const rusztowania = cart
                 .filter(i => !i.isManual && i.type === "BULK")
                 .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: i.quantity, section: "RUSZTOWANIA" }));
-
-            // Wpis rÄ™czny rozbijamy na osobne linie â†’ sekcja MATERIAĹY DODATKOWE
             const materialyDodatkowe = cart
                 .filter(i => i.isManual)
                 .flatMap(i =>
@@ -3582,7 +3636,6 @@ export default function ShopPage() {
                         .filter(l => l.trim() !== "")
                         .map(l => ({ name: l.trim(), quantity: 1, section: "MATERIAĹY DODATKOWE" }))
                 );
-
             const processedCart = [...narzedzia, ...rusztowania, ...materialyDodatkowe];
 
             const res = await fetch("/api/orders", {
@@ -3592,38 +3645,48 @@ export default function ShopPage() {
                     orderId,
                     siteId: selectedSiteId,
                     siteName: sites.find(s => s.id === selectedSiteId)?.name,
-                    user: { uid: user?.uid, firstName: user?.firstName, lastName: user?.lastName },
-                    cart: processedCart,
-                    // Sekcje osobno dla Ĺ‚atwiejszego generowania PDF
-                    sections: {
-                        narzedzia,
-                        rusztowania,
-                        materialyDodatkowe,
+                    // Dane zamawiajÄ…cego â€” z kontekstu sesji, nie z formularza
+                    user: {
+                        uid: user?.uid,
+                        firstName: user?.firstName,
+                        lastName: user?.lastName,
+                        email: user?.email,
                     },
-                    notes: orderNotes
-                })
+                    cart: processedCart,
+                    sections: { narzedzia, rusztowania, materialyDodatkowe },
+                    notes: orderNotes,
+                }),
             });
 
             if (res.ok) {
-                alert(`ZamĂłwienie ${orderId} wysĹ‚ane!`);
+                // WyczyĹ›Ä‡ lokalny stan (draft usuwa serwer)
                 setCart([]);
+                setOrderNotes("");
                 setIsCartOpen(false);
+                alert(`âś… ZamĂłwienie ${orderId} zostaĹ‚o zĹ‚oĹĽone!\nPDF wysĹ‚ano na e-mail.`);
             } else {
-                alert("BĹ‚Ä…d wysyĹ‚ki zamĂłwienia.");
+                const errData = await res.json();
+                alert("BĹ‚Ä…d wysyĹ‚ki: " + (errData.error || "Nieznany bĹ‚Ä…d"));
             }
         } catch (error) {
             console.error(error);
-            alert("BĹ‚Ä…d wysyĹ‚ki.");
+            alert("BĹ‚Ä…d wysyĹ‚ki zamĂłwienia.");
         } finally {
             setIsSubmitting(false);
         }
     };
 
-    const uniqueCategories = Array.from(new Set(items.filter(i => i.type === "UNIQUE").map(i => i.category).filter(Boolean))).sort();
+    // â”€â”€ Filtrowanie katalogu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    const getVisibleItems = () => {
-        let filtered = items.filter(i => i.status === "sprawne" && i.name.toLowerCase().includes(searchTerm.toLowerCase()));
+    const uniqueCategories = Array.from(
+        new Set(items.filter(i => i.type === "UNIQUE").map(i => i.category).filter(Boolean))
+    ).sort();
 
+    const getVisibleItems = (): InventoryItem[] => {
+        const filtered = items.filter(i =>
+            i.status === "sprawne" &&
+            i.name.toLowerCase().includes(searchTerm.toLowerCase())
+        );
         if (activeTab === "UNIQUE") {
             let uniqueItems = filtered.filter(i => i.type === "UNIQUE" && i.availableQuantity > 0);
             if (selectedCategory !== "ALL") {
@@ -3633,36 +3696,65 @@ export default function ShopPage() {
         } else {
             if (selectedSystemId) {
                 return filtered.filter(i => i.type === "BULK" && i.subType === "SUB_ITEM" && i.mainCategoryId === selectedSystemId);
-            } else {
-                return filtered.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
             }
+            return filtered.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
         }
     };
 
+    // â”€â”€â”€ RENDER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
     return (
         <div className="p-4 md:p-6 max-w-[1600px] mx-auto h-[90vh] flex flex-col relative animate-fade-in overflow-hidden">
+
+            {/* â”€â”€ NagĹ‚Ăłwek â”€â”€ */}
             <div className="flex justify-between items-center mb-4 border-b pb-4">
                 <div>
                     <h1 className="text-2xl font-black text-slate-800 tracking-tighter uppercase italic">Sklep PESAM</h1>
+                    {/* Informacja o kierowniku */}
+                    <p className="text-xs text-slate-500 mt-0.5 font-medium">
+                        Zalogowany: <span className="font-bold text-slate-700">{user?.firstName} {user?.lastName}</span>
+                        {sites.length === 1 && (
+                            <> Â· Budowa: <span className="font-bold text-blue-600">{sites[0].name}</span></>
+                        )}
+                    </p>
                 </div>
-                <button onClick={() => setIsCartOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl font-bold shadow-md flex items-center gap-2 transition-all">
-                    đź›’ KOSZYK <span className="bg-white text-blue-600 px-1.5 rounded-md text-[10px]">{cart.length}</span>
+                <button
+                    onClick={() => setIsCartOpen(true)}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl font-bold shadow-md flex items-center gap-2 transition-all relative"
+                >
+                    đź›’ KOSZYK
+                    <span className="bg-white text-blue-600 px-1.5 rounded-md text-[10px] font-black">{cart.length}</span>
+                    {/* WskaĹşnik niewyslaneog draftu */}
+                    {cart.length > 0 && (
+                        <span className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-green-400 rounded-full border-2 border-white" title="Koszyk zapisany" />
+                    )}
                 </button>
             </div>
 
+            {/* Pasek informacyjny o niezapisanym koszyku */}
+            {cart.length > 0 && (
+                <div className="mb-3 px-4 py-2 bg-green-50 border border-green-200 rounded-xl flex items-center gap-3 text-xs">
+                    <span className="text-green-600">đź’ľ</span>
+                    <span className="text-green-700 font-medium">
+                        TwĂłj koszyk ({cart.length} poz.) jest automatycznie zapisywany â€” moĹĽesz go bezpiecznie zamknÄ…Ä‡ i wrĂłciÄ‡ pĂłĹşniej.
+                    </span>
+                    {draftSaving && <span className="text-green-500 italic">ZapisujÄ™...</span>}
+                </div>
+            )}
+
+            {/* â”€â”€ Filtry â”€â”€ */}
             <div className="flex flex-col md:flex-row gap-3 mb-6 items-center">
                 <input
                     type="text"
-                    placeholder="Szukaj (np. zak...)"
+                    placeholder="Szukaj (np. szlifierka...)"
                     value={searchTerm}
                     onChange={e => setSearchTerm(e.target.value)}
                     className="p-2.5 border rounded-xl flex-1 max-w-sm text-sm outline-none focus:border-blue-500 shadow-sm"
                 />
-
                 {activeTab === "UNIQUE" && (
                     <select
                         value={selectedCategory}
-                        onChange={(e) => setSelectedCategory(e.target.value)}
+                        onChange={e => setSelectedCategory(e.target.value)}
                         className="p-2.5 border rounded-xl bg-white text-sm text-slate-700 outline-none focus:border-blue-500 shadow-sm cursor-pointer"
                     >
                         <option value="ALL">Wszystkie kategorie</option>
@@ -3671,19 +3763,29 @@ export default function ShopPage() {
                         ))}
                     </select>
                 )}
-
                 <div className="flex bg-slate-100 p-1 rounded-lg shadow-inner border border-slate-200">
-                    <button onClick={() => { setActiveTab("UNIQUE"); setSelectedSystemId(null); setSelectedCategory("ALL"); }} className={`px-4 py-1.5 rounded-md text-[11px] font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>NARZÄDZIA</button>
-                    <button onClick={() => { setActiveTab("BULK"); setSelectedSystemId(null); }} className={`px-4 py-1.5 rounded-md text-[11px] font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>RUSZTOWANIA</button>
+                    <button
+                        onClick={() => { setActiveTab("UNIQUE"); setSelectedSystemId(null); setSelectedCategory("ALL"); }}
+                        className={`px-4 py-1.5 rounded-md text-[11px] font-black transition-all ${activeTab === "UNIQUE" ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                    >NARZÄDZIA</button>
+                    <button
+                        onClick={() => { setActiveTab("BULK"); setSelectedSystemId(null); }}
+                        className={`px-4 py-1.5 rounded-md text-[11px] font-black transition-all ${activeTab === "BULK" ? "bg-white text-orange-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                    >RUSZTOWANIA</button>
                 </div>
-
                 {selectedSystemId && (
-                    <button onClick={() => setSelectedSystemId(null)} className="text-[11px] font-black text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-200">â† WRĂ“Ä† DO SYSTEMĂ“W</button>
+                    <button
+                        onClick={() => setSelectedSystemId(null)}
+                        className="text-[11px] font-black text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-200"
+                    >â† WRĂ“Ä† DO SYSTEMĂ“W</button>
                 )}
             </div>
 
+            {/* â”€â”€ Katalog â”€â”€ */}
             <div className="flex-1 overflow-y-auto pr-2 pb-10">
-                {loading ? <div className="text-center p-10 text-slate-400 font-bold uppercase text-xs">Ĺadowanie asortymentu...</div> : (
+                {loading ? (
+                    <div className="text-center p-10 text-slate-400 font-bold uppercase text-xs">Ĺadowanie asortymentu...</div>
+                ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
                         {getVisibleItems().map(item => {
                             const isSystem = activeTab === "BULK" && item.subType === "MAIN_CAT";
@@ -3691,7 +3793,11 @@ export default function ShopPage() {
 
                             if (isSystem) {
                                 return (
-                                    <div key={item.id} onClick={() => setSelectedSystemId(item.id)} className="bg-slate-800 text-white rounded-xl border border-slate-700 flex items-center h-[120px] cursor-pointer hover:bg-slate-700 hover:shadow-xl transition-all relative overflow-hidden group">
+                                    <div
+                                        key={item.id}
+                                        onClick={() => setSelectedSystemId(item.id)}
+                                        className="bg-slate-800 text-white rounded-xl border border-slate-700 flex items-center h-[120px] cursor-pointer hover:bg-slate-700 hover:shadow-xl transition-all relative overflow-hidden group"
+                                    >
                                         <div className="absolute -right-4 -bottom-4 opacity-10 text-8xl transition-transform group-hover:scale-110">đź“</div>
                                         <div className="w-28 h-full bg-white/10 flex items-center justify-center p-2 border-r border-white/10 flex-shrink-0">
                                             {item.imageUrl ? <img src={item.imageUrl} className="max-w-full max-h-full object-contain rounded" alt="" /> : <span className="text-3xl">đźŹ—ď¸Ź</span>}
@@ -3709,39 +3815,49 @@ export default function ShopPage() {
                                 <div
                                     key={item.id}
                                     className={`border rounded-xl flex items-center h-[110px] overflow-hidden transition-all shadow-sm group relative ${isInCart
-                                            ? 'border-green-500 shadow-md'
-                                            : 'bg-white border-slate-200 hover:shadow-lg hover:border-blue-300'
+                                            ? "border-green-500 shadow-md"
+                                            : "bg-white border-slate-200 hover:shadow-lg hover:border-blue-300"
                                         }`}
                                     style={isInCart ? {
-                                        backgroundColor: '#f0fdf4',
-                                        backgroundImage: 'repeating-linear-gradient(45deg, rgba(34, 197, 94, 0.05) 0, rgba(34, 197, 94, 0.05) 10px, rgba(34, 197, 94, 0.1) 10px, rgba(34, 197, 94, 0.1) 20px)'
+                                        backgroundColor: "#f0fdf4",
+                                        backgroundImage: "repeating-linear-gradient(45deg, rgba(34,197,94,0.05) 0, rgba(34,197,94,0.05) 10px, rgba(34,197,94,0.1) 10px, rgba(34,197,94,0.1) 20px)",
                                     } : {}}
                                 >
-                                    {/* Miniaturka (Lewa strona) */}
-                                    <div className="w-24 h-full bg-slate-50 flex items-center justify-center border-r border-slate-100 p-2 cursor-zoom-in relative group/img z-10 flex-shrink-0" onClick={() => item.imageUrl && setEnlargedImage(item.imageUrl)}>
-                                        <img src={item.imageUrl || 'https://via.placeholder.com/100?text=Brak'} alt={item.name} className="max-w-full max-h-full object-contain group-hover/img:scale-110 transition-transform duration-300" />
+                                    {/* Miniaturka */}
+                                    <div
+                                        className="w-24 h-full bg-slate-50 flex items-center justify-center border-r border-slate-100 p-2 cursor-zoom-in relative group/img z-10 flex-shrink-0"
+                                        onClick={() => item.imageUrl && setEnlargedImage(item.imageUrl)}
+                                    >
+                                        <img
+                                            src={item.imageUrl || "https://via.placeholder.com/100?text=Brak"}
+                                            alt={item.name}
+                                            className="max-w-full max-h-full object-contain group-hover/img:scale-110 transition-transform duration-300"
+                                        />
                                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center text-white text-xl font-bold">đź”Ť</div>
                                     </div>
 
-                                    {/* Informacje (Prawa strona) */}
+                                    {/* Info */}
                                     <div className="p-3 flex-1 flex flex-col justify-between h-full z-10">
                                         <div>
                                             <h3 className="font-bold text-slate-800 text-[11px] leading-tight line-clamp-2 uppercase" title={item.name}>{item.name}</h3>
-                                            {item.type === "UNIQUE" && <p className="text-[10px] font-black text-blue-600 mt-0.5">NR MAG: {item.inventoryNumber}</p>}
+                                            {item.type === "UNIQUE" && (
+                                                <p className="text-[10px] font-black text-blue-600 mt-0.5">NR MAG: {item.inventoryNumber}</p>
+                                            )}
                                         </div>
-
                                         <div className="flex items-center justify-between mt-auto">
                                             <div className="flex flex-col">
                                                 <span className="text-[8px] font-bold text-slate-400 uppercase leading-none mb-0.5">Na stanie</span>
                                                 <span className="text-xs font-black text-green-600 leading-none">{item.availableQuantity} szt.</span>
                                             </div>
-
                                             {isInCart ? (
                                                 <div className="text-[10px] font-black text-green-700 bg-white border border-green-300 px-3 py-1.5 rounded-lg flex items-center gap-1 shadow-sm">
                                                     <span>âś“</span> W KOSZYKU
                                                 </div>
                                             ) : (
-                                                <button onClick={() => addToCart(item)} className="bg-slate-100 hover:bg-green-600 text-slate-600 hover:text-white border border-slate-200 hover:border-green-600 px-3 py-1.5 rounded-lg text-[10px] font-black transition-all active:scale-95 uppercase shadow-sm">
+                                                <button
+                                                    onClick={() => addToCart(item)}
+                                                    className="bg-slate-100 hover:bg-green-600 text-slate-600 hover:text-white border border-slate-200 hover:border-green-600 px-3 py-1.5 rounded-lg text-[10px] font-black transition-all active:scale-95 uppercase shadow-sm"
+                                                >
                                                     Do koszyka
                                                 </button>
                                             )}
@@ -3754,127 +3870,182 @@ export default function ShopPage() {
                 )}
             </div>
 
-            {/* LIGHTBOX POWIÄKSZENIA ZDJÄCIA */}
+            {/* â”€â”€ Lightbox â”€â”€ */}
             {enlargedImage && (
-                <div className="fixed inset-0 bg-black/90 z-[9999999] flex items-center justify-center p-4 cursor-zoom-out" onClick={() => setEnlargedImage(null)}>
+                <div
+                    className="fixed inset-0 bg-black/90 z-[9999999] flex items-center justify-center p-4 cursor-zoom-out"
+                    onClick={() => setEnlargedImage(null)}
+                >
                     <img src={enlargedImage} className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl border-2 border-white/20" alt="PowiÄ™kszenie" />
                     <button className="absolute top-6 right-6 text-white text-4xl font-bold opacity-70 hover:opacity-100 transition-opacity">&times;</button>
                 </div>
             )}
 
-            {/* âś… MODAL WPISU RÄCZNEGO - edytor pozycji */}
+            {/* â”€â”€ Modal wpisu rÄ™cznego â”€â”€ */}
             {isManualModalOpen && (
                 <ManualEntryModal
                     initialText={manualText}
-                    onSave={(text) => saveManualEntry(text)}
+                    onSave={saveManualEntry}
                     onCancel={() => setIsManualModalOpen(false)}
                 />
             )}
 
-            {/* KOSZYK (Drawer) - pointer-events-none na overlay, ĹĽeby modal byĹ‚ klikalny */}
+            {/* â”€â”€ KOSZYK (Drawer) â”€â”€ */}
             {isCartOpen && (
-                <div
-                    className="fixed inset-0 flex justify-end animate-fade-in"
-                    style={{ zIndex: 99999 }}
-                >
-                    {/* Ciemne tĹ‚o - pointer-events-none gdy modal otwarty */}
+                <div className="fixed inset-0 flex justify-end animate-fade-in" style={{ zIndex: 99999 }}>
                     <div
                         className="absolute inset-0 bg-black/60"
-                        style={{ pointerEvents: isManualModalOpen ? 'none' : 'auto' }}
+                        style={{ pointerEvents: isManualModalOpen ? "none" : "auto" }}
                         onClick={() => !isManualModalOpen && setIsCartOpen(false)}
                     />
+                    <div className="relative bg-white w-full max-w-md h-full shadow-2xl flex flex-col animate-slide-in" style={{ pointerEvents: "auto" }}>
 
-                    {/* Drawer - zawsze klikalny */}
-                    <div className="relative bg-white w-full max-w-md h-full shadow-2xl flex flex-col animate-slide-in" style={{ pointerEvents: 'auto' }}>
+                        {/* NagĹ‚Ăłwek koszyka */}
                         <div className="p-4 border-b flex justify-between items-center bg-slate-50">
-                            <h2 className="text-lg font-black uppercase">Koszyk</h2>
+                            <div>
+                                <h2 className="text-lg font-black uppercase">Koszyk zamĂłwienia</h2>
+                                <p className="text-[10px] text-slate-500 font-medium mt-0.5">
+                                    {user?.firstName} {user?.lastName} Â· {cart.length} poz.
+                                    {draftSaving && <span className="ml-2 text-green-500 italic">ZapisujÄ™...</span>}
+                                    {!draftSaving && cart.length > 0 && <span className="ml-2 text-green-600">đź’ľ Zapisano</span>}
+                                </p>
+                            </div>
                             <button onClick={() => setIsCartOpen(false)} className="text-2xl text-slate-400 hover:text-red-500">&times;</button>
                         </div>
+
+                        {/* WybĂłr budowy */}
                         <div className="p-4 bg-blue-600 text-white shadow-inner">
-                            <label className="text-[10px] font-black uppercase block mb-1">Cel: Budowa</label>
-                            <select value={selectedSiteId} onChange={e => setSelectedSiteId(e.target.value)} className="w-full p-2 rounded-lg bg-white text-slate-800 text-sm font-bold shadow-sm">
-                                <option value="">-- Wybierz budowÄ™ --</option>
-                                {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                            </select>
+                            <label className="text-[10px] font-black uppercase block mb-1">
+                                Cel: Budowa
+                                {sites.length === 1 && <span className="ml-2 font-normal italic">(automatycznie przypisana)</span>}
+                            </label>
+                            {sites.length === 0 ? (
+                                <div className="bg-red-500/30 text-red-100 p-2 rounded-lg text-xs font-bold">
+                                    âš ď¸Ź Nie jesteĹ› przypisany do ĹĽadnej budowy. Skontaktuj siÄ™ z administratorem.
+                                </div>
+                            ) : sites.length === 1 ? (
+                                <div className="w-full p-2 rounded-lg bg-white/20 text-white text-sm font-bold">
+                                    {sites[0].name}
+                                </div>
+                            ) : (
+                                <select
+                                    value={selectedSiteId}
+                                    onChange={e => handleSiteChange(e.target.value)}
+                                    className="w-full p-2 rounded-lg bg-white text-slate-800 text-sm font-bold shadow-sm"
+                                >
+                                    <option value="">-- Wybierz budowÄ™ --</option>
+                                    {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                </select>
+                            )}
                         </div>
+
+                        {/* Lista pozycji */}
                         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
                             <div className="flex justify-between items-center border-b border-slate-200 pb-2 mb-4">
                                 <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Twoje przedmioty</span>
-                                <button onClick={openManualModal} className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm">+ WPIS RÄCZNY</button>
+                                <button
+                                    onClick={openManualModal}
+                                    className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
+                                >
+                                    + WPIS RÄCZNY
+                                </button>
                             </div>
 
                             {cart.length === 0 ? (
                                 <div className="text-center py-20 text-slate-300 font-bold uppercase text-xs italic">Koszyk jest pusty</div>
-                            ) : cart.map(c => (
-                                <div key={c.cartId} className={`border rounded-xl shadow-sm bg-white overflow-hidden ${c.isManual ? 'border-orange-300' : 'border-slate-200'}`}>
-
-                                    {c.isManual ? (
-                                        /* WPIS RÄCZNY - klikalny, otwiera modal */
-                                        <div
-                                            className="cursor-pointer hover:bg-orange-50 transition-colors"
-                                            onClick={openManualModal}
-                                        >
-                                            <div className="flex items-center justify-between px-3 pt-3 pb-2">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-base">đź“ť</span>
-                                                    <div>
-                                                        <p className="text-[10px] font-black text-orange-600 uppercase tracking-tight">MateriaĹ‚y dodatkowe</p>
-                                                        <p className="text-[9px] text-orange-400">
-                                                            {c.name.split("\n").filter(l => l.trim()).length} pozycji Â· kliknij aby edytowaÄ‡
-                                                        </p>
+                            ) : (
+                                cart.map(c => (
+                                    <div key={c.cartId} className={`border rounded-xl shadow-sm bg-white overflow-hidden ${c.isManual ? "border-orange-300" : "border-slate-200"}`}>
+                                        {c.isManual ? (
+                                            <div className="cursor-pointer hover:bg-orange-50 transition-colors" onClick={openManualModal}>
+                                                <div className="flex items-center justify-between px-3 pt-3 pb-2">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-base">đź“ť</span>
+                                                        <div>
+                                                            <p className="text-[10px] font-black text-orange-600 uppercase tracking-tight">MateriaĹ‚y dodatkowe</p>
+                                                            <p className="text-[9px] text-orange-400">
+                                                                {c.name.split("\n").filter(l => l.trim()).length} pozycji Â· kliknij aby edytowaÄ‡
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-[10px] text-orange-500 font-bold bg-orange-100 px-2 py-1 rounded-lg">âśŹď¸Ź Edytuj</span>
+                                                        <button
+                                                            onClick={e => { e.stopPropagation(); removeFromCart(c.cartId); }}
+                                                            className="text-red-400 hover:text-red-600 hover:bg-red-50 w-6 h-6 rounded flex items-center justify-center text-lg font-bold transition"
+                                                        >&times;</button>
                                                     </div>
                                                 </div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-[10px] text-orange-500 font-bold bg-orange-100 px-2 py-1 rounded-lg">âśŹď¸Ź Edytuj</span>
-                                                    <button
-                                                        onClick={e => { e.stopPropagation(); removeFromCart(c.cartId); }}
-                                                        className="text-red-400 hover:text-red-600 hover:bg-red-50 w-6 h-6 rounded flex items-center justify-center text-lg font-bold transition"
-                                                    >&times;</button>
-                                                </div>
-                                            </div>
-                                            {/* PodglÄ…d pozycji - max 3 */}
-                                            <div className="px-3 pb-3 space-y-1">
-                                                {c.name.split("\n").filter(l => l.trim()).slice(0, 3).map((line, i) => (
-                                                    <div key={i} className="flex items-start gap-2">
-                                                        <span className="text-[9px] font-black text-orange-400 bg-orange-100 rounded px-1 flex-shrink-0 mt-0.5">{i + 1}</span>
-                                                        <p className="text-[11px] text-slate-700 leading-snug line-clamp-1">{line}</p>
-                                                    </div>
-                                                ))}
-                                                {c.name.split("\n").filter(l => l.trim()).length > 3 && (
-                                                    <div className="flex items-center gap-2 pt-1">
+                                                <div className="px-3 pb-3 space-y-1">
+                                                    {c.name.split("\n").filter(l => l.trim()).slice(0, 3).map((line, i) => (
+                                                        <div key={i} className="flex items-start gap-2">
+                                                            <span className="text-[9px] font-black text-orange-400 bg-orange-100 rounded px-1 flex-shrink-0 mt-0.5">{i + 1}</span>
+                                                            <p className="text-[11px] text-slate-700 leading-snug line-clamp-1">{line}</p>
+                                                        </div>
+                                                    ))}
+                                                    {c.name.split("\n").filter(l => l.trim()).length > 3 && (
                                                         <span className="text-[9px] font-black text-orange-300 bg-orange-50 border border-orange-200 border-dashed rounded px-2 py-0.5">
                                                             + {c.name.split("\n").filter(l => l.trim()).length - 3} wiÄ™cej pozycji â€” kliknij aby zobaczyÄ‡
                                                         </span>
-                                                    </div>
-                                                )}
+                                                    )}
+                                                </div>
                                             </div>
-                                        </div>
-                                    ) : (
-                                        /* PRODUKT Z KATALOGU */
-                                        <div className="flex items-center gap-3 p-3">
-                                            <img src={c.imageUrl || 'https://via.placeholder.com/40'} className="w-10 h-10 rounded-lg object-cover border flex-shrink-0" />
-                                            <div className="flex-1 min-w-0">
-                                                <p className="font-bold truncate text-xs uppercase leading-tight">{c.name}</p>
-                                                <p className="text-[9px] text-blue-500 font-bold mt-0.5">NR: {c.inventoryNumber || "-"}</p>
+                                        ) : (
+                                            <div className="flex items-center gap-3 p-3">
+                                                <img
+                                                    src={c.imageUrl || "https://via.placeholder.com/40"}
+                                                    className="w-10 h-10 rounded-lg object-cover border flex-shrink-0"
+                                                    alt=""
+                                                />
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="font-bold truncate text-xs uppercase leading-tight">{c.name}</p>
+                                                    <p className="text-[9px] text-blue-500 font-bold mt-0.5">NR: {c.inventoryNumber || "-"}</p>
+                                                </div>
+                                                <div className="flex items-center gap-2 flex-shrink-0">
+                                                    {c.type === "BULK" ? (
+                                                        <input
+                                                            type="number"
+                                                            min="1"
+                                                            max={c.maxQty || 9999}
+                                                            value={c.quantity}
+                                                            onChange={e => updateQty(c.cartId, Number(e.target.value))}
+                                                            className="w-12 p-1 border rounded text-center text-xs font-bold outline-none focus:border-blue-500"
+                                                        />
+                                                    ) : (
+                                                        <span className="font-black text-xs bg-slate-100 px-3 py-2 rounded-xl border">1</span>
+                                                    )}
+                                                    <button
+                                                        onClick={() => removeFromCart(c.cartId)}
+                                                        className="text-red-500 bg-red-50 hover:bg-red-500 hover:text-white transition-colors w-7 h-7 rounded flex items-center justify-center font-bold text-lg leading-none"
+                                                    >&times;</button>
+                                                </div>
                                             </div>
-                                            <div className="flex items-center gap-2 flex-shrink-0">
-                                                {c.type === "BULK" ? (
-                                                    <input type="number" min="1" max={c.maxQty || 9999} value={c.quantity} onChange={(e) => updateQty(c.cartId, Number(e.target.value))} className="w-12 p-1 border rounded text-center text-xs font-bold outline-none focus:border-blue-500" />
-                                                ) : (
-                                                    <span className="font-black text-xs bg-slate-100 px-3 py-2 rounded-xl border">1</span>
-                                                )}
-                                                <button onClick={() => removeFromCart(c.cartId)} className="text-red-500 bg-red-50 hover:bg-red-500 hover:text-white transition-colors w-7 h-7 rounded flex items-center justify-center font-bold text-lg leading-none">&times;</button>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            ))}
+                                        )}
+                                    </div>
+                                ))
+                            )}
                         </div>
+
+                        {/* Stopka koszyka */}
                         <div className="p-4 border-t border-slate-200 bg-white">
-                            <textarea value={orderNotes} onChange={e => setOrderNotes(e.target.value)} placeholder="Uwagi do zamĂłwienia..." className="w-full p-3 border border-slate-200 rounded-xl text-xs h-20 outline-none focus:border-blue-500 mb-4 bg-slate-50" />
-                            <button onClick={handleSubmitOrder} disabled={isSubmitting || cart.length === 0} className="w-full py-4 bg-green-600 hover:bg-green-700 text-white font-black rounded-2xl shadow-lg disabled:opacity-50 transition-all uppercase tracking-widest text-sm">
-                                {isSubmitting ? "WysyĹ‚anie..." : "WyĹ›lij zamĂłwienie"}
+                            <textarea
+                                value={orderNotes}
+                                onChange={e => handleNotesChange(e.target.value)}
+                                placeholder="Uwagi do zamĂłwienia (pilnoĹ›Ä‡, szczegĂłĹ‚y dostawy...)..."
+                                className="w-full p-3 border border-slate-200 rounded-xl text-xs h-20 outline-none focus:border-blue-500 mb-4 bg-slate-50 resize-none"
+                            />
+                            <button
+                                onClick={handleSubmitOrder}
+                                disabled={isSubmitting || cart.length === 0 || !selectedSiteId}
+                                className="w-full py-4 bg-green-600 hover:bg-green-700 text-white font-black rounded-2xl shadow-lg disabled:opacity-50 transition-all uppercase tracking-widest text-sm"
+                            >
+                                {isSubmitting ? "WysyĹ‚anie..." : `WyĹ›lij zamĂłwienie (${cart.length} poz.)`}
                             </button>
+                            {!selectedSiteId && cart.length > 0 && (
+                                <p className="text-center text-xs text-red-500 mt-2 font-bold">
+                                    âš ď¸Ź Wybierz budowÄ™ przed wysĹ‚aniem
+                                </p>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -4353,13 +4524,290 @@ export async function POST(req: Request) {
 import { NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/admin';
 import nodemailer from 'nodemailer';
+import { PDFDocument, rgb } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 
+// â”€â”€â”€ TYPY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+interface OrderItem {
+    name: string;
+    inventoryNumber?: string;
+    quantity: number;
+    section: 'NARZÄDZIA' | 'RUSZTOWANIA' | 'MATERIAĹY DODATKOWE';
+}
+
+interface OrderPayload {
+    orderId: string;
+    siteId: string;
+    siteName: string;
+    user: { uid: string; firstName: string; lastName: string; email?: string };
+    cart: OrderItem[];
+    sections: {
+        narzedzia: OrderItem[];
+        rusztowania: OrderItem[];
+        materialyDodatkowe: OrderItem[];
+    };
+    notes: string;
+}
+
+// â”€â”€â”€ HELPER: zamiana polskich znakĂłw na ASCII (fallback) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function toAscii(text: string): string {
+    return text
+        .replace(/Ä…/g, 'a').replace(/Ä„/g, 'A')
+        .replace(/Ä‡/g, 'c').replace(/Ä†/g, 'C')
+        .replace(/Ä™/g, 'e').replace(/Ä/g, 'E')
+        .replace(/Ĺ‚/g, 'l').replace(/Ĺ/g, 'L')
+        .replace(/Ĺ„/g, 'n').replace(/Ĺ/g, 'N')
+        .replace(/Ăł/g, 'o').replace(/Ă“/g, 'O')
+        .replace(/Ĺ›/g, 's').replace(/Ĺš/g, 'S')
+        .replace(/Ĺş/g, 'z').replace(/Ĺą/g, 'Z')
+        .replace(/ĹĽ/g, 'z').replace(/Ĺ»/g, 'Z');
+}
+
+// â”€â”€â”€ GENERATOR PDF â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async function generateOrderPdf(payload: OrderPayload): Promise<Uint8Array> {
+    const { orderId, siteName, user, sections, notes } = payload;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('pl-PL', {
+        year: 'numeric', month: 'long', day: 'numeric',
+    });
+    const timeStr = now.toLocaleTimeString('pl-PL', {
+        hour: '2-digit', minute: '2-digit',
+    });
+
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.registerFontkit(fontkit);
+
+    // Ĺadowanie czcionek Roboto obsĹ‚ugujÄ…cych polskie znaki
+    const [fontBytes, fontBoldBytes] = await Promise.all([
+        fetch('https://fonts.gstatic.com/s/roboto/v32/KFOmCnqEu92Fr1Me5WZLCzYlKw.ttf').then(r => r.arrayBuffer()),
+        fetch('https://fonts.gstatic.com/s/roboto/v32/KFOlCnqEu92Fr1MmWUlvAx05IsDqlA.ttf').then(r => r.arrayBuffer()),
+    ]);
+
+    const fontRegular = await pdfDoc.embedFont(fontBytes);
+    const fontBold = await pdfDoc.embedFont(fontBoldBytes);
+
+    const page = pdfDoc.addPage([595, 842]); // A4
+    const { width, height } = page.getSize();
+
+    // Kolory
+    const colorBlue = rgb(0.145, 0.388, 0.922);
+    const colorSlate = rgb(0.243, 0.298, 0.369);
+    const colorLight = rgb(0.949, 0.953, 0.961);
+    const colorDark = rgb(0.118, 0.145, 0.18);
+    const colorMuted = rgb(0.561, 0.612, 0.659);
+    const colorOrange = rgb(0.851, 0.533, 0.098);
+
+    const margin = 48;
+    let y = height - margin;
+
+    // â”€â”€ NagĹ‚Ăłwek (pasek niebieski) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    page.drawRectangle({ x: 0, y: height - 80, width, height: 80, color: colorBlue });
+
+    page.drawText('PESAM', {
+        x: margin, y: height - 48,
+        size: 26, font: fontBold, color: rgb(1, 1, 1),
+    });
+    page.drawText('System Zarzadzania Magazynem', {
+        x: margin, y: height - 68,
+        size: 9, font: fontRegular, color: rgb(0.8, 0.88, 1),
+    });
+
+    // Numer zamĂłwienia (prawy gĂłrny rĂłg)
+    const orderLabel = `Nr: ${orderId}`;
+    const orderLabelWidth = fontBold.widthOfTextAtSize(orderLabel, 10);
+    page.drawText(orderLabel, {
+        x: width - margin - orderLabelWidth,
+        y: height - 42,
+        size: 10, font: fontBold, color: rgb(1, 1, 1),
+    });
+    const dateLabel = `${dateStr}  ${timeStr}`;
+    const dateLabelWidth = fontRegular.widthOfTextAtSize(dateLabel, 8);
+    page.drawText(dateLabel, {
+        x: width - margin - dateLabelWidth,
+        y: height - 58,
+        size: 8, font: fontRegular, color: rgb(0.8, 0.88, 1),
+    });
+
+    y = height - 100;
+
+    // â”€â”€ TytuĹ‚ dokumentu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    page.drawText('DOKUMENT ZAMOWIENIA', {
+        x: margin, y,
+        size: 16, font: fontBold, color: colorDark,
+    });
+    y -= 28;
+
+    // â”€â”€ Blok informacyjny (2 kolumny) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const infoBoxH = 68;
+    page.drawRectangle({ x: margin, y: y - infoBoxH, width: width - 2 * margin, height: infoBoxH, color: colorLight });
+
+    const col1x = margin + 16;
+    const col2x = margin + (width - 2 * margin) / 2 + 8;
+    let iy = y - 20;
+
+    const drawInfoRow = (label: string, value: string, cx: number, cy: number) => {
+        page.drawText(label, { x: cx, y: cy, size: 7.5, font: fontRegular, color: colorMuted });
+        page.drawText(toAscii(value || 'â€”'), { x: cx, y: cy - 13, size: 9.5, font: fontBold, color: colorDark });
+    };
+
+    drawInfoRow('Zamawiajacy:', `${user.firstName} ${user.lastName}`, col1x, iy);
+    drawInfoRow('Budowa docelowa:', siteName, col2x, iy);
+    iy -= 32;
+    drawInfoRow('Data zlozenia:', `${dateStr}, godz. ${timeStr}`, col1x, iy);
+    drawInfoRow('Nr zamowienia:', orderId, col2x, iy);
+
+    y -= infoBoxH + 18;
+
+    // â”€â”€ Pomocnicze funkcje tabeli â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const TABLE_LEFT = margin;
+    const TABLE_WIDTH = width - 2 * margin;
+    const COL_LP = 28;
+    const COL_INV = 70;
+    const COL_QTY = 46;
+    const COL_NAME = TABLE_WIDTH - COL_LP - COL_INV - COL_QTY;
+    const ROW_H = 20;
+    const HEADER_H = 22;
+
+    const drawSectionHeader = (title: string, color: typeof colorBlue) => {
+        page.drawRectangle({ x: TABLE_LEFT, y: y - 22, width: TABLE_WIDTH, height: 22, color });
+        page.drawText(toAscii(title), {
+            x: TABLE_LEFT + 10, y: y - 15,
+            size: 9, font: fontBold, color: rgb(1, 1, 1),
+        });
+        y -= 22;
+    };
+
+    const drawTableHeader = () => {
+        page.drawRectangle({ x: TABLE_LEFT, y: y - HEADER_H, width: TABLE_WIDTH, height: HEADER_H, color: colorSlate });
+        const headers = [
+            { text: 'Lp.', x: TABLE_LEFT + 6 },
+            { text: 'Nazwa przedmiotu', x: TABLE_LEFT + COL_LP + 6 },
+            { text: 'Nr Mag.', x: TABLE_LEFT + COL_LP + COL_NAME + 6 },
+            { text: 'Ilosc', x: TABLE_LEFT + COL_LP + COL_NAME + COL_INV + 4 },
+        ];
+        headers.forEach(h => {
+            page.drawText(h.text, { x: h.x, y: y - 15, size: 7.5, font: fontBold, color: rgb(1, 1, 1) });
+        });
+        y -= HEADER_H;
+    };
+
+    const drawTableRow = (lp: number, item: OrderItem, shade: boolean) => {
+        if (shade) {
+            page.drawRectangle({ x: TABLE_LEFT, y: y - ROW_H, width: TABLE_WIDTH, height: ROW_H, color: rgb(0.972, 0.976, 0.984) });
+        }
+        page.drawLine({ start: { x: TABLE_LEFT, y: y - ROW_H }, end: { x: TABLE_LEFT + TABLE_WIDTH, y: y - ROW_H }, thickness: 0.5, color: rgb(0.88, 0.90, 0.92) });
+
+        const nameMaxChars = 52;
+        const rawName = item.name.length > nameMaxChars ? item.name.slice(0, nameMaxChars) + '...' : item.name;
+
+        page.drawText(`${lp}.`, { x: TABLE_LEFT + 6, y: y - 14, size: 8, font: fontRegular, color: colorSlate });
+        page.drawText(toAscii(rawName), { x: TABLE_LEFT + COL_LP + 6, y: y - 14, size: 8, font: fontRegular, color: colorDark });
+        page.drawText(item.inventoryNumber || 'â€”', { x: TABLE_LEFT + COL_LP + COL_NAME + 6, y: y - 14, size: 8, font: fontRegular, color: colorSlate });
+        page.drawText(`${item.quantity} szt.`, { x: TABLE_LEFT + COL_LP + COL_NAME + COL_INV + 4, y: y - 14, size: 8, font: fontBold, color: colorDark });
+
+        y -= ROW_H;
+    };
+
+    const drawColumnLines = (startY: number, endY: number) => {
+        [COL_LP, COL_LP + COL_NAME, COL_LP + COL_NAME + COL_INV].forEach(cx => {
+            page.drawLine({
+                start: { x: TABLE_LEFT + cx, y: startY },
+                end: { x: TABLE_LEFT + cx, y: endY },
+                thickness: 0.5, color: rgb(0.82, 0.85, 0.88),
+            });
+        });
+        page.drawRectangle({ x: TABLE_LEFT, y: endY, width: TABLE_WIDTH, height: startY - endY, borderColor: rgb(0.75, 0.78, 0.82), borderWidth: 0.8 });
+    };
+
+    // â”€â”€ SEKCJA: NARZÄDZIA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (sections.narzedzia.length > 0) {
+        drawSectionHeader('NARZEDZIA I SPRZET', colorBlue);
+        const sectionStartY = y;
+        drawTableHeader();
+        sections.narzedzia.forEach((item, i) => drawTableRow(i + 1, item, i % 2 === 1));
+        drawColumnLines(sectionStartY, y);
+        y -= 14;
+    }
+
+    // â”€â”€ SEKCJA: RUSZTOWANIA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (sections.rusztowania.length > 0) {
+        drawSectionHeader('RUSZTOWANIA', colorSlate);
+        const sectionStartY = y;
+        drawTableHeader();
+        sections.rusztowania.forEach((item, i) => drawTableRow(i + 1, item, i % 2 === 1));
+        drawColumnLines(sectionStartY, y);
+        y -= 14;
+    }
+
+    // â”€â”€ SEKCJA: MATERIAĹY DODATKOWE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (sections.materialyDodatkowe.length > 0) {
+        drawSectionHeader('MATERIALY DODATKOWE', colorOrange);
+        const sectionStartY = y;
+        drawTableHeader();
+        sections.materialyDodatkowe.forEach((item, i) => drawTableRow(i + 1, item, i % 2 === 1));
+        drawColumnLines(sectionStartY, y);
+        y -= 14;
+    }
+
+    // â”€â”€ Uwagi â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (notes?.trim()) {
+        y -= 6;
+        page.drawRectangle({ x: TABLE_LEFT, y: y - 46, width: TABLE_WIDTH, height: 46, color: rgb(1, 0.98, 0.93) });
+        page.drawRectangle({ x: TABLE_LEFT, y: y - 46, width: 4, height: 46, color: colorOrange });
+        page.drawText('UWAGI DO ZAMOWIENIA:', { x: TABLE_LEFT + 12, y: y - 14, size: 7.5, font: fontBold, color: colorOrange });
+
+        const words = toAscii(notes).split(' ');
+        let line = '';
+        let lineY = y - 26;
+        const maxWidth = TABLE_WIDTH - 24;
+        for (const word of words) {
+            const test = line ? `${line} ${word}` : word;
+            if (fontRegular.widthOfTextAtSize(test, 8.5) > maxWidth) {
+                page.drawText(line, { x: TABLE_LEFT + 12, y: lineY, size: 8.5, font: fontRegular, color: colorDark });
+                line = word;
+                lineY -= 12;
+            } else {
+                line = test;
+            }
+        }
+        if (line) {
+            page.drawText(line, { x: TABLE_LEFT + 12, y: lineY, size: 8.5, font: fontRegular, color: colorDark });
+        }
+        y -= 60;
+    }
+
+    // â”€â”€ Podpisy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const signY = Math.min(y - 30, 160);
+    const signW = (TABLE_WIDTH - 24) / 2;
+
+    const drawSignBox = (label: string, name: string, sx: number) => {
+        page.drawLine({ start: { x: sx, y: signY }, end: { x: sx + signW, y: signY }, thickness: 0.8, color: colorSlate });
+        page.drawText(label, { x: sx, y: signY - 12, size: 7.5, font: fontRegular, color: colorMuted });
+        page.drawText(toAscii(name), { x: sx, y: signY - 24, size: 8.5, font: fontBold, color: colorDark });
+    };
+
+    drawSignBox('Zamowil:', `${user.firstName} ${user.lastName}`, TABLE_LEFT);
+    drawSignBox('Potwierdzil (Magazyn):', '...................................', TABLE_LEFT + signW + 24);
+
+    // â”€â”€ Stopka â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    page.drawRectangle({ x: 0, y: 0, width, height: 28, color: colorLight });
+    page.drawText('Wygenerowano automatycznie przez System PESAM  â€˘  Dokument nie wymaga podpisu elektronicznego', {
+        x: margin, y: 10, size: 6.5, font: fontRegular, color: colorMuted,
+    });
+    const pageNum = `Str. 1`;
+    const pageNumW = fontRegular.widthOfTextAtSize(pageNum, 6.5);
+    page.drawText(pageNum, { x: width - margin - pageNumW, y: 10, size: 6.5, font: fontRegular, color: colorMuted });
+
+    return pdfDoc.save();
+}
+
+// â”€â”€â”€ HANDLER POST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function POST(req: Request) {
     try {
-        const body = await req.json();
-        const { orderId, siteId, siteName, user, cart, notes } = body;
+        const body: OrderPayload = await req.json();
+        const { orderId, siteId, siteName, user, cart, notes, sections } = body;
 
-        // 1. Zapisanie zamĂłwienia do Firestore (przez Admin SDK)
+        // 1. Zapis zamĂłwienia do Firestore (Admin SDK)
         const orderRef = adminDb.collection('orders').doc(orderId);
         await orderRef.set({
             orderId,
@@ -4367,80 +4815,142 @@ export async function POST(req: Request) {
             siteName,
             orderedBy: user.uid,
             orderedByName: `${user.firstName} ${user.lastName}`,
-            status: "NOWE", // NOWE, W_REALIZACJI, ZAKONCZONE
-            notes: notes || "",
+            status: 'NOWE',
+            notes: notes || '',
             createdAt: new Date().toISOString(),
-            items: cart
+            items: cart,
         });
 
-        // 2. Konfiguracja wysyĹ‚ki E-mail (Nodemailer)
-        // Wymaga utworzenia "HasĹ‚a Aplikacji" w ustawieniach konta Google
+        // 2. UsuĹ„ draft koszyka (zamĂłwienie zĹ‚oĹĽone)
+        try {
+            await adminDb.collection('cartDrafts').doc(user.uid).delete();
+        } catch (_) {
+            // draft mĂłgĹ‚ nie istnieÄ‡
+        }
+
+        // 3. Generowanie PDF
+        const pdfBytes = await generateOrderPdf(body);
+        const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
+
+        // 4. Konfiguracja Nodemailer
         const transporter = nodemailer.createTransport({
             service: 'gmail',
             auth: {
-                user: process.env.EMAIL_USER, // Np. TwojMail@gmail.com
-                pass: process.env.EMAIL_PASS, // HasĹ‚o Aplikacji wygenerowane w Google
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
             },
         });
 
-        // 3. Generowanie "Dokumentu" jako eleganckiego e-maila HTML
-        const itemsHtml = cart.map((item: any, index: number) => `
-            <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd;">${index + 1}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd;">
-                    <strong>${item.name}</strong> 
-                    ${item.isManual ? '<span style="color: #d97706; font-size: 10px;">(Wpis rÄ™czny)</span>' : ''}
-                </td>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd; text-align: center;">
-                    ${item.inventoryNumber || '-'}
-                </td>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd; text-align: center; font-weight: bold;">
-                    ${item.quantity}
-                </td>
+        // 5. TreĹ›Ä‡ HTML e-maila (wspĂłlna)
+        const totalItems = cart.length;
+        const sectionsSummary = [
+            sections.narzedzia.length ? `${sections.narzedzia.length} narzÄ™dzi/a` : '',
+            sections.rusztowania.length ? `${sections.rusztowania.length} pozycji rusztowaĹ„` : '',
+            sections.materialyDodatkowe.length ? `${sections.materialyDodatkowe.length} mat. dodatkowych` : '',
+        ].filter(Boolean).join(' Â· ');
+
+        const allItemsHtml = cart.map((item, i) => `
+            <tr style="background:${i % 2 === 0 ? '#fff' : '#f8fafc'}">
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:12px">${i + 1}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-weight:600;font-size:12px">${item.name}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#3b82f6;font-family:monospace;font-size:11px">${item.inventoryNumber || 'â€”'}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-weight:700;font-size:12px">${item.quantity}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:10px;color:#94a3b8">${item.section}</td>
             </tr>
         `).join('');
 
-        const mailOptions = {
-            from: `"PESAM System" <${process.env.EMAIL_USER}>`,
-            to: process.env.EMAIL_WAREHOUSE || process.env.EMAIL_USER, // Mail magazynu
-            subject: `đź”Ą Nowe zamĂłwienie [${siteName}] - ${orderId}`,
-            html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                    <div style="background-color: #2563eb; padding: 20px; color: white; text-align: center;">
-                        <h2 style="margin: 0;">Dokument ZamĂłwienia</h2>
-                        <p style="margin: 5px 0 0 0; opacity: 0.8;">Nr: ${orderId}</p>
+        const emailHtml = (recipientLabel: string) => `
+        <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:680px;margin:0 auto;background:#f1f5f9">
+            <div style="background:#2563eb;padding:28px 36px;border-radius:12px 12px 0 0">
+                <h1 style="color:#fff;margin:0;font-size:22px;font-weight:900;letter-spacing:-0.5px">PESAM</h1>
+                <p style="color:#bfdbfe;margin:4px 0 0;font-size:12px">System ZarzÄ…dzania Magazynem</p>
+            </div>
+            <div style="background:#fff;padding:28px 36px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;padding-bottom:20px;border-bottom:2px solid #e2e8f0">
+                    <div>
+                        <h2 style="margin:0 0 4px;color:#1e293b;font-size:18px">đź“¦ Nowe zamĂłwienie</h2>
+                        <p style="margin:0;color:#64748b;font-size:13px">${recipientLabel}</p>
                     </div>
-                    <div style="padding: 20px;">
-                        <p><strong>Budowa:</strong> ${siteName}</p>
-                        <p><strong>ZamawiajÄ…cy:</strong> ${user.firstName} ${user.lastName}</p>
-                        <p><strong>Data:</strong> ${new Date().toLocaleString('pl-PL')}</p>
-                        ${notes ? `<div style="background: #fffbeb; padding: 10px; border-left: 4px solid #f59e0b; margin-bottom: 20px;"><strong>Uwagi:</strong> ${notes}</div>` : ''}
-                        
-                        <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
-                            <thead style="background-color: #f8fafc; text-align: left;">
-                                <tr>
-                                    <th style="padding: 10px; border-bottom: 2px solid #ddd;">Lp</th>
-                                    <th style="padding: 10px; border-bottom: 2px solid #ddd;">Nazwa</th>
-                                    <th style="padding: 10px; border-bottom: 2px solid #ddd; text-align: center;">Nr Mag</th>
-                                    <th style="padding: 10px; border-bottom: 2px solid #ddd; text-align: center;">IloĹ›Ä‡</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${itemsHtml}
-                            </tbody>
-                        </table>
+                    <div style="background:#eff6ff;padding:10px 16px;border-radius:8px;text-align:right">
+                        <p style="margin:0;font-size:10px;color:#3b82f6;font-weight:700;text-transform:uppercase">Nr zamĂłwienia</p>
+                        <p style="margin:4px 0 0;font-size:15px;font-weight:900;color:#1e40af">${orderId}</p>
                     </div>
                 </div>
-            `,
-        };
+                <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
+                    <tr>
+                        <td style="padding:8px 0;width:50%">
+                            <p style="margin:0;font-size:10px;color:#94a3b8;text-transform:uppercase;font-weight:700">ZamawiajÄ…cy</p>
+                            <p style="margin:4px 0 0;font-size:14px;font-weight:700;color:#1e293b">${user.firstName} ${user.lastName}</p>
+                        </td>
+                        <td style="padding:8px 0">
+                            <p style="margin:0;font-size:10px;color:#94a3b8;text-transform:uppercase;font-weight:700">Budowa docelowa</p>
+                            <p style="margin:4px 0 0;font-size:14px;font-weight:700;color:#1e293b">${siteName}</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding:8px 0" colspan="2">
+                            <p style="margin:0;font-size:10px;color:#94a3b8;text-transform:uppercase;font-weight:700">Pozycje</p>
+                            <p style="margin:4px 0 0;font-size:13px;color:#475569">${totalItems} pozycji Ĺ‚Ä…cznie: ${sectionsSummary}</p>
+                        </td>
+                    </tr>
+                </table>
+                ${notes ? `<div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:12px 16px;border-radius:0 8px 8px 0;margin-bottom:20px"><p style="margin:0 0 4px;font-size:10px;font-weight:700;color:#d97706;text-transform:uppercase">Uwagi</p><p style="margin:0;font-size:13px;color:#92400e">${notes}</p></div>` : ''}
+                <table style="width:100%;border-collapse:collapse;border-radius:8px;overflow:hidden">
+                    <thead>
+                        <tr style="background:#1e293b">
+                            <th style="padding:10px 12px;color:#fff;text-align:left;font-size:11px;font-weight:700">Lp.</th>
+                            <th style="padding:10px 12px;color:#fff;text-align:left;font-size:11px;font-weight:700">Nazwa</th>
+                            <th style="padding:10px 12px;color:#fff;text-align:left;font-size:11px;font-weight:700">Nr Mag.</th>
+                            <th style="padding:10px 12px;color:#fff;text-align:center;font-size:11px;font-weight:700">IloĹ›Ä‡</th>
+                            <th style="padding:10px 12px;color:#fff;text-align:left;font-size:11px;font-weight:700">Sekcja</th>
+                        </tr>
+                    </thead>
+                    <tbody>${allItemsHtml}</tbody>
+                </table>
+            </div>
+            <div style="background:#f8fafc;padding:16px 36px;border-radius:0 0 12px 12px;text-align:center">
+                <p style="margin:0;font-size:11px;color:#94a3b8">WiadomoĹ›Ä‡ wygenerowana automatycznie przez system PESAM Â· ${new Date().toLocaleString('pl-PL')}</p>
+            </div>
+        </div>`;
 
-        // WysyĹ‚anie e-maila
-        await transporter.sendMail(mailOptions);
+        // 6. WysyĹ‚ka do MAGAZYNU
+        await transporter.sendMail({
+            from: `"PESAM System" <${process.env.EMAIL_USER}>`,
+            to: process.env.EMAIL_WAREHOUSE || process.env.EMAIL_USER,
+            subject: `đź“¦ Nowe zamĂłwienie [${siteName}] Â· ${orderId}`,
+            html: emailHtml('WiadomoĹ›Ä‡ do: Magazyn PESAM'),
+            attachments: [{
+                filename: `zamowienie_${orderId}.pdf`,
+                content: pdfBase64,
+                encoding: 'base64',
+                contentType: 'application/pdf',
+            }],
+        });
 
-        return NextResponse.json({ success: true, message: "ZamĂłwienie zapisane i wysĹ‚ane!" });
+        // 7. Kopia do KIEROWNIKA (jeĹ›li ma e-mail)
+        if (user.email && user.email !== process.env.EMAIL_WAREHOUSE) {
+            await transporter.sendMail({
+                from: `"PESAM System" <${process.env.EMAIL_USER}>`,
+                to: user.email,
+                subject: `âś… Twoje zamĂłwienie zostaĹ‚o zĹ‚oĹĽone Â· ${orderId}`,
+                html: emailHtml(`Kopia dla: ${user.firstName} ${user.lastName}`),
+                attachments: [{
+                    filename: `zamowienie_${orderId}.pdf`,
+                    content: pdfBase64,
+                    encoding: 'base64',
+                    contentType: 'application/pdf',
+                }],
+            });
+        }
+
+        return NextResponse.json({
+            success: true,
+            message: 'ZamĂłwienie zapisane, PDF wygenerowany i e-maile wysĹ‚ane!',
+            orderId,
+        });
 
     } catch (error: any) {
-        console.error("BĹ‚Ä…d API Orders:", error);
+        console.error('BĹ‚Ä…d API Orders:', error);
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 }
