@@ -20,7 +20,7 @@ export async function POST(req: Request) {
         });
 
         const model = vertexAI.getGenerativeModel({
-            model: 'gemini-1.5-flash',
+            model: 'gemini-2.5-pro',
             systemInstruction: {
                 role: 'system',
                 parts: [{

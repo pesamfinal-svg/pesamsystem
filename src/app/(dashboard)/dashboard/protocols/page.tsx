@@ -334,6 +334,11 @@ export default function ProtocolsHub() {
         setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
+
+                // ═══════════════════════════════════════════════════════════════
+                // FAZA 1: WSZYSTKIE ODCZYTY (reads muszą być przed writes!)
+                // ═══════════════════════════════════════════════════════════════
+
                 const protocolRef = doc(db, "protocols", selectedProtocol.dbId);
                 const protocolDoc = await transaction.get(protocolRef);
 
@@ -341,17 +346,31 @@ export default function ProtocolsHub() {
                     throw "Ten protokół został już przetworzony lub nie istnieje.";
                 }
 
+                // Pobieramy wszystkie dokumenty inventory na raz
+                const itemDocs: Record<string, any> = {};
+                for (const item of selectedProtocol.items) {
+                    if (!item.inventoryId) continue;
+                    const itemRef = doc(db, "inventory", item.inventoryId);
+                    const itemDoc = await transaction.get(itemRef);
+                    itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
+                }
+
+                // ═══════════════════════════════════════════════════════════════
+                // FAZA 2: WSZYSTKIE ZAPISY (writes po reads)
+                // ═══════════════════════════════════════════════════════════════
+
                 const updatedItemsForProtocol = [];
 
                 for (const item of selectedProtocol.items) {
-                    const itemRef = doc(db, "inventory", item.inventoryId);
-                    const itemDoc = await transaction.get(itemRef);
+                    if (!item.inventoryId) continue;
+
+                    const { ref: itemRef, doc: itemDoc } = itemDocs[item.inventoryId];
                     if (!itemDoc.exists()) continue;
 
                     const itemData = itemDoc.data();
                     const workerInput = acceptInputs[item.inventoryId];
 
-                    // TWORZENIE ZALEGŁOŚCI OSPRZĘTU (Bazując na ostatecznej weryfikacji MAGAZYNIERA)
+                    // TWORZENIE ZALEGŁOŚCI OSPRZĘTU
                     let missingAccessoriesNote = "";
                     const finalizedAccessories = [];
 
@@ -359,13 +378,9 @@ export default function ProtocolsHub() {
                         const missing = [];
                         for (let idx = 0; idx < item.accessories.length; idx++) {
                             const acc = item.accessories[idx];
-                            const isVerifiedReturning = workerInput.verifiedAccessories[idx]; // Weryfikacja
-
+                            const isVerifiedReturning = workerInput.verifiedAccessories[idx];
                             finalizedAccessories.push({ ...acc, verifiedReturning: isVerifiedReturning });
-
-                            if (!isVerifiedReturning) {
-                                missing.push(acc);
-                            }
+                            if (!isVerifiedReturning) missing.push(acc);
                         }
 
                         if (missing.length > 0) {
@@ -381,16 +396,14 @@ export default function ProtocolsHub() {
                                     availableQuantity: 0,
                                     totalQuantity: mAcc.quantity || 1,
                                     status: "sprawne",
-                                    allocations: {
-                                        [selectedProtocol.sourceId]: mAcc.quantity || 1
-                                    },
+                                    allocations: { [selectedProtocol.sourceId]: mAcc.quantity || 1 },
                                     createdAt: new Date().toISOString()
                                 });
                             }
                         }
                     }
 
-                    // TWORZENIE SPRAWY W CENTRUM LIKWIDACJI SZKÓD (SĄD)
+                    // TWORZENIE SPRAWY W CENTRUM LIKWIDACJI SZKÓD
                     if (itemData.type === "UNIQUE" && workerInput.finalStatus === "uszkodzone" && workerInput.createClaim) {
                         const claimRef = doc(collection(db, "claims"));
                         transaction.set(claimRef, {
@@ -409,6 +422,7 @@ export default function ProtocolsHub() {
                         });
                     }
 
+                    // AKTUALIZACJA STANU MAGAZYNOWEGO
                     if (itemData.type === "BULK") {
                         const currentAllocations = itemData.allocations || {};
                         const currentSiteQty = currentAllocations[selectedProtocol.sourceId] || 0;
@@ -429,9 +443,11 @@ export default function ProtocolsHub() {
 
                         const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
                         transaction.set(historyRef, {
-                            date: new Date().toISOString(), type: "ZWROT",
+                            date: new Date().toISOString(),
+                            type: "ZWROT",
                             description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${workerInput.createClaim ? ' [Zgłoszono do Centrum Likwidacji Szkód]' : ''}`,
-                            status: workerInput.finalStatus, user: `${user?.firstName} ${user?.lastName}`
+                            status: workerInput.finalStatus,
+                            user: `${user?.firstName} ${user?.lastName}`
                         });
                     }
 
@@ -440,10 +456,11 @@ export default function ProtocolsHub() {
                         receivedQty: workerInput.receivedQty,
                         finalStatus: workerInput.finalStatus,
                         warehouseNotes: workerInput.notes + missingAccessoriesNote,
-                        accessories: finalizedAccessories // Podmieniamy na to co faktycznie zatwierdził magazyn
+                        accessories: finalizedAccessories
                     });
                 }
 
+                // AKTUALIZACJA PROTOKOŁU
                 transaction.update(protocolRef, {
                     status: "ZAAKCEPTOWANY",
                     acceptedBy: user?.uid,

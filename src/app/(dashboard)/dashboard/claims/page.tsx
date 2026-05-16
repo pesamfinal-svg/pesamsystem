@@ -45,7 +45,6 @@ export default function ClaimsCenter() {
     const [selectedClaim, setSelectedClaim] = useState<Claim | null>(null);
     const [loading, setLoading] = useState(true);
 
-    // ZMIANA: Zakładki w lewym panelu
     const [activeTab, setActiveTab] = useState<"AKTYWNE" | "ARCHIWUM">("AKTYWNE");
 
     const [messageText, setMessageText] = useState("");
@@ -73,9 +72,20 @@ export default function ClaimsCenter() {
         try {
             const q = query(collection(db, "claims"), orderBy("createdAt", "desc"));
             const snap = await getDocs(q);
-            let allClaims = snap.docs.map(d => ({ id: d.id, ...d.data() } as Claim));
+
+            // ZABEZPIECZENIE: Wymuszamy tablice dla starszych dokumentów z bazy!
+            let allClaims = snap.docs.map(d => {
+                const data = d.data();
+                return {
+                    id: d.id,
+                    ...data,
+                    assignedManagers: data.assignedManagers || [],
+                    messages: data.messages || []
+                } as Claim;
+            });
 
             if (!canViewAllClaims) {
+                // Bezpieczne sprawdzanie (tablica na pewno istnieje)
                 allClaims = allClaims.filter(c => c.assignedManagers.includes(user?.uid || "") || c.reportedBy === user?.uid);
             }
             setClaims(allClaims);
@@ -119,7 +129,12 @@ export default function ClaimsCenter() {
             });
 
             fetchData();
-            setSelectedClaim({ ...selectedClaim, assignedManagers: [managerUid], status: "W_TOKU", messages: [...(selectedClaim.messages || []), aiInitialMessage] });
+            setSelectedClaim({
+                ...selectedClaim,
+                assignedManagers: [...(selectedClaim.assignedManagers || []), managerUid],
+                status: "W_TOKU",
+                messages: [...(selectedClaim.messages || []), aiInitialMessage]
+            });
         } catch (e) { alert("Błąd AI"); } finally { setAiGenerating(false); }
     };
 
@@ -266,7 +281,8 @@ export default function ClaimsCenter() {
                                 )}
                             </div>
 
-                            {canManageClaims && selectedClaim.assignedManagers.length === 0 && selectedClaim.status !== "ZAMKNIETA" && (
+                            {/* ZABEZPIECZENIE: Operator || [] dla pewności */}
+                            {canManageClaims && (selectedClaim.assignedManagers || []).length === 0 && selectedClaim.status !== "ZAMKNIETA" && (
                                 <div className="bg-orange-50 border-b border-orange-200 p-4 animate-pulse">
                                     <p className="text-xs font-black text-orange-800 mb-2 uppercase">🚨 Sprawa wymaga przypisania kierownika:</p>
                                     <select onChange={(e) => assignManagerAndStartInvestigation(e.target.value)} className="p-2.5 text-sm border border-orange-300 rounded-xl font-bold bg-white outline-none">
@@ -309,7 +325,8 @@ export default function ClaimsCenter() {
                                 </div>
                             )}
 
-                            {selectedClaim.status !== "ZAMKNIETA" && selectedClaim.assignedManagers.length > 0 && (
+                            {/* ZABEZPIECZENIE: Operator || [] dla pewności */}
+                            {selectedClaim.status !== "ZAMKNIETA" && (selectedClaim.assignedManagers || []).length > 0 && (
                                 <div className="p-5 bg-white border-t border-slate-200">
                                     {canManageClaims && (
                                         <div className="flex justify-between items-center mb-3">

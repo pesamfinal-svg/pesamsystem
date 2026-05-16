@@ -1,0 +1,38 @@
+# Settings for Backend (on Cloud Run).
+# See https://firebase.google.com/docs/app-hosting/configure#cloud-run
+runConfig:
+  minInstances: 0
+
+env:
+  - variable: FIREBASE_ADMIN_PROJECT_ID
+    secret: FIREBASE_ADMIN_PROJECT_ID
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: FIREBASE_ADMIN_CLIENT_EMAIL
+    secret: FIREBASE_ADMIN_CLIENT_EMAIL
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: FIREBASE_ADMIN_PRIVATE_KEY
+    secret: FIREBASE_ADMIN_PRIVATE_KEY
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: EMAIL_USER
+    secret: EMAIL_USER
+    availability:
+      - RUNTIME
+
+  - variable: EMAIL_PASS
+    secret: EMAIL_PASS
+    availability:
+      - RUNTIME
+
+  - variable: EMAIL_WAREHOUSE
+    secret: EMAIL_WAREHOUSE
+    availability:
+      - RUNTIME
