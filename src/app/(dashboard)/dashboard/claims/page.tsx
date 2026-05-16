@@ -281,30 +281,88 @@ export default function ClaimsCenter() {
                                 )}
                             </div>
 
-                            {/* ZABEZPIECZENIE: Operator || [] dla pewności */}
+                            {/* 1. SEKCJA PRZYPISYWANIA KIEROWNIKA ZE WSKAŹNIKIEM PRACY AI */}
                             {canManageClaims && (selectedClaim.assignedManagers || []).length === 0 && selectedClaim.status !== "ZAMKNIETA" && (
-                                <div className="bg-orange-50 border-b border-orange-200 p-4 animate-pulse">
-                                    <p className="text-xs font-black text-orange-800 mb-2 uppercase">🚨 Sprawa wymaga przypisania kierownika:</p>
-                                    <select onChange={(e) => assignManagerAndStartInvestigation(e.target.value)} className="p-2.5 text-sm border border-orange-300 rounded-xl font-bold bg-white outline-none">
-                                        <option value="">-- Wybierz kierownika do przesłuchania --</option>
-                                        {managers.map(m => <option key={m.uid} value={m.uid}>{m.name}</option>)}
-                                    </select>
+                                <div className="bg-orange-50 border-b border-orange-200 p-4">
+                                    <p className="text-xs font-black text-orange-800 mb-2 uppercase tracking-widest">🚨 Sprawa wymaga przypisania kierownika:</p>
+                                    <div className="flex items-center gap-4">
+                                        <select
+                                            disabled={aiGenerating}
+                                            onChange={(e) => assignManagerAndStartInvestigation(e.target.value)}
+                                            className="p-2.5 text-sm border border-orange-300 rounded-xl font-bold bg-white outline-none focus:ring-2 focus:ring-orange-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                                        >
+                                            <option value="">-- Wybierz kierownika do przesłuchania --</option>
+                                            {managers.map(m => <option key={m.uid} value={m.uid}>{m.name}</option>)}
+                                        </select>
+
+                                        {/* Wizualny feedback, że system "myśli" */}
+                                        {aiGenerating && (
+                                            <div className="flex items-center gap-3 text-orange-700 animate-pulse">
+                                                <div className="w-5 h-5 border-3 border-orange-600 border-t-transparent rounded-full animate-spin"></div>
+                                                <span className="text-[11px] font-black uppercase tracking-tighter">Asystent analizuje dowody i przygotowuje wezwanie...</span>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                             )}
 
+                            {/* 2. OBSZAR ROZPRAWY (CZAT) Z OBSŁUGĄ DOWODÓW FOTOGRAFICZNYCH */}
                             <div className="flex-1 p-6 overflow-y-auto bg-slate-50/50 space-y-4">
-                                {selectedClaim.messages?.map(msg => {
+                                {(selectedClaim.messages || []).map((msg) => {
+                                    // 1. Filtr widoczności dla magazyniera
                                     if (user?.roleId === "magazynier" && !msg.visibleToWarehouse) return null;
+
                                     const isMe = msg.senderId === user?.uid;
+
+                                    // 2. Obsługa technicznych odpowiedzi JSON od AI (żeby nie straszyły użytkownika)
+                                    const isJson = msg.text?.trim().startsWith('{') && msg.text?.trim().endsWith('}');
+                                    const displayText = isJson ? "Asystent przetworzył dane techniczne i wygenerował raport." : msg.text;
+
                                     return (
                                         <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                                            <div className={`p-4 rounded-2xl shadow-sm max-w-[85%] ${isMe ? 'bg-blue-600 text-white rounded-br-sm' : msg.senderRole === 'AI' ? 'bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-sm'}`}>
-                                                <div className="flex justify-between gap-4 mb-1 opacity-60 font-black text-[9px] uppercase tracking-wider"><span>{msg.senderName}</span><span>{msg.senderRole}</span></div>
-                                                <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                                            <div className={`p-4 rounded-2xl shadow-sm max-w-[85%] ${isMe
+                                                    ? 'bg-blue-600 text-white rounded-br-sm'
+                                                    : msg.senderRole === 'AI'
+                                                        ? 'bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm'
+                                                        : 'bg-white border border-slate-200 text-slate-800 rounded-bl-sm'
+                                                }`}>
+
+                                                {/* Nagłówek: Nazwa nadawcy i Rola */}
+                                                <div className="flex justify-between gap-4 mb-2 opacity-60 font-black text-[9px] uppercase tracking-wider border-b border-black/5 pb-1">
+                                                    <span>{msg.senderName}</span>
+                                                    <span>{msg.senderRole}</span>
+                                                </div>
+
+                                                {/* WYŚWIETLANIE DOWODU (ZDJĘCIA) - Jeśli istnieje imageUrl w wiadomości */}
+                                                {(msg as any).imageUrl && (
+                                                    <div className="mb-3 mt-1 rounded-xl overflow-hidden border border-black/10 shadow-lg bg-black/5 group cursor-zoom-in relative">
+                                                        <img
+                                                            src={(msg as any).imageUrl}
+                                                            alt="Zabezpieczony dowód w sprawie"
+                                                            className="max-h-80 w-full object-contain hover:scale-105 transition-transform duration-300"
+                                                            onClick={() => window.open((msg as any).imageUrl, '_blank')}
+                                                        />
+                                                        <div className="absolute top-2 right-2 bg-black/50 text-white text-[8px] px-2 py-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                                                            Kliknij, aby powiększyć
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Treść wiadomości */}
+                                                <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                                                    {displayText}
+                                                </p>
+
+                                                {/* Data/Godzina (Opcjonalnie dla profesjonalnego wyglądu akt) */}
+                                                <p className={`text-[8px] mt-2 opacity-40 ${isMe ? 'text-right' : 'text-left'}`}>
+                                                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                </p>
                                             </div>
                                         </div>
                                     );
                                 })}
+
+                                {/* Punkt kotwiczenia dla automatycznego przewijania w dół */}
                                 <div ref={chatEndRef} />
                             </div>
 
