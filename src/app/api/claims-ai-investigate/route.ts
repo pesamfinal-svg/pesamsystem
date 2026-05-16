@@ -26,7 +26,7 @@ export async function POST(req: Request) {
 
         // 2. Wybór stabilnego modelu (1.5-pro jest najdokładniejszy do JSONa)
         const model = vertexAI.getGenerativeModel({
-            model: 'gemini-1.5-pro',
+            model: 'gemini-2.5-pro',
             systemInstruction: {
                 role: 'system',
                 parts: [{
