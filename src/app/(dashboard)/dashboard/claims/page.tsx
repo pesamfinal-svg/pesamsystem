@@ -103,7 +103,13 @@ export default function ClaimsCenter() {
     const assignManagerAndStartInvestigation = async (managerUid: string) => {
         if (!selectedClaim || !managerUid) return;
         setAiGenerating(true);
+
         try {
+            // Zbieramy wszystkie linki do zdjęć z historii rozmowy jako dowody
+            const evidencePhotos = (selectedClaim.messages || [])
+                .filter(msg => (msg as any).imageUrl)
+                .map(msg => (msg as any).imageUrl);
+
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -111,21 +117,29 @@ export default function ClaimsCenter() {
                     inventoryName: selectedClaim.inventoryName,
                     inventoryNumber: selectedClaim.inventoryNumber,
                     siteName: selectedClaim.siteName,
-                    // KLUCZ: Przekazujemy podsumowanie techniczne od magazyniera!
                     warehouseSummary: selectedClaim.description,
+                    evidencePhotos: evidencePhotos, // Przekazujemy tablicę ze zdjęciami
                     isInitial: true
                 })
             });
-            const data = await response.json();
 
-            // ... (reszta kodu bez zmian) ...
+            // KLUCZOWA POPRAWKA: Sprawdzamy, czy API odpowiedziało sukcesem (kod 2xx)
+            if (!response.ok) {
+                // Jeśli wystąpił błąd, próbujemy odczytać jego treść z serwera
+                const errorData = await response.json();
+                // Rzucamy nowym błędem, który zostanie złapany przez blok `catch`
+                throw new Error(errorData.error || `Błąd serwera: ${response.status}`);
+            }
+
+            // Ten kod wykona się tylko, jeśli odpowiedź była pomyślna
+            const data = await response.json();
 
             const aiInitialMessage: ChatMessage = {
                 id: Date.now().toString(),
                 senderId: "system_ai",
                 senderName: "Asystent Śledczy AI 🤖",
                 senderRole: "AI",
-                text: data.reply,
+                text: data.reply, // Teraz mamy pewność, że data.reply istnieje
                 timestamp: new Date().toISOString(),
                 visibleToWarehouse: false
             };
@@ -137,14 +151,20 @@ export default function ClaimsCenter() {
                 messages: arrayUnion(aiInitialMessage)
             });
 
-            fetchData();
-            setSelectedClaim({
-                ...selectedClaim,
-                assignedManagers: [...(selectedClaim.assignedManagers || []), managerUid],
+            // Aktualizujemy stan lokalny, aby zmiany były widoczne od razu
+            setSelectedClaim(prev => prev ? {
+                ...prev,
+                assignedManagers: [...(prev.assignedManagers || []), managerUid],
                 status: "W_TOKU",
-                messages: [...(selectedClaim.messages || []), aiInitialMessage]
-            });
-        } catch (e) { alert("Błąd AI"); } finally { setAiGenerating(false); }
+                messages: [...(prev.messages || []), aiInitialMessage]
+            } : null);
+
+        } catch (e: any) {
+            // Teraz alert pokaże konkretny błąd z serwera, a nie tylko "Błąd AI"
+            alert(`Błąd AI: ${e.message}`);
+        } finally {
+            setAiGenerating(false);
+        }
     };
 
     const askAiForHelp = async () => {

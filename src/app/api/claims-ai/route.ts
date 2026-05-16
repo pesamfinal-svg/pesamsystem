@@ -2,80 +2,93 @@
 import { NextResponse } from 'next/server';
 import { VertexAI } from '@google-cloud/vertexai';
 
+// FUNKCJA POMOCNICZA: Konwertuje publiczny URL z Firebase Storage na wewnętrzny format `gs://`
+// To jest kluczowy element, aby Vertex AI mogło "zobaczyć" obrazy.
+function convertHttpsToGsUri(httpsUrl: string): string | null {
+    // Sprawdzamy, czy link pasuje do wzorca Firebase Storage
+    const match = httpsUrl.match(/https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/([^/]+)\/o\/([^?]+)/);
+    if (!match) {
+        console.warn(`URL nie pasuje do formatu Firebase Storage: ${httpsUrl}`);
+        return null;
+    }
+    const bucket = match[1];
+    const objectPath = decodeURIComponent(match[2]);
+    return `gs://${bucket}/${objectPath}`;
+}
+
 export async function POST(req: Request) {
     try {
         const payload = await req.json();
 
-        // Wyciągamy kompletne dane z akt sprawy przesłane z frontendu
         const {
             inventoryName,
             inventoryNumber,
             siteName,
-            warehouseSummary, // To jest kluczowe podsumowanie od magazyniera
+            warehouseSummary,
+            evidencePhotos, // Tablica publicznych URL-i do zdjęć
             messages,
             isInitial
         } = payload;
 
-        // Inicjalizacja Vertex AI
         const vertexAI = new VertexAI({
             project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-            location: 'europe-west1'
+            location: 'europe-west1' // Jeśli tu nadal będzie problem, zmień na 'us-central1'
         });
 
-        // Konfiguracja modelu - Używamy 1.5-flash dla błyskawicznych odpowiedzi
+        // Używamy stabilnej i potężnej wersji modelu, która obsługuje multimodalność
         const model = vertexAI.getGenerativeModel({
-            model: 'gemini-1.5-flash',
+            model: 'gemini-2.5-pro',
             systemInstruction: {
                 role: 'system',
                 parts: [{
-                    text: `Jesteś bezwzględnym i technicznym Asystentem Śledczym PESAM. 
-                    Twoim zadaniem jest konfrontowanie tłumaczeń kierowników budowy z faktami technicznymi z magazynu.
-                    
-                    ZASADY:
-                    1. Bądź surowy, konkretny i techniczny. Żadnych uprzejmości.
-                    2. Zadawaj MAKSYMALNIE 2-3 mordercze pytania.
-                    3. Twoim celem jest wykazanie błędów w eksploatacji (np. złe zasilanie, brak czyszczenia, przeciążenie).
-                    4. Jeśli magazyn stwierdził konkretne uszkodzenie (np. spalony silnik), Twoje pytania muszą uderzać w przyczynę (np. długość przedłużacza).`
+                    text: `Jesteś Asystentem Śledczym PESAM. Twoim zadaniem jest konfrontowanie kierowników z faktami technicznymi z magazynu i dowodami wizualnymi. Bądź surowy, konkretny i techniczny. Zadawaj 2-3 kluczowe pytania, aby wykazać błędy w eksploatacji.`
                 }]
             }
         });
 
-        // --- SCENARIUSZ 1: GENEROWANIE PIERWSZEGO WEZWANIA DLA KIEROWNIKA ---
+        // --- SCENARIUSZ 1: PIERWSZE WEZWANIE DO KIEROWNIKA ---
         if (isInitial) {
-            const initialPrompt = `
-            AKTA SPRAWY:
-            - Sprzęt: ${inventoryName} (Nr: ${inventoryNumber || 'Brak'})
-            - Budowa: ${siteName || 'Brak danych'}
-            - RAPORT TECHNICZNY MAGAZYNU: ${warehouseSummary || 'Brak opisu.'}
+            // Budujemy dynamicznie prompt składający się z tekstu i obrazów
+            const promptParts: any[] = [
+                { text: `AKTA SPRAWY:\n- Sprzęt: ${inventoryName} (Nr: ${inventoryNumber})\n- Budowa: ${siteName}\n- RAPORT TECHNICZNY MAGAZYNU: ${warehouseSummary}\n\nZADANIE:\nNa podstawie powyższego raportu i załączonych zdjęć dowodowych, sformułuj pierwsze, surowe wezwanie do wyjaśnień dla kierownika.` }
+            ];
 
-            ZADANIE:
-            Na podstawie powyższych faktów z magazynu, sformułuj pierwsze, surowe wezwanie do wyjaśnień dla kierownika. 
-            Nie pytaj co się stało (bo wiemy to z raportu). Pytaj o techniczne okoliczności, które doprowadziły do stanu opisanego przez magazyn.
-            Zadaj 2-3 precyzyjne pytania.
-            `;
+            // Jeśli frontend przesłał zdjęcia, konwertujemy je na format GS i dodajemy do promptu
+            if (evidencePhotos && Array.isArray(evidencePhotos) && evidencePhotos.length > 0) {
+                evidencePhotos.forEach((url: string) => {
+                    const gsUri = convertHttpsToGsUri(url);
+                    if (gsUri) {
+                        promptParts.push({
+                            fileData: {
+                                mimeType: 'image/jpeg', // Zakładamy JPEG, można to rozbudować
+                                fileUri: gsUri
+                            }
+                        });
+                    }
+                });
+            }
 
-            const result = await model.generateContent(initialPrompt);
+            // Wysyłamy do AI kompletny, multimodalny prompt
+            const result = await model.generateContent({ contents: [{ role: 'user', parts: promptParts }] });
             const response = await result.response;
-            const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "Brak odpowiedzi AI.";
+            const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "Błąd generowania odpowiedzi. Sprawdź logi.";
 
             return NextResponse.json({ reply: text });
         }
 
-        // --- SCENARIUSZ 2: ANALIZA ROZMOWY I POMOC DLA DYREKTORA ---
+        // --- SCENARIUSZ 2: ANALIZA TRWAJĄCEJ ROZMOWY ---
         const formattedHistory = (messages || []).map((m: any) =>
             `[${m.senderRole}] ${m.senderName}: ${m.text}`
         ).join("\n\n");
 
         const analysisPrompt = `
-        KONTEKST TECHNICZNY (Co widział magazyn): ${warehouseSummary}
+        KONTEKST TECHNICZNY (Raport magazynu): ${warehouseSummary}
         
         PRZEBIEG PRZESŁUCHANIA:
         ${formattedHistory}
 
         ZADANIE:
-        Przeanalizuj odpowiedzi kierownika pod kątem technicznym. 
-        Wskaż, gdzie jego wersja nie zgadza się z raportem magazynu. 
-        Wypunktuj kłamstwa/niespójności i podpowiedz Dyrektorowi następne miażdżące pytanie.
+        Przeanalizuj odpowiedzi kierownika. Wskaż niespójności z raportem magazynu i podpowiedz Dyrektorowi następne miażdżące pytanie.
         `;
 
         const result = await model.generateContent(analysisPrompt);
@@ -86,7 +99,7 @@ export async function POST(req: Request) {
 
     } catch (error: any) {
         console.error("--- Błąd Vertex AI Detail ---");
-        console.error(error);
+        console.error(error); // Wyświetli pełny błąd w logach serwera
         return NextResponse.json(
             { error: error.message || "Błąd wewnętrzny Vertex AI" },
             { status: 500 }
