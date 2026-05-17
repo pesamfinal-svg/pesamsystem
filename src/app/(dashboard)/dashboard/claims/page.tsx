@@ -108,8 +108,11 @@ export default function ClaimsCenter() {
 
         try {
             const evidencePhotos = (selectedClaim.messages || [])
-                .filter(msg => msg.imageUrl)
-                .map(msg => msg.imageUrl);
+                .flatMap(msg => {
+                    if (msg.imageUrls && msg.imageUrls.length > 0) return msg.imageUrls;
+                    if (msg.imageUrl) return [msg.imageUrl]; // Kompatybilność dla starszych spraw
+                    return [];
+                });
 
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',

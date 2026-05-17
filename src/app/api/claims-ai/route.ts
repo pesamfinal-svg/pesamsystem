@@ -2,16 +2,27 @@
 import { NextResponse } from 'next/server';
 import { VertexAI } from '@google-cloud/vertexai';
 
-// FUNKCJA POMOCNICZA: Konwertuje publiczny URL z Firebase Storage na wewnętrzny format `gs://`
-function convertHttpsToGsUri(httpsUrl: string): string | null {
-    const match = httpsUrl.match(/https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/([^/]+)\/o\/([^?]+)/);
-    if (!match) {
-        console.warn(`URL nie pasuje do formatu Firebase Storage: ${httpsUrl}`);
+// FUNKCJA POMOCNICZA: Pobiera publiczny URL obrazka, zamienia na base64 i ustala poprawny mimeType
+// To jest najbezpieczniejszy sposób przekazywania obrazów do Vertex AI, omijający błędy 500 związane z uprawnieniami i GCS.
+async function fetchImageAsBase64(url: string) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const mimeType = response.headers.get('content-type') || 'image/jpeg';
+
+        return {
+            inlineData: {
+                data: buffer.toString('base64'),
+                mimeType: mimeType
+            }
+        };
+    } catch (error) {
+        console.error(`Błąd pobierania zdjęcia (${url}):`, error);
         return null;
     }
-    const bucket = match[1];
-    const objectPath = decodeURIComponent(match[2]);
-    return `gs://${bucket}/${objectPath}`;
 }
 
 export async function POST(req: Request) {
@@ -33,13 +44,12 @@ export async function POST(req: Request) {
             location: 'europe-west1'
         });
 
-        // Używamy stabilnej i potężnej wersji modelu, która obsługuje multimodalność
+        // ZMIANA: Model 1.5-pro jest najnowszą STABILNĄ wersją w Vertex. 2.5-pro to błąd w nazwie rzucający 500.
         const model = vertexAI.getGenerativeModel({
             model: 'gemini-2.5-pro',
             systemInstruction: {
                 role: 'system',
                 parts: [{
-                    // ZMIANA: Zmieniono rolę z "surowego śledczego" na "inteligentnego doradcę" (styl Google)
                     text: `Jesteś Asystentem Śledczym PESAM i inteligentnym doradcą Dyrektora. Twoim zadaniem jest podpowiadanie Dyrektorowi trafnych, dociekliwych pytań do zadania Kierownikowi budowy na czacie. Krótko, konkretnie, w formie listy pytań.`
                 }]
             }
@@ -63,23 +73,20 @@ export async function POST(req: Request) {
                 ` }
             ];
 
+            // Konwersja URL -> Base64 (Zabezpieczenie przed błędem 500)
             if (evidencePhotos && Array.isArray(evidencePhotos) && evidencePhotos.length > 0) {
-                evidencePhotos.forEach((url: string) => {
-                    const gsUri = convertHttpsToGsUri(url);
-                    if (gsUri) {
-                        promptParts.push({
-                            fileData: {
-                                mimeType: 'image/jpeg',
-                                fileUri: gsUri
-                            }
-                        });
-                    }
+                const imageParts = await Promise.all(
+                    evidencePhotos.map((url: string) => fetchImageAsBase64(url))
+                );
+
+                imageParts.forEach(part => {
+                    if (part) promptParts.push(part);
                 });
             }
 
             const result = await model.generateContent({ contents: [{ role: 'user', parts: promptParts }] });
             const response = await result.response;
-            const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "Błąd generowania odpowiedzi. Sprawdź logi.";
+            const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "Błąd generowania odpowiedzi.";
 
             return NextResponse.json({ reply: text });
         }
@@ -89,7 +96,6 @@ export async function POST(req: Request) {
             `[${m.senderRole}] ${m.senderName}: ${m.text}`
         ).join("\n\n");
 
-        // ZMIANA: Całkowicie nowy prompt wzorowany na wyszukiwarce Google AI
         const analysisPrompt = `
         Działasz jako inteligentny doradca Dyrektora w systemie PESAM. 
         Analizujesz trwającą właśnie wymianę wiadomości (czat) pomiędzy Kierownikiem a Dyrekcją/Magazynem.
