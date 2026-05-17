@@ -288,9 +288,17 @@ export default function ClaimsCenter() {
                                                     <button
                                                         key={i}
                                                         onClick={() => {
-                                                            // Usuwamy ewentualne wiodące cyfry np "1. " lub myślniki "- " przed wstawieniem
-                                                            setMessageText(question.replace(/^\d+\.\s*/, '').replace(/^-\s*/, ''));
-                                                            setShowAiDrawer(false);
+                                                            const cleanQuestion = question.replace(/^\d+\.\s*/, '').replace(/^-\s*/, '');
+
+                                                            // Używamy funkcji callback w setMessageText, aby DOKLEIĆ tekst, a nie go nadpisać
+                                                            setMessageText(prev => {
+                                                                const currentText = prev.trim();
+                                                                // Jeśli pole jest puste, wstawiamy samo pytanie. 
+                                                                // Jeśli coś tam już jest, dodajemy nową linię, myślnik i kolejne pytanie.
+                                                                return currentText ? `${currentText}\n- ${cleanQuestion}` : `- ${cleanQuestion}`;
+                                                            });
+
+                                                            // USUNĘLIŚMY setShowAiDrawer(false); - dzięki temu panel zostaje otwarty!
                                                         }}
                                                         className="w-full text-left p-3 bg-slate-800 hover:bg-purple-900 rounded-xl border border-slate-700 hover:border-purple-500 text-sm text-slate-200 transition shadow-sm group"
                                                     >
