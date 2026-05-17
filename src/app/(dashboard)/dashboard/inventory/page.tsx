@@ -84,6 +84,7 @@ export default function InventoryPage() {
         inventoryId: string;
         inventoryName: string;
         inventoryNumber: string;
+        siteName: string;
         warehouseNotes: string;
         declaredStatus: string;
     } | null>(null);
@@ -274,6 +275,7 @@ export default function InventoryPage() {
             inventoryId: selectedItem.id,
             inventoryName: selectedItem.name,
             inventoryNumber: selectedItem.inventoryNumber,
+            siteName: selectedItem.currentLocation || "Zgłoszenie z katalogu magazynu",
             warehouseNotes: selectedItem.additionalInfo || "",
             declaredStatus: selectedItem.status,
         });
@@ -687,7 +689,7 @@ export default function InventoryPage() {
                     inventoryId={investigationData.inventoryId}
                     inventoryName={investigationData.inventoryName}
                     inventoryNumber={investigationData.inventoryNumber}
-                    siteName="Zgłoszenie z katalogu magazynu"
+                    siteName={investigationData.siteName}
                     reportedByUid={user?.uid || ""}
                     reportedByName={`${user?.firstName} ${user?.lastName}`}
                     warehouseNotes={investigationData.warehouseNotes}
