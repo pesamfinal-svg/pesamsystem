@@ -1,39 +1,40 @@
 // src/app/api/claims-ai-investigate/route.ts
 import { NextResponse } from 'next/server';
-import { VertexAI } from '@google-cloud/vertexai';
+// 1. Zmieniamy na główny pakiet @google/genai
+import { GoogleGenAI } from '@google/genai';
 
-interface ConversationMessage {
-    role: "user" | "assistant";
-    content: string;
-}
+// 2. Inicjalizujemy klienta z flagą vertexai: true, aby połączyć się z Google Cloud
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
+    location: 'global' // Używamy globalnego endpointu dla modeli serii 3.1
+});
 
 export async function POST(req: Request) {
     try {
         const payload = await req.json();
-        // DODANO: warehouseNotes i declaredStatus odbierane z frontendu
-        const { inventoryName, inventoryNumber, siteName, messages, isInitial, warehouseNotes, declaredStatus } = payload;
+        const {
+            inventoryName,
+            inventoryNumber,
+            siteName,
+            messages,
+            isInitial,
+            warehouseNotes,
+            declaredStatus
+        } = payload;
 
-        // Inicjalizacja Vertex AI wewnątrz funkcji (bezpieczne dla wdrożenia)
-        const vertexAI = new VertexAI({
-            project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-            location: 'europe-west1'
-        });
+        // Używamy najnowszego, szybkiego i taniego modelu Gemini 3.1 Flash
+        const modelName = 'gemini-3-flash-preview';
 
-        // 1. Logika sprawdzania, czy zdjęcia już są w historii rozmowy
-        const clientMessages: ConversationMessage[] = messages || [];
-        const hasPhotosInHistory = clientMessages.some(m =>
+        const clientMessages = messages || [];
+        const hasPhotosInHistory = clientMessages.some((m: any) =>
             m.content.includes("[Zdjęcia:") ||
             m.content.includes("[Dołączono") ||
             m.content.toLowerCase().includes("załączyłem zdjęcie")
         );
 
-        // 2. Wybór stabilnego modelu (1.5-pro jest najdokładniejszy do JSONa)
-        const model = vertexAI.getGenerativeModel({
-            model: 'gemini-2.5-flash',
-            systemInstruction: {
-                role: 'system',
-                parts: [{
-                    text: `Jesteś Asystentem Śledczym PESAM. Twoim rozmówcą jest MAGAZYNIER odbierający sprzęt "${inventoryName}" z budowy "${siteName}".
+        // UŻYTO TWOJEGO DOKŁADNEGO PROMPTU z drobnymi modyfikacjami dla nowego SDK
+        const systemInstruction = `Jesteś Asystentem Śledczym PESAM. Twoim rozmówcą jest MAGAZYNIER odbierający sprzęt "${inventoryName}" z budowy "${siteName}".
 
 Twoje zadanie: zebrać konkretny raport techniczny przed przekazaniem sprawy do Zarządu.
 
@@ -51,8 +52,8 @@ OBOWIĄZKOWE INFORMACJE DO ZEBRANIA:
 
 STATUS ZDJĘĆ:
 ${hasPhotosInHistory
-                            ? "UWAGA: Zdjęcia są już w aktach (punkt 3 ZALICZONY). Nie pytaj o nie. Potwierdź ich otrzymanie i przejdź do podsumowania."
-                            : "PUNKT 3 (ZDJĘCIA) JEST WYMAGANY - dopytaj o nie, jeśli jeszcze ich nie ma."}
+                ? "UWAGA: Zdjęcia są już w aktach (punkt 3 ZALICZONY). Nie pytaj o nie. Potwierdź ich otrzymanie i przejdź do podsumowania."
+                : "PUNKT 3 (ZDJĘCIA) JEST WYMAGANY - dopytaj o nie, jeśli jeszcze ich nie ma."}
 
 TAKTYKI:
 - Magazynier NIE BYŁ na budowie. NIGDY nie pytaj o okoliczności awarii ani o to, kto zawinił.
@@ -61,64 +62,42 @@ TAKTYKI:
 
 FORMAT JSON:
 Gdy zbierasz info: {"reply":"Twoja wiadomość","isComplete":false,"needsPhotos":${hasPhotosInHistory ? "false" : "true"},"caseContext":null}
-Gdy masz KOMPLET: {"reply":"Dziękuję. Protokół zabezpieczony.","isComplete":true,"needsPhotos":false,"caseContext":"RAPORT MAGAZYNU:\\nSprzęt: [nazwa]\\nStan: [opis]\\nDiagnoza: [naprawa/złom]\\nHistoria: [info]\\nZdjęcia: [tak/nie]"}`
-                }]
-            }
-        });
+Gdy masz KOMPLET: {"reply":"Dziękuję. Protokół zabezpieczony.","isComplete":true,"needsPhotos":false,"caseContext":"RAPORT MAGAZYNU:\\nSprzęt: ${inventoryName}\\nStan: ${warehouseNotes || declaredStatus}\\nDiagnoza: [naprawa/złom]\\nHistoria: [info]\\nZdjęcia: [tak/nie]"}`;
 
-        // DODANO: Wplecenie notatki magazyniera w pierwszą wiadomość
-        const INIT_MESSAGE = `Nowe zgłoszenie szkody. Sprzęt: "${inventoryName}" (Nr mag: ${inventoryNumber}), Budowa: "${siteName}".
-Magazynier nadał status: "${declaredStatus || 'uszkodzone'}" i wpisał uwagę: "${warehouseNotes || 'Brak uwag'}".
-Potwierdź odbiór tych informacji i przejdź bezpośrednio do pytania o rokowania lub gwarancję/historię.`;
-
-        // --- OBSŁUGA PIERWSZEGO WYWOŁANIA ---
-        if (isInitial) {
-            const result = await model.generateContent(INIT_MESSAGE);
-            const response = await result.response;
-            const rawText = response.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-            const cleanText = rawText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-
-            try {
-                return NextResponse.json(JSON.parse(cleanText));
-            } catch {
-                return NextResponse.json({ reply: rawText, isComplete: false, needsPhotos: true, caseContext: null });
-            }
-        }
-
-        // --- OBSŁUGA KONTYNUACJI ROZMOWY ---
-        const allMessages: ConversationMessage[] = [
-            { role: "user", content: INIT_MESSAGE },
-            ...clientMessages
-        ];
-
-        if (allMessages.length < 2) {
-            return NextResponse.json({ reply: "Błąd konwersacji.", isComplete: false, needsPhotos: true, caseContext: null });
-        }
-
-        const historyMessages = allMessages.slice(0, -1);
-        const currentMessage = allMessages[allMessages.length - 1];
-
-        const geminiHistory = historyMessages.map(m => ({
+        // Budujemy historię rozmowy dla nowego SDK (rola 'model' zamiast 'assistant')
+        const contents = clientMessages.map((m: any) => ({
             role: m.role === 'assistant' ? 'model' : 'user',
             parts: [{ text: m.content }]
         }));
 
-        const chat = model.startChat({ history: geminiHistory });
-        const result = await chat.sendMessage(currentMessage.content);
-        const response = await result.response;
-        const rawText = response.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-        const cleanText = rawText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+        const initialPrompt = `Nowe zgłoszenie szkody. Sprzęt: "${inventoryName}" (Nr mag: ${inventoryNumber}), Budowa: "${siteName}".
+Magazynier nadał status: "${declaredStatus || 'uszkodzone'}" i wpisał uwagę: "${warehouseNotes || 'Brak uwag'}".
+Potwierdź odbiór tych informacji i przejdź bezpośrednio do pytania o rokowania lub gwarancję/historię.`;
 
-        try {
-            return NextResponse.json(JSON.parse(cleanText));
-        } catch {
-            return NextResponse.json({ reply: rawText, isComplete: false, needsPhotos: true, caseContext: null });
-        }
+        // Logika czatu - w nowym SDK jest prostsza. Przekazujemy całą historię i dodajemy nową wiadomość na końcu.
+        const finalContents = isInitial
+            ? [{ role: 'user', parts: [{ text: initialPrompt }] }]
+            : contents;
+
+        const response = await ai.models.generateContent({
+            model: modelName,
+            contents: finalContents,
+            config: {
+                systemInstruction: systemInstruction,
+                temperature: 0.2, // Niska temperatura dla stabilnego JSON
+                responseMimeType: "application/json" // Wymuszamy format JSON, aby uniknąć błędów
+            }
+        });
+
+        // W nowym SDK odpowiedź tekstowa jest bezpośrednio dostępna i czysta (bez ```)
+        const rawText = response.text || '{}';
+
+        return NextResponse.json(JSON.parse(rawText));
 
     } catch (error: any) {
         console.error("Investigation AI error:", error);
         return NextResponse.json(
-            { error: error.message || "Błąd wewnętrzny Vertex AI" },
+            { error: error.message || "Błąd wewnętrzny Google Gen AI" },
             { status: 500 }
         );
     }
