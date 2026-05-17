@@ -38,6 +38,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Protokoły", path: "/dashboard/protocols", icon: "📝", requiredPermission: "issueProtocols" },
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
+        { name: "Twoja Budowa", path: "/dashboard/my-site", icon: "🏢", requiredPermission: "viewSiteState" },
         { name: "Zarządzanie Pracownikami", path: "/dashboard/admin/users", icon: "👥", requiredPermission: "manageUsers" },
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },
         { name: "Sąd PESAM", path: "/dashboard/claims", icon: "⚖️", requiredPermission: "viewClaims" },

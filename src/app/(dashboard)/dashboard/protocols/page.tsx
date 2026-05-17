@@ -11,22 +11,22 @@ import { hasPermission } from "@/lib/auth/permissions";
 // --- INTERFEJSY ---
 interface Site { id: string; name: string; status: string; }
 interface InventoryItem {
-    id: string; name: string; type: "UNIQUE" | "BULK"; inventoryNumber: string;
-    category: string; availableQuantity: number; totalQuantity: number;
+    id: string; name: string; type: "UNIQUE" | "BULK"; subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL"; inventoryNumber: string;
+    category: string; availableQuantity: number; totalQuantity: number; unit?: string;
     currentLocation: string; status: string; allocations: Record<string, number>;
 }
 interface Accessory { id: string; name: string; quantity: number; mustReturn: boolean; }
 interface CartItem {
     cartItemId: string; isManual: boolean; dbId?: string; type?: "UNIQUE" | "BULK";
     inventoryNumber?: string; availableQuantity?: number; currentLocation?: string; status?: string;
-    name: string; issueQty: number; accessories: Accessory[];
+    name: string; issueQty: number; unit?: string; accessories: Accessory[];
 }
 
 // Interfejsy dla ZWROTÓW
 interface ReturnAccessory { name: string; mustReturn: boolean; isReturning: boolean; quantity: number; }
 interface ReturnCartItem {
     dbId: string; name: string; type: "UNIQUE" | "BULK"; inventoryNumber: string;
-    maxQty: number; returnQty: number;
+    maxQty: number; returnQty: number; unit?: string;
     declaredStatus: string;
     accessories: ReturnAccessory[];
 }
@@ -41,11 +41,20 @@ export default function ProtocolsHub() {
     const [isIssueModalOpen, setIsIssueModalOpen] = useState(false);
     const [issueSiteInput, setIssueSiteInput] = useState("");
     const [cart, setCart] = useState<CartItem[]>([]);
+    const [bulkPickModal, setBulkPickModal] = useState<{ item: InventoryItem; qty: number } | null>(null);
+
+    // Stany dla WPISU RĘCZNEGO
+    const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+    const [manualName, setManualName] = useState("");
+    const [manualQty, setManualQty] = useState<number | "">("");
+    const [manualUnit, setManualUnit] = useState("szt.");
 
     // Stany dla ZWROTU
     const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
     const [returnSiteId, setReturnSiteId] = useState("");
     const [returnCart, setReturnCart] = useState<ReturnCartItem[]>([]);
+    // NOWE: Aktywna zakładka w zwrotach
+    const [returnActiveTab, setReturnActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
 
     // Stany dla AKCEPTACJI ZWROTÓW
     const [isAcceptModalOpen, setIsAcceptModalOpen] = useState(false);
@@ -55,7 +64,6 @@ export default function ProtocolsHub() {
     const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // POPRAWKA BŁĘDU TYPESCRIPT: Dodano warehouseNotes i declaredStatus do definicji typu
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
         inventoryName: string;
@@ -116,6 +124,9 @@ export default function ProtocolsHub() {
         setSelectedProtocol(null);
         setAcceptInputs({});
         setAccessoryFormOpenFor(null);
+        setBulkPickModal(null);
+        setIsManualModalOpen(false);
+        setReturnActiveTab("UNIQUE");
     };
 
     const userSites = sites.filter(s => {
@@ -126,29 +137,66 @@ export default function ProtocolsHub() {
     // -------------------------------------------------------------------------
     // LOGIKA KOSZYKA WYDANIA
     // -------------------------------------------------------------------------
+
+    const filteredInventory = inventory.filter(item => {
+        if (item.type !== activeTab) return false;
+        if (item.subType === "MAIN_CAT") return false;
+        if (item.subType === "MANUAL") return false; // Nie pokazujemy ręcznych w wydaniu z bazy
+        const matchesName = item.name.toLowerCase().includes(searchName.toLowerCase());
+        let matchesInvNum = true;
+        if (searchInvNumber) matchesInvNum = (item.inventoryNumber || "").toLowerCase().includes(searchInvNumber.toLowerCase());
+        return matchesName && matchesInvNum;
+    });
+
     const addToCart = (item: InventoryItem) => {
         if (item.availableQuantity <= 0) return alert(`Przedmiot w lokalizacji: ${item.currentLocation}. Najpierw zrób zwrot!`);
         if (item.status !== "sprawne") return alert(`Przedmiot ma status: ${item.status.toUpperCase()}!`);
-        if (cart.find(i => i.dbId === item.id)) return;
+        if (cart.find(i => i.dbId === item.id)) return alert("Ten przedmiot jest już w koszyku!");
 
-        setCart([...cart, {
+        if (item.type === "BULK") {
+            setBulkPickModal({ item, qty: 1 });
+            return;
+        }
+
+        setCart(prev => [...prev, {
             cartItemId: Date.now().toString(), isManual: false, dbId: item.id, type: item.type,
             inventoryNumber: item.inventoryNumber, availableQuantity: item.availableQuantity,
             currentLocation: item.currentLocation, status: item.status, name: item.name,
-            issueQty: 1, accessories: []
+            issueQty: 1, unit: item.unit || "szt.", accessories: []
         }]);
     };
 
-    const addManualItemToCart = () => {
-        const name = prompt("Wpisz nazwę przedmiotu (np. Drut fi 12):");
-        if (!name) return;
-        const qtyStr = prompt("Podaj ilość:");
-        const qty = parseInt(qtyStr || "0");
-        if (isNaN(qty) || qty <= 0) return alert("Nieprawidłowa ilość!");
-
-        setCart([...cart, {
-            cartItemId: Date.now().toString(), isManual: true, name: name, issueQty: qty, accessories: []
+    const confirmBulkAdd = () => {
+        if (!bulkPickModal) return;
+        const { item, qty } = bulkPickModal;
+        if (qty <= 0 || qty > item.availableQuantity) {
+            return alert(`Podaj ilość od 1 do ${item.availableQuantity}`);
+        }
+        setCart(prev => [...prev, {
+            cartItemId: Date.now().toString(), isManual: false, dbId: item.id, type: item.type,
+            inventoryNumber: item.inventoryNumber, availableQuantity: item.availableQuantity,
+            currentLocation: item.currentLocation, status: item.status, name: item.name,
+            issueQty: qty, unit: item.unit || "szt.", accessories: []
         }]);
+        setBulkPickModal(null);
+    };
+
+    const openManualModal = () => {
+        setManualName("");
+        setManualQty("");
+        setManualUnit("szt.");
+        setIsManualModalOpen(true);
+    };
+
+    const confirmManualAdd = () => {
+        if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) {
+            return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
+        }
+        setCart(prev => [...prev, {
+            cartItemId: Date.now().toString(), isManual: true, name: manualName.trim(),
+            issueQty: Number(manualQty), unit: manualUnit, accessories: []
+        }]);
+        setIsManualModalOpen(false);
     };
 
     const removeFromCart = (cartItemId: string) => setCart(cart.filter(i => i.cartItemId !== cartItemId));
@@ -179,16 +227,30 @@ export default function ProtocolsHub() {
         setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
+                const itemDocs: Record<string, any> = {};
+                for (const cartItem of cart) {
+                    if (cartItem.isManual || !cartItem.dbId) continue;
+                    const itemRef = doc(db, "inventory", cartItem.dbId);
+                    const itemDoc = await transaction.get(itemRef);
+
+                    if (!itemDoc.exists()) throw `Przedmiot ${cartItem.name} nie istnieje w bazie!`;
+                    itemDocs[cartItem.dbId] = { ref: itemRef, doc: itemDoc };
+                }
+
                 let siteId = "";
                 let siteName = issueSiteInput.trim();
                 const existingSite = sites.find(s => s.name.toLowerCase() === siteName.toLowerCase());
 
+                let newSiteRef = null;
                 if (existingSite) {
                     siteId = existingSite.id;
                     siteName = existingSite.name;
                 } else {
-                    const newSiteRef = doc(collection(db, "sites"));
+                    newSiteRef = doc(collection(db, "sites"));
                     siteId = newSiteRef.id;
+                }
+
+                if (newSiteRef) {
                     transaction.set(newSiteRef, {
                         name: siteName, location: "Wpis ręczny", status: "aktywna", createdAt: new Date().toISOString()
                     });
@@ -197,31 +259,66 @@ export default function ProtocolsHub() {
                 const protocolRef = doc(collection(db, "protocols"));
                 const protocolId = `WYD-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
 
+                const finalProtocolItems = [];
+
                 for (const cartItem of cart) {
-                    if (cartItem.isManual) continue;
+                    if (cartItem.isManual) {
+                        // NOWOŚĆ: Rejestrujemy wpis ręczny jako kartotekę BULK z flagą MANUAL
+                        const newDocRef = doc(collection(db, "inventory"));
+                        transaction.set(newDocRef, {
+                            name: cartItem.name,
+                            type: "BULK",
+                            subType: "MANUAL",
+                            inventoryNumber: "RĘCZNY",
+                            category: "Wpis ręczny",
+                            unit: cartItem.unit || "szt.",
+                            availableQuantity: 0,
+                            totalQuantity: cartItem.issueQty,
+                            status: "sprawne",
+                            allocations: { [siteId]: cartItem.issueQty },
+                            createdAt: new Date().toISOString()
+                        });
 
-                    const itemRef = doc(db, "inventory", cartItem.dbId!);
-                    const itemDoc = await transaction.get(itemRef);
+                        finalProtocolItems.push({
+                            inventoryId: newDocRef.id,
+                            isManual: true,
+                            name: cartItem.name,
+                            inventoryNumber: "RĘCZNY",
+                            quantity: cartItem.issueQty,
+                            unit: cartItem.unit || "szt.",
+                            accessories: cartItem.accessories
+                        });
+                    } else {
+                        const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId!];
+                        const data = itemDoc.data();
 
-                    if (!itemDoc.exists()) throw `Przedmiot ${cartItem.name} nie istnieje!`;
+                        const newAvailable = data.availableQuantity - cartItem.issueQty;
+                        if (newAvailable < 0) throw `Brak wystarczającej ilości dla: ${data.name}`;
 
-                    const data = itemDoc.data();
-                    const newAvailable = data.availableQuantity - cartItem.issueQty;
-                    if (newAvailable < 0) throw `Brak wystarczającej ilości dla: ${data.name}`;
+                        const currentAllocations = data.allocations || {};
+                        const newAllocations = { ...currentAllocations, [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty };
 
-                    const currentAllocations = data.allocations || {};
-                    const newAllocations = { ...currentAllocations, [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty };
+                        const updateData: any = { availableQuantity: newAvailable, allocations: newAllocations };
+                        if (data.type === "UNIQUE") updateData.currentLocation = siteName;
 
-                    const updateData: any = { availableQuantity: newAvailable, allocations: newAllocations };
-                    if (data.type === "UNIQUE") updateData.currentLocation = siteName;
+                        transaction.update(itemRef, updateData);
 
-                    transaction.update(itemRef, updateData);
+                        if (data.type === "UNIQUE") {
+                            const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(), type: "WYDANIE", description: `Wydano na budowę: ${siteName}`,
+                                status: data.status, user: `${user?.firstName} ${user?.lastName}`
+                            });
+                        }
 
-                    if (data.type === "UNIQUE") {
-                        const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
-                        transaction.set(historyRef, {
-                            date: new Date().toISOString(), type: "WYDANIE", description: `Wydano na budowę: ${siteName}`,
-                            status: data.status, user: `${user?.firstName} ${user?.lastName}`
+                        finalProtocolItems.push({
+                            inventoryId: cartItem.dbId,
+                            isManual: false,
+                            name: cartItem.name,
+                            inventoryNumber: cartItem.inventoryNumber || "",
+                            quantity: cartItem.issueQty,
+                            unit: cartItem.unit || "szt.",
+                            accessories: cartItem.accessories
                         });
                     }
                 }
@@ -230,14 +327,7 @@ export default function ProtocolsHub() {
                     protocolId, type: "WYDANIE", sourceId: "MAGAZYN", destinationId: siteId, destinationName: siteName,
                     createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
-                    items: cart.map(i => ({
-                        inventoryId: i.isManual ? null : i.dbId,
-                        isManual: i.isManual,
-                        name: i.name,
-                        inventoryNumber: i.inventoryNumber || "",
-                        quantity: i.issueQty,
-                        accessories: i.accessories
-                    }))
+                    items: finalProtocolItems
                 });
             });
 
@@ -252,10 +342,11 @@ export default function ProtocolsHub() {
     };
 
     // -------------------------------------------------------------------------
-    // ZGŁASZANIE ZWROTU (Kierownik -> Magazyn)
+    // ZGŁASZANIE ZWROTU
     // -------------------------------------------------------------------------
     const openReturnModal = () => {
         if (userSites.length === 1) setReturnSiteId(userSites[0].id);
+        setReturnActiveTab("UNIQUE");
         setIsReturnModalOpen(true);
     };
 
@@ -283,7 +374,7 @@ export default function ProtocolsHub() {
 
         setReturnCart(prev => [...prev, {
             dbId: item.id, name: item.name, type: item.type, inventoryNumber: item.inventoryNumber,
-            maxQty: item.allocations[returnSiteId], returnQty: 1, declaredStatus: "sprawne", accessories: expectedAccessories
+            maxQty: item.allocations[returnSiteId], returnQty: 1, unit: item.unit || "szt.", declaredStatus: "sprawne", accessories: expectedAccessories
         }]);
     };
 
@@ -299,7 +390,7 @@ export default function ProtocolsHub() {
                 protocolId, type: "ZWROT", documentSource: "APP_ELECTRONIC", sourceId: returnSiteId, sourceName: siteName, destinationId: "MAGAZYN",
                 createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "OCZEKUJACY", createdAt: new Date().toISOString(),
                 items: returnCart.map(i => ({
-                    inventoryId: i.dbId, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber,
+                    inventoryId: i.dbId, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber, unit: i.unit || "szt.",
                     declaredQty: i.returnQty, declaredStatus: i.type === "UNIQUE" ? i.declaredStatus : null, accessories: i.accessories
                 }))
             });
@@ -308,8 +399,17 @@ export default function ProtocolsHub() {
         } catch (error: any) { alert("Błąd: " + error.message); } finally { setIsSubmitting(false); }
     };
 
+    // Filtrujemy na podstawie budowy oraz nowej zakładki (Narzędzia/Rusztowania/Inne)
+    const inventoryOnSelectedSite = inventory.filter(i => returnSiteId && i.allocations && i.allocations[returnSiteId] > 0);
+    const filteredReturnInventory = inventoryOnSelectedSite.filter(item => {
+        if (returnActiveTab === "UNIQUE") return item.type === "UNIQUE";
+        if (returnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL" && item.category !== "Wpis ręczny";
+        if (returnActiveTab === "MANUAL") return item.subType === "MANUAL" || item.category === "Wpis ręczny";
+        return true;
+    });
+
     // -------------------------------------------------------------------------
-    // AKCEPTACJA ZWROTU PRZEZ MAGAZYNIERA (Magia tworzenia zaległości)
+    // AKCEPTACJA ZWROTU PRZEZ MAGAZYNIERA (Pozostaje bez zmian)
     // -------------------------------------------------------------------------
     const openAcceptModal = () => {
         fetchPendingProtocols();
@@ -322,9 +422,7 @@ export default function ProtocolsHub() {
         protocol.items.forEach((i: any) => {
             const verAcc: Record<number, boolean> = {};
             if (i.accessories) {
-                i.accessories.forEach((a: any, idx: number) => {
-                    verAcc[idx] = a.isReturning;
-                });
+                i.accessories.forEach((a: any, idx: number) => { verAcc[idx] = a.isReturning; });
             }
 
             initialInputs[i.inventoryId] = {
@@ -365,11 +463,6 @@ export default function ProtocolsHub() {
         setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
-
-                // ═══════════════════════════════════════════════════════════════
-                // FAZA 1: WSZYSTKIE ODCZYTY (reads muszą być przed writes!)
-                // ═══════════════════════════════════════════════════════════════
-
                 const protocolRef = doc(db, "protocols", selectedProtocol.dbId);
                 const protocolDoc = await transaction.get(protocolRef);
 
@@ -385,10 +478,6 @@ export default function ProtocolsHub() {
                     itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
                 }
 
-                // ═══════════════════════════════════════════════════════════════
-                // FAZA 2: WSZYSTKIE ZAPISY (writes po reads)
-                // ═══════════════════════════════════════════════════════════════
-
                 const updatedItemsForProtocol = [];
 
                 for (const item of selectedProtocol.items) {
@@ -400,7 +489,6 @@ export default function ProtocolsHub() {
                     const itemData = itemDoc.data();
                     const workerInput = acceptInputs[item.inventoryId];
 
-                    // TWORZENIE ZALEGŁOŚCI OSPRZĘTU
                     let missingAccessoriesNote = "";
                     const finalizedAccessories = [];
 
@@ -433,7 +521,6 @@ export default function ProtocolsHub() {
                         }
                     }
 
-                    // AKTUALIZACJA STANU MAGAZYNOWEGO
                     if (itemData.type === "BULK") {
                         const currentAllocations = itemData.allocations || {};
                         const currentSiteQty = currentAllocations[selectedProtocol.sourceId] || 0;
@@ -471,7 +558,6 @@ export default function ProtocolsHub() {
                     });
                 }
 
-                // AKTUALIZACJA PROTOKOŁU
                 transaction.update(protocolRef, {
                     status: "ZAAKCEPTOWANY",
                     acceptedBy: user?.uid,
@@ -493,18 +579,7 @@ export default function ProtocolsHub() {
         }
     };
 
-
     if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie modułu protokołów...</div>;
-
-    const filteredInventory = inventory.filter(item => {
-        if (item.type !== activeTab) return false;
-        const matchesName = item.name.toLowerCase().includes(searchName.toLowerCase());
-        let matchesInvNum = true;
-        if (searchInvNumber) matchesInvNum = (item.inventoryNumber || "").toLowerCase().includes(searchInvNumber.toLowerCase());
-        return matchesName && matchesInvNum;
-    });
-
-    const inventoryOnSelectedSite = inventory.filter(i => returnSiteId && i.allocations && i.allocations[returnSiteId] > 0);
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto animate-fade-in">
@@ -546,6 +621,7 @@ export default function ProtocolsHub() {
                             <button onClick={closeModal} className="text-4xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
                         <div className="flex-1 flex overflow-hidden">
+                            {/* LEWA — lista sprzętu */}
                             <div className="w-[55%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-slate-50">
                                     <div className="flex gap-2 mb-4 bg-slate-200 p-1 rounded-xl w-fit">
@@ -565,32 +641,41 @@ export default function ProtocolsHub() {
                                     {filteredInventory.map(item => {
                                         const isAvailable = item.availableQuantity > 0;
                                         const isBroken = item.status !== "sprawne";
+                                        const isInCart = !!cart.find(i => i.dbId === item.id);
                                         return (
-                                            <div key={item.id} className={`flex justify-between items-center p-3 border rounded-xl shadow-sm ${isAvailable ? 'bg-white' : 'bg-slate-100 opacity-60'} ${isBroken ? 'border-red-300 bg-red-50' : ''}`}>
+                                            <div key={item.id} className={`flex justify-between items-center p-3 border rounded-xl shadow-sm transition
+                                                ${isInCart ? 'bg-green-50 border-green-300' : isAvailable ? 'bg-white' : 'bg-slate-100 opacity-60'}
+                                                ${isBroken ? 'border-red-300 bg-red-50' : ''}`}>
                                                 <div>
                                                     <p className="font-bold text-sm text-slate-800">{item.name}</p>
                                                     <p className="text-[11px] font-mono text-blue-600">Nr Mag: {item.inventoryNumber || "-"}</p>
                                                     {!isAvailable && <p className="text-[10px] text-red-600 font-bold uppercase">📍 Poza magazynem: {item.currentLocation}</p>}
-                                                    {isAvailable && <p className="text-[10px] text-green-600 font-bold">Dostępne: {item.availableQuantity}</p>}
+                                                    {isAvailable && <p className="text-[10px] text-green-600 font-bold">Dostępne: {item.availableQuantity} {item.unit || "szt."}</p>}
                                                 </div>
-                                                {isAvailable && !isBroken ? (
+                                                {isInCart ? (
+                                                    <span className="text-[10px] bg-green-100 text-green-700 font-black px-2 py-1 rounded-lg uppercase">W koszyku</span>
+                                                ) : isAvailable && !isBroken ? (
                                                     <button onClick={() => addToCart(item)} className="bg-slate-100 hover:bg-green-600 hover:text-white text-green-600 w-10 h-10 rounded-lg font-black text-xl transition">+</button>
-                                                ) : <div className="text-[10px] text-red-500 font-bold text-center uppercase leading-tight">Zablokowane</div>}
+                                                ) : (
+                                                    <div className="text-[10px] text-red-500 font-bold text-center uppercase leading-tight">Zablokowane</div>
+                                                )}
                                             </div>
-                                        )
+                                        );
                                     })}
                                 </div>
                             </div>
+
+                            {/* PRAWA — budowa + koszyk */}
                             <div className="w-[45%] flex flex-col bg-white">
                                 <div className="p-6 border-b bg-slate-50">
                                     <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Wybierz lub wpisz budowę</label>
-                                    <input list="sites-list" placeholder="Wybierz z listy lub wpisz nową usterkę..." value={issueSiteInput} onChange={(e) => setIssueSiteInput(e.target.value)} className="w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 font-bold shadow-sm" />
+                                    <input list="sites-list" placeholder="Wybierz z listy lub wpisz nową budowę..." value={issueSiteInput} onChange={(e) => setIssueSiteInput(e.target.value)} className="w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 font-bold shadow-sm" />
                                     <datalist id="sites-list">{sites.map(s => <option key={s.id} value={s.name} />)}</datalist>
                                 </div>
                                 <div className="flex-1 p-6 overflow-y-auto">
                                     <div className="flex justify-between items-center mb-4">
                                         <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest">2. Koszyk wydania</label>
-                                        <button onClick={addManualItemToCart} className="bg-orange-100 text-orange-800 px-3 py-1.5 rounded-lg text-xs font-bold">+ Wpis ręczny</button>
+                                        <button onClick={openManualModal} className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm">+ Wpis ręczny</button>
                                     </div>
                                     {cart.length === 0 ? (
                                         <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">KOSZYK PUSTY</div>
@@ -600,13 +685,27 @@ export default function ProtocolsHub() {
                                                 <div key={cItem.cartItemId} className={`p-4 border rounded-xl shadow-sm ${cItem.isManual ? 'bg-orange-50 border-orange-200' : 'bg-slate-50'}`}>
                                                     <div className="flex items-center justify-between gap-4">
                                                         <div className="flex-1">
-                                                            <p className="font-bold text-sm text-slate-800">{cItem.name} {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Ręczny</span>}</p>
+                                                            <p className="font-bold text-sm text-slate-800">
+                                                                {cItem.name}
+                                                                {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Ręczny</span>}
+                                                            </p>
                                                             {!cItem.isManual && <p className="text-[10px] text-slate-500 font-mono">Nr Mag: {cItem.inventoryNumber || "-"}</p>}
                                                         </div>
                                                         <div className="flex items-center gap-3">
                                                             {cItem.type === "BULK" || cItem.isManual ? (
-                                                                <input type="number" min="1" max={cItem.isManual ? 9999 : cItem.availableQuantity} value={cItem.issueQty} onChange={(e) => updateCartQty(cItem.cartItemId, Number(e.target.value))} className="w-16 p-2 border rounded-lg text-center font-bold outline-none" />
-                                                            ) : <span className="font-bold text-sm bg-white px-3 py-2 rounded-lg border">1 szt.</span>}
+                                                                <div className="flex items-center gap-1">
+                                                                    <input
+                                                                        type="number" min="0.01" step="any"
+                                                                        max={cItem.isManual ? 999999 : cItem.availableQuantity}
+                                                                        value={cItem.issueQty}
+                                                                        onChange={(e) => updateCartQty(cItem.cartItemId, Number(e.target.value))}
+                                                                        className="w-16 p-2 border rounded-lg text-center font-bold outline-none"
+                                                                    />
+                                                                    <span className="text-xs font-bold text-slate-500">{cItem.unit || "szt."}</span>
+                                                                </div>
+                                                            ) : (
+                                                                <span className="font-bold text-sm bg-white px-3 py-2 rounded-lg border">1 szt.</span>
+                                                            )}
                                                             <button onClick={() => removeFromCart(cItem.cartItemId)} className="bg-red-100 hover:bg-red-500 text-red-600 hover:text-white w-8 h-8 rounded-lg font-bold">&times;</button>
                                                         </div>
                                                     </div>
@@ -624,11 +723,15 @@ export default function ProtocolsHub() {
                                                             <div className="flex items-center gap-2 mt-2 bg-blue-50 p-2 rounded border border-blue-100">
                                                                 <input type="text" placeholder="Nazwa (np. Klucz)" className="flex-1 p-1.5 text-xs border" value={accName} onChange={e => setAccName(e.target.value)} />
                                                                 <input type="number" min="1" className="w-12 p-1.5 text-xs text-center border" value={accQty} onChange={e => setAccQty(Number(e.target.value))} />
-                                                                <label className="text-[10px] font-bold flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={accMustReturn} onChange={e => setAccMustReturn(e.target.checked)} /> Ma wrócić?</label>
+                                                                <label className="text-[10px] font-bold flex items-center gap-1 cursor-pointer">
+                                                                    <input type="checkbox" checked={accMustReturn} onChange={e => setAccMustReturn(e.target.checked)} /> Ma wrócić?
+                                                                </label>
                                                                 <button onClick={() => saveAccessory(cItem.cartItemId)} className="bg-blue-600 text-white text-xs font-bold px-3 py-1.5 rounded">OK</button>
                                                                 <button onClick={() => setAccessoryFormOpenFor(null)} className="text-slate-500 text-xs">Anuluj</button>
                                                             </div>
-                                                        ) : <button onClick={() => setAccessoryFormOpenFor(cItem.cartItemId)} className="text-[10px] font-bold text-blue-600 hover:underline mt-2">+ Dodaj osprzęt</button>}
+                                                        ) : (
+                                                            <button onClick={() => setAccessoryFormOpenFor(cItem.cartItemId)} className="text-[10px] font-bold text-blue-600 hover:underline mt-2">+ Dodaj osprzęt</button>
+                                                        )}
                                                     </div>
                                                 </div>
                                             ))}
@@ -642,6 +745,111 @@ export default function ProtocolsHub() {
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MINI-MODAL: Wybór ilości dla BULK (ze stanów magazynowych) */}
+            {bulkPickModal && (
+                <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in">
+                        <h3 className="text-lg font-black text-slate-800 mb-1">Podaj ilość</h3>
+                        <p className="text-sm text-slate-500 mb-1">
+                            <span className="font-bold text-slate-700">{bulkPickModal.item.name}</span>
+                        </p>
+                        <p className="text-[11px] font-mono text-blue-600 mb-5">
+                            Nr Mag: {bulkPickModal.item.inventoryNumber}
+                        </p>
+                        <div className="flex items-center gap-3 mb-2">
+                            <button
+                                onClick={() => setBulkPickModal(p => p && p.qty > 1 ? { ...p, qty: p.qty - 1 } : p)}
+                                className="w-12 h-12 rounded-xl bg-slate-100 hover:bg-slate-200 text-2xl font-black text-slate-700 transition flex items-center justify-center"
+                            >−</button>
+                            <input
+                                type="number" min="1" max={bulkPickModal.item.availableQuantity}
+                                value={bulkPickModal.qty}
+                                onChange={e => setBulkPickModal(p => p ? { ...p, qty: Math.max(1, Math.min(Number(e.target.value), p.item.availableQuantity)) } : p)}
+                                className="flex-1 text-center text-2xl font-black p-2 border-2 rounded-xl outline-none focus:border-green-500"
+                            />
+                            <button
+                                onClick={() => setBulkPickModal(p => p && p.qty < p.item.availableQuantity ? { ...p, qty: p.qty + 1 } : p)}
+                                className="w-12 h-12 rounded-xl bg-slate-100 hover:bg-slate-200 text-2xl font-black text-slate-700 transition flex items-center justify-center"
+                            >+</button>
+                        </div>
+                        <p className="text-[11px] text-slate-400 text-center mb-6">
+                            Dostępne na magazynie: <span className="font-bold text-slate-600">{bulkPickModal.item.availableQuantity} {bulkPickModal.item.unit || "szt."}</span>
+                        </p>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setBulkPickModal(null)}
+                                className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition"
+                            >Anuluj</button>
+                            <button
+                                onClick={confirmBulkAdd}
+                                className="flex-1 py-3 bg-green-600 text-white font-black rounded-xl hover:bg-green-700 shadow-md transition"
+                            >Dodaj do koszyka</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MINI-MODAL: Wpis ręczny */}
+            {isManualModalOpen && (
+                <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in">
+                        <h3 className="text-lg font-black text-orange-600 mb-4 flex items-center gap-2">
+                            <span>📝</span> Wpis ręczny (poza bazą)
+                        </h3>
+                        <div className="space-y-4 mb-6">
+                            <div>
+                                <label className="block text-[11px] font-black text-slate-400 uppercase mb-1">Nazwa przedmiotu / materiału</label>
+                                <input
+                                    type="text"
+                                    value={manualName}
+                                    onChange={(e) => setManualName(e.target.value)}
+                                    placeholder="np. Drut wiązałkowy fi 1.2"
+                                    className="w-full p-3 border-2 rounded-xl outline-none focus:border-orange-500 font-bold"
+                                />
+                            </div>
+                            <div className="flex gap-3">
+                                <div className="flex-1">
+                                    <label className="block text-[11px] font-black text-slate-400 uppercase mb-1">Ilość</label>
+                                    <input
+                                        type="number" min="0.01" step="any"
+                                        value={manualQty}
+                                        onChange={(e) => setManualQty(e.target.value === "" ? "" : Number(e.target.value))}
+                                        placeholder="0"
+                                        className="w-full p-3 border-2 rounded-xl outline-none focus:border-orange-500 font-bold text-center"
+                                    />
+                                </div>
+                                <div className="w-[45%]">
+                                    <label className="block text-[11px] font-black text-slate-400 uppercase mb-1">Jednostka</label>
+                                    <select
+                                        value={manualUnit}
+                                        onChange={(e) => setManualUnit(e.target.value)}
+                                        className="w-full p-3 border-2 rounded-xl outline-none focus:border-orange-500 font-bold bg-white text-center cursor-pointer"
+                                    >
+                                        <option value="szt.">szt.</option>
+                                        <option value="kg">kg</option>
+                                        <option value="mb">mb</option>
+                                        <option value="m²">m²</option>
+                                        <option value="m³">m³</option>
+                                        <option value="kpl.">kpl.</option>
+                                        <option value="opak.">opak.</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setIsManualModalOpen(false)}
+                                className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition"
+                            >Anuluj</button>
+                            <button
+                                onClick={confirmManualAdd}
+                                className="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl hover:bg-orange-600 shadow-md transition"
+                            >Zatwierdź</button>
                         </div>
                     </div>
                 </div>
@@ -663,17 +871,25 @@ export default function ProtocolsHub() {
                                         <option value="" disabled>-- Wybierz budowę --</option>
                                         {userSites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                     </select>
+                                    {/* NOWOŚĆ: Zakładki w Zgłaszaniu Zwrotu */}
+                                    <div className="mt-4 flex gap-2 bg-blue-100/50 p-1 rounded-xl w-fit border border-blue-200">
+                                        <button onClick={() => setReturnActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
+                                        <button onClick={() => setReturnActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
+                                        <button onClick={() => setReturnActiveTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'MANUAL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}>INNE (WPIS RĘCZNY)</button>
+                                    </div>
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
                                     {!returnSiteId ? (
                                         <div className="text-center p-10 text-slate-400">Wybierz budowę z listy powyżej.</div>
-                                    ) : inventoryOnSelectedSite.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400">Brak sprzętu na tej budowie w bazie.</div>
-                                    ) : inventoryOnSelectedSite.map(item => (
+                                    ) : filteredReturnInventory.length === 0 ? (
+                                        <div className="text-center p-10 text-slate-400">Brak sprzętu w tej kategorii na budowie.</div>
+                                    ) : filteredReturnInventory.map(item => (
                                         <div key={item.id} className="flex justify-between items-center p-3 border rounded-xl bg-white hover:border-blue-300 transition shadow-sm">
                                             <div>
                                                 <p className="font-bold text-sm text-slate-800">{item.name}</p>
-                                                <p className="text-[11px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "-"} | Na budowie: <b className="text-blue-600">{item.allocations[returnSiteId]}</b> szt.</p>
+                                                <p className="text-[11px] font-mono text-slate-500">
+                                                    Nr Mag: {item.inventoryNumber || "-"} | Na budowie: <b className="text-blue-600">{item.allocations[returnSiteId]}</b> {item.unit || "szt."}
+                                                </p>
                                             </div>
                                             <button onClick={() => addToReturnCart(item)} className="bg-slate-100 hover:bg-blue-600 hover:text-white text-blue-600 w-10 h-10 rounded-lg font-black text-xl transition">+</button>
                                         </div>
@@ -704,8 +920,8 @@ export default function ProtocolsHub() {
                                                         <div className="flex items-center gap-3">
                                                             {cItem.type === "BULK" ? (
                                                                 <div className="flex items-center gap-1">
-                                                                    <span className="text-[10px] text-slate-400">Szt:</span>
-                                                                    <input type="number" min="1" max={cItem.maxQty} value={cItem.returnQty} onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, returnQty: Number(e.target.value) } : i))} className="w-16 p-2 border rounded-lg text-center font-bold outline-none" />
+                                                                    <input type="number" min="0.01" step="any" max={cItem.maxQty} value={cItem.returnQty} onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, returnQty: Number(e.target.value) } : i))} className="w-16 p-2 border rounded-lg text-center font-bold outline-none" />
+                                                                    <span className="text-[10px] text-slate-500 font-bold">{cItem.unit || "szt."}</span>
                                                                 </div>
                                                             ) : <span className="font-bold text-sm bg-white px-3 py-2 rounded-lg border">1 szt.</span>}
                                                             <button onClick={() => setReturnCart(returnCart.filter(i => i.dbId !== cItem.dbId))} className="bg-red-100 text-red-600 hover:bg-red-500 hover:text-white transition w-8 h-8 rounded-lg font-bold">&times;</button>
@@ -716,7 +932,12 @@ export default function ProtocolsHub() {
                                                             <p className="text-[10px] font-black text-orange-800 uppercase mb-2">⚠️ Pamiętaj o osprzęcie z wydania:</p>
                                                             {cItem.accessories.map((acc, idx) => (
                                                                 <label key={idx} className="flex items-center gap-2 cursor-pointer mb-1">
-                                                                    <input type="checkbox" checked={acc.isReturning} onChange={(e) => { const newCart = [...returnCart]; const targetItem = newCart.find(i => i.dbId === cItem.dbId); if (targetItem) targetItem.accessories[idx].isReturning = e.target.checked; setReturnCart(newCart); }} className="w-4 h-4" />
+                                                                    <input type="checkbox" checked={acc.isReturning} onChange={(e) => {
+                                                                        const newCart = [...returnCart];
+                                                                        const targetItem = newCart.find(i => i.dbId === cItem.dbId);
+                                                                        if (targetItem) targetItem.accessories[idx].isReturning = e.target.checked;
+                                                                        setReturnCart(newCart);
+                                                                    }} className="w-4 h-4" />
                                                                     <span className="text-sm">Zwracam: {acc.name} ({acc.quantity} szt.)</span>
                                                                 </label>
                                                             ))}
@@ -737,7 +958,7 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-            {/* MODAL 3: AKCEPTACJA ZWROTU (Weryfikacja przez Magazyn) */}
+            {/* MODAL 3: AKCEPTACJA ZWROTU */}
             {isAcceptModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
@@ -787,7 +1008,7 @@ export default function ProtocolsHub() {
                                                                 <div className="text-right">
                                                                     <p className="text-[10px] text-slate-500 uppercase">Kierownik Zgłosił:</p>
                                                                     {item.type === "BULK" ? (
-                                                                        <p className="font-black text-slate-700">{item.declaredQty} szt.</p>
+                                                                        <p className="font-black text-slate-700">{item.declaredQty} {item.unit || "szt."}</p>
                                                                     ) : (
                                                                         <p className="font-bold text-sm">Status: {item.declaredStatus}</p>
                                                                     )}
@@ -799,13 +1020,14 @@ export default function ProtocolsHub() {
 
                                                                 {item.type === "BULK" && (
                                                                     <div className="flex items-center gap-2">
-                                                                        <label className="text-xs text-slate-600">Przyjęto szt:</label>
+                                                                        <label className="text-xs text-slate-600">Przyjęto:</label>
                                                                         <input
-                                                                            type="number" min="0"
+                                                                            type="number" min="0" step="any"
                                                                             value={inputState.receivedQty}
                                                                             onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, receivedQty: Number(e.target.value) } })}
                                                                             className={`w-20 p-1.5 border rounded text-center font-bold outline-none ${isQtyDifferent ? 'bg-orange-100 text-orange-900 border-orange-400' : 'bg-slate-50'}`}
                                                                         />
+                                                                        <span className="text-[10px] font-bold text-slate-500">{item.unit || "szt."}</span>
                                                                     </div>
                                                                 )}
 
@@ -823,7 +1045,6 @@ export default function ProtocolsHub() {
                                                                                 <option value="uszkodzone">❌ Uszkodzone</option>
                                                                             </select>
                                                                         </div>
-                                                                        {/* ZGŁOSZENIE SZKODY DO SĄDU */}
                                                                         {inputState.finalStatus === "uszkodzone" && (
                                                                             <label className="flex items-center gap-2 p-2 bg-red-50 border border-red-200 rounded cursor-pointer mt-1 animate-fade-in">
                                                                                 <input
@@ -848,7 +1069,6 @@ export default function ProtocolsHub() {
                                                                 </div>
                                                             </div>
 
-                                                            {/* ZMIANA: Interaktywna lista osprzętu dla Magazyniera */}
                                                             {item.accessories && item.accessories.length > 0 && (
                                                                 <div className="mt-3 p-3 bg-orange-50 border border-orange-200 rounded text-xs">
                                                                     <p className="font-bold text-orange-800 mb-2">Fizyczna weryfikacja osprzętu z wydania:</p>
@@ -876,7 +1096,7 @@ export default function ProtocolsHub() {
                                                                 </div>
                                                             )}
                                                         </div>
-                                                    )
+                                                    );
                                                 })}
                                             </div>
                                         </div>

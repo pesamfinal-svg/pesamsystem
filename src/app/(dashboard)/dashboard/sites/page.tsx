@@ -1,9 +1,11 @@
+// src/app/(dashboard)/sites/page.tsx
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
+import { hasPermission } from "@/lib/auth/permissions"; // <-- DODANO IMPORT UPRAWNIEŃ
 import { useRouter } from "next/navigation";
 
 interface Site {
@@ -32,14 +34,18 @@ export default function SitesManagementPage() {
         status: "active" as "active" | "completed"
     });
 
-    // Zabezpieczenie: tylko admin/uprawniony (uproszczone na potrzeby testów)
-    useEffect(() => {
-        if (user && user.roleId !== "admin") {
-            // router.push("/dashboard");
-        }
-    }, [user, router]);
+    // Weryfikacja, czy użytkownik ma prawo zarządzać budowami (manageSites)
+    const canManageSites = user ? hasPermission("manageSites", user.rolePermissions, user.permissionOverrides) : false;
 
-    const fetchSites = async () => {
+    // ZABEZPIECZENIE STRONY: Wywala z niej każdego bez odpowiedniego uprawnienia
+    useEffect(() => {
+        if (user && !canManageSites) {
+            alert("Brak uprawnień do zarządzania słownikiem budów.");
+            router.push("/dashboard");
+        }
+    }, [user, canManageSites, router]);
+
+    const fetchSites = useCallback(async () => {
         setLoading(true);
         try {
             const q = query(collection(db, "sites"), orderBy("name", "asc"));
@@ -54,10 +60,13 @@ export default function SitesManagementPage() {
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
 
-    useEffect(() => { fetchData(); }, []);
-    const fetchData = () => fetchSites();
+    useEffect(() => {
+        if (canManageSites) {
+            fetchSites();
+        }
+    }, [canManageSites, fetchSites]);
 
     const openModal = (s?: Site) => {
         if (s) {
@@ -72,6 +81,8 @@ export default function SitesManagementPage() {
 
     const handleSaveSite = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (!canManageSites) return; // Podwójne zabezpieczenie
+
         setIsSubmitting(true);
         try {
             if (editingSite) {
@@ -101,6 +112,8 @@ export default function SitesManagementPage() {
     };
 
     const handleDeleteSite = async (id: string, name: string) => {
+        if (!canManageSites) return;
+
         if (confirm(`⚠️ Czy na pewno chcesz TRWALE USUNĄĆ budowę: ${name}?\n\nTej operacji nie da się cofnąć.`)) {
             try {
                 await deleteDoc(doc(db, "sites", id));
@@ -111,6 +124,9 @@ export default function SitesManagementPage() {
         }
     };
 
+    // Jeśli user nie ma uprawnień i jest w trakcie przekierowywania - nie renderuj UI
+    if (!canManageSites) return null;
+
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto animate-fade-in">
             <div className="flex justify-between items-center mb-8">
@@ -118,12 +134,15 @@ export default function SitesManagementPage() {
                     <h1 className="text-2xl font-bold text-slate-800">Słownik Budów</h1>
                     <p className="text-slate-500 text-sm mt-1">Dodawaj aktywne projekty, do których przypisany będzie sprzęt</p>
                 </div>
-                <button
-                    onClick={() => openModal()}
-                    className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition"
-                >
-                    + Dodaj Nową Budowę
-                </button>
+                {/* Przycisk schowany za uprawnieniem (w tym pliku i tak sprawdzamy dostęp do całej strony, ale to dobra praktyka) */}
+                {canManageSites && (
+                    <button
+                        onClick={() => openModal()}
+                        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition"
+                    >
+                        + Dodaj Nową Budowę
+                    </button>
+                )}
             </div>
 
             {loading ? (
@@ -146,18 +165,22 @@ export default function SitesManagementPage() {
                                 <p className="text-sm text-slate-500 flex-grow mb-6">📍 {site.location}</p>
 
                                 <div className="flex justify-between items-center pt-4 border-t border-slate-50">
-                                    <button
-                                        onClick={() => openModal(site)}
-                                        className="text-blue-600 hover:text-blue-800 text-sm font-bold"
-                                    >
-                                        Edytuj
-                                    </button>
-                                    <button
-                                        onClick={() => handleDeleteSite(site.id, site.name)}
-                                        className="text-red-400 hover:text-red-600 text-xs"
-                                    >
-                                        Usuń trwale
-                                    </button>
+                                    {canManageSites && (
+                                        <>
+                                            <button
+                                                onClick={() => openModal(site)}
+                                                className="text-blue-600 hover:text-blue-800 text-sm font-bold"
+                                            >
+                                                Edytuj
+                                            </button>
+                                            <button
+                                                onClick={() => handleDeleteSite(site.id, site.name)}
+                                                className="text-red-400 hover:text-red-600 text-xs"
+                                            >
+                                                Usuń trwale
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         ))
@@ -166,7 +189,7 @@ export default function SitesManagementPage() {
             )}
 
             {/* Modal Formularza */}
-            {isModalOpen && (
+            {isModalOpen && canManageSites && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-fade-in">
                         <div className="p-6 border-b bg-slate-50 flex justify-between items-center">
