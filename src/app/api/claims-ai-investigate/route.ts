@@ -16,7 +16,7 @@ export async function POST(req: Request) {
         // Inicjalizacja Vertex AI wewnątrz funkcji (bezpieczne dla wdrożenia)
         const vertexAI = new VertexAI({
             project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-            location: 'europe-west1'
+            location: 'global'
         });
 
         // 1. Logika sprawdzania, czy zdjęcia już są w historii rozmowy
@@ -29,7 +29,7 @@ export async function POST(req: Request) {
 
         // 2. Wybór stabilnego modelu (1.5-pro jest najdokładniejszy do JSONa)
         const model = vertexAI.getGenerativeModel({
-            model: 'gemini-2.5-pro',
+            model: 'gemini-3.1-flash-lite',
             systemInstruction: {
                 role: 'system',
                 parts: [{
