@@ -41,12 +41,12 @@ export async function POST(req: Request) {
 
         const vertexAI = new VertexAI({
             project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-            location: 'global'
+            location: 'europe-west1'
         });
 
         // ZMIANA: Model 1.5-pro jest najnowszą STABILNĄ wersją w Vertex. 2.5-pro to błąd w nazwie rzucający 500.
         const model = vertexAI.getGenerativeModel({
-            model: 'gemini-3.1-pro-preview',
+            model: 'gemini-2.5-pro',
             systemInstruction: {
                 role: 'system',
                 parts: [{
