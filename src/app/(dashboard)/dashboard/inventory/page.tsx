@@ -38,6 +38,11 @@ interface InventoryItem {
     createdAt: string;
 }
 
+interface InvestigationMessage {
+    role: string;
+    content: string;
+}
+
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
     name: "",
     type: "UNIQUE",
@@ -73,15 +78,21 @@ export default function InventoryPage() {
     const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
     const [showSpecs, setShowSpecs] = useState(false);
 
-    // MODAL SERWISOWY (NOWOŚĆ)
+    // MODAL SERWISOWY
     const [isServiceModalOpen, setIsServiceModalOpen] = useState(false);
     const [serviceData, setServiceData] = useState({ newStatus: "sprawne", description: "", cost: "" });
     const [isServiceSubmitting, setIsServiceSubmitting] = useState(false);
 
-    // MODAL ZGŁOSZENIA SZKODY
+    // MODAL ZGŁOSZENIA SZKODY - AGENT ŚLEDCZY
     const [isClaimModalOpen, setIsClaimModalOpen] = useState(false);
     const [claimReason, setClaimReason] = useState("");
     const [isClaimSubmitting, setIsClaimSubmitting] = useState(false);
+    const [investigationMessages, setInvestigationMessages] = useState<InvestigationMessage[]>([]);
+    const [investigationInput, setInvestigationInput] = useState("");
+    const [isInvestigating, setIsInvestigating] = useState(false);
+    const [investigationComplete, setInvestigationComplete] = useState(false);
+    const [finalCaseContext, setFinalCaseContext] = useState<string | null>(null);
+    const [claimStep, setClaimStep] = useState<"INITIAL_FORM" | "INVESTIGATION" | "DONE">("INITIAL_FORM");
 
     const [imageFile, setImageFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
@@ -228,8 +239,6 @@ export default function InventoryPage() {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
             setItemHistory(historySnap.docs.map(d => d.data() as HistoryEntry));
 
-            // ZMIANA: Usunęliśmy filtr 'where("status", "in", ...)'
-            // Teraz szukamy jakiejkolwiek sprawy, niezależnie od jej statusu.
             const claimsQ = query(
                 collection(db, "claims"),
                 where("inventoryId", "==", item.id),
@@ -240,7 +249,7 @@ export default function InventoryPage() {
 
             if (!claimsSnap.empty) {
                 const latestClaim = claimsSnap.docs[0].data();
-                setHasOpenClaim(latestClaim.status); // Zapisujemy "NOWA", "W_TOKU" lub "ZAMKNIETA"
+                setHasOpenClaim(latestClaim.status);
             }
 
         } catch (e) {
@@ -252,7 +261,7 @@ export default function InventoryPage() {
     };
 
     // =========================================================================
-    // NOWE FUNKCJE DO KARTY URZĄDZENIA: SERWIS i SZKODY
+    // FUNKCJE DO KARTY URZĄDZENIA: SERWIS
     // =========================================================================
 
     const openServiceModal = () => {
@@ -293,12 +302,10 @@ export default function InventoryPage() {
 
             alert("Wpis serwisowy został dodany!");
             const updatedItem = { ...selectedItem, status: serviceData.newStatus.toLowerCase() };
-
-            // Odświeżenie interfejsu bez przeładowywania strony
             setSelectedItem(updatedItem);
             setIsServiceModalOpen(false);
             fetchItems();
-            openItemCard(updatedItem); // Odświeża historię
+            openItemCard(updatedItem);
         } catch (error) {
             alert("Błąd: " + error);
         } finally {
@@ -306,10 +313,87 @@ export default function InventoryPage() {
         }
     };
 
-    const handleReportClaim = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!selectedItem || !claimReason.trim()) return;
+    // =========================================================================
+    // FUNKCJE DO KARTY URZĄDZENIA: SZKODY - AGENT ŚLEDCZY
+    // =========================================================================
 
+    // KROK 1: Magazynier wpisuje wstępną uwagę → startuje agent śledczy
+    const handleStartInvestigation = async () => {
+        if (!selectedItem || !claimReason.trim()) return;
+        setIsInvestigating(true);
+        setInvestigationMessages([]);
+        setInvestigationComplete(false);
+        setFinalCaseContext(null);
+
+        try {
+            const res = await fetch("/api/claims-ai-investigate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    inventoryName: selectedItem.name,
+                    inventoryNumber: selectedItem.inventoryNumber,
+                    siteName: "Zgłoszenie z katalogu magazynu",
+                    warehouseNotes: claimReason,
+                    declaredStatus: selectedItem.status,
+                    messages: [],
+                    isInitial: true
+                })
+            });
+            const data = await res.json();
+            setInvestigationMessages([{ role: "assistant", content: data.reply }]);
+            if (data.isComplete) {
+                setInvestigationComplete(true);
+                setFinalCaseContext(data.caseContext);
+            }
+            setClaimStep("INVESTIGATION");
+        } catch (e) {
+            alert("Błąd połączenia z Agentem Śledczym.");
+        } finally {
+            setIsInvestigating(false);
+        }
+    };
+
+    // KROK 2: Magazynier odpowiada agentowi
+    const handleInvestigationReply = async () => {
+        if (!investigationInput.trim() || !selectedItem) return;
+        const userMsg = { role: "user", content: investigationInput };
+        const updatedMessages = [...investigationMessages, userMsg];
+        setInvestigationMessages(updatedMessages);
+        setInvestigationInput("");
+        setIsInvestigating(true);
+
+        try {
+            const res = await fetch("/api/claims-ai-investigate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    inventoryName: selectedItem.name,
+                    inventoryNumber: selectedItem.inventoryNumber,
+                    siteName: "Zgłoszenie z katalogu magazynu",
+                    warehouseNotes: claimReason,
+                    declaredStatus: selectedItem.status,
+                    messages: updatedMessages,
+                    isInitial: false
+                })
+            });
+            const data = await res.json();
+            const aiMsg = { role: "assistant", content: data.reply };
+            setInvestigationMessages(prev => [...prev, aiMsg]);
+
+            if (data.isComplete) {
+                setInvestigationComplete(true);
+                setFinalCaseContext(data.caseContext);
+            }
+        } catch (e) {
+            alert("Błąd Agenta Śledczego.");
+        } finally {
+            setIsInvestigating(false);
+        }
+    };
+
+    // KROK 3: Tworzenie sprawy po skompletowaniu raportu przez agenta
+    const handleCreateClaim = async () => {
+        if (!selectedItem || !finalCaseContext) return;
         setIsClaimSubmitting(true);
         try {
             await addDoc(collection(db, "claims"), {
@@ -317,21 +401,25 @@ export default function InventoryPage() {
                 inventoryId: selectedItem.id,
                 inventoryName: selectedItem.name,
                 inventoryNumber: selectedItem.inventoryNumber || "",
-                siteName: "Zgłoszenie z magazynu",
+                siteName: "Zgłoszenie z katalogu magazynu",
                 reportedBy: user?.uid,
                 reportedByName: `${user?.firstName} ${user?.lastName}`,
                 description: claimReason,
+                warehouseSummary: finalCaseContext,
                 status: "NOWA",
                 createdAt: new Date().toISOString(),
                 messages: [],
                 assignedManagers: []
             });
-            alert("Pomyślnie utworzono sprawę w Sądzie PESAM!");
-            setIsClaimModalOpen(false);
-            setSelectedItem(null);
-            fetchItems();
+            setClaimStep("DONE");
+            setTimeout(() => {
+                setIsClaimModalOpen(false);
+                setClaimStep("INITIAL_FORM");
+                setSelectedItem(null);
+                fetchItems();
+            }, 2000);
         } catch (error) {
-            alert("Błąd zgłaszania sprawy: " + error);
+            alert("Błąd tworzenia sprawy: " + error);
         } finally {
             setIsClaimSubmitting(false);
         }
@@ -472,23 +560,33 @@ export default function InventoryPage() {
                             <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900">&times;</button>
                         </div>
 
-                        {/* AKCJE SERWISOWE I SĄDOWE - Z ROZDZIAŁEM NA STATUS SPRAWY */}
+                        {/* AKCJE SERWISOWE I SĄDOWE */}
                         <div className="flex flex-wrap gap-3 mb-8">
                             <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Dodaj wpis serwisowy / Zmień stan</button>
 
-                            {/* Przycisk widoczny tylko jeśli status jest inny niż 'sprawne' i NIE MA ŻADNEJ SPRAWY */}
                             {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
-                                <button onClick={() => { setClaimReason(""); setIsClaimModalOpen(true); }} className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black">⚖️ Zgłoś do Sądu (Szkoda)</button>
+                                <button
+                                    onClick={() => {
+                                        setClaimReason("");
+                                        setInvestigationMessages([]);
+                                        setInvestigationInput("");
+                                        setInvestigationComplete(false);
+                                        setFinalCaseContext(null);
+                                        setClaimStep("INITIAL_FORM");
+                                        setIsClaimModalOpen(true);
+                                    }}
+                                    className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black"
+                                >
+                                    ⚖️ Zgłoś do Sądu (Szkoda)
+                                </button>
                             )}
 
-                            {/* Komunikat, gdy sprawa jest W TOKU */}
                             {(hasOpenClaim === 'NOWA' || hasOpenClaim === 'W_TOKU') && (
                                 <div className="flex-1 py-3 bg-orange-100 text-orange-800 border border-orange-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
                                     <span>⏳</span> Sprawa w Sądzie w toku
                                 </div>
                             )}
 
-                            {/* Komunikat, gdy sprawa jest ZAMKNIĘTA */}
                             {hasOpenClaim === 'ZAMKNIETA' && (
                                 <div className="flex-1 py-3 bg-slate-100 text-slate-500 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
                                     <span>📁</span> Sprawa została zamknięta
@@ -627,7 +725,7 @@ export default function InventoryPage() {
                 </div>
             )}
 
-            {/* NOWOŚĆ: MODAL SERWISOWY (Elegancki formularz zamiast prompta) */}
+            {/* MODAL SERWISOWY */}
             {isServiceModalOpen && selectedItem && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in">
@@ -691,33 +789,126 @@ export default function InventoryPage() {
                 </div>
             )}
 
-            {/* NOWOŚĆ: MODAL ZGŁOSZENIA SZKODY DO SĄDU */}
+            {/* MODAL ZGŁOSZENIA SZKODY - AGENT ŚLEDCZY (3 kroki) */}
             {isClaimModalOpen && selectedItem && (
                 <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-8 animate-fade-in border-t-8 border-red-600">
-                        <h2 className="text-2xl font-black text-slate-800 mb-2 uppercase tracking-tighter">⚖️ Zgłoś Szkodę do Sądu</h2>
-                        <p className="text-xs text-slate-500 mb-6 font-bold uppercase">{selectedItem.name} (Nr: {selectedItem.inventoryNumber})</p>
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-8 max-h-[90vh] overflow-y-auto animate-fade-in border-t-8 border-red-600">
 
-                        <form onSubmit={handleReportClaim} className="space-y-5">
-                            <div>
-                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Powód zgłoszenia / Opis usterki</label>
+                        {/* ── KROK 1: Formularz wstępny ── */}
+                        {claimStep === "INITIAL_FORM" && (
+                            <>
+                                <div className="flex items-center gap-3 mb-2">
+                                    <span className="text-2xl">⚖️</span>
+                                    <h2 className="text-xl font-black text-slate-800 uppercase tracking-tighter">Zgłoś Szkodę do Sądu</h2>
+                                </div>
+                                <p className="text-xs text-slate-500 font-bold uppercase mb-6">
+                                    {selectedItem.name} (Nr: {selectedItem.inventoryNumber})
+                                </p>
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">
+                                    Powód zgłoszenia / Opis usterki
+                                </label>
                                 <textarea
-                                    required
+                                    value={claimReason}
+                                    onChange={e => setClaimReason(e.target.value)}
                                     rows={4}
                                     placeholder="Opisz dokładnie, co się stało ze sprzętem. Np. pęknięta obudowa, ślady upadku z wysokości, próby nieautoryzowanej naprawy..."
-                                    value={claimReason}
-                                    onChange={(e) => setClaimReason(e.target.value)}
-                                    className="w-full p-3 border-2 border-slate-100 rounded-xl bg-slate-50 outline-none focus:border-red-500 text-sm transition-all"
+                                    className="w-full p-3 border-2 border-slate-100 rounded-xl bg-slate-50 outline-none focus:border-red-400 text-sm mb-6 resize-none transition-all"
                                 />
-                            </div>
+                                <div className="flex gap-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsClaimModalOpen(false)}
+                                        className="flex-1 py-4 text-slate-500 font-bold uppercase tracking-widest border rounded-2xl hover:bg-slate-50 transition"
+                                    >
+                                        Anuluj
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleStartInvestigation}
+                                        disabled={!claimReason.trim() || isInvestigating}
+                                        className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition disabled:opacity-50 uppercase"
+                                    >
+                                        {isInvestigating ? "Łączenie z agentem..." : "Wyślij Zgłoszenie →"}
+                                    </button>
+                                </div>
+                            </>
+                        )}
 
-                            <div className="flex gap-4 pt-4">
-                                <button type="button" onClick={() => setIsClaimModalOpen(false)} className="flex-1 py-4 text-slate-500 font-bold uppercase tracking-widest">Anuluj</button>
-                                <button type="submit" disabled={isClaimSubmitting} className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition disabled:bg-slate-300 uppercase">
-                                    {isClaimSubmitting ? "ZGŁASZANIE..." : "Wyślij Zgłoszenie"}
-                                </button>
+                        {/* ── KROK 2: Czat z agentem śledczym ── */}
+                        {claimStep === "INVESTIGATION" && (
+                            <>
+                                <div className="flex items-center gap-3 mb-1">
+                                    <span className="text-2xl">🕵️</span>
+                                    <h2 className="text-xl font-black text-slate-800 uppercase tracking-tighter">Agent Śledczy PESAM</h2>
+                                </div>
+                                <p className="text-xs text-red-500 font-bold uppercase mb-4">
+                                    {selectedItem.name} — Zbieranie protokołu
+                                </p>
+
+                                <div className="space-y-3 mb-4 max-h-72 overflow-y-auto pr-1">
+                                    {investigationMessages.map((msg, i) => (
+                                        <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                                            <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.role === "user"
+                                                ? "bg-blue-600 text-white rounded-br-none"
+                                                : "bg-slate-100 text-slate-800 rounded-bl-none border"
+                                                }`}>
+                                                {msg.content}
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {isInvestigating && (
+                                        <div className="flex justify-start">
+                                            <div className="bg-slate-100 border p-3 rounded-2xl rounded-bl-none text-sm text-slate-400 animate-pulse">
+                                                Agent analizuje...
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {!investigationComplete ? (
+                                    <div className="flex gap-2 mt-2">
+                                        <input
+                                            value={investigationInput}
+                                            onChange={e => setInvestigationInput(e.target.value)}
+                                            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleInvestigationReply(); } }}
+                                            placeholder="Twoja odpowiedź..."
+                                            className="flex-1 p-3 border-2 rounded-xl outline-none focus:border-blue-400 text-sm"
+                                            disabled={isInvestigating}
+                                        />
+                                        <button
+                                            onClick={handleInvestigationReply}
+                                            disabled={isInvestigating || !investigationInput.trim()}
+                                            className="bg-blue-600 text-white px-5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50 transition"
+                                        >
+                                            ➤
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="mt-4 space-y-3">
+                                        <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm text-green-800 font-bold text-center">
+                                            ✅ Protokół skompletowany. Gotowy do przekazania do Sądu.
+                                        </div>
+                                        <button
+                                            onClick={handleCreateClaim}
+                                            disabled={isClaimSubmitting}
+                                            className="w-full py-4 bg-red-600 text-white rounded-2xl font-black hover:bg-red-700 shadow-xl transition disabled:opacity-50 uppercase tracking-wide"
+                                        >
+                                            {isClaimSubmitting ? "Tworzenie sprawy..." : "⚖️ Przekaż do Sądu PESAM"}
+                                        </button>
+                                    </div>
+                                )}
+                            </>
+                        )}
+
+                        {/* ── KROK 3: Potwierdzenie ── */}
+                        {claimStep === "DONE" && (
+                            <div className="text-center py-10">
+                                <div className="text-6xl mb-4">✅</div>
+                                <h2 className="text-2xl font-black text-green-700 mb-2 uppercase">Sprawa utworzona!</h2>
+                                <p className="text-sm text-slate-500">Przekazano do Sądu PESAM. Zamykanie...</p>
                             </div>
-                        </form>
+                        )}
+
                     </div>
                 </div>
             )}
