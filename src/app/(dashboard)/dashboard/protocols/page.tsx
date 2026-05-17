@@ -52,15 +52,19 @@ export default function ProtocolsHub() {
     const [pendingProtocols, setPendingProtocols] = useState<any[]>([]);
     const [selectedProtocol, setSelectedProtocol] = useState<any | null>(null);
 
-    // ZMIANA: Dodano `verifiedAccessories` do stanu magazyniera
     const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
+
+    // POPRAWKA BŁĘDU TYPESCRIPT: Dodano warehouseNotes i declaredStatus do definicji typu
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
         inventoryName: string;
         inventoryNumber: string;
         siteName: string;
+        warehouseNotes: string;
+        declaredStatus: string;
     } | null>(null);
+
     const [investigationDone, setInvestigationDone] = useState(false);
 
     // Filtry
@@ -313,14 +317,13 @@ export default function ProtocolsHub() {
     };
 
     const openProtocolDetails = (protocol: any) => {
-        // ZMIANA: Inicjalizacja verifiedAccessories na podstawie deklaracji kierownika
         const initialInputs: Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }> = {};
 
         protocol.items.forEach((i: any) => {
             const verAcc: Record<number, boolean> = {};
             if (i.accessories) {
                 i.accessories.forEach((a: any, idx: number) => {
-                    verAcc[idx] = a.isReturning; // Domyślnie bierzemy to co zgłosił kierownik
+                    verAcc[idx] = a.isReturning;
                 });
             }
 
@@ -340,7 +343,6 @@ export default function ProtocolsHub() {
     const handleAcceptSubmit = async (skipInvestigationCheck = false) => {
         if (!selectedProtocol) return;
 
-        // NOWE: Znajdź przedmioty wymagające śledztwa AI
         if (!investigationDone && !skipInvestigationCheck) {
             const itemNeedingInvestigation = selectedProtocol.items.find((item: any) => {
                 const input = acceptInputs[item.inventoryId];
@@ -353,6 +355,8 @@ export default function ProtocolsHub() {
                     inventoryName: itemNeedingInvestigation.name,
                     inventoryNumber: itemNeedingInvestigation.inventoryNumber || "",
                     siteName: selectedProtocol.sourceName,
+                    warehouseNotes: acceptInputs[itemNeedingInvestigation.inventoryId]?.notes || "",
+                    declaredStatus: acceptInputs[itemNeedingInvestigation.inventoryId]?.finalStatus || "uszkodzone",
                 });
                 return;
             }
@@ -373,7 +377,6 @@ export default function ProtocolsHub() {
                     throw "Ten protokół został już przetworzony lub nie istnieje.";
                 }
 
-                // Pobieramy wszystkie dokumenty inventory na raz
                 const itemDocs: Record<string, any> = {};
                 for (const item of selectedProtocol.items) {
                     if (!item.inventoryId) continue;
@@ -429,8 +432,6 @@ export default function ProtocolsHub() {
                             }
                         }
                     }
-
-
 
                     // AKTUALIZACJA STANU MAGAZYNOWEGO
                     if (itemData.type === "BULK") {
@@ -917,6 +918,8 @@ export default function ProtocolsHub() {
                     siteName={investigationData.siteName}
                     reportedByUid={user?.uid || ""}
                     reportedByName={`${user?.firstName} ${user?.lastName}`}
+                    warehouseNotes={investigationData.warehouseNotes}
+                    declaredStatus={investigationData.declaredStatus}
                 />
             )}
         </div>

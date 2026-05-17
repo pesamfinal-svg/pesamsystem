@@ -5,9 +5,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { collection, addDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
-// ⚠️ WAŻNE: Upewnij się że eksportujesz `storage` z @/lib/firebase/config:
-// import { getStorage } from "firebase/storage";
-// export const storage = getStorage(app);
 
 interface ConversationMessage {
     role: "user" | "assistant";
@@ -33,6 +30,9 @@ interface ClaimInvestigationModalProps {
     // Dane zgłaszającego
     reportedByUid: string;
     reportedByName: string;
+    // NOWE: Dane od magazyniera
+    warehouseNotes: string;
+    declaredStatus: string;
 }
 
 const generateClaimId = (): string => {
@@ -95,6 +95,8 @@ export default function ClaimInvestigationModal({
     siteName,
     reportedByUid,
     reportedByName,
+    warehouseNotes, // Odbieramy notatkę
+    declaredStatus  // Odbieramy status
 }: ClaimInvestigationModalProps) {
     // Chat state
     const [displayMessages, setDisplayMessages] = useState<DisplayMessage[]>([]);
@@ -160,6 +162,9 @@ export default function ClaimInvestigationModal({
                     inventoryNumber,
                     siteName,
                     isInitial: true,
+                    // ZMIANA: Wysyłamy notatkę do AI
+                    warehouseNotes,
+                    declaredStatus
                 }),
             });
             const data = await res.json();
@@ -242,6 +247,9 @@ export default function ClaimInvestigationModal({
                     inventoryNumber,
                     siteName,
                     messages: updatedApi,
+                    // ZMIANA: Wysyłamy notatkę do AI dla pewności na każdym etapie
+                    warehouseNotes,
+                    declaredStatus
                 }),
             });
             const data = await res.json();
@@ -266,7 +274,7 @@ export default function ClaimInvestigationModal({
         } finally {
             setIsAiTyping(false);
         }
-    }, [userInput, pendingFiles, displayMessages, apiMessages, isAiTyping, isUploading, inventoryName, inventoryNumber, siteName, claimTempId]);
+    }, [userInput, pendingFiles, displayMessages, apiMessages, isAiTyping, isUploading, inventoryName, inventoryNumber, siteName, claimTempId, warehouseNotes, declaredStatus]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -294,17 +302,22 @@ export default function ClaimInvestigationModal({
         const claimId = generateClaimId();
 
         // Build claim messages from investigation (visible to all)
-        const investigationMessages = displayMessages.map((msg, i) => ({
-            id: `inv_${i}_${Date.now()}`,
-            senderId: msg.role === "assistant" ? "system_ai" : reportedByUid,
-            senderName:
-                msg.role === "assistant" ? "Asystent Śledczy AI 🤖" : reportedByName,
-            senderRole: msg.role === "assistant" ? "AI" : "MAGAZYN",
-            text: msg.content,
-            timestamp: new Date().toISOString(),
-            visibleToWarehouse: true,
-            photos: msg.photos || [],
-        }));
+        // Build claim messages from investigation (visible to all)
+        const investigationMessages = displayMessages.map((msg, i) => {
+            return {
+                id: `inv_${i}_${Date.now()}`,
+                senderId: msg.role === "assistant" ? "system_ai" : reportedByUid,
+                senderName: msg.role === "assistant" ? "Asystent Śledczy AI 🤖" : reportedByName,
+                senderRole: msg.role === "assistant" ? "AI" : "MAGAZYN",
+                text: msg.content,
+                timestamp: new Date().toISOString(),
+                visibleToWarehouse: true,
+                imageUrl: msg.photos && msg.photos.length > 0 ? msg.photos[0] : null, // Zostawiamy dla kompatybilności wstecznej
+                imageUrls: msg.photos || [], // NOWE: Przekazujemy całą tablicę zdjęć!
+            };
+        });
+
+        // Dodajemy zdjęcia, które ew. były w drugiej iteracji msg.photos do głównej puli, ale rzadko się to zdarza
 
         // Add final AI summary message (internal, not visible to warehouse)
         const summaryMessage = {
@@ -312,14 +325,14 @@ export default function ClaimInvestigationModal({
             senderId: "system_ai",
             senderName: "Asystent Śledczy AI 🤖",
             senderRole: "AI",
-            text: `📋 PROTOKÓŁ WSTĘPNY – PRZEKAZANIE DO ZARZĄDU\n\n${caseContext}\n\n📸 Łącznie zebranych zdjęć: ${allUploadedPhotoUrls.length}`,
+            text: `📋 PROTOKÓŁ WSTĘPNY – PRZEKAZANIE DO ZARZĄDU\n\nUwagi magazyniera: ${warehouseNotes || "Brak"}\nStatus: ${declaredStatus}\n\nAnaliza AI:\n${caseContext}\n\n📸 Łącznie zebranych zdjęć dowodowych: ${allUploadedPhotoUrls.length}`,
             timestamp: new Date().toISOString(),
             visibleToWarehouse: false,
-            photos: [],
+            imageUrl: null, // Podsumowanie nie potrzebuje własnego zdjęcia
         };
 
-        // Extract short description (first 200 chars of caseContext)
-        const shortDescription = caseContext?.slice(0, 200).replace(/\n/g, " ") || "Uszkodzenie sprzętu";
+        // Extract short description
+        const shortDescription = `Zgłoszenie: ${declaredStatus}. ${warehouseNotes} | Wnioski AI: ${caseContext?.slice(0, 100).replace(/\n/g, " ") || "Brak"}`;
 
         try {
             const docRef = await addDoc(collection(db, "claims"), {
@@ -417,8 +430,8 @@ export default function ClaimInvestigationModal({
                             <div key={i} className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
                                 <div
                                     className={`max-w-[88%] rounded-2xl px-4 py-3 shadow-sm ${isUser
-                                            ? "bg-blue-600 text-white rounded-br-sm"
-                                            : "bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm"
+                                        ? "bg-blue-600 text-white rounded-br-sm"
+                                        : "bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm"
                                         }`}
                                 >
                                     <div

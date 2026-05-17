@@ -16,6 +16,8 @@ interface ChatMessage {
     text: string;
     timestamp: string;
     visibleToWarehouse: boolean;
+    imageUrl?: string;
+    imageUrls?: string[]; // DODANE
 }
 
 interface Claim {
@@ -105,10 +107,9 @@ export default function ClaimsCenter() {
         setAiGenerating(true);
 
         try {
-            // Zbieramy wszystkie linki do zdjęć z historii rozmowy jako dowody
             const evidencePhotos = (selectedClaim.messages || [])
-                .filter(msg => (msg as any).imageUrl)
-                .map(msg => (msg as any).imageUrl);
+                .filter(msg => msg.imageUrl)
+                .map(msg => msg.imageUrl);
 
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',
@@ -118,49 +119,32 @@ export default function ClaimsCenter() {
                     inventoryNumber: selectedClaim.inventoryNumber,
                     siteName: selectedClaim.siteName,
                     warehouseSummary: selectedClaim.description,
-                    evidencePhotos: evidencePhotos, // Przekazujemy tablicę ze zdjęciami
+                    evidencePhotos: evidencePhotos,
                     isInitial: true
                 })
             });
 
-            // KLUCZOWA POPRAWKA: Sprawdzamy, czy API odpowiedziało sukcesem (kod 2xx)
-            if (!response.ok) {
-                // Jeśli wystąpił błąd, próbujemy odczytać jego treść z serwera
-                const errorData = await response.json();
-                // Rzucamy nowym błędem, który zostanie złapany przez blok `catch`
-                throw new Error(errorData.error || `Błąd serwera: ${response.status}`);
-            }
-
-            // Ten kod wykona się tylko, jeśli odpowiedź była pomyślna
             const data = await response.json();
 
-            const aiInitialMessage: ChatMessage = {
-                id: Date.now().toString(),
-                senderId: "system_ai",
-                senderName: "Asystent Śledczy AI 🤖",
-                senderRole: "AI",
-                text: data.reply, // Teraz mamy pewność, że data.reply istnieje
-                timestamp: new Date().toISOString(),
-                visibleToWarehouse: false
-            };
-
+            // 1. Zapisujemy sprawę jako W_TOKU i przypisujemy managera (BEZ DODAWANIA WIADOMOŚCI AI)
             const claimRef = doc(db, "claims", selectedClaim.id);
             await updateDoc(claimRef, {
                 assignedManagers: arrayUnion(managerUid),
-                status: "W_TOKU",
-                messages: arrayUnion(aiInitialMessage)
+                status: "W_TOKU"
             });
 
-            // Aktualizujemy stan lokalny, aby zmiany były widoczne od razu
+            // 2. Aktualizujemy UI
             setSelectedClaim(prev => prev ? {
                 ...prev,
                 assignedManagers: [...(prev.assignedManagers || []), managerUid],
-                status: "W_TOKU",
-                messages: [...(prev.messages || []), aiInitialMessage]
+                status: "W_TOKU"
             } : null);
 
+            // 3. Wrzucamy odpowiedź do Drawera i go otwieramy
+            setAiAdvice(data.reply);
+            setShowAiDrawer(true);
+
         } catch (e: any) {
-            // Teraz alert pokaże konkretny błąd z serwera, a nie tylko "Błąd AI"
             alert(`Błąd AI: ${e.message}`);
         } finally {
             setAiGenerating(false);
@@ -174,7 +158,11 @@ export default function ClaimsCenter() {
             const response = await fetch('/api/claims-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ inventoryName: selectedClaim.inventoryName, messages: selectedClaim.messages })
+                body: JSON.stringify({
+                    inventoryName: selectedClaim.inventoryName,
+                    messages: selectedClaim.messages,
+                    warehouseSummary: selectedClaim.description
+                })
             });
             const data = await response.json();
             if (response.ok) { setAiAdvice(data.reply); setShowAiDrawer(true); }
@@ -282,20 +270,39 @@ export default function ClaimsCenter() {
                         </div>
                     ) : (
                         <>
-                            {/* BOCZNY PANEL AI (DRAWER) */}
+                            {/* BOCZNY PANEL AI (DRAWER) - ZAKTUALIZOWANY WIDOK LISTY PYTAŃ */}
                             <div className={`absolute top-0 right-0 h-full w-80 bg-slate-900 text-white z-30 shadow-2xl transition-transform duration-300 transform ${showAiDrawer ? 'translate-x-0' : 'translate-x-full'}`}>
                                 <div className="p-6 h-full flex flex-col">
                                     <div className="flex justify-between items-center mb-6">
                                         <h3 className="text-purple-400 font-black uppercase text-xs tracking-widest">✨ Podpowiedź AI</h3>
                                         <button onClick={() => setShowAiDrawer(false)} className="text-slate-400 hover:text-white">✕</button>
                                     </div>
-                                    <div className="flex-1 overflow-y-auto text-sm leading-relaxed text-slate-300 italic">
+
+                                    <div className="flex-1 overflow-y-auto text-sm leading-relaxed text-slate-300">
                                         {aiAdvice ? (
-                                            <div className="space-y-4">
-                                                <p className="bg-slate-800 p-4 rounded-xl border border-slate-700">{aiAdvice}</p>
-                                                <button onClick={() => { setMessageText(aiAdvice.split('"')[1] || aiAdvice); setShowAiDrawer(false); }} className="w-full py-2 bg-purple-600 text-white font-bold text-xs rounded-lg transition hover:bg-purple-500">Użyj tej podpowiedzi</button>
+                                            <div className="space-y-2">
+                                                {aiAdvice.split('\n').filter(q => q.trim() !== "").map((question, i) => (
+                                                    <button
+                                                        key={i}
+                                                        onClick={() => {
+                                                            // Usuwamy ewentualne wiodące cyfry np "1. " lub myślniki "- " przed wstawieniem
+                                                            setMessageText(question.replace(/^\d+\.\s*/, '').replace(/^-\s*/, ''));
+                                                            setShowAiDrawer(false);
+                                                        }}
+                                                        className="w-full text-left p-3 bg-slate-800 hover:bg-purple-900 rounded-xl border border-slate-700 hover:border-purple-500 text-sm text-slate-200 transition shadow-sm group"
+                                                    >
+                                                        <span className="text-purple-400 font-bold mr-2 opacity-50 group-hover:opacity-100 transition">✦</span>
+                                                        {question}
+                                                    </button>
+                                                ))}
+                                                <p className="text-[10px] text-slate-500 mt-4 text-center italic">Kliknij wybrane pytanie, aby użyć go w czacie.</p>
                                             </div>
-                                        ) : 'Analizuję...'}
+                                        ) : (
+                                            <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
+                                                <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                                                Analizuję akta sprawy...
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -328,7 +335,7 @@ export default function ClaimsCenter() {
                                         {aiGenerating && (
                                             <div className="flex items-center gap-3 text-orange-700 animate-pulse">
                                                 <div className="w-5 h-5 border-3 border-orange-600 border-t-transparent rounded-full animate-spin"></div>
-                                                <span className="text-[11px] font-black uppercase tracking-tighter">Asystent analizuje dowody i przygotowuje wezwanie...</span>
+                                                <span className="text-[11px] font-black uppercase tracking-tighter">Asystent analizuje dowody i przygotowuje pytania...</span>
                                             </div>
                                         )}
                                     </div>
@@ -362,20 +369,20 @@ export default function ClaimsCenter() {
                                                     <span>{msg.senderRole}</span>
                                                 </div>
 
-                                                {/* WYŚWIETLANIE DOWODU (ZDJĘCIA) - Jeśli istnieje imageUrl w wiadomości */}
-                                                {(msg as any).imageUrl && (
-                                                    <div className="mb-3 mt-1 rounded-xl overflow-hidden border border-black/10 shadow-lg bg-black/5 group cursor-zoom-in relative">
+                                                {/* WYŚWIETLANIE DOWODÓW (ZDJĘĆ) - Obsługa wielu zdjęć */}
+                                                {(msg.imageUrls?.length ? msg.imageUrls : (msg.imageUrl ? [msg.imageUrl] : [])).map((url, idx) => (
+                                                    <div key={idx} className="mb-3 mt-1 rounded-xl overflow-hidden border border-black/10 shadow-lg bg-black/5 group cursor-zoom-in relative">
                                                         <img
-                                                            src={(msg as any).imageUrl}
-                                                            alt="Zabezpieczony dowód w sprawie"
+                                                            src={url}
+                                                            alt={`Zabezpieczony dowód w sprawie ${idx + 1}`}
                                                             className="max-h-80 w-full object-contain hover:scale-105 transition-transform duration-300"
-                                                            onClick={() => window.open((msg as any).imageUrl, '_blank')}
+                                                            onClick={() => window.open(url, '_blank')}
                                                         />
                                                         <div className="absolute top-2 right-2 bg-black/50 text-white text-[8px] px-2 py-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                                                            Kliknij, aby powiększyć
+                                                            Powiększ dowód nr {idx + 1}
                                                         </div>
                                                     </div>
-                                                )}
+                                                ))}
 
                                                 {/* Treść wiadomości */}
                                                 <p className="text-sm whitespace-pre-wrap leading-relaxed">

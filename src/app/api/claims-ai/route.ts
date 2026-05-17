@@ -3,9 +3,7 @@ import { NextResponse } from 'next/server';
 import { VertexAI } from '@google-cloud/vertexai';
 
 // FUNKCJA POMOCNICZA: Konwertuje publiczny URL z Firebase Storage na wewnętrzny format `gs://`
-// To jest kluczowy element, aby Vertex AI mogło "zobaczyć" obrazy.
 function convertHttpsToGsUri(httpsUrl: string): string | null {
-    // Sprawdzamy, czy link pasuje do wzorca Firebase Storage
     const match = httpsUrl.match(/https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/([^/]+)\/o\/([^?]+)/);
     if (!match) {
         console.warn(`URL nie pasuje do formatu Firebase Storage: ${httpsUrl}`);
@@ -32,7 +30,7 @@ export async function POST(req: Request) {
 
         const vertexAI = new VertexAI({
             project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-            location: 'europe-west1' // Jeśli tu nadal będzie problem, zmień na 'us-central1'
+            location: 'europe-west1'
         });
 
         // Używamy stabilnej i potężnej wersji modelu, która obsługuje multimodalność
@@ -41,26 +39,37 @@ export async function POST(req: Request) {
             systemInstruction: {
                 role: 'system',
                 parts: [{
-                    text: `Jesteś Asystentem Śledczym PESAM. Twoim zadaniem jest konfrontowanie kierowników z faktami technicznymi z magazynu i dowodami wizualnymi. Bądź surowy, konkretny i techniczny. Zadawaj 2-3 kluczowe pytania, aby wykazać błędy w eksploatacji.`
+                    // ZMIANA: Zmieniono rolę z "surowego śledczego" na "inteligentnego doradcę" (styl Google)
+                    text: `Jesteś Asystentem Śledczym PESAM i inteligentnym doradcą Dyrektora. Twoim zadaniem jest podpowiadanie Dyrektorowi trafnych, dociekliwych pytań do zadania Kierownikowi budowy na czacie. Krótko, konkretnie, w formie listy pytań.`
                 }]
             }
         });
 
         // --- SCENARIUSZ 1: PIERWSZE WEZWANIE DO KIEROWNIKA ---
         if (isInitial) {
-            // Budujemy dynamicznie prompt składający się z tekstu i obrazów
             const promptParts: any[] = [
-                { text: `AKTA SPRAWY:\n- Sprzęt: ${inventoryName} (Nr: ${inventoryNumber})\n- Budowa: ${siteName}\n- RAPORT TECHNICZNY MAGAZYNU: ${warehouseSummary}\n\nZADANIE:\nNa podstawie powyższego raportu i załączonych zdjęć dowodowych, sformułuj pierwsze, surowe wezwanie do wyjaśnień dla kierownika.` }
+                {
+                    text: `
+                Jesteś asystentem Dyrektora. Otwieracie nową sprawę dotyczącą zniszczonego sprzętu.
+                
+                AKTA SPRAWY:
+                - Sprzęt: ${inventoryName} (Nr: ${inventoryNumber})
+                - Budowa: ${siteName}
+                - Raport magazynu: ${warehouseSummary}
+                
+                ZADANIE:
+                Na podstawie raportu magazynu i ewentualnych zdjęć, zaproponuj 3 krótkie, ostre pytania, które Dyrektor powinien zadać kierownikowi budowy, aby pociągnąć go za język.
+                Zwróć TYLKO pytania. Każde pytanie w osobnej linii, poprzedzone numerem. Żadnych wstępów, powitań ani elaboratów.
+                ` }
             ];
 
-            // Jeśli frontend przesłał zdjęcia, konwertujemy je na format GS i dodajemy do promptu
             if (evidencePhotos && Array.isArray(evidencePhotos) && evidencePhotos.length > 0) {
                 evidencePhotos.forEach((url: string) => {
                     const gsUri = convertHttpsToGsUri(url);
                     if (gsUri) {
                         promptParts.push({
                             fileData: {
-                                mimeType: 'image/jpeg', // Zakładamy JPEG, można to rozbudować
+                                mimeType: 'image/jpeg',
                                 fileUri: gsUri
                             }
                         });
@@ -68,7 +77,6 @@ export async function POST(req: Request) {
                 });
             }
 
-            // Wysyłamy do AI kompletny, multimodalny prompt
             const result = await model.generateContent({ contents: [{ role: 'user', parts: promptParts }] });
             const response = await result.response;
             const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "Błąd generowania odpowiedzi. Sprawdź logi.";
@@ -81,14 +89,23 @@ export async function POST(req: Request) {
             `[${m.senderRole}] ${m.senderName}: ${m.text}`
         ).join("\n\n");
 
+        // ZMIANA: Całkowicie nowy prompt wzorowany na wyszukiwarce Google AI
         const analysisPrompt = `
-        KONTEKST TECHNICZNY (Raport magazynu): ${warehouseSummary}
+        Działasz jako inteligentny doradca Dyrektora w systemie PESAM. 
+        Analizujesz trwającą właśnie wymianę wiadomości (czat) pomiędzy Kierownikiem a Dyrekcją/Magazynem.
         
-        PRZEBIEG PRZESŁUCHANIA:
+        KONTEKST (Co ustalił magazyn): ${warehouseSummary}
+        
+        HISTORIA CZATU:
         ${formattedHistory}
 
-        ZADANIE:
-        Przeanalizuj odpowiedzi kierownika. Wskaż niespójności z raportem magazynu i podpowiedz Dyrektorowi następne miażdżące pytanie.
+        TWOJE ZADANIE:
+        Na podstawie tego co już zostało powiedziane wyżej, zaproponuj Dyrektorowi 2-3 krótkie, naturalne i dociekliwe pytania, które może teraz zadać Kierownikowi, aby wyciągnąć więcej informacji lub obnażyć błędy w eksploatacji.
+        
+        WYTYCZNE:
+        - NIE pisz elaboratów ani oficjalnych wezwań.
+        - Zachowuj się jak podpowiadacz (tak jak Tryb AI w wyszukiwarce Google).
+        - Zwróć wynik jako prostą listę wypunktowaną z numerami (1., 2. itd.) na początku linii (bez zbędnych wstępów i listów do kogokolwiek).
         `;
 
         const result = await model.generateContent(analysisPrompt);
@@ -99,7 +116,7 @@ export async function POST(req: Request) {
 
     } catch (error: any) {
         console.error("--- Błąd Vertex AI Detail ---");
-        console.error(error); // Wyświetli pełny błąd w logach serwera
+        console.error(error);
         return NextResponse.json(
             { error: error.message || "Błąd wewnętrzny Vertex AI" },
             { status: 500 }

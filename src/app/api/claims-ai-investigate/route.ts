@@ -10,7 +10,8 @@ interface ConversationMessage {
 export async function POST(req: Request) {
     try {
         const payload = await req.json();
-        const { inventoryName, inventoryNumber, siteName, messages, isInitial } = payload;
+        // DODANO: warehouseNotes i declaredStatus odbierane z frontendu
+        const { inventoryName, inventoryNumber, siteName, messages, isInitial, warehouseNotes, declaredStatus } = payload;
 
         // Inicjalizacja Vertex AI wewnątrz funkcji (bezpieczne dla wdrożenia)
         const vertexAI = new VertexAI({
@@ -21,7 +22,9 @@ export async function POST(req: Request) {
         // 1. Logika sprawdzania, czy zdjęcia już są w historii rozmowy
         const clientMessages: ConversationMessage[] = messages || [];
         const hasPhotosInHistory = clientMessages.some(m =>
-            m.content.includes("[Zdjęcia:") || m.content.toLowerCase().includes("załączyłem zdjęcie")
+            m.content.includes("[Zdjęcia:") ||
+            m.content.includes("[Dołączono") ||
+            m.content.toLowerCase().includes("załączyłem zdjęcie")
         );
 
         // 2. Wybór stabilnego modelu (1.5-pro jest najdokładniejszy do JSONa)
@@ -37,16 +40,19 @@ Twoje zadanie: zebrać konkretny raport techniczny przed przekazaniem sprawy do 
 PROTOKÓŁ PRZESŁUCHANIA MAGAZYNU:
 Zadajesz JEDNO konkretne pytanie naraz. 
 
+UWAGA: Magazynier już wstępnie zdiagnozował problem jako: "${warehouseNotes}". 
+Z tego powodu POMIŃ pytanie o stan fizyczny (co jest zepsute). 
+Od razu przejdź do pytań o rokowania (czy da się naprawić) lub historię serwisową.
+
 OBOWIĄZKOWE INFORMACJE DO ZEBRANIA:
-1. STAN FIZYCZNY: Co dokładnie jest uszkodzone (pęknięcia, spalenia, braki)?
-2. ROKOWANIA: Czy sprzęt nadaje się do naprawy, czy to złom?
-3. GWARANCJA / HISTORIA: Czy jest gwarancja? Czy sprzęt był już w serwisie?
-4. DOKUMENTACJA ZDJĘCIOWA: Czy są zdjęcia w systemie? 
+1. ROKOWANIA: Czy sprzęt nadaje się do naprawy, czy to złom?
+2. GWARANCJA / HISTORIA: Czy jest gwarancja? Czy sprzęt był już w serwisie?
+3. DOKUMENTACJA ZDJĘCIOWA: Czy są zdjęcia w systemie? 
 
 STATUS ZDJĘĆ:
 ${hasPhotosInHistory
-                            ? "UWAGA: Zdjęcia są już w aktach (punkt 4 ZALICZONY). Nie pytaj o nie. Potwierdź ich otrzymanie i przejdź do podsumowania."
-                            : "PUNKT 4 (ZDJĘCIA) JEST WYMAGANY - dopytaj o nie, jeśli jeszcze ich nie ma."}
+                            ? "UWAGA: Zdjęcia są już w aktach (punkt 3 ZALICZONY). Nie pytaj o nie. Potwierdź ich otrzymanie i przejdź do podsumowania."
+                            : "PUNKT 3 (ZDJĘCIA) JEST WYMAGANY - dopytaj o nie, jeśli jeszcze ich nie ma."}
 
 TAKTYKI:
 - Magazynier NIE BYŁ na budowie. NIGDY nie pytaj o okoliczności awarii ani o to, kto zawinił.
@@ -60,7 +66,10 @@ Gdy masz KOMPLET: {"reply":"Dziękuję. Protokół zabezpieczony.","isComplete":
             }
         });
 
-        const INIT_MESSAGE = `Nowe zgłoszenie szkody. Sprzęt: "${inventoryName}" (Nr mag: ${inventoryNumber}), Budowa: "${siteName}". Rozpocznij szybki protokół zdawczo-odbiorczy z magazynem.`;
+        // DODANO: Wplecenie notatki magazyniera w pierwszą wiadomość
+        const INIT_MESSAGE = `Nowe zgłoszenie szkody. Sprzęt: "${inventoryName}" (Nr mag: ${inventoryNumber}), Budowa: "${siteName}".
+Magazynier nadał status: "${declaredStatus || 'uszkodzone'}" i wpisał uwagę: "${warehouseNotes || 'Brak uwag'}".
+Potwierdź odbiór tych informacji i przejdź bezpośrednio do pytania o rokowania lub gwarancję/historię.`;
 
         // --- OBSŁUGA PIERWSZEGO WYWOŁANIA ---
         if (isInitial) {
