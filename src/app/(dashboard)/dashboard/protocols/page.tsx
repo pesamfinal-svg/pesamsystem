@@ -39,6 +39,8 @@ interface PaperReturnCartItem {
     finalStatus: string; notes: string;
 }
 
+type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
+
 export default function ProtocolsHub() {
     const { user } = useAuth();
     const [sites, setSites] = useState<Site[]>([]);
@@ -82,6 +84,7 @@ export default function ProtocolsHub() {
     const [isPaperReturnModalOpen, setIsPaperReturnModalOpen] = useState(false);
     const [paperReturnSiteId, setPaperReturnSiteId] = useState("");
     const [paperDocReference, setPaperDocReference] = useState("");
+    const [paperDocSource, setPaperDocSource] = useState<PaperDocSource>("KIEROWNIK");
     const [paperReturnCart, setPaperReturnCart] = useState<PaperReturnCartItem[]>([]);
     const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
@@ -157,6 +160,7 @@ export default function ProtocolsHub() {
         setReturnSiteId("");
         setPaperReturnSiteId("");
         setPaperDocReference("");
+        setPaperDocSource("KIEROWNIK");
         setSelectedProtocol(null);
         setAcceptInputs({});
         setAccessoryFormOpenFor(null);
@@ -379,7 +383,7 @@ export default function ProtocolsHub() {
     // ZGŁASZANIE ZWROTU APLIKACYJNEGO
     // -------------------------------------------------------------------------
     const openReturnModal = async () => {
-        await fetchPendingProtocols(); // Odświeżamy blokady
+        await fetchPendingProtocols();
         if (userSites.length === 1) setReturnSiteId(userSites[0].id);
         setReturnActiveTab("UNIQUE");
         setIsReturnModalOpen(true);
@@ -463,10 +467,10 @@ export default function ProtocolsHub() {
     });
 
     // -------------------------------------------------------------------------
-    // WPROWADŹ ZWROT Z PAPIERU (NOWE)
+    // WPROWADŹ ZWROT Z PAPIERU
     // -------------------------------------------------------------------------
     const openPaperReturnModal = async () => {
-        await fetchPendingProtocols(); // Odświeżamy blokady
+        await fetchPendingProtocols();
         setPaperReturnActiveTab("UNIQUE");
         setIsPaperReturnModalOpen(true);
     };
@@ -571,7 +575,7 @@ export default function ProtocolsHub() {
                             const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
                             transaction.set(historyRef, {
                                 date: new Date().toISOString(), type: "ZWROT",
-                                description: `Zwrot papierowy z: ${siteName}. Nr Dok: ${paperDocReference || 'Brak'}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
+                                description: `Zwrot papierowy z: ${siteName}. Nr Dok: ${paperDocReference || 'Brak'}. Źródło: ${paperDocSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
                                 status: cartItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`
                             });
                         }
@@ -586,11 +590,21 @@ export default function ProtocolsHub() {
                 }
 
                 transaction.set(protocolRef, {
-                    protocolId, type: "ZWROT", documentSource: "PAPER", paperReference: paperDocReference,
-                    sourceId: paperReturnSiteId, sourceName: siteName, destinationId: "MAGAZYN",
-                    createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`,
-                    acceptedBy: user?.uid, acceptedByName: `${user?.firstName} ${user?.lastName}`,
-                    status: "ZAAKCEPTOWANY", createdAt: new Date().toISOString(), acceptedAt: new Date().toISOString(),
+                    protocolId,
+                    type: "ZWROT",
+                    documentSource: "PAPER",
+                    paperDocumentSource: paperDocSource,
+                    paperReference: paperDocReference,
+                    sourceId: paperReturnSiteId,
+                    sourceName: siteName,
+                    destinationId: "MAGAZYN",
+                    createdBy: user?.uid,
+                    createdByName: `${user?.firstName} ${user?.lastName}`,
+                    acceptedBy: user?.uid,
+                    acceptedByName: `${user?.firstName} ${user?.lastName}`,
+                    status: "ZAAKCEPTOWANY",
+                    createdAt: new Date().toISOString(),
+                    acceptedAt: new Date().toISOString(),
                     items: finalProtocolItems
                 });
             });
@@ -1023,8 +1037,8 @@ export default function ProtocolsHub() {
                                     <button
                                         onClick={handleIssueSubmit}
                                         disabled={isSubmitting || cart.length === 0 || !issueSiteInput.trim() || accessoryFormOpenFor !== null}
-                                        className="w-2/3 py-4 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300 disabled:shadow-none"
                                         title={accessoryFormOpenFor !== null ? "Najpierw zatwierdź lub anuluj dodawanie osprzętu!" : ""}
+                                        className="w-2/3 py-4 bg-green-600 hover:bg-green-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300 disabled:shadow-none transition"
                                     >
                                         {isSubmitting ? "ZAPISYWANIE..." : accessoryFormOpenFor !== null ? "⚠️ DOKOŃCZ DODAWANIE OSPRZĘTU" : "ZATWIERDŹ I WYDAJ"}
                                     </button>
@@ -1035,7 +1049,7 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-            {/* MINI-MODAL: Wybór ilości dla BULK (ze stanów magazynowych) */}
+            {/* MINI-MODAL: Wybór ilości dla BULK */}
             {bulkPickModal && (
                 <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
                     <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in">
@@ -1066,14 +1080,8 @@ export default function ProtocolsHub() {
                             Dostępne na magazynie: <span className="font-bold text-slate-600">{bulkPickModal.item.availableQuantity} {bulkPickModal.item.unit || "szt."}</span>
                         </p>
                         <div className="flex gap-3">
-                            <button
-                                onClick={() => setBulkPickModal(null)}
-                                className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition"
-                            >Anuluj</button>
-                            <button
-                                onClick={confirmBulkAdd}
-                                className="flex-1 py-3 bg-green-600 text-white font-black rounded-xl hover:bg-green-700 shadow-md transition"
-                            >Dodaj do koszyka</button>
+                            <button onClick={() => setBulkPickModal(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={confirmBulkAdd} className="flex-1 py-3 bg-green-600 text-white font-black rounded-xl hover:bg-green-700 shadow-md transition">Dodaj do koszyka</button>
                         </div>
                     </div>
                 </div>
@@ -1265,7 +1273,7 @@ export default function ProtocolsHub() {
                             <button onClick={closeModal} className="text-4xl text-orange-400 hover:text-orange-800 leading-none">&times;</button>
                         </div>
                         <div className="flex-1 flex overflow-hidden">
-                            {/* LEWA STRONA - BUDA I INWENTARZ */}
+                            {/* LEWA STRONA */}
                             <div className="w-[45%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-orange-50/50">
                                     <label className="block text-[11px] font-black text-orange-800 uppercase tracking-widest mb-2">1. Wybierz Budowę</label>
@@ -1300,17 +1308,76 @@ export default function ProtocolsHub() {
                                 </div>
                             </div>
 
-                            {/* PRAWA STRONA - KOSZYK I AKCEPTACJA */}
+                            {/* PRAWA STRONA */}
                             <div className="w-[55%] flex flex-col bg-white">
-                                <div className="p-6 border-b bg-white flex gap-4 items-center">
-                                    <div className="flex-1">
-                                        <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1">Nr dokumentu papierowego (Opcjonalnie)</label>
-                                        <input type="text" placeholder="np. WZ 12/05/2026" value={paperDocReference} onChange={e => setPaperDocReference(e.target.value)} className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-orange-500 font-bold bg-slate-50" />
+                                {/* NAGŁÓWEK PRAWEJ STRONY - ŹRÓDŁO + NR DOKUMENTU */}
+                                <div className="p-6 border-b bg-white flex gap-4 items-start">
+                                    <div className="flex-1 flex flex-col gap-3">
+
+                                        {/* WYBÓR ŹRÓDŁA PROTOKOŁU */}
+                                        <div>
+                                            <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2">
+                                                Źródło dokumentu zwrotu
+                                            </label>
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => setPaperDocSource("KIEROWNIK")}
+                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-black border-2 transition text-center leading-tight ${paperDocSource === "KIEROWNIK"
+                                                        ? "bg-green-600 text-white border-green-600 shadow-md"
+                                                        : "bg-white text-slate-500 border-slate-200 hover:border-green-400 hover:text-green-700"}`}
+                                                >
+                                                    📋 Protokół<br />Kierownika
+                                                </button>
+                                                <button
+                                                    onClick={() => setPaperDocSource("KIEROWCA")}
+                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-black border-2 transition text-center leading-tight ${paperDocSource === "KIEROWCA"
+                                                        ? "bg-blue-600 text-white border-blue-600 shadow-md"
+                                                        : "bg-white text-slate-500 border-slate-200 hover:border-blue-400 hover:text-blue-700"}`}
+                                                >
+                                                    🚛 Protokół<br />Kierowcy
+                                                </button>
+                                                <button
+                                                    onClick={() => setPaperDocSource("BRAK_PROTOKOLU")}
+                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-black border-2 transition text-center leading-tight ${paperDocSource === "BRAK_PROTOKOLU"
+                                                        ? "bg-red-500 text-white border-red-500 shadow-md"
+                                                        : "bg-white text-slate-500 border-slate-200 hover:border-red-400 hover:text-red-600"}`}
+                                                >
+                                                    ⚠️ Brak<br />Protokołu
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* NR DOKUMENTU - ukryty gdy BRAK_PROTOKOLU */}
+                                        {paperDocSource !== "BRAK_PROTOKOLU" ? (
+                                            <div>
+                                                <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1">
+                                                    Nr dokumentu papierowego (Opcjonalnie)
+                                                </label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="np. WZ 12/05/2026"
+                                                    value={paperDocReference}
+                                                    onChange={e => setPaperDocReference(e.target.value)}
+                                                    className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-orange-500 font-bold bg-slate-50"
+                                                />
+                                            </div>
+                                        ) : (
+                                            <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-700 font-bold flex items-start gap-2">
+                                                <span className="text-base">⚠️</span>
+                                                <span>Brak protokołu zostanie odnotowany w systemie i uwzględniony w raporcie odpowiedzialności kierowników.</span>
+                                            </div>
+                                        )}
                                     </div>
-                                    <button onClick={() => { setManualName(""); setManualQty(""); setIsPaperManualModalOpen(true); }} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-3 rounded-xl text-xs font-bold transition shadow-sm h-fit self-end border border-slate-200 whitespace-nowrap">
-                                        + Dodaj z palca (Poza listą)
+
+                                    <button
+                                        onClick={() => { setManualName(""); setManualQty(""); setIsPaperManualModalOpen(true); }}
+                                        className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-3 rounded-xl text-xs font-bold transition shadow-sm border border-slate-200 whitespace-nowrap self-end"
+                                    >
+                                        + Dodaj z palca<br />(Poza listą)
                                     </button>
                                 </div>
+
+                                {/* KOSZYK */}
                                 <div className="flex-1 overflow-y-auto p-6 bg-slate-50 space-y-3">
                                     {paperReturnCart.length === 0 ? (
                                         <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">Wybierz pozycje z lewej strony lub dodaj ręcznie.</div>
@@ -1350,6 +1417,7 @@ export default function ProtocolsHub() {
                                         ))
                                     )}
                                 </div>
+
                                 <div className="p-6 border-t bg-white flex gap-4">
                                     <button onClick={closeModal} className="w-1/3 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl border border-slate-200">ANULUJ</button>
                                     <button onClick={handlePaperReturnSubmit} disabled={isSubmitting || paperReturnCart.length === 0} className="w-2/3 py-4 bg-orange-500 hover:bg-orange-600 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300 transition">ZATWIERDŹ ZWROT PAPIEROWY</button>
@@ -1391,7 +1459,6 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-
             {/* MODAL 3: AKCEPTACJA ZWROTU APLIKACYJNEGO */}
             {isAcceptModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
@@ -1432,7 +1499,6 @@ export default function ProtocolsHub() {
                                                     const isQtyDifferent = item.type === "BULK" && inputState.receivedQty !== item.declaredQty;
                                                     const isStatusDifferent = item.type === "UNIQUE" && inputState.finalStatus !== item.declaredStatus;
 
-                                                    // Wyszukujemy max dozwoloną ilość dla BULK (żeby zabezpieczyć przed pomyłką)
                                                     const invItem = inventory.find(inv => inv.id === item.inventoryId);
                                                     let maxAllowed = 999999;
                                                     if (!item.isNewManual && invItem && invItem.type === "BULK") {
@@ -1456,7 +1522,6 @@ export default function ProtocolsHub() {
                                                                     <button
                                                                         onClick={() => removeItemFromAcceptProtocol(item.inventoryId)}
                                                                         className="bg-red-50 hover:bg-red-500 text-red-500 hover:text-white border border-red-200 hover:border-red-500 rounded px-2 py-0.5 text-[10px] font-bold uppercase transition-colors"
-                                                                        title="Usuń tę pozycję z protokołu"
                                                                     >
                                                                         &times; Usuń
                                                                     </button>
@@ -1548,9 +1613,7 @@ export default function ProtocolsHub() {
                                                 })}
                                             </div>
 
-                                            {/* ZDJĘCIA i DODAWANIE DODATKOWYCH SPRZĘTÓW */}
                                             <div className="flex gap-4">
-                                                {/* Lewa strona: ZDJĘCIA */}
                                                 <div className="flex-1 bg-slate-50 border border-slate-200 p-4 rounded-xl">
                                                     <h4 className="text-xs font-bold text-slate-800 mb-2 uppercase tracking-wider">📸 Zdjęcia do protokołu (Opcjonalnie)</h4>
                                                     <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200 cursor-pointer mb-3" />
@@ -1566,7 +1629,6 @@ export default function ProtocolsHub() {
                                                     )}
                                                 </div>
 
-                                                {/* Prawa strona: BRAKI */}
                                                 <div className="flex-1 bg-purple-50 border-2 border-dashed border-purple-200 p-4 rounded-xl flex flex-col justify-center">
                                                     <h4 className="text-xs font-bold text-purple-800 mb-3 uppercase tracking-wider text-center">Zapomniał czegoś zgłosić?</h4>
                                                     <div className="flex flex-col gap-2">
@@ -1579,11 +1641,10 @@ export default function ProtocolsHub() {
                                                     </div>
                                                 </div>
                                             </div>
-
                                         </div>
 
                                         <div className="p-6 border-t bg-slate-50 flex gap-4 items-center">
-                                            <p className="text-[10px] text-slate-400 flex-1 leading-tight">Zatwierdzenie zdejmie sprzęt z budowy i przywróci na magazyn. Sprzęty zapomniane (dodane ręcznie w tym oknie) będą odnotowane jako oddane "ponad stan".</p>
+                                            <p className="text-[10px] text-slate-400 flex-1 leading-tight">Zatwierdzenie zdejmie sprzęt z budowy i przywróci na magazyn.</p>
                                             <button onClick={() => handleAcceptSubmit(false)} disabled={isSubmitting} className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300">
                                                 {isSubmitting ? "ZAPISYWANIE..." : "AKCEPTUJ ZWROT"}
                                             </button>
