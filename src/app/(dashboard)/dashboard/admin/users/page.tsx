@@ -207,6 +207,7 @@ export default function UsersManagementPage() {
                     assignedSites: formData.assignedSites,
                     permissionOverrides: formData.permissionOverrides,
                     isActive: true,
+                    requiresPasswordChange: true, // <-- DODANA FLAGA
                     createdAt: new Date().toISOString()
                 });
                 alert("Pracownik został pomyślnie utworzony!");
