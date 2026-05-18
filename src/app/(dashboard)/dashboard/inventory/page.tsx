@@ -395,7 +395,11 @@ export default function InventoryPage() {
                 <input type="text" placeholder="Szukaj..." className="p-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
                 <select className="p-2 border rounded-lg bg-white" value={locFilter} onChange={(e) => setLocFilter(e.target.value)}>
                     <option value="ALL">Wszystkie lokalizacje</option>
-                    {uniqueLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                    {uniqueLocations.map((loc, index) => (
+                        <option key={loc ? String(loc) : `loc-${index}`} value={loc || ""}>
+                            {loc || "Brak lokalizacji"}
+                        </option>
+                    ))}
                 </select>
                 <select className="p-2 border rounded-lg bg-white" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                     <option value="ALL">Wszystkie statusy</option>
@@ -557,7 +561,11 @@ export default function InventoryPage() {
                                     <label className="text-[10px] font-bold text-slate-400 uppercase">Wybierz System (Rodzica)</label>
                                     <select required value={formData.mainCategoryId} onChange={e => setFormData({ ...formData, mainCategoryId: e.target.value })} className="w-full p-2 border rounded-xl bg-white outline-none">
                                         <option value="" disabled>-- Wybierz system z listy --</option>
-                                        {mainSystems.map(sys => <option key={sys.id} value={sys.id}>{sys.name}</option>)}
+                                        {mainSystems.map((sys, index) => (
+                                            <option key={sys.id || `sys-${index}`} value={sys.id}>
+                                                {sys.name}
+                                            </option>
+                                        ))}
                                     </select>
                                 </div>
                             )}

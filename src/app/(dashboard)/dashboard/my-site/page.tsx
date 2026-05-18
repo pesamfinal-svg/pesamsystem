@@ -18,6 +18,7 @@ interface Protocol {
     protocolId: string; type: string; createdAt: string;
     status: string; createdByName: string; items: any[];
     sourceId?: string; destinationId?: string;
+    documentSource?: string; paperDocumentSource?: string; // <- Dodane do interfejsu
 }
 
 export default function MySiteHub() {
@@ -28,19 +29,15 @@ export default function MySiteHub() {
     const [selectedSiteId, setSelectedSiteId] = useState("");
     const [loading, setLoading] = useState(true);
 
-    // Nawigacja wewnątrz hub-a
     const [activeView, setActiveView] = useState<"HUB" | "INVENTORY" | "HISTORY" | "DAMAGES" | "CLAIMS">("HUB");
 
-    // Dane dla modułów
     const [itemsOnSite, setItemsOnSite] = useState<InventoryItem[]>([]);
     const [siteProtocols, setSiteProtocols] = useState<Protocol[]>([]);
     const [damages, setDamages] = useState<any[]>([]);
 
-    // Stany dla INVENTORY (Wykaz sprzętu)
     const [inventoryActiveTab, setInventoryActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL" | "ALL">("ALL");
     const [inventorySearchQuery, setInventorySearchQuery] = useState("");
 
-    // Stan do rozwijania protokołów w Historii
     const [expandedProtocolId, setExpandedProtocolId] = useState<string | null>(null);
 
     const canViewSiteState = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
@@ -93,12 +90,7 @@ export default function MySiteHub() {
                 if (p.type === "ZWROT" && p.sourceId === selectedSiteId) {
                     p.items.forEach(item => {
                         if (item.finalStatus === "uszkodzone" || item.declaredStatus === "uszkodzone") {
-                            damagesList.push({
-                                protocolId: p.protocolId,
-                                date: p.createdAt,
-                                status: p.status,
-                                ...item
-                            });
+                            damagesList.push({ protocolId: p.protocolId, date: p.createdAt, status: p.status, ...item });
                         }
                     });
                 }
@@ -108,15 +100,35 @@ export default function MySiteHub() {
         fetchDataForSite();
     }, [selectedSiteId, canViewSiteState]);
 
+    // ZMODYFIKOWANA FUNKCJA SPRAWDZAJĄCA NIEZGODNOŚCI
     const checkDiscrepancies = (protocol: Protocol) => {
+        // Ignorujemy wydania i protokoły jeszcze niezaakceptowane
         if (protocol.type !== "ZWROT" || protocol.status === "OCZEKUJACY") return false;
+
+        // 1. Sprawdzamy na poziomie całego protokołu (np. Brak protokołu papierowego)
+        if (protocol.documentSource === "PAPER" && protocol.paperDocumentSource === "BRAK_PROTOKOLU") {
+            return true;
+        }
+
+        // 2. Sprawdzamy każdą pozycję w protokole (Wspólna logika dla aplikacji i papieru)
         return protocol.items.some(item => {
-            const decQty = item.declaredQty || item.quantity || 0;
+            // Bezpieczne pobieranie ilości:
+            // declaredQty to ilość zgłoszona przez apkę LUB ilość z kwitów papierowych
+            const decQty = item.declaredQty !== undefined ? item.declaredQty : (item.quantity !== undefined ? item.quantity : 1);
             const recQty = item.receivedQty !== undefined ? item.receivedQty : decQty;
+
             const decStatus = item.declaredStatus || "sprawne";
             const finStatus = item.finalStatus || decStatus;
+
             const hasNotes = !!item.warehouseNotes;
-            return decQty !== recQty || decStatus !== finStatus || hasNotes;
+
+            return (
+                decQty !== recQty ||             // Różnica w ilości (Zgłoszono/Kwit vs Przyjęto fizycznie)
+                decStatus !== finStatus ||       // Magazyn przyjął z innym statusem niż deklarowano
+                finStatus === "uszkodzone" ||    // Przedmiot zjechał uszkodzony (zawsze wymaga uwagi)
+                hasNotes ||                      // Magazynier zostawił notatkę
+                item.isNewManual                 // Magazynier dopisał coś "z palca" (nie było tego na liście/kwicie)
+            );
         });
     };
 
@@ -124,22 +136,17 @@ export default function MySiteHub() {
         setExpandedProtocolId(prev => prev === protocolId ? null : protocolId);
     };
 
-    // Logika filtrowania Wykazu Sprzętu
     const getFilteredInventory = () => {
         return itemsOnSite.filter(item => {
-            // Filtr zakładki
             if (inventoryActiveTab === "UNIQUE" && item.type !== "UNIQUE") return false;
             if (inventoryActiveTab === "BULK" && (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Wpis ręczny")) return false;
             if (inventoryActiveTab === "MANUAL" && item.subType !== "MANUAL" && item.category !== "Wpis ręczny") return false;
-
-            // Filtr wyszukiwarki (Nazwa lub Nr Magazynowy)
             if (inventorySearchQuery) {
                 const query = inventorySearchQuery.toLowerCase();
                 const matchesName = item.name.toLowerCase().includes(query);
                 const matchesNum = item.inventoryNumber ? item.inventoryNumber.toLowerCase().includes(query) : false;
                 if (!matchesName && !matchesNum) return false;
             }
-
             return true;
         });
     };
@@ -168,6 +175,7 @@ export default function MySiteHub() {
                                 siteProtocols.map((p, idx) => {
                                     const isPending = p.status === "OCZEKUJACY";
                                     const isIssue = p.type === "WYDANIE";
+                                    const isPaper = p.documentSource === "PAPER";
                                     const hasAlert = checkDiscrepancies(p);
                                     const isExpanded = expandedProtocolId === p.protocolId;
 
@@ -181,7 +189,16 @@ export default function MySiteHub() {
                                                     <div>
                                                         <div className="flex items-center gap-2">
                                                             <p className="font-black text-slate-800 text-lg">{p.protocolId}</p>
-                                                            {hasAlert && <span className="bg-red-100 text-red-700 text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider animate-pulse">⚠️ Niezgodność</span>}
+                                                            {hasAlert && (
+                                                                <span className="bg-red-100 text-red-700 text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider animate-pulse">
+                                                                    {p.paperDocumentSource === "BRAK_PROTOKOLU" ? '⚠️ BRAK PROTOKOŁU' : '⚠️ NIEZGODNOŚĆ'}
+                                                                </span>
+                                                            )}
+                                                            {isPaper && p.paperDocumentSource !== "BRAK_PROTOKOLU" && !hasAlert && (
+                                                                <span className="bg-slate-100 text-slate-500 text-[9px] px-2 py-0.5 rounded uppercase border border-slate-200">
+                                                                    Papier ({p.paperDocumentSource})
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         <p className="text-xs text-slate-500 mt-0.5">{new Date(p.createdAt).toLocaleString()} • Wystawił: {p.createdByName}</p>
                                                     </div>
@@ -199,37 +216,54 @@ export default function MySiteHub() {
                                                     <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 pl-2">Pozycje w protokole:</h4>
                                                     <div className="space-y-2">
                                                         {p.items.map((item: any, itemIdx: number) => {
-                                                            const decQty = item.declaredQty || item.quantity || 1;
+                                                            const decQty = item.declaredQty !== undefined ? item.declaredQty : (item.quantity !== undefined ? item.quantity : (item.receivedQty || 1));
                                                             const recQty = item.receivedQty !== undefined ? item.receivedQty : decQty;
+
+                                                            // Sprawdzamy różnice (teraz dotyczy to RÓWNIEŻ PAPIERU)
                                                             const isQtyDiff = !isIssue && !isPending && decQty !== recQty;
                                                             const isStatusDiff = !isIssue && !isPending && item.declaredStatus && item.finalStatus && item.declaredStatus !== item.finalStatus;
+
                                                             const hasNotes = !!item.warehouseNotes;
-                                                            const hasItemAlert = isQtyDiff || isStatusDiff || hasNotes;
+                                                            const hasItemAlert = isQtyDiff || isStatusDiff || hasNotes || item.isNewManual || item.finalStatus === "uszkodzone";
 
                                                             return (
                                                                 <div key={itemIdx} className={`p-3 rounded-xl border ${hasItemAlert ? 'bg-orange-50 border-orange-200' : 'bg-white border-slate-200'}`}>
                                                                     <div className="flex justify-between items-start">
                                                                         <div>
-                                                                            <p className="font-bold text-slate-800 text-sm">{item.name}</p>
+                                                                            <p className="font-bold text-slate-800 text-sm">
+                                                                                {item.name}
+                                                                                {item.isNewManual && <span className="ml-2 text-[9px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-black uppercase">Wpis ręczny</span>}
+                                                                            </p>
                                                                             <p className="text-[10px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "BRAK"}</p>
                                                                         </div>
                                                                         <div className="text-right">
+                                                                            {/* Jeśli to wydanie z magazynu lub oczekujący zwrot, wyświetlamy prosto */}
                                                                             {isIssue || isPending ? (
-                                                                                <p className="font-black text-slate-700 bg-slate-100 px-2 py-1 rounded">{decQty} {item.unit || "szt."}</p>
+                                                                                <div className="flex flex-col items-end gap-1">
+                                                                                    <p className="font-black text-slate-700 bg-slate-100 px-2 py-1 rounded">Ilość: {decQty} {item.unit || "szt."}</p>
+                                                                                </div>
                                                                             ) : (
+                                                                                /* W przeciwnym razie to sfinalizowany ZWROT (aplikacyjny lub papierowy) - pokazujemy detale */
                                                                                 <div className="flex flex-col items-end text-xs">
                                                                                     {isQtyDiff ? (
-                                                                                        <div className="bg-orange-100 text-orange-800 px-2 py-1 rounded">Zgłoszono: <b>{decQty}</b> ➔ Przyjęto: <b className="text-red-600">{recQty}</b> {item.unit || "szt."}</div>
+                                                                                        <div className="bg-orange-100 text-orange-800 px-2 py-1 rounded border border-orange-200 shadow-sm">
+                                                                                            {isPaper ? 'Kwit' : 'Zgłoszono'}: <b>{decQty}</b> ➔ Fizycznie: <b className="text-red-600">{recQty}</b> {item.unit || "szt."}
+                                                                                        </div>
                                                                                     ) : (
                                                                                         <p className="font-black text-slate-700 bg-slate-100 px-2 py-1 rounded">Ilość: {recQty} {item.unit || "szt."}</p>
                                                                                     )}
+
                                                                                     {isStatusDiff && <p className="mt-1 text-[10px] text-red-600 font-bold">Zgłoszono: {item.declaredStatus} ➔ Przyjęto: {item.finalStatus}</p>}
+
+                                                                                    {(!isStatusDiff && item.finalStatus && item.finalStatus !== "sprawne") && (
+                                                                                        <p className="mt-1 text-[10px] text-red-600 font-bold uppercase bg-red-100 px-2 py-0.5 rounded">{item.finalStatus}</p>
+                                                                                    )}
                                                                                 </div>
                                                                             )}
                                                                         </div>
                                                                     </div>
                                                                     {hasNotes && (
-                                                                        <div className="mt-2 text-xs bg-red-50 text-red-800 p-2 rounded border border-red-100"><span className="font-bold">Notatka magazynu:</span> {item.warehouseNotes}</div>
+                                                                        <div className="mt-2 text-xs bg-red-50 text-red-800 p-2 rounded border border-red-100 shadow-sm"><span className="font-bold">Notatka magazynu:</span> {item.warehouseNotes}</div>
                                                                     )}
                                                                 </div>
                                                             )

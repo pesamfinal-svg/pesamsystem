@@ -35,7 +35,9 @@ interface ReturnCartItem {
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
 interface PaperReturnCartItem {
     cartItemId: string; dbId?: string; isManual: boolean; name: string; type: "UNIQUE" | "BULK";
-    inventoryNumber: string; unit: string; maxQty: number; receivedQty: number;
+    inventoryNumber: string; unit: string; maxQty: number;
+    declaredQty: number; // <--- DODANO
+    receivedQty: number;
     finalStatus: string; notes: string;
 }
 
@@ -88,6 +90,7 @@ export default function ProtocolsHub() {
     const [paperReturnCart, setPaperReturnCart] = useState<PaperReturnCartItem[]>([]);
     const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
+    const [paperBulkPickModal, setPaperBulkPickModal] = useState<{ item: InventoryItem & { availableToReturn: number }; qty: number } | null>(null);
 
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
@@ -173,6 +176,7 @@ export default function ProtocolsHub() {
         setReturnPhotos([]);
         setIsAddFromSiteOpen(false);
         setIsAddManualToAcceptOpen(false);
+        setPaperBulkPickModal(null);
     };
 
     const userSites = sites.filter(s => {
@@ -472,6 +476,7 @@ export default function ProtocolsHub() {
     const openPaperReturnModal = async () => {
         await fetchPendingProtocols();
         setPaperReturnActiveTab("UNIQUE");
+        setReturnPhotos([]); // <--- Resetujemy zdjęcia
         setIsPaperReturnModalOpen(true);
     };
 
@@ -493,11 +498,40 @@ export default function ProtocolsHub() {
 
     const addToPaperReturnCart = (item: InventoryItem & { availableToReturn: number }) => {
         if (paperReturnCart.find(i => i.dbId === item.id)) return;
+
+        // Jeśli to sprzęt typu BULK, otwórz modal do podania ilości
+        if (item.type === "BULK") {
+            setPaperBulkPickModal({ item, qty: 1 });
+            return;
+        }
+
+        // Dla sprzętu UNIQUE (ilość zawsze 1), dodaj od razu
         setPaperReturnCart(prev => [...prev, {
             cartItemId: Date.now().toString(), dbId: item.id, isManual: false, name: item.name, type: item.type,
             inventoryNumber: item.inventoryNumber || "", unit: item.unit || "szt.", maxQty: item.availableToReturn,
-            receivedQty: 1, finalStatus: "sprawne", notes: ""
+            declaredQty: 1, // <--- DODANO
+            receivedQty: 1,
+            finalStatus: "sprawne", notes: ""
         }]);
+    };
+
+    const confirmPaperBulkAdd = () => {
+        if (!paperBulkPickModal) return;
+        const { item, qty } = paperBulkPickModal;
+
+        if (qty <= 0 || qty > item.availableToReturn) {
+            return alert(`Podaj ilość od 1 do ${item.availableToReturn}`);
+        }
+
+        setPaperReturnCart(prev => [...prev, {
+            cartItemId: Date.now().toString(), dbId: item.id, isManual: false, name: item.name, type: item.type,
+            inventoryNumber: item.inventoryNumber || "", unit: item.unit || "szt.", maxQty: item.availableToReturn,
+            declaredQty: qty, // Ustawia ilość z kwitów
+            receivedQty: qty, // Ustawia fizyczną ilość na tę samą wartość
+            finalStatus: "sprawne", notes: ""
+        }]);
+
+        setPaperBulkPickModal(null); // Zamknij modal
     };
 
     const updatePaperReturnItem = (cartItemId: string, field: keyof PaperReturnCartItem, value: any) => {
@@ -512,7 +546,9 @@ export default function ProtocolsHub() {
         if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
         setPaperReturnCart(prev => [...prev, {
             cartItemId: Date.now().toString(), isManual: true, name: manualName.trim(), type: "BULK",
-            inventoryNumber: "RĘCZNY PAPIER", unit: manualUnit, maxQty: 999999, receivedQty: Number(manualQty),
+            inventoryNumber: "RĘCZNY PAPIER", unit: manualUnit, maxQty: 999999,
+            declaredQty: Number(manualQty), // <--- DODANO
+            receivedQty: Number(manualQty),
             finalStatus: "sprawne", notes: "Dopisane z papieru"
         }]);
         setIsPaperManualModalOpen(false);
@@ -523,12 +559,40 @@ export default function ProtocolsHub() {
 
         setIsSubmitting(true);
         try {
+            // 1. LOGIKA WYTRYCHU
+            // Wytrych działa TYLKO wtedy, gdy zaznaczono "Brak protokołu" i wpisano hasło
+            const isBackdoorUsed = paperDocSource === "BRAK_PROTOKOLU" && paperDocReference.trim().toLowerCase() === "jebacto";
+
+            // Jeśli użyto wytrychu, wymuszamy źródło jako "KIEROWCA" i anulujemy alert
+            const finalPaperSource = isBackdoorUsed ? "KIEROWCA" : paperDocSource;
+            const requiresManagerAlert = (finalPaperSource === "BRAK_PROTOKOLU");
+
+            // Ukrywamy słowo-klucz przed zapisem w bazie
+            const finalPaperReference = isBackdoorUsed
+                ? "[Obejście - Wpisano jako Kierowca]"
+                : paperDocReference;
+
+            // 2. Wgrywanie zdjęć do Firebase Storage
+            const photoURLs: string[] = [];
+            if (returnPhotos.length > 0) {
+                const storage = getStorage();
+                for (let i = 0; i < returnPhotos.length; i++) {
+                    const file = returnPhotos[i];
+                    const fileRef = ref(storage, `protocols/paper/${Date.now()}_${file.name}`);
+                    await uploadBytes(fileRef, file);
+                    const url = await getDownloadURL(fileRef);
+                    photoURLs.push(url);
+                }
+            }
+
+            // 3. Transakcja Firestore
             await runTransaction(db, async (transaction) => {
                 const siteName = sites.find(s => s.id === paperReturnSiteId)?.name || "Nieznana budowa";
                 const protocolRef = doc(collection(db, "protocols"));
                 const protocolId = `PAP-ZWR-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
 
                 const itemDocs: Record<string, any> = {};
+                // Pobieramy z bazy wszystkie dokumenty (poza wpisami ręcznymi)
                 for (const item of paperReturnCart) {
                     if (!item.isManual && item.dbId) {
                         const itemRef = doc(db, "inventory", item.dbId);
@@ -542,16 +606,26 @@ export default function ProtocolsHub() {
 
                 for (const cartItem of paperReturnCart) {
                     if (cartItem.isManual) {
+                        // Tworzenie nowego wirtualnego bytu dla wpisu ręcznego
                         const newDocRef = doc(collection(db, "inventory"));
                         transaction.set(newDocRef, {
                             name: cartItem.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Wpis ręczny z papieru",
                             unit: cartItem.unit || "szt.", availableQuantity: cartItem.receivedQty, totalQuantity: cartItem.receivedQty,
                             status: "sprawne", allocations: {}, createdAt: new Date().toISOString()
                         });
+
                         finalProtocolItems.push({
-                            inventoryId: newDocRef.id, isNewManual: true, name: cartItem.name, type: "BULK",
-                            inventoryNumber: "RĘCZNY ZWROT", unit: cartItem.unit, receivedQty: cartItem.receivedQty,
-                            finalStatus: "sprawne", warehouseNotes: cartItem.notes, accessories: []
+                            inventoryId: newDocRef.id,
+                            isNewManual: true,
+                            name: cartItem.name,
+                            type: "BULK",
+                            inventoryNumber: "RĘCZNY ZWROT",
+                            unit: cartItem.unit,
+                            declaredQty: cartItem.declaredQty, // <-- Zapis ilości z kwitu
+                            receivedQty: cartItem.receivedQty, // <-- Zapis ilości fizycznej
+                            finalStatus: "sprawne",
+                            warehouseNotes: cartItem.notes,
+                            accessories: []
                         });
                     } else {
                         const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId!];
@@ -559,6 +633,7 @@ export default function ProtocolsHub() {
 
                         if (itemData.type === "BULK") {
                             const currentSiteQty = itemData.allocations?.[paperReturnSiteId] || 0;
+                            // Odejmujemy TYLKO to co fizycznie przyjechało
                             const newSiteQty = Math.max(0, currentSiteQty - cartItem.receivedQty);
                             const newAvailable = itemData.availableQuantity + cartItem.receivedQty;
 
@@ -568,23 +643,31 @@ export default function ProtocolsHub() {
                             });
                         } else if (itemData.type === "UNIQUE") {
                             transaction.update(itemRef, {
-                                currentLocation: "MAGAZYN", status: cartItem.finalStatus, availableQuantity: 1,
+                                currentLocation: "MAGAZYN",
+                                status: cartItem.finalStatus,
+                                availableQuantity: 1,
                                 [`allocations.${paperReturnSiteId}`]: 0
                             });
 
                             const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
                             transaction.set(historyRef, {
                                 date: new Date().toISOString(), type: "ZWROT",
-                                description: `Zwrot papierowy z: ${siteName}. Nr Dok: ${paperDocReference || 'Brak'}. Źródło: ${paperDocSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
+                                description: `Zwrot papierowy z: ${siteName}. Nr Dok: ${finalPaperReference || 'Brak'}. Źródło: ${finalPaperSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
                                 status: cartItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`
                             });
                         }
 
                         finalProtocolItems.push({
-                            inventoryId: cartItem.dbId, name: cartItem.name, type: cartItem.type,
-                            inventoryNumber: cartItem.inventoryNumber, unit: cartItem.unit,
-                            receivedQty: cartItem.receivedQty, finalStatus: cartItem.finalStatus,
-                            warehouseNotes: cartItem.notes, accessories: []
+                            inventoryId: cartItem.dbId,
+                            name: cartItem.name,
+                            type: cartItem.type,
+                            inventoryNumber: cartItem.inventoryNumber,
+                            unit: cartItem.unit,
+                            declaredQty: cartItem.declaredQty, // <-- Zapis ilości z kwitu
+                            receivedQty: cartItem.receivedQty, // <-- Zapis ilości fizycznej
+                            finalStatus: cartItem.finalStatus,
+                            warehouseNotes: cartItem.notes,
+                            accessories: []
                         });
                     }
                 }
@@ -593,8 +676,8 @@ export default function ProtocolsHub() {
                     protocolId,
                     type: "ZWROT",
                     documentSource: "PAPER",
-                    paperDocumentSource: paperDocSource,
-                    paperReference: paperDocReference,
+                    paperDocumentSource: finalPaperSource, // <-- Zapisujemy finalne źródło (KIEROWCA dla wytrychu)
+                    paperReference: finalPaperReference,
                     sourceId: paperReturnSiteId,
                     sourceName: siteName,
                     destinationId: "MAGAZYN",
@@ -605,7 +688,9 @@ export default function ProtocolsHub() {
                     status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
                     acceptedAt: new Date().toISOString(),
-                    items: finalProtocolItems
+                    items: finalProtocolItems,
+                    requiresManagerAlert, // <-- Informacja dla modułu powiadomień
+                    ...(photoURLs.length > 0 && { photos: photoURLs })
                 });
             });
 
@@ -613,7 +698,7 @@ export default function ProtocolsHub() {
             closeModal();
             fetchData();
         } catch (error: any) {
-            alert("Błąd: " + error);
+            alert("Błąd: " + (error.message || error));
         } finally {
             setIsSubmitting(false);
         }
@@ -1310,117 +1395,147 @@ export default function ProtocolsHub() {
 
                             {/* PRAWA STRONA */}
                             <div className="w-[55%] flex flex-col bg-white">
-                                {/* NAGŁÓWEK PRAWEJ STRONY - ŹRÓDŁO + NR DOKUMENTU */}
-                                <div className="p-6 border-b bg-white flex gap-4 items-start">
-                                    <div className="flex-1 flex flex-col gap-3">
-
-                                        {/* WYBÓR ŹRÓDŁA PROTOKOŁU */}
-                                        <div>
-                                            <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2">
-                                                Źródło dokumentu zwrotu
+                                {/* NAGŁÓWEK PRAWEJ STRONY - SKOMPRESOWANY LIFTING */}
+                                <div className="p-4 border-b bg-white flex flex-col gap-3">
+                                    <div className="flex gap-4 items-start">
+                                        {/* WYBÓR ŹRÓDŁA */}
+                                        <div className="flex-1">
+                                            <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
+                                                Źródło dokumentu
                                             </label>
-                                            <div className="flex gap-2">
+                                            <div className="flex gap-1.5">
                                                 <button
                                                     onClick={() => setPaperDocSource("KIEROWNIK")}
-                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-black border-2 transition text-center leading-tight ${paperDocSource === "KIEROWNIK"
-                                                        ? "bg-green-600 text-white border-green-600 shadow-md"
+                                                    className={`flex-1 py-2 px-2 rounded-lg text-[10px] font-black border-2 transition text-center leading-tight ${paperDocSource === "KIEROWNIK"
+                                                        ? "bg-green-600 text-white border-green-600 shadow-sm"
                                                         : "bg-white text-slate-500 border-slate-200 hover:border-green-400 hover:text-green-700"}`}
                                                 >
-                                                    📋 Protokół<br />Kierownika
+                                                    📋 Kierownik
                                                 </button>
                                                 <button
                                                     onClick={() => setPaperDocSource("KIEROWCA")}
-                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-black border-2 transition text-center leading-tight ${paperDocSource === "KIEROWCA"
-                                                        ? "bg-blue-600 text-white border-blue-600 shadow-md"
+                                                    className={`flex-1 py-2 px-2 rounded-lg text-[10px] font-black border-2 transition text-center leading-tight ${paperDocSource === "KIEROWCA"
+                                                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
                                                         : "bg-white text-slate-500 border-slate-200 hover:border-blue-400 hover:text-blue-700"}`}
                                                 >
-                                                    🚛 Protokół<br />Kierowcy
+                                                    🚛 Kierowca
                                                 </button>
                                                 <button
                                                     onClick={() => setPaperDocSource("BRAK_PROTOKOLU")}
-                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-black border-2 transition text-center leading-tight ${paperDocSource === "BRAK_PROTOKOLU"
-                                                        ? "bg-red-500 text-white border-red-500 shadow-md"
+                                                    className={`flex-1 py-2 px-2 rounded-lg text-[10px] font-black border-2 transition text-center leading-tight ${paperDocSource === "BRAK_PROTOKOLU"
+                                                        ? "bg-red-500 text-white border-red-500 shadow-sm"
                                                         : "bg-white text-slate-500 border-slate-200 hover:border-red-400 hover:text-red-600"}`}
                                                 >
-                                                    ⚠️ Brak<br />Protokołu
+                                                    ⚠️ Brak
                                                 </button>
                                             </div>
                                         </div>
 
-                                        {/* NR DOKUMENTU - ukryty gdy BRAK_PROTOKOLU */}
-                                        {paperDocSource !== "BRAK_PROTOKOLU" ? (
-                                            <div>
-                                                <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-1">
-                                                    Nr dokumentu papierowego (Opcjonalnie)
-                                                </label>
-                                                <input
-                                                    type="text"
-                                                    placeholder="np. WZ 12/05/2026"
-                                                    value={paperDocReference}
-                                                    onChange={e => setPaperDocReference(e.target.value)}
-                                                    className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-orange-500 font-bold bg-slate-50"
-                                                />
-                                            </div>
-                                        ) : (
-                                            <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-700 font-bold flex items-start gap-2">
-                                                <span className="text-base">⚠️</span>
-                                                <span>Brak protokołu zostanie odnotowany w systemie i uwzględniony w raporcie odpowiedzialności kierowników.</span>
-                                            </div>
-                                        )}
+                                        {/* NR DOKUMENTU / WYTRYCH */}
+                                        <div className="flex-1">
+                                            <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
+                                                Nr dokumentu / Uwagi (Opcj.)
+                                            </label>
+                                            <input
+                                                type="text"
+                                                placeholder={paperDocSource === "BRAK_PROTOKOLU" ? "Wpisz numer lub zostaw puste..." : "np. WZ 12/05/2026"}
+                                                value={paperDocReference}
+                                                onChange={e => setPaperDocReference(e.target.value)}
+                                                className="w-full p-2 text-sm border-2 rounded-lg outline-none focus:border-orange-500 font-bold bg-slate-50"
+                                            />
+                                        </div>
                                     </div>
 
-                                    <button
-                                        onClick={() => { setManualName(""); setManualQty(""); setIsPaperManualModalOpen(true); }}
-                                        className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-3 rounded-xl text-xs font-bold transition shadow-sm border border-slate-200 whitespace-nowrap self-end"
-                                    >
-                                        + Dodaj z palca<br />(Poza listą)
-                                    </button>
+                                    {/* KOMUNIKAT DLA BRAKU PROTOKOŁU */}
+                                    {paperDocSource === "BRAK_PROTOKOLU" && (
+                                        <div className="bg-red-50 border border-red-200 rounded-lg p-2 text-[11px] text-red-700 font-bold flex items-center gap-2">
+                                            <span>⚠️ System powiadomi kierownictwo o braku protokołu.</span>
+                                        </div>
+                                    )}
                                 </div>
 
+                                {/* WĄSKA BELKA Z OPCJAMI (ZDJĘCIA + WPIS RĘCZNY) */}
+                                <div className="flex justify-between items-center px-4 py-2.5 bg-slate-100 border-b border-slate-200">
+                                    <span className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Koszyk Zwrotu</span>
+                                    <div className="flex gap-2">
+                                        <label className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1.5 rounded-lg text-[11px] font-bold transition shadow-sm border border-orange-200 cursor-pointer flex items-center gap-1">
+                                            📸 Zdjęcia {returnPhotos.length > 0 && `(${returnPhotos.length})`}
+                                            <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="hidden" />
+                                        </label>
+                                        <button
+                                            onClick={() => { setManualName(""); setManualQty(""); setIsPaperManualModalOpen(true); }}
+                                            className="bg-white hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-[11px] font-bold transition shadow-sm border border-slate-300"
+                                        >
+                                            + Dodaj z palca
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* MINIATURY ZDJĘĆ (POJAWIAJĄ SIĘ TYLKO JAK SĄ ZDJĘCIA) */}
+                                {returnPhotos.length > 0 && (
+                                    <div className="px-4 py-2 border-b bg-slate-50 flex gap-2 overflow-x-auto">
+                                        {returnPhotos.map((photo, index) => (
+                                            <div key={index} className="relative w-12 h-12 shrink-0 rounded border bg-white shadow-sm overflow-hidden flex items-center justify-center">
+                                                <img src={URL.createObjectURL(photo)} alt="preview" className="object-cover w-full h-full" />
+                                                <button onClick={() => removePhoto(index)} className="absolute top-0.5 right-0.5 bg-red-500 text-white w-4 h-4 rounded-full text-[10px] font-bold leading-none flex items-center justify-center">&times;</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
                                 {/* KOSZYK */}
-                                <div className="flex-1 overflow-y-auto p-6 bg-slate-50 space-y-3">
+                                <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-2">
                                     {paperReturnCart.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">Wybierz pozycje z lewej strony lub dodaj ręcznie.</div>
+                                        <div className="text-center p-8 text-slate-400 border-2 border-dashed rounded-xl">Wybierz pozycje z lewej strony lub dodaj ręcznie.</div>
                                     ) : (
                                         paperReturnCart.map(cItem => (
-                                            <div key={cItem.cartItemId} className={`p-4 border rounded-xl shadow-sm bg-white ${cItem.isManual ? 'border-dashed border-orange-300' : 'border-slate-200'}`}>
-                                                <div className="flex justify-between items-start mb-3">
+                                            <div key={cItem.cartItemId} className={`p-3 border rounded-xl shadow-sm bg-white ${cItem.isManual ? 'border-dashed border-orange-300' : 'border-slate-200'}`}>
+                                                <div className="flex justify-between items-start mb-2">
                                                     <div>
-                                                        <p className="font-bold text-slate-800">
+                                                        <p className="font-bold text-sm text-slate-800">
                                                             {cItem.name}
-                                                            {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 rounded uppercase border border-orange-200">Ręczny</span>}
+                                                            {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
                                                         </p>
                                                         {!cItem.isManual && <p className="text-[10px] font-mono text-slate-500">Nr Mag: {cItem.inventoryNumber || "-"} | Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
                                                     </div>
-                                                    <button onClick={() => removePaperReturnItem(cItem.cartItemId)} className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-xs font-bold">&times; Usuń</button>
+                                                    <button onClick={() => removePaperReturnItem(cItem.cartItemId)} className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-[10px] font-bold">&times; Usuń</button>
                                                 </div>
-                                                <div className="flex flex-wrap gap-4 items-center bg-slate-50 p-2 rounded border border-slate-100">
+                                                <div className="flex flex-wrap gap-2 items-center bg-slate-50 p-2 rounded border border-slate-100">
                                                     {cItem.type === "BULK" || cItem.isManual ? (
-                                                        <div className="flex items-center gap-2">
-                                                            <label className="text-xs text-slate-600 font-bold">Zwrócono:</label>
-                                                            <input type="number" min="0.01" step="any" max={cItem.isManual ? undefined : cItem.maxQty} value={cItem.receivedQty} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'receivedQty', Number(e.target.value))} className="w-20 p-1.5 border rounded text-center font-bold outline-none bg-white" />
-                                                            <span className="text-[10px] font-bold text-slate-500">{cItem.unit}</span>
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="flex items-center gap-1.5 bg-white px-2 py-1 rounded border border-slate-200">
+                                                                <label className="text-[10px] text-slate-500 font-bold uppercase">Kwity:</label>
+                                                                <input type="number" min="0.01" step="any" value={cItem.declaredQty} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'declaredQty', Number(e.target.value))} className="w-12 text-center text-sm font-bold outline-none text-slate-700" />
+                                                            </div>
+                                                            <div className="flex items-center gap-1.5 bg-orange-50 px-2 py-1 rounded border border-orange-200">
+                                                                <label className="text-[10px] text-orange-800 font-bold uppercase">Fizycznie:</label>
+                                                                <input type="number" min="0.01" step="any" max={cItem.isManual ? undefined : cItem.maxQty} value={cItem.receivedQty} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'receivedQty', Number(e.target.value))} className="w-12 bg-transparent text-center text-sm font-bold outline-none text-red-600" />
+                                                                <span className="text-[10px] font-bold text-orange-700">{cItem.unit}</span>
+                                                            </div>
                                                         </div>
                                                     ) : (
-                                                        <div className="flex items-center gap-2">
-                                                            <label className="text-xs text-slate-600 font-bold">Stan po zwrocie:</label>
-                                                            <select value={cItem.finalStatus} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'finalStatus', e.target.value)} className="p-1.5 border rounded text-xs font-bold outline-none bg-white">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <label className="text-[11px] text-slate-600 font-bold">Status:</label>
+                                                            <select value={cItem.finalStatus} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'finalStatus', e.target.value)} className="p-1 border rounded text-[11px] font-bold outline-none bg-white">
                                                                 <option value="sprawne">✅ Sprawne</option>
-                                                                <option value="do przeglądu">⚠️ Do przeglądu</option>
-                                                                <option value="uszkodzone">❌ Uszkodzone</option>
+                                                                <option value="do przeglądu">⚠️ Przegląd</option>
+                                                                <option value="uszkodzone">❌ Uszkodz.</option>
                                                             </select>
                                                         </div>
                                                     )}
-                                                    <input type="text" placeholder="Notatka magazyniera..." value={cItem.notes} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'notes', e.target.value)} className="flex-1 text-xs p-1.5 border rounded bg-white outline-none min-w-[150px]" />
+                                                    <input type="text" placeholder="Notatka magazyniera..." value={cItem.notes} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'notes', e.target.value)} className="flex-1 text-[11px] p-1 border rounded bg-white outline-none min-w-[120px]" />
                                                 </div>
                                             </div>
                                         ))
                                     )}
                                 </div>
 
-                                <div className="p-6 border-t bg-white flex gap-4">
-                                    <button onClick={closeModal} className="w-1/3 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl border border-slate-200">ANULUJ</button>
-                                    <button onClick={handlePaperReturnSubmit} disabled={isSubmitting || paperReturnCart.length === 0} className="w-2/3 py-4 bg-orange-500 hover:bg-orange-600 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300 transition">ZATWIERDŹ ZWROT PAPIEROWY</button>
+                                {/* STOPKA */}
+                                <div className="p-4 border-t bg-white flex gap-3">
+                                    <button onClick={closeModal} className="w-1/3 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-bold rounded-xl border border-slate-200 transition">ANULUJ</button>
+                                    <button onClick={handlePaperReturnSubmit} disabled={isSubmitting || paperReturnCart.length === 0} className="w-2/3 py-3 bg-orange-500 hover:bg-orange-600 text-white text-sm font-black rounded-xl shadow-md disabled:bg-slate-300 transition">
+                                        {isSubmitting ? "ZAPISYWANIE..." : "ZATWIERDŹ ZWROT PAPIEROWY"}
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -1717,6 +1832,34 @@ export default function ProtocolsHub() {
                         <div className="flex gap-3">
                             <button onClick={() => setIsAddManualToAcceptOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                             <button onClick={confirmAddManualToAccept} className="flex-1 py-3 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 shadow-md transition">Zatwierdź wpis</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MINI-MODAL: Wybór ilości dla ZWROTU PAPIEROWEGO */}
+            {paperBulkPickModal && (
+                <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-2 border-orange-300">
+                        <h3 className="text-lg font-black text-orange-800 mb-1">Ilość z dokumentu papierowego</h3>
+                        <p className="text-sm text-slate-500 mb-5">
+                            <span className="font-bold text-slate-700">{paperBulkPickModal.item.name}</span>
+                        </p>
+                        <input
+                            type="number"
+                            min="1"
+                            max={paperBulkPickModal.item.availableToReturn}
+                            value={paperBulkPickModal.qty}
+                            onChange={e => setPaperBulkPickModal(p => p ? { ...p, qty: Math.max(1, Math.min(Number(e.target.value), p.item.availableToReturn)) } : p)}
+                            className="w-full text-center text-3xl font-black p-3 border-2 rounded-xl outline-none focus:border-orange-500 mb-2"
+                            autoFocus
+                        />
+                        <p className="text-[11px] text-slate-400 text-center mb-6">
+                            Na budowie jest (max do zwrotu): <span className="font-bold text-slate-600">{paperBulkPickModal.item.availableToReturn} {paperBulkPickModal.item.unit || "szt."}</span>
+                        </p>
+                        <div className="flex gap-3">
+                            <button onClick={() => setPaperBulkPickModal(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={confirmPaperBulkAdd} className="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl hover:bg-orange-600 shadow-md transition">Zatwierdź ilość</button>
                         </div>
                     </div>
                 </div>
