@@ -7,12 +7,12 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { hasPermission, PermissionKey } from "@/lib/auth/permissions";
 
-// Dodajemy atrybut requiredPermission do struktury menu
+// ZMIANA: requiredPermission może teraz być pojedynczym kluczem lub tablicą kluczy
 type MenuItem = {
     name: string;
     path: string;
     icon: string;
-    requiredPermission?: PermissionKey;
+    requiredPermission?: PermissionKey | PermissionKey[];
 };
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -35,22 +35,44 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const menuItems: MenuItem[] = [
         { name: "Pulpit", path: "/dashboard", icon: "📊" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
-        { name: "Protokoły", path: "/dashboard/protocols", icon: "📝", requiredPermission: "protocolsIssue" },
+
+        // ZMIANA: Widoczne, jeśli ma JAKIEKOLWIEK uprawnienie do protokołów
+        {
+            name: "Protokoły",
+            path: "/dashboard/protocols",
+            icon: "📝",
+            requiredPermission: ["protocolsIssue", "protocolsReturnApp", "protocolsReturnPaper", "acceptReturns"]
+        },
+
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
         { name: "Twoja Budowa", path: "/dashboard/my-site", icon: "🏢", requiredPermission: "viewSiteState" },
         { name: "Zarządzanie Pracownikami", path: "/dashboard/admin/users", icon: "👥", requiredPermission: "manageUsers" },
-        { name: "Pracownicy Fizyczni", path: "/dashboard/admin/workers", icon: "👷", requiredPermission: "manageWorkers" },
+
+        // ZMIANA: Widoczne, jeśli ma JAKIEKOLWIEK uprawnienie do modułu pracowników fizycznych
+        {
+            name: "Pracownicy Fizyczni",
+            path: "/dashboard/admin/workers",
+            icon: "👷",
+            requiredPermission: ["workersManage", "workersIssueWarehouse", "workersIssueSite"]
+        },
+
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },
         { name: "Sąd PESAM", path: "/dashboard/claims", icon: "⚖️", requiredPermission: "viewClaims" },
     ];
 
-    // Funkcja filtrująca menu
-    // Funkcja filtrująca menu - CZYSTA LOGIKA UPRAWNIEŃ (Zero sztywnego admina)
+    // Funkcja filtrująca menu - CZYSTA LOGIKA UPRAWNIEŃ (obsługuje tablice)
     const canViewMenuItem = (item: MenuItem) => {
         if (!item.requiredPermission) return true; // Zawsze widoczne (np. Pulpit)
 
-        // System sprawdza wyłącznie, czy przypisana Rola (lub wyjątek) pozwala na ten widok
+        // Jeśli to tablica, sprawdzamy czy użytkownik ma PRZYNAJMNIEJ JEDNO z wymienionych uprawnień
+        if (Array.isArray(item.requiredPermission)) {
+            return item.requiredPermission.some(permission =>
+                hasPermission(permission, user.rolePermissions, user.permissionOverrides)
+            );
+        }
+
+        // Jeśli to pojedynczy string (stare zachowanie)
         return hasPermission(item.requiredPermission, user.rolePermissions, user.permissionOverrides);
     };
 

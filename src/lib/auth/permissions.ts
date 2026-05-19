@@ -11,7 +11,6 @@ export const ALL_PERMISSIONS = {
     createOrder: "Sklep: Składanie zamówień na budowę",
     manageOrders: "Magazyn: Realizacja zamówień",
 
-    // ZMIENIONE UPRAWNIENIA PROTOKOŁÓW:
     protocolsIssue: "Protokoły: Wydania z magazynu",
     protocolsReturnApp: "Protokoły: Zwrot elektroniczny",
     protocolsReturnPaper: "Protokoły: Zwrot z papieru",
@@ -21,7 +20,11 @@ export const ALL_PERMISSIONS = {
     viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
     viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
     manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)",
-    manageWorkers: "Zarządzanie: Pracownicy fizyczni" // <-- DODAJ TĘ LINIĘ
+
+    // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
+    workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",
+    workersIssueWarehouse: "Pracownicy fizyczni: Wydawanie z Magazynu Głównego",
+    workersIssueSite: "Pracownicy fizyczni: Wydawanie ze swoich budów"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;
@@ -36,16 +39,11 @@ export function hasPermission(
     rolePermissions: Record<string, boolean> = {},
     permissionOverrides: Record<string, boolean> = {}
 ): boolean {
-    // 1. Sprawdzamy czy użytkownik ma zdefiniowany wyjątek dla tej akcji
     if (permissionKey in permissionOverrides) {
         return permissionOverrides[permissionKey];
     }
-
-    // 2. Jeśli nie, sprawdzamy co mówi jego Rola
     if (permissionKey in rolePermissions) {
         return rolePermissions[permissionKey];
     }
-
-    // 3. W przeciwnym razie brak dostępu
     return false;
 }
