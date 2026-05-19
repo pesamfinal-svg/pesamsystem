@@ -13,7 +13,12 @@ interface InventoryItem {
     id: string; name: string; inventoryNumber: string; type: "UNIQUE" | "BULK"; subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL"; category: string;
     imageUrl: string; allocations: Record<string, number>; unit?: string;
 }
-interface Site { id: string; name: string; location: string; }
+interface Site {
+    id: string;
+    name: string;
+    status?: string;
+    location?: string;
+}
 interface Protocol {
     protocolId: string; type: string; createdAt: string;
     status: string; createdByName: string; items: any[];

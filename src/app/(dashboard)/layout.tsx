@@ -35,11 +35,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const menuItems: MenuItem[] = [
         { name: "Pulpit", path: "/dashboard", icon: "📊" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
-        { name: "Protokoły", path: "/dashboard/protocols", icon: "📝", requiredPermission: "issueProtocols" },
+        { name: "Protokoły", path: "/dashboard/protocols", icon: "📝", requiredPermission: "protocolsIssue" },
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
         { name: "Twoja Budowa", path: "/dashboard/my-site", icon: "🏢", requiredPermission: "viewSiteState" },
         { name: "Zarządzanie Pracownikami", path: "/dashboard/admin/users", icon: "👥", requiredPermission: "manageUsers" },
+        { name: "Pracownicy Fizyczni", path: "/dashboard/admin/workers", icon: "👷", requiredPermission: "manageWorkers" },
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },
         { name: "Sąd PESAM", path: "/dashboard/claims", icon: "⚖️", requiredPermission: "viewClaims" },
     ];

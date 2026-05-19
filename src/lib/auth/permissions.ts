@@ -10,12 +10,18 @@ export const ALL_PERMISSIONS = {
     manageInventory: "Katalog: Dodawanie i edycja sprzętu",
     createOrder: "Sklep: Składanie zamówień na budowę",
     manageOrders: "Magazyn: Realizacja zamówień",
-    issueProtocols: "Protokoły: Wystawianie wydań i zwrotów",
+
+    // ZMIENIONE UPRAWNIENIA PROTOKOŁÓW:
+    protocolsIssue: "Protokoły: Wydania z magazynu",
+    protocolsReturnApp: "Protokoły: Zwrot elektroniczny",
+    protocolsReturnPaper: "Protokoły: Zwrot z papieru",
     acceptReturns: "Protokoły: Akceptacja zwrotów",
+
     viewSiteState: "Podgląd: Stany na budowach",
     viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
     viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
-    manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)"
+    manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)",
+    manageWorkers: "Zarządzanie: Pracownicy fizyczni" // <-- DODAJ TĘ LINIĘ
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

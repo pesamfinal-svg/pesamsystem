@@ -10,7 +10,12 @@ import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal
 import { hasPermission } from "@/lib/auth/permissions";
 
 // --- INTERFEJSY ---
-interface Site { id: string; name: string; status: string; }
+interface Site {
+    id: string;
+    name: string;
+    status?: string;
+    location?: string;
+}
 interface InventoryItem {
     id: string; name: string; type: "UNIQUE" | "BULK"; subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL"; inventoryNumber: string;
     category: string; availableQuantity: number; totalQuantity: number; unit?: string;
@@ -82,7 +87,7 @@ export default function ProtocolsHub() {
     const [acceptSiteTab, setAcceptSiteTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
     const [isAddManualToAcceptOpen, setIsAddManualToAcceptOpen] = useState(false);
 
-    // Stany dla ZWROTU PAPIEROWEGO
+    // Stany dla ZWROTÓW PAPIEROWYCH
     const [isPaperReturnModalOpen, setIsPaperReturnModalOpen] = useState(false);
     const [paperReturnSiteId, setPaperReturnSiteId] = useState("");
     const [paperDocReference, setPaperDocReference] = useState("");
@@ -91,7 +96,6 @@ export default function ProtocolsHub() {
     const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
     const [paperBulkPickModal, setPaperBulkPickModal] = useState<{ item: InventoryItem & { availableToReturn: number }; qty: number } | null>(null);
-
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
         inventoryName: string;
@@ -100,6 +104,13 @@ export default function ProtocolsHub() {
         warehouseNotes: string;
         declaredStatus: string;
     } | null>(null);
+
+    // --- NOWE STANY: DATY I TRYB RATUNKOWY ---
+    const [issueDocDate, setIssueDocDate] = useState(() => new Date().toISOString().split('T')[0]);
+    const [isIssueArchival, setIsIssueArchival] = useState(false);
+    const [paperDocDate, setPaperDocDate] = useState(() => new Date().toISOString().split('T')[0]);
+    const [paperSearchName, setPaperSearchName] = useState("");
+    const [paperSearchInvNumber, setPaperSearchInvNumber] = useState("");
 
     const [investigationDone, setInvestigationDone] = useState(false);
 
@@ -177,12 +188,25 @@ export default function ProtocolsHub() {
         setIsAddFromSiteOpen(false);
         setIsAddManualToAcceptOpen(false);
         setPaperBulkPickModal(null);
+
+        // Czyszczenie nowych stanów po zamknięciu okien
+        setIssueDocDate(new Date().toISOString().split('T')[0]);
+        setIsIssueArchival(false);
+        setPaperDocDate(new Date().toISOString().split('T')[0]);
+        setPaperSearchName("");
+        setPaperSearchInvNumber("");
     };
 
+    // 1. Budowy dla zwykłych akcji (Zwrot z Aplikacji) - Ukrywamy Wpisy Ręczne i Zakończone
     const userSites = sites.filter(s => {
         const sitesArray = user?.assignedSites || [];
-        return sitesArray.includes("ALL") || sitesArray.includes(s.id);
+        const isAssigned = sitesArray.includes("ALL") || sitesArray.includes(s.id);
+        const isRealActiveSite = s.location !== "Wpis ręczny" && s.status !== "ZAKOŃCZONA";
+        return isAssigned && isRealActiveSite;
     });
+
+    // 2. Budowy do auto-uzupełniania w Wydaniach (Bez śmieci)
+    const activeRealSites = sites.filter(s => s.location !== "Wpis ręczny" && s.status !== "ZAKOŃCZONA");
 
     // -------------------------------------------------------------------------
     // LOGIKA KOSZYKA WYDANIA
@@ -267,6 +291,48 @@ export default function ProtocolsHub() {
     const handleIssueSubmit = async () => {
         if (!issueSiteInput.trim() || cart.length === 0) return alert("Podaj budowę i wybierz przedmioty!");
 
+        // --- NOWOŚĆ: INTELIGENTNY STRAŻNIK DAT (Tylko dla standardowych wydań) ---
+        if (!isIssueArchival) {
+            setIsSubmitting(true); // Blokuje przycisk na ułamek sekundy podczas sprawdzania
+            try {
+                const conflictingItems = [];
+
+                for (const cartItem of cart) {
+                    if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+
+                    // Pobieramy najnowszy wpis z historii tego urządzenia
+                    const historyRef = collection(db, `inventory/${cartItem.dbId}/history`);
+                    // Sortujemy po dacie systemowej malejąco, by pobrać najświeższy fizycznie wpis
+                    const q = query(historyRef, orderBy("date", "desc"), limit(1));
+                    const snap = await getDocs(q);
+
+                    if (!snap.empty) {
+                        const lastDoc = snap.docs[0].data();
+                        // Szukamy daty z dokumentu (lub jeśli to stary wpis - bierzemy datę systemową)
+                        const lastDocDate = lastDoc.documentDate || lastDoc.date.split('T')[0];
+
+                        // PORÓWNANIE DAT: Jeśli wprowadzamy stary papier, a sprzęt ma nowszą historię
+                        if (lastDocDate > issueDocDate) {
+                            conflictingItems.push(`- ${cartItem.name} (nr ${cartItem.inventoryNumber || 'brak'}): ma już nowszą operację z dnia ${lastDocDate}`);
+                        }
+                    }
+                }
+
+                // Jeśli znaleziono konflikty, blokujemy wysyłkę i informujemy magazyniera
+                if (conflictingItems.length > 0) {
+                    setIsSubmitting(false); // Odblokowujemy przycisk
+                    return alert(
+                        `⚠️ BLOKADA: KONFLIKT DAT!\n\n` +
+                        `Próbujesz wydać sprzęt z datą wsteczną (${issueDocDate}), ale system wykrył nowsze wpisy (np. nowsze zwroty) dla poniższych przedmiotów:\n\n` +
+                        conflictingItems.join("\n") +
+                        `\n\nJeśli wprowadzasz ZALEGŁY papier Wydania dla sprzętu, który zdążył już wrócić, MUSISZ zaznaczyć opcję:\n☑️ "Protokół archiwalny (Nie zdejmuj sprzętu z półki)"!`
+                    );
+                }
+            } catch (err) {
+                console.error("Błąd podczas walidacji dat:", err);
+            }
+        }
+
         setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
@@ -334,21 +400,27 @@ export default function ProtocolsHub() {
                         const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId!];
                         const data = itemDoc.data();
 
-                        const newAvailable = data.availableQuantity - cartItem.issueQty;
-                        if (newAvailable < 0) throw `Brak wystarczającej ilości dla: ${data.name}`;
+                        // JESLI NIE JEST ARCHIWALNY - NORMALNIE ZDEJMUJEMY Z MAGAZYNU
+                        if (!isIssueArchival) {
+                            const newAvailable = data.availableQuantity - cartItem.issueQty;
+                            if (newAvailable < 0) throw `Brak wystarczającej ilości dla: ${data.name}`;
 
-                        const currentAllocations = data.allocations || {};
-                        const newAllocations = { ...currentAllocations, [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty };
+                            const currentAllocations = data.allocations || {};
+                            const newAllocations = { ...currentAllocations, [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty };
 
-                        const updateData: any = { availableQuantity: newAvailable, allocations: newAllocations };
-                        if (data.type === "UNIQUE") updateData.currentLocation = siteName;
+                            const updateData: any = { availableQuantity: newAvailable, allocations: newAllocations };
+                            if (data.type === "UNIQUE") updateData.currentLocation = siteName;
 
-                        transaction.update(itemRef, updateData);
+                            transaction.update(itemRef, updateData);
+                        }
 
                         if (data.type === "UNIQUE") {
                             const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
                             transaction.set(historyRef, {
-                                date: new Date().toISOString(), type: "WYDANIE", description: `Wydano na budowę: ${siteName}`,
+                                date: new Date().toISOString(),
+                                documentDate: issueDocDate, // Nowe pole - data dokumentu
+                                type: "WYDANIE",
+                                description: `${isIssueArchival ? '[ZALEGŁY WPIS - BEZ ZMIANY STANÓW] ' : ''}Wydano na budowę: ${siteName}`,
                                 status: data.status, user: `${user?.firstName} ${user?.lastName}`
                             });
                         }
@@ -369,6 +441,8 @@ export default function ProtocolsHub() {
                     protocolId, type: "WYDANIE", sourceId: "MAGAZYN", destinationId: siteId, destinationName: siteName,
                     createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
+                    documentDate: issueDocDate, // Data kwitu
+                    isArchival: isIssueArchival, // Flaga dla archiwalnych
                     items: finalProtocolItems
                 });
             });
@@ -480,20 +554,35 @@ export default function ProtocolsHub() {
         setIsPaperReturnModalOpen(true);
     };
 
-    const inventoryOnPaperSite = inventory
-        .map(i => {
-            const siteQty = i.allocations?.[paperReturnSiteId] || 0;
-            const lockedQty = lockedInPending[i.id] || 0;
-            const availableToReturn = siteQty - lockedQty;
-            return { ...i, availableToReturn };
-        })
-        .filter(i => paperReturnSiteId && i.availableToReturn > 0);
+    const filteredPaperInventory = inventory.filter(item => {
+        if (paperReturnActiveTab === "UNIQUE") {
+            if (item.type !== "UNIQUE") return false;
+        } else if (paperReturnActiveTab === "BULK") {
+            if (item.type !== "BULK" || item.subType === "MANUAL") return false;
+        } else if (paperReturnActiveTab === "MANUAL") {
+            if (item.subType !== "MANUAL") return false;
+        }
 
-    const filteredPaperInventory = inventoryOnPaperSite.filter(item => {
-        if (paperReturnActiveTab === "UNIQUE") return item.type === "UNIQUE";
-        if (paperReturnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL";
-        if (paperReturnActiveTab === "MANUAL") return item.subType === "MANUAL";
-        return true;
+        const isSearching = paperSearchName.trim() !== "" || paperSearchInvNumber.trim() !== "";
+
+        // TRYB RATUNKOWY (Tylko dla UNIQUE i tylko jak użytkownik czegoś szuka)
+        if (paperReturnActiveTab === "UNIQUE" && isSearching) {
+            const matchName = item.name.toLowerCase().includes(paperSearchName.toLowerCase());
+            const matchInv = (item.inventoryNumber || "").toLowerCase().includes(paperSearchInvNumber.toLowerCase());
+            return matchName && matchInv;
+        }
+
+        // STANDARDOWE ZACHOWANIE (Jeśli nie szuka, pokazuj tylko to, co formalnie jest na budowie)
+        if (!paperReturnSiteId) return false;
+        const siteQty = item.allocations?.[paperReturnSiteId] || 0;
+        const lockedQty = lockedInPending[item.id] || 0;
+        const availableToReturn = siteQty - lockedQty;
+        return availableToReturn > 0;
+
+    }).map(item => {
+        const siteQty = item.allocations?.[paperReturnSiteId] || 0;
+        const lockedQty = lockedInPending[item.id] || 0;
+        return { ...item, availableToReturn: Math.max(0, siteQty - lockedQty) };
     });
 
     const addToPaperReturnCart = (item: InventoryItem & { availableToReturn: number }) => {
@@ -642,17 +731,33 @@ export default function ProtocolsHub() {
                                 availableQuantity: newAvailable
                             });
                         } else if (itemData.type === "UNIQUE") {
+
+                            // Logika wykrywania Wymuszonego Zwrotu
+                            const wasOnWarehouse = itemData.availableQuantity === 1;
+                            const prevLocation = itemData.currentLocation || "Nieznana";
+                            const isForceful = prevLocation !== siteName && !wasOnWarehouse;
+
+                            let forceWarning = "";
+                            if (wasOnWarehouse) {
+                                forceWarning = "[⚠️ WYMUSZONY ZWROT - Wg systemu był w Magazynie] ";
+                            } else if (isForceful) {
+                                forceWarning = `[⚠️ WYMUSZONY ZWROT - Ściągnięto systemowo z innej budowy: ${prevLocation}] `;
+                            }
+
+                            // Czyścimy wszystkie przypisania i dajemy na Magazyn
                             transaction.update(itemRef, {
                                 currentLocation: "MAGAZYN",
                                 status: cartItem.finalStatus,
                                 availableQuantity: 1,
-                                [`allocations.${paperReturnSiteId}`]: 0
+                                allocations: {}
                             });
 
                             const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
                             transaction.set(historyRef, {
-                                date: new Date().toISOString(), type: "ZWROT",
-                                description: `Zwrot papierowy z: ${siteName}. Nr Dok: ${finalPaperReference || 'Brak'}. Źródło: ${finalPaperSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
+                                date: new Date().toISOString(),
+                                documentDate: paperDocDate, // data dokumentu
+                                type: "ZWROT",
+                                description: `${forceWarning}Zwrot papierowy z: ${siteName}. Nr Dok: ${finalPaperReference || 'Brak'}. Źródło: ${finalPaperSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
                                 status: cartItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`
                             });
                         }
@@ -676,7 +781,7 @@ export default function ProtocolsHub() {
                     protocolId,
                     type: "ZWROT",
                     documentSource: "PAPER",
-                    paperDocumentSource: finalPaperSource, // <-- Zapisujemy finalne źródło (KIEROWCA dla wytrychu)
+                    paperDocumentSource: finalPaperSource,
                     paperReference: finalPaperReference,
                     sourceId: paperReturnSiteId,
                     sourceName: siteName,
@@ -687,9 +792,10 @@ export default function ProtocolsHub() {
                     acceptedByName: `${user?.firstName} ${user?.lastName}`,
                     status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
+                    documentDate: paperDocDate, // Data z kwitu
                     acceptedAt: new Date().toISOString(),
                     items: finalProtocolItems,
-                    requiresManagerAlert, // <-- Informacja dla modułu powiadomień
+                    requiresManagerAlert,
                     ...(photoURLs.length > 0 && { photos: photoURLs })
                 });
             });
@@ -965,21 +1071,28 @@ export default function ProtocolsHub() {
             <h1 className="text-3xl font-bold text-slate-800 tracking-tight mb-8">Centrum Protokołów</h1>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
-                {user && hasPermission("issueProtocols", user.rolePermissions, user.permissionOverrides) && (
+                {/* 1. WYDANIE (Klucz: protocolsIssue) */}
+                {user && hasPermission("protocolsIssue", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={() => setIsIssueModalOpen(true)} className="bg-green-50 hover:bg-green-100 border border-green-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">📤</div><h3 className="font-bold text-green-900">Wystaw Wydanie</h3><p className="text-xs text-green-700 mt-1">Z magazynu na budowę</p>
                     </div>
                 )}
-                {user && hasPermission("issueProtocols", user.rolePermissions, user.permissionOverrides) && (
+
+                {/* 2. ZWROT APLIKACYJNY (Klucz: protocolsReturnApp) */}
+                {user && hasPermission("protocolsReturnApp", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={openReturnModal} className="bg-blue-50 hover:bg-blue-100 border border-blue-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">📲</div><h3 className="font-bold text-blue-900">Zgłoś Zwrot</h3><p className="text-xs text-blue-700 mt-1">Kierownik: z budowy do magazynu</p>
                     </div>
                 )}
-                {user && hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides) && (
+
+                {/* 3. ZWROT PAPIEROWY (Klucz: protocolsReturnPaper) */}
+                {user && hasPermission("protocolsReturnPaper", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={openPaperReturnModal} className="bg-orange-50 hover:bg-orange-100 border border-orange-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">📝</div><h3 className="font-bold text-orange-900">Wprowadź Zwrot</h3><p className="text-xs text-orange-700 mt-1">Przepisz z papieru</p>
                     </div>
                 )}
+
+                {/* 4. AKCEPTACJA (Klucz: acceptReturns - pozostaje bez zmian) */}
                 {user && hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={openAcceptModal} className="bg-purple-50 hover:bg-purple-100 border border-purple-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group relative">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">✅</div><h3 className="font-bold text-purple-900">Akceptuj Zwroty</h3><p className="text-xs text-purple-700 mt-1">Magazyn: weryfikacja i przyjęcie</p>
@@ -1049,12 +1162,21 @@ export default function ProtocolsHub() {
                                 <div className="p-6 border-b bg-slate-50">
                                     <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Wybierz lub wpisz budowę</label>
                                     <input list="sites-list" placeholder="Wybierz z listy lub wpisz nową budowę..." value={issueSiteInput} onChange={(e) => setIssueSiteInput(e.target.value)} className="w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-green-500 font-bold shadow-sm" />
-                                    <datalist id="sites-list">{sites.map(s => <option key={s.id} value={s.name} />)}</datalist>
+                                    <datalist id="sites-list">{activeRealSites.map(s => <option key={s.id} value={s.name} />)}</datalist>
                                 </div>
                                 <div className="flex-1 p-6 overflow-y-auto">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest">2. Koszyk wydania</label>
-                                        <button onClick={() => setIsManualModalOpen(true)} className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm">+ Wpis ręczny</button>
+                                    <div className="flex justify-between items-center mb-4 border-b pb-4">
+                                        <div className="flex flex-col gap-2 w-[70%]">
+                                            <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest">2. Koszyk wydania</label>
+                                            <div className="flex items-center gap-3">
+                                                <input type="date" value={issueDocDate} onChange={e => setIssueDocDate(e.target.value)} className="p-2 text-xs border-2 border-slate-200 rounded-lg outline-none focus:border-green-500 font-bold bg-slate-50" title="Data z papierowego dokumentu" />
+                                                <label className="flex items-center gap-2 cursor-pointer bg-yellow-50 hover:bg-yellow-100 px-2 py-1.5 rounded-lg border border-yellow-200 transition">
+                                                    <input type="checkbox" checked={isIssueArchival} onChange={e => setIsIssueArchival(e.target.checked)} className="w-4 h-4 text-yellow-600 rounded" />
+                                                    <span className="text-[10px] font-bold text-yellow-800 leading-tight">Protokół archiwalny<br /><span className="font-normal text-yellow-700">Nie zdejmuj sprzętu z półki</span></span>
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <button onClick={() => setIsManualModalOpen(true)} className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm h-fit">+ Wpis ręczny</button>
                                     </div>
                                     {cart.length === 0 ? (
                                         <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">KOSZYK PUSTY</div>
@@ -1363,32 +1485,48 @@ export default function ProtocolsHub() {
                                 <div className="p-6 border-b bg-orange-50/50">
                                     <label className="block text-[11px] font-black text-orange-800 uppercase tracking-widest mb-2">1. Wybierz Budowę</label>
                                     <select value={paperReturnSiteId} onChange={(e) => { setPaperReturnSiteId(e.target.value); setPaperReturnCart([]); }} className="w-full p-4 border-2 border-orange-200 rounded-xl outline-none focus:border-orange-500 font-bold bg-white mb-4">
-                                        <option value="" disabled>-- Wybierz budowę --</option>
-                                        {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        <option value="" disabled>-- Wybierz budowę / Cel --</option>
+                                        {sites.map(s => (
+                                            <option key={s.id} value={s.id}>
+                                                {s.name} {s.location === "Wpis ręczny" ? "(Prywatne / Ręczne)" : s.status === "ZAKOŃCZONA" ? "(Zakończona)" : ""}
+                                            </option>
+                                        ))}
                                     </select>
-                                    <div className="flex gap-2 bg-orange-100/50 p-1 rounded-xl w-fit border border-orange-200">
+                                    <div className="flex gap-2 bg-orange-100/50 p-1 rounded-xl w-fit border border-orange-200 mb-3">
                                         <button onClick={() => setPaperReturnActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'UNIQUE' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
                                         <button onClick={() => setPaperReturnActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
                                         <button onClick={() => setPaperReturnActiveTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'MANUAL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}>WPISY RĘCZNE</button>
                                     </div>
+
+                                    {/* NOWE: WYSZUKIWARKA RATUNKOWA */}
+                                    {paperReturnActiveTab === "UNIQUE" && (
+                                        <div className="flex gap-2">
+                                            <input type="text" placeholder="Szukaj nazwy..." value={paperSearchName} onChange={e => setPaperSearchName(e.target.value)} className="w-full p-2 border rounded-lg text-sm bg-white outline-none focus:border-orange-400" />
+                                            <input type="text" placeholder="Nr Mag..." value={paperSearchInvNumber} onChange={e => setPaperSearchInvNumber(e.target.value)} className="w-1/2 p-2 border rounded-lg text-sm bg-white outline-none focus:border-orange-400 font-mono" />
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
                                     {!paperReturnSiteId ? (
                                         <div className="text-center p-10 text-slate-400">Wybierz budowę, by zobaczyć co na niej jest.</div>
                                     ) : filteredPaperInventory.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400">Brak sprzętu w tej kategorii na wybranej budowie (lub cały oczekuje na weryfikację).</div>
+                                        <div className="text-center p-10 text-slate-400">Brak sprzętu na budowie (wyszukaj nr inwentarzowy, aby użyć zwrotu ratunkowego).</div>
                                     ) : (
-                                        filteredPaperInventory.map(item => (
-                                            <div key={item.id} className="flex justify-between items-center p-3 border rounded-xl bg-white shadow-sm hover:border-orange-300">
-                                                <div>
-                                                    <p className="font-bold text-sm text-slate-800">{item.name}</p>
-                                                    <p className="text-[11px] font-mono text-slate-500">
-                                                        Nr Mag: {item.inventoryNumber || "-"} | Na budowie (Dostępne): <b className="text-orange-600">{item.availableToReturn}</b> {item.unit || "szt."}
-                                                    </p>
+                                        filteredPaperInventory.map(item => {
+                                            const isFormallyOnSite = item.availableToReturn > 0;
+                                            return (
+                                                <div key={item.id} className={`flex justify-between items-center p-3 border rounded-xl shadow-sm transition ${isFormallyOnSite ? 'bg-white hover:border-orange-300' : 'bg-red-50 border-red-200'}`}>
+                                                    <div>
+                                                        <p className="font-bold text-sm text-slate-800">{item.name}</p>
+                                                        <p className="text-[11px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                        {!isFormallyOnSite && <p className="text-[10px] text-red-600 font-bold uppercase mt-1">⚠️ Wg systemu na: {item.currentLocation}</p>}
+                                                    </div>
+                                                    <button onClick={() => addToPaperReturnCart({ ...item, availableToReturn: isFormallyOnSite ? item.availableToReturn : 1 })} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${isFormallyOnSite ? 'bg-orange-100 hover:bg-orange-500 text-orange-700 hover:text-white' : 'bg-red-500 text-white hover:bg-red-600 shadow'}`}>
+                                                        {isFormallyOnSite ? "Dodaj do zwrotu" : "Wymuś Zwrot"}
+                                                    </button>
                                                 </div>
-                                                <button onClick={() => addToPaperReturnCart(item)} className="bg-orange-100 hover:bg-orange-500 text-orange-700 hover:text-white px-3 py-1.5 rounded-lg text-xs font-bold transition">Dodaj do zwrotu</button>
-                                            </div>
-                                        ))
+                                            )
+                                        })
                                     )}
                                 </div>
                             </div>
@@ -1398,6 +1536,13 @@ export default function ProtocolsHub() {
                                 {/* NAGŁÓWEK PRAWEJ STRONY - SKOMPRESOWANY LIFTING */}
                                 <div className="p-4 border-b bg-white flex flex-col gap-3">
                                     <div className="flex gap-4 items-start">
+
+                                        {/* NOWE: DATA DOKUMENTU */}
+                                        <div className="w-1/4">
+                                            <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Data z Kwitu</label>
+                                            <input type="date" value={paperDocDate} onChange={e => setPaperDocDate(e.target.value)} className="w-full p-2 text-sm border-2 rounded-lg outline-none focus:border-orange-500 font-bold bg-slate-50" />
+                                        </div>
+
                                         {/* WYBÓR ŹRÓDŁA */}
                                         <div className="flex-1">
                                             <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">

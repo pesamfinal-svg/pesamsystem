@@ -23,7 +23,12 @@ interface InventoryItem {
     status: string;
     category: string;
 }
-interface Site { id: string; name: string; }
+interface Site {
+    id: string;
+    name: string;
+    status?: string;
+    location?: string;
+}
 interface CartItem {
     cartId: string;
     isManual: boolean;
@@ -211,13 +216,16 @@ export default function ShopPage() {
     const [draftSaving, setDraftSaving] = useState(false);
 
     // UI
+    // UI
     const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
     const [isManualModalOpen, setIsManualModalOpen] = useState(false);
     const [manualText, setManualText] = useState("");
+    const [bulkPickModal, setBulkPickModal] = useState<{ item: InventoryItem; qty: number } | null>(null);
 
     // Debounce ref dla zapisu draftu
     const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    // ── Pobieranie danych + wczytanie draftu ──────────────────────────────────
     // ── Pobieranie danych + wczytanie draftu ──────────────────────────────────
     useEffect(() => {
         if (!user) return;
@@ -232,9 +240,14 @@ export default function ShopPage() {
                 const sitesSnap = await getDocs(query(collection(db, "sites"), orderBy("name", "asc")));
                 const allSites = sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[];
                 const userAssigned = user?.assignedSites || [];
+
+                // Blokujemy możliwość zamawiania na wpisy ręczne i budowy zakończone
                 const filteredSites = allSites.filter(s =>
-                    userAssigned.includes("ALL") || userAssigned.includes(s.id)
+                    (userAssigned.includes("ALL") || userAssigned.includes(s.id)) &&
+                    s.location !== "Wpis ręczny" &&
+                    s.status !== "ZAKOŃCZONA"
                 );
+
                 setSites(filteredSites);
 
                 // Wczytaj draft koszyka z Firestore
@@ -296,6 +309,13 @@ export default function ShopPage() {
     const addToCart = (item: InventoryItem) => {
         if (item.availableQuantity <= 0) return alert("Brak na magazynie głównym.");
         if (cart.find(i => i.dbId === item.id)) return;
+
+        // Jeśli to sprzęt ilościowy (BULK), pokaż modal z pytaniem o ilość
+        if (item.type === "BULK") {
+            setBulkPickModal({ item, qty: 1 });
+            return;
+        }
+
         const newCart: CartItem[] = [...cart, {
             cartId: Date.now().toString(),
             isManual: false,
@@ -309,6 +329,31 @@ export default function ShopPage() {
         }];
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
+    };
+
+    const confirmBulkAdd = () => {
+        if (!bulkPickModal) return;
+        const { item, qty } = bulkPickModal;
+
+        if (qty <= 0 || qty > item.availableQuantity) {
+            return alert(`Podaj ilość od 1 do ${item.availableQuantity}`);
+        }
+
+        const newCart: CartItem[] = [...cart, {
+            cartId: Date.now().toString(),
+            isManual: false,
+            dbId: item.id,
+            name: item.name,
+            type: item.type,
+            inventoryNumber: item.inventoryNumber,
+            quantity: qty,
+            imageUrl: item.imageUrl,
+            maxQty: item.availableQuantity,
+        }];
+
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+        setBulkPickModal(null); // Zamknij modal
     };
 
     const removeFromCart = (cartId: string) => {
@@ -570,8 +615,8 @@ export default function ShopPage() {
                                 <div
                                     key={item.id}
                                     className={`border rounded-xl flex items-center h-[110px] overflow-hidden transition-all shadow-sm group relative ${isInCart
-                                            ? "border-green-500 shadow-md"
-                                            : "bg-white border-slate-200 hover:shadow-lg hover:border-blue-300"
+                                        ? "border-green-500 shadow-md"
+                                        : "bg-white border-slate-200 hover:shadow-lg hover:border-blue-300"
                                         }`}
                                     style={isInCart ? {
                                         backgroundColor: "#f0fdf4",
@@ -625,14 +670,38 @@ export default function ShopPage() {
                 )}
             </div>
 
-            {/* ── Lightbox ── */}
-            {enlargedImage && (
-                <div
-                    className="fixed inset-0 bg-black/90 z-[9999999] flex items-center justify-center p-4 cursor-zoom-out"
-                    onClick={() => setEnlargedImage(null)}
-                >
-                    <img src={enlargedImage} className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl border-2 border-white/20" alt="Powiększenie" />
-                    <button className="absolute top-6 right-6 text-white text-4xl font-bold opacity-70 hover:opacity-100 transition-opacity">&times;</button>
+            {/* ── Modal wyboru ilości (BULK) ── */}
+            {bulkPickModal && (
+                <div className="fixed inset-0 bg-black/60 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-t-4 border-blue-500">
+                        <h3 className="text-xl font-black text-slate-800 mb-1">Podaj ilość</h3>
+                        <p className="text-sm text-slate-500 mb-5 line-clamp-2">
+                            <span className="font-bold text-slate-700">{bulkPickModal.item.name}</span>
+                        </p>
+                        <div className="flex items-center gap-3 mb-2">
+                            <button
+                                onClick={() => setBulkPickModal(p => p && p.qty > 1 ? { ...p, qty: p.qty - 1 } : p)}
+                                className="w-14 h-14 rounded-2xl bg-slate-100 hover:bg-slate-200 text-3xl font-black text-slate-700 transition flex items-center justify-center"
+                            >−</button>
+                            <input
+                                type="number" min="1" max={bulkPickModal.item.availableQuantity}
+                                value={bulkPickModal.qty}
+                                onChange={e => setBulkPickModal(p => p ? { ...p, qty: Math.max(1, Math.min(Number(e.target.value), p.item.availableQuantity)) } : p)}
+                                className="flex-1 text-center text-3xl font-black p-2 border-2 rounded-2xl outline-none focus:border-blue-500 bg-slate-50"
+                            />
+                            <button
+                                onClick={() => setBulkPickModal(p => p && p.qty < p.item.availableQuantity ? { ...p, qty: p.qty + 1 } : p)}
+                                className="w-14 h-14 rounded-2xl bg-slate-100 hover:bg-slate-200 text-3xl font-black text-slate-700 transition flex items-center justify-center"
+                            >+</button>
+                        </div>
+                        <p className="text-[11px] text-slate-400 text-center mb-6">
+                            Maksymalnie na stanie: <span className="font-bold text-slate-600">{bulkPickModal.item.availableQuantity} szt.</span>
+                        </p>
+                        <div className="flex gap-3">
+                            <button onClick={() => setBulkPickModal(null)} className="flex-1 py-4 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={confirmBulkAdd} className="flex-1 py-4 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md transition">Dodaj do koszyka</button>
+                        </div>
+                    </div>
                 </div>
             )}
 

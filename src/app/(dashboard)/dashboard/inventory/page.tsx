@@ -232,7 +232,16 @@ export default function InventoryPage() {
         setHasOpenClaim(false);
         try {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
-            setItemHistory(historySnap.docs.map(d => d.data() as HistoryEntry));
+            const rawHistory = historySnap.docs.map(d => d.data() as HistoryEntry);
+
+            // --- NOWE: Sortowanie chronologiczne po dacie z papieru (Malejąco: od najnowszej do najstarszej) ---
+            const sortedHistory = rawHistory.sort((a: any, b: any) => {
+                const dateA = new Date(a.documentDate || a.date).getTime();
+                const dateB = new Date(b.documentDate || b.date).getTime();
+                return dateB - dateA;
+            });
+
+            setItemHistory(sortedHistory);
 
             const claimsQ = query(
                 collection(db, "claims"),
@@ -523,7 +532,9 @@ export default function InventoryPage() {
                                         ) : (
                                             itemHistory.map((h, i) => (
                                                 <tr key={i} className="border-b last:border-0 hover:bg-slate-50">
-                                                    <td className="p-3 whitespace-nowrap">{new Date(h.date).toLocaleDateString()}</td>
+                                                    <td className="p-3 whitespace-nowrap">
+                                                        {new Date((h as any).documentDate || h.date).toLocaleDateString()}
+                                                    </td>
                                                     <td className={`p-3 font-bold ${h.type.includes("SERWIS") ? 'text-blue-600' : ''}`}>{h.type}</td>
                                                     <td className="p-3">{h.description}</td>
                                                     <td className="p-3 text-slate-400">{h.user}</td>
