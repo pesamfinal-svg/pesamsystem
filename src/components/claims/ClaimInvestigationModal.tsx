@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { collection, addDoc } from "firebase/firestore";
+import { collection, addDoc, doc, getDoc, getDocs } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 
@@ -30,7 +30,7 @@ interface ClaimInvestigationModalProps {
     // Dane zgłaszającego
     reportedByUid: string;
     reportedByName: string;
-    // NOWE: Dane od magazyniera
+    // Dane od magazyniera
     warehouseNotes: string;
     declaredStatus: string;
 }
@@ -44,7 +44,7 @@ const generateClaimId = (): string => {
     return `SZK-${dd}${mm}${yy}-${rand}`;
 };
 
-// Kompresja/resize zdjęcia przed uploadem (opcjonalnie)
+// Kompresja/resize zdjęcia przed uploadem
 const resizeImage = (file: File, maxWidth = 1200): Promise<File> => {
     return new Promise((resolve) => {
         const reader = new FileReader();
@@ -95,12 +95,12 @@ export default function ClaimInvestigationModal({
     siteName,
     reportedByUid,
     reportedByName,
-    warehouseNotes, // Odbieramy notatkę
-    declaredStatus  // Odbieramy status
+    warehouseNotes,
+    declaredStatus
 }: ClaimInvestigationModalProps) {
     // Chat state
     const [displayMessages, setDisplayMessages] = useState<DisplayMessage[]>([]);
-    const [apiMessages, setApiMessages] = useState<ConversationMessage[]>([]); // mirrors displayMessages but for API
+    const [apiMessages, setApiMessages] = useState<ConversationMessage[]>([]);
     const [userInput, setUserInput] = useState("");
     const [isAiTyping, setIsAiTyping] = useState(false);
     const [isInitialized, setIsInitialized] = useState(false);
@@ -109,11 +109,23 @@ export default function ClaimInvestigationModal({
     const [isComplete, setIsComplete] = useState(false);
     const [caseContext, setCaseContext] = useState<string | null>(null);
 
+    // DANE URZĄDZENIA POBRANE Z BAZY DO WYWIADU
+    const [purchasePrice, setPurchasePrice] = useState<number>(0);
+    const [purchaseDate, setPurchaseDate] = useState<string>("");
+
+    // LISTA KIEROWNIKÓW DO PRZYPISANIA NA KOŃCU
+    const [kierownicy, setKierownicy] = useState<any[]>([]);
+    const [selectedKierownikId, setSelectedKierownikId] = useState("");
+
+    // TRYB AWARYJNY (FAIL-SAFE) DLA MAGAZYNIERA
+    const [backupStep, setBackupStep] = useState<number | null>(null); // null = AI, 0-3 = awaryjne kroki
+    const [backupAnswers, setBackupAnswers] = useState<string[]>([]);
+
     // Photo state
-    const [pendingFiles, setPendingFiles] = useState<File[]>([]); // files queued to send with next message
-    const [allUploadedPhotoUrls, setAllUploadedPhotoUrls] = useState<string[]>([]); // all uploaded URLs
+    const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+    const [allUploadedPhotoUrls, setAllUploadedPhotoUrls] = useState<string[]>([]);
     const [isUploading, setIsUploading] = useState(false);
-    const [claimTempId] = useState(() => `tmp_${Date.now()}`); // stable ID for storage path
+    const [claimTempId] = useState(() => `tmp_${Date.now()}`);
 
     // Submission
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -148,12 +160,34 @@ export default function ClaimInvestigationModal({
         setPendingFiles([]);
         setAllUploadedPhotoUrls([]);
         setIsSubmitting(false);
+        setBackupStep(null);
+        setBackupAnswers([]);
+        setSelectedKierownikId("");
     };
 
     const initializeInvestigation = async () => {
         setIsInitialized(true);
         setIsAiTyping(true);
         try {
+            // 1. Pobierz dane finansowe sprzętu z bazy
+            const itemSnap = await getDoc(doc(db, "inventory", inventoryId));
+            let pDate = "";
+            let pPrice = 0;
+            if (itemSnap.exists()) {
+                pDate = itemSnap.data().purchaseDate || "";
+                pPrice = itemSnap.data().purchasePrice || 0;
+                setPurchaseDate(pDate);
+                setPurchasePrice(pPrice);
+            }
+
+            // 2. Pobierz aktywnych kierowników budów do przypisania na koniec
+            const usersSnap = await getDocs(collection(db, "users"));
+            const list = usersSnap.docs
+                .map(d => ({ uid: d.id, name: `${d.data().firstName} ${d.data().lastName}`, roleId: d.data().roleId }))
+                .filter(u => u.roleId === "kierownik");
+            setKierownicy(list);
+
+            // 3. Wywołaj asystenta AI
             const res = await fetch("/api/claims-ai-investigate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -162,29 +196,39 @@ export default function ClaimInvestigationModal({
                     inventoryNumber,
                     siteName,
                     isInitial: true,
-                    // ZMIANA: Wysyłamy notatkę do AI
                     warehouseNotes,
-                    declaredStatus
+                    declaredStatus,
+                    purchaseDate: pDate,
+                    purchasePrice: pPrice,
+                    role: "MAGAZYN"
                 }),
             });
-            const data = await res.json();
-            const aiReply = data.reply || "Błąd inicjalizacji.";
 
-            setDisplayMessages([{ role: "assistant", content: aiReply }]);
-            setApiMessages([{ role: "assistant", content: aiReply }]);
+            if (res.ok) {
+                const data = await res.json();
+                const aiReply = data.reply || "Błąd inicjalizacji.";
+                setDisplayMessages([{ role: "assistant", content: aiReply }]);
+                setApiMessages([{ role: "assistant", content: aiReply }]);
 
-            if (data.isComplete) {
-                setIsComplete(true);
-                setCaseContext(data.caseContext);
+                if (data.isComplete) {
+                    setIsComplete(true);
+                    setCaseContext(data.caseContext);
+                }
+            } else {
+                throw new Error("AI Offline");
             }
         } catch (err) {
             console.error("Init error:", err);
+            // URUCHOMIENIE TRYBU AWARYJNEGO (FAIL-SAFE)
+            setBackupStep(0);
+            const firstBackupQ = "Czy urządzenie nadaje się do naprawy, czy to całkowity złom?";
             setDisplayMessages([
                 {
                     role: "assistant",
-                    content: "Błąd połączenia z systemem AI. Odśwież stronę i spróbuj ponownie.",
+                    content: `[TRYB AWARYJNY ASYSTENTA] Serwer AI jest przeciążony. Przeprowadzę uproszczony wywiad techniczny.\n\nPytanie 1: ${firstBackupQ}`,
                 },
             ]);
+            setApiMessages([{ role: "assistant", content: firstBackupQ }]);
         } finally {
             setIsAiTyping(false);
         }
@@ -216,7 +260,6 @@ export default function ClaimInvestigationModal({
         }
         setIsUploading(false);
 
-        // Build user message text for API (include photo info)
         const photoNote =
             newPhotoUrls.length > 0
                 ? `\n[Dołączono ${newPhotoUrls.length} zdjęcie(a) jako dowód fotograficzny]`
@@ -237,44 +280,92 @@ export default function ClaimInvestigationModal({
         setDisplayMessages(updatedDisplay);
         setApiMessages(updatedApi);
 
-        // Call AI
-        try {
-            const res = await fetch("/api/claims-ai-investigate", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    inventoryName,
-                    inventoryNumber,
-                    siteName,
-                    messages: updatedApi,
-                    // ZMIANA: Wysyłamy notatkę do AI dla pewności na każdym etapie
-                    warehouseNotes,
-                    declaredStatus
-                }),
-            });
-            const data = await res.json();
-            const aiReply = data.reply || "Analizuję...";
+        // --- OBSŁUGA CZATU ---
+        if (backupStep !== null) {
+            // --- CZĘŚĆ AWARYJNA (FAIL-SAFE) ---
+            const currentAnswers = [...backupAnswers, text || "[Zdjęcia]"];
+            setBackupAnswers(currentAnswers);
 
-            const aiDisplayMsg: DisplayMessage = { role: "assistant", content: aiReply };
-            const aiApiMsg: ConversationMessage = { role: "assistant", content: aiReply };
-
-            setDisplayMessages((prev) => [...prev, aiDisplayMsg]);
-            setApiMessages((prev) => [...prev, aiApiMsg]);
-
-            if (data.isComplete) {
+            const nextStep = backupStep + 1;
+            if (nextStep === 1) {
+                let warrantyQ = "Z którego roku jest sprzęt i czy jest na niego gwarancja?";
+                if (purchaseDate) {
+                    const age = (new Date().getTime() - new Date(purchaseDate).getTime()) / (1000 * 60 * 60 * 24 * 365);
+                    warrantyQ = `Urządzenie zakupiono: ${purchaseDate} (ma ${Math.round(age)} lat). Czy na pewno jest już po gwarancji producenta?`;
+                }
+                const nextContent = `Pytanie 2: ${warrantyQ}`;
+                setDisplayMessages([...updatedDisplay, { role: "assistant", content: nextContent }]);
+                setApiMessages([...updatedApi, { role: "assistant", content: nextContent }]);
+                setBackupStep(1);
+                setIsAiTyping(false);
+            } else if (nextStep === 2) {
+                const nextContent = "Pytanie 3: Czy sprzęt był już w zewnętrznym serwisie na wycenie? Jeśli tak, co uznał serwis i na ile wyceniono naprawę?";
+                setDisplayMessages([...updatedDisplay, { role: "assistant", content: nextContent }]);
+                setApiMessages([...updatedApi, { role: "assistant", content: nextContent }]);
+                setBackupStep(2);
+                setIsAiTyping(false);
+            } else if (nextStep === 3) {
+                let priceQ = "Jaka jest orientacyjna cena rynkowa nowego takiego urządzenia?";
+                if (purchasePrice > 0) priceQ = `Cena tego modelu w bazie to ${purchasePrice} zł. Czy rynkowa cena nowego urządzenia uległa zmianie?`;
+                const nextContent = `Pytanie 4: ${priceQ}`;
+                setDisplayMessages([...updatedDisplay, { role: "assistant", content: nextContent }]);
+                setApiMessages([...updatedApi, { role: "assistant", content: nextContent }]);
+                setBackupStep(3);
+                setIsAiTyping(false);
+            } else {
+                // Koniec pytań awaryjnych - składamy raport techniczny ręcznie
+                const manualReport = `RAPORT MAGAZYNU (ZABEZPIECZONY AWARYJNIE):\nSprzęt: ${inventoryName}\nStan: ${warehouseNotes || declaredStatus}\nDiagnoza serwisu: ${currentAnswers[0]}\nGwarancja: ${currentAnswers[1]}\nPróby naprawy: ${currentAnswers[2]}\nUstalona cena rynkowa: ${currentAnswers[3]}\nZdjęcia: Tak (w bazie)`;
+                setCaseContext(manualReport);
                 setIsComplete(true);
-                setCaseContext(data.caseContext);
+                const endContent = "Dziękuję. Protokół został zabezpieczony w trybie awaryjnym. Wybierz kierownika odpowiedzialnego za budowę i prześlij sprawę.";
+                setDisplayMessages([...updatedDisplay, { role: "assistant", content: endContent }]);
+                setApiMessages([...updatedApi, { role: "assistant", content: endContent }]);
+                setIsAiTyping(false);
             }
-        } catch (err) {
-            console.error("Send error:", err);
-            setDisplayMessages((prev) => [
-                ...prev,
-                { role: "assistant", content: "Błąd połączenia. Spróbuj ponownie." },
-            ]);
-        } finally {
-            setIsAiTyping(false);
+        } else {
+            // --- STANDARDOWY PROCES AI ---
+            try {
+                const res = await fetch("/api/claims-ai-investigate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        inventoryName,
+                        inventoryNumber,
+                        siteName,
+                        messages: updatedApi,
+                        warehouseNotes,
+                        declaredStatus,
+                        purchaseDate,
+                        purchasePrice,
+                        role: "MAGAZYN"
+                    }),
+                });
+                const data = await res.json();
+                const aiReply = data.reply || "Analizuję...";
+
+                const aiDisplayMsg: DisplayMessage = { role: "assistant", content: aiReply };
+                const aiApiMsg: ConversationMessage = { role: "assistant", content: aiReply };
+
+                setDisplayMessages((prev) => [...prev, aiDisplayMsg]);
+                setApiMessages((prev) => [...prev, aiApiMsg]);
+
+                if (data.isComplete) {
+                    setIsComplete(true);
+                    setCaseContext(data.caseContext);
+                }
+            } catch (err) {
+                // Przełączenie awaryjne w trakcie czatu
+                setBackupStep(0);
+                const fallbackQ = "Czy sprzęt nadaje się do naprawy, czy to całkowity złom?";
+                setDisplayMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: `⚠️ Serwer AI przestał odpowiadać. Przełączam na tryb awaryjny.\n\nPytanie: ${fallbackQ}` },
+                ]);
+            } finally {
+                setIsAiTyping(false);
+            }
         }
-    }, [userInput, pendingFiles, displayMessages, apiMessages, isAiTyping, isUploading, inventoryName, inventoryNumber, siteName, claimTempId, warehouseNotes, declaredStatus]);
+    }, [userInput, pendingFiles, displayMessages, apiMessages, isAiTyping, isUploading, inventoryName, inventoryNumber, siteName, claimTempId, warehouseNotes, declaredStatus, backupStep, backupAnswers, purchaseDate, purchasePrice]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -287,7 +378,7 @@ export default function ClaimInvestigationModal({
         if (e.target.files) {
             const files = Array.from(e.target.files);
             setPendingFiles((prev) => [...prev, ...files]);
-            e.target.value = ""; // reset input so same files can be re-selected
+            e.target.value = "";
         }
     };
 
@@ -297,45 +388,41 @@ export default function ClaimInvestigationModal({
 
     const submitToCourt = async () => {
         if (!caseContext || isSubmitting) return;
+        if (!selectedKierownikId) return alert("Musisz przypisać kierownika budowy odpowiedzialnego za ten sprzęt!");
         setIsSubmitting(true);
 
         const claimId = generateClaimId();
 
-        // Build claim messages from investigation (visible to all)
-        // Build claim messages from investigation (visible to all)
+        // Mapujemy historię wywiadu AI na format czatu sędziowskiego
         const investigationMessages = displayMessages.map((msg, i) => {
             return {
                 id: `inv_${i}_${Date.now()}`,
                 senderId: msg.role === "assistant" ? "system_ai" : reportedByUid,
-                senderName: msg.role === "assistant" ? "Asystent Śledczy AI 🤖" : reportedByName,
+                senderName: msg.role === "assistant" ? "Sędzia AI CLS" : reportedByName,
                 senderRole: msg.role === "assistant" ? "AI" : "MAGAZYN",
                 text: msg.content,
                 timestamp: new Date().toISOString(),
                 visibleToWarehouse: true,
-                imageUrl: msg.photos && msg.photos.length > 0 ? msg.photos[0] : null, // Zostawiamy dla kompatybilności wstecznej
-                imageUrls: msg.photos || [], // NOWE: Przekazujemy całą tablicę zdjęć!
+                imageUrls: msg.photos || [],
             };
         });
 
-        // Dodajemy zdjęcia, które ew. były w drugiej iteracji msg.photos do głównej puli, ale rzadko się to zdarza
-
-        // Add final AI summary message (internal, not visible to warehouse)
+        // Końcowy raport wewnętrzny
         const summaryMessage = {
             id: `summary_${Date.now()}`,
             senderId: "system_ai",
-            senderName: "Asystent Śledczy AI 🤖",
+            senderName: "Sędzia AI CLS",
             senderRole: "AI",
             text: `📋 PROTOKÓŁ WSTĘPNY – PRZEKAZANIE DO ZARZĄDU\n\nUwagi magazyniera: ${warehouseNotes || "Brak"}\nStatus: ${declaredStatus}\n\nAnaliza AI:\n${caseContext}\n\n📸 Łącznie zebranych zdjęć dowodowych: ${allUploadedPhotoUrls.length}`,
             timestamp: new Date().toISOString(),
             visibleToWarehouse: false,
-            imageUrl: null, // Podsumowanie nie potrzebuje własnego zdjęcia
+            imageUrl: null,
         };
 
-        // Extract short description
         const shortDescription = `Zgłoszenie: ${declaredStatus}. ${warehouseNotes} | Wnioski AI: ${caseContext?.slice(0, 100).replace(/\n/g, " ") || "Brak"}`;
 
         try {
-            const docRef = await addDoc(collection(db, "claims"), {
+            await addDoc(collection(db, "claims"), {
                 claimId,
                 inventoryId,
                 inventoryName,
@@ -344,16 +431,16 @@ export default function ClaimInvestigationModal({
                 reportedBy: reportedByUid,
                 reportedByName,
                 description: shortDescription,
-                status: "NOWA",
+                status: "NOWA", // <--- Sprawa trafia do Kierownika jako "NOWA" (Przesłuchanie)
                 createdAt: new Date().toISOString(),
-                assignedManagers: [],
+                assignedManagers: [selectedKierownikId], // Przypisujemy wybranego kierownika!
                 messages: [...investigationMessages, summaryMessage],
-                evidencePhotos: allUploadedPhotoUrls, // all photo URLs for easy access
+                evidencePhotos: allUploadedPhotoUrls,
                 investigationComplete: true,
-                caseContext, // full AI summary
+                caseContext,
             });
 
-            onClaimCreated(claimId, docRef.id);
+            onClaimCreated(claimId, "temp-doc-id");
         } catch (err) {
             console.error("Create claim error:", err);
             alert("Błąd tworzenia sprawy w bazie. Spróbuj ponownie.");
@@ -367,7 +454,6 @@ export default function ClaimInvestigationModal({
     const canSend =
         (userInput.trim() || pendingFiles.length > 0) && !isAiTyping && !isUploading;
 
-    // Progress steps
     const steps = [
         { label: "Identyfikacja", done: displayMessages.length >= 1 },
         { label: "Okoliczności", done: displayMessages.length >= 5 },
@@ -437,7 +523,7 @@ export default function ClaimInvestigationModal({
                                     <div
                                         className={`text-[9px] uppercase font-black mb-1.5 tracking-wider ${isUser ? "text-blue-300" : "text-purple-500"}`}
                                     >
-                                        {isUser ? reportedByName : "Asystent Śledczy AI 🤖"}
+                                        {isUser ? reportedByName : "Sędzia AI CLS 🤖"}
                                     </div>
                                     <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
 
@@ -499,35 +585,39 @@ export default function ClaimInvestigationModal({
                     <div ref={chatEndRef} />
                 </div>
 
-                {/* ── COMPLETION BANNER ── */}
+                {/* ── COMPLETION & ASSIGNMENT PANEL ── */}
                 {isComplete && (
-                    <div className="flex-shrink-0 bg-green-50 border-t-2 border-green-300 px-5 py-4">
+                    <div className="flex-shrink-0 bg-green-50 border-t-2 border-green-300 p-5 flex flex-col gap-4">
+                        {/* WYBÓR KIEROWNIKA BUDOWY */}
+                        <div className="bg-white p-4 rounded-2xl border border-green-200 shadow-sm">
+                            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Kto odpowiada za budowę: {siteName}?</label>
+                            <select
+                                required
+                                value={selectedKierownikId}
+                                onChange={e => setSelectedKierownikId(e.target.value)}
+                                className="w-full p-3 bg-slate-50 border-2 border-slate-200 rounded-xl font-bold text-slate-800 text-sm outline-none focus:border-purple-500 cursor-pointer"
+                            >
+                                <option value="" disabled>-- Wybierz kierownika z listy --</option>
+                                {kierownicy.map(k => <option key={k.uid} value={k.uid}>{k.name}</option>)}
+                            </select>
+                        </div>
+
                         <div className="flex items-center gap-4">
                             <div className="text-2xl">✅</div>
                             <div className="flex-1 min-w-0">
                                 <p className="text-sm font-black text-green-800 uppercase tracking-tight">
-                                    Protokół zamknięty
+                                    Protokół Magazyniera Zamknięty
                                 </p>
                                 <p className="text-xs text-green-700 mt-0.5 truncate">
-                                    Zebrano komplet informacji.
-                                    {allUploadedPhotoUrls.length > 0
-                                        ? ` 📸 ${allUploadedPhotoUrls.length} zdjęcie(a) w aktach.`
-                                        : " ⚠️ Brak zdjęć w aktach."}
+                                    Wywiad techniczny zakończony. Przypisz kierownika i wyślij akta.
                                 </p>
                             </div>
                             <button
                                 onClick={submitToCourt}
-                                disabled={isSubmitting}
-                                className="flex-shrink-0 bg-red-600 hover:bg-red-700 text-white font-black px-5 py-3 rounded-xl shadow-xl transition disabled:opacity-50 text-sm uppercase tracking-wide"
+                                disabled={isSubmitting || !selectedKierownikId}
+                                className="flex-shrink-0 bg-purple-600 hover:bg-purple-700 text-white font-black px-5 py-3 rounded-xl shadow-xl transition disabled:opacity-50 disabled:bg-slate-400 text-sm uppercase tracking-wide"
                             >
-                                {isSubmitting ? (
-                                    <span className="flex items-center gap-2">
-                                        <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                        Wysyłam...
-                                    </span>
-                                ) : (
-                                    "⚖️ Wyślij do Sądu PESAM"
-                                )}
+                                {isSubmitting ? "Wysyłam..." : "⚖️ Wyślij do Sądu PESAM"}
                             </button>
                         </div>
                     </div>
@@ -576,7 +666,7 @@ export default function ClaimInvestigationModal({
                                 accept="image/*,image/heic"
                                 onChange={handleFileChange}
                                 className="hidden"
-                                capture="environment" // mobile: prefer camera
+                                capture="environment"
                             />
 
                             {/* Text input */}

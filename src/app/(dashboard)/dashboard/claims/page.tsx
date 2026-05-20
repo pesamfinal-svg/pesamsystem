@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { collection, getDocs, doc, updateDoc, arrayUnion, query, orderBy } from "firebase/firestore";
+import { collection, getDocs, doc, updateDoc, arrayUnion, query, orderBy, where, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -16,8 +16,6 @@ interface ChatMessage {
     text: string;
     timestamp: string;
     visibleToWarehouse: boolean;
-    imageUrl?: string;
-    imageUrls?: string[]; // DODANE
 }
 
 interface Claim {
@@ -34,48 +32,51 @@ interface Claim {
     createdAt: string;
     assignedManagers: string[];
     messages: ChatMessage[];
+    aiReport?: string; // Oficjalny raport z przesłuchania Kierownika
     decisionInternal?: string;
     decisionWarehouse?: string;
 }
 
-interface UserBasic { uid: string; name: string; roleId: string; }
+// Sztywne pytania awaryjne dla Kierownika (Fail-safe)
+const BACKUP_QUESTIONS = [
+    "W jakich dokładnie okolicznościach doszło do uszkodzenia tego sprzętu na budowie i kto na nim wtedy pracował?",
+    "Czy sprzęt był używany zgodnie z przeznaczeniem i instrukcją obsługi?",
+    "Czy na budowie były podejmowane jakiekolwiek próby samodzielnej naprawy lub rozkręcania urządzenia?",
+    "Czy przed wystąpieniem usterki były jakieś sygnały ostrzegawcze (np. przegrzewanie się, spadek mocy)?"
+];
 
 export default function ClaimsCenter() {
     const { user } = useAuth();
     const [claims, setClaims] = useState<Claim[]>([]);
-    const [managers, setManagers] = useState<UserBasic[]>([]);
     const [selectedClaim, setSelectedClaim] = useState<Claim | null>(null);
     const [loading, setLoading] = useState(true);
 
     const [activeTab, setActiveTab] = useState<"AKTYWNE" | "ARCHIWUM">("AKTYWNE");
-
     const [messageText, setMessageText] = useState("");
-    const [visibleToWarehouse, setVisibleToWarehouse] = useState(false);
     const [isSending, setIsSending] = useState(false);
 
-    // DORADCA AI
-    const [aiGenerating, setAiGenerating] = useState(false);
-    const [aiAdvice, setAiAdvice] = useState<string | null>(null);
-    const [showAiDrawer, setShowAiDrawer] = useState(false);
+    // KIEROWNIK CHAT Z AI
+    const [aiMessages, setAiMessages] = useState<any[]>([]);
+    const [aiLoading, setAiLoading] = useState(false);
+    const [daysOnSite, setDaysOnSite] = useState<number | null>(null);
 
-    // MODAL WYROKU
+    // TRYB AWARYJNY (FAIL-SAFE)
+    const [backupStep, setBackupStep] = useState<number | null>(null);
+    const [backupAnswers, setBackupAnswers] = useState<string[]>([]);
+
+    // MODAL WYROKU (SZEF)
     const [isVerdictModalOpen, setIsVerdictModalOpen] = useState(false);
     const [verdictData, setVerdictData] = useState({ internal: "", warehouse: "" });
-
-    const canManageClaims = user ? hasPermission("manageClaims", user.rolePermissions, user.permissionOverrides) : false;
-    const canViewAllClaims = user ? hasPermission("viewAllClaims", user.rolePermissions, user.permissionOverrides) : false;
-
-    const chatRoleName = canManageClaims ? "DYREKCJA" : user?.roleId === "magazynier" ? "MAGAZYN" : "KIEROWNIK";
 
     const chatEndRef = useRef<HTMLDivElement>(null);
 
     const fetchData = async () => {
+        if (!user) return;
         setLoading(true);
         try {
             const q = query(collection(db, "claims"), orderBy("createdAt", "desc"));
             const snap = await getDocs(q);
 
-            // ZABEZPIECZENIE: Wymuszamy tablice dla starszych dokumentów z bazy!
             let allClaims = snap.docs.map(d => {
                 const data = d.data();
                 return {
@@ -86,132 +87,217 @@ export default function ClaimsCenter() {
                 } as Claim;
             });
 
+            // Zabezpieczenie widoczności: Kierownik widzi tylko swoje sprawy
             if (!canViewAllClaims) {
-                // Bezpieczne sprawdzanie (tablica na pewno istnieje)
-                allClaims = allClaims.filter(c => c.assignedManagers.includes(user?.uid || "") || c.reportedBy === user?.uid);
+                allClaims = allClaims.filter(c => c.assignedManagers.includes(user.uid) || c.reportedBy === user.uid);
             }
             setClaims(allClaims);
-
-            if (canManageClaims) {
-                const uSnap = await getDocs(collection(db, "users"));
-                setManagers(uSnap.docs.map(d => ({ uid: d.id, name: `${d.data().firstName} ${d.data().lastName}`, roleId: d.data().roleId })));
-            }
         } catch (error) { console.error("Błąd pobierania:", error); } finally { setLoading(false); }
     };
 
     useEffect(() => { if (user) fetchData(); }, [user]);
-    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [selectedClaim?.messages]);
+    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [selectedClaim?.messages, aiMessages]);
 
-    const assignManagerAndStartInvestigation = async (managerUid: string) => {
-        if (!selectedClaim || !managerUid) return;
-        setAiGenerating(true);
+    // --- ZABEZPIECZENIE I WALIDACJA REAC-HOOKS (EARLY RETURN) ---
+    // Jeśli profil się ładuje, wyświetlamy loader. Od tej linii w dół TypeScript wie, że user istnieje.
+    if (!user) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Ładowanie profilu użytkownika...</div>;
 
+    const canManageClaims = hasPermission("manageClaims", user.rolePermissions, user.permissionOverrides);
+    const canViewAllClaims = hasPermission("viewAllClaims", user.rolePermissions, user.permissionOverrides);
+
+    const chatRoleName = canManageClaims ? "DYREKCJA" : user.roleId === "magazynier" ? "MAGAZYN" : "KIEROWNIK";
+
+    // OBLICZANIE ILE DNI SPRZĘT BYŁ NA BUDOWIE
+    const calculateDaysOnSite = async (claim: Claim) => {
         try {
-            const evidencePhotos = (selectedClaim.messages || [])
-                .flatMap(msg => {
-                    if (msg.imageUrls && msg.imageUrls.length > 0) return msg.imageUrls;
-                    if (msg.imageUrl) return [msg.imageUrl]; // Kompatybilność dla starszych spraw
-                    return [];
+            const q = query(collection(db, "protocols"), where("type", "==", "WYDANIE"), orderBy("createdAt", "desc"), limit(30));
+            const snap = await getDocs(q);
+            for (const d of snap.docs) {
+                const p = d.data();
+                const hasItem = p.items?.some((i: any) => i.inventoryId === claim.inventoryId);
+                if (hasItem && p.destinationName === claim.siteName) {
+                    const issueDate = new Date(p.createdAt);
+                    const currentDate = new Date(claim.createdAt);
+                    const diffTime = Math.abs(currentDate.getTime() - issueDate.getTime());
+                    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                }
+            }
+        } catch (e) { console.error("Błąd obliczania dni:", e); }
+        return null;
+    };
+
+    const handleSelectClaim = async (claim: Claim) => {
+        setSelectedClaim(claim);
+        setAiMessages([]);
+        setBackupStep(null);
+        setBackupAnswers([]);
+
+        // Sprawdzamy czy zalogowany użytkownik to przypisany Kierownik i sprawa jest NOWA
+        const isMyInvestigation = claim.status === "NOWA" && claim.assignedManagers.includes(user.uid);
+
+        if (isMyInvestigation) {
+            setAiLoading(true);
+            const days = await calculateDaysOnSite(claim);
+            setDaysOnSite(days);
+
+            try {
+                const res = await fetch("/api/claims-ai-investigate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        inventoryName: claim.inventoryName,
+                        inventoryNumber: claim.inventoryNumber,
+                        siteName: claim.siteName,
+                        warehouseNotes: claim.description,
+                        declaredStatus: "uszkodzone",
+                        daysOnSite: days,
+                        isInitial: true
+                    })
                 });
 
-            const response = await fetch('/api/claims-ai', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    inventoryName: selectedClaim.inventoryName,
-                    inventoryNumber: selectedClaim.inventoryNumber,
-                    siteName: selectedClaim.siteName,
-                    warehouseSummary: selectedClaim.description,
-                    evidencePhotos: evidencePhotos,
-                    isInitial: true
-                })
-            });
-
-            const data = await response.json();
-
-            // 1. Zapisujemy sprawę jako W_TOKU i przypisujemy managera (BEZ DODAWANIA WIADOMOŚCI AI)
-            const claimRef = doc(db, "claims", selectedClaim.id);
-            await updateDoc(claimRef, {
-                assignedManagers: arrayUnion(managerUid),
-                status: "W_TOKU"
-            });
-
-            // 2. Aktualizujemy UI
-            setSelectedClaim(prev => prev ? {
-                ...prev,
-                assignedManagers: [...(prev.assignedManagers || []), managerUid],
-                status: "W_TOKU"
-            } : null);
-
-            // 3. Wrzucamy odpowiedź do Drawera i go otwieramy
-            setAiAdvice(data.reply);
-            setShowAiDrawer(true);
-
-        } catch (e: any) {
-            alert(`Błąd AI: ${e.message}`);
-        } finally {
-            setAiGenerating(false);
+                if (res.ok) {
+                    const data = await res.json();
+                    setAiMessages([{ role: "assistant", content: data.reply }]);
+                } else {
+                    throw new Error();
+                }
+            } catch (err) {
+                // URUCHOMIENIE TRYBU AWARYJNEGO (FAIL-SAFE)
+                setBackupStep(0);
+                setAiMessages([{ role: "assistant", content: `[TRYB AWARYJNY SĘDZIEGO] Witaj Kierowniku. Serwer AI jest chwilowo przeciążony. Przeprowadzę z Tobą uproszczone przesłuchanie techniczne.\n\nPytanie 1: ${BACKUP_QUESTIONS[0]}` }]);
+            } finally {
+                setAiLoading(false);
+            }
         }
     };
 
-    const askAiForHelp = async () => {
-        if (!selectedClaim) return;
-        setAiGenerating(true);
-        try {
-            const response = await fetch('/api/claims-ai', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    inventoryName: selectedClaim.inventoryName,
-                    messages: selectedClaim.messages,
-                    warehouseSummary: selectedClaim.description
-                })
-            });
-            const data = await response.json();
-            if (response.ok) { setAiAdvice(data.reply); setShowAiDrawer(true); }
-        } catch (error) { console.error(error); }
-        finally { setAiGenerating(false); }
+    // WYSYŁANIE WIADOMOŚCI W WYWIADZIE KIEROWNIK ➔ AI
+    const handleSendToAi = async () => {
+        if (!messageText.trim() || !selectedClaim) return;
+        setAiLoading(true);
+
+        const updatedMessages = [...aiMessages, { role: "user", content: messageText }];
+        setAiMessages(updatedMessages);
+        setMessageText("");
+
+        if (backupStep !== null) {
+            // TRYB AWARYJNY (FAIL-SAFE)
+            const currentAnswers = [...backupAnswers, messageText];
+            setBackupAnswers(currentAnswers);
+
+            const nextStep = backupStep + 1;
+            if (nextStep < BACKUP_QUESTIONS.length) {
+                setBackupStep(nextStep);
+                setAiMessages([...updatedMessages, { role: "assistant", content: `Pytanie ${nextStep + 1}: ${BACKUP_QUESTIONS[nextStep]}` }]);
+                setAiLoading(false);
+            } else {
+                // Koniec pytań awaryjnych - składamy raport ręcznie
+                const manualReport = `RAPORT KOŃCOWY SĘDZIEGO (TRYB AWARYJNY):\nUrządzenie: ${selectedClaim.inventoryName}\nBudowa: ${selectedClaim.siteName}\nUstalenia z Kierownikiem:\n- Okoliczności awarii: ${currentAnswers[0]}\n- Zgodność z instrukcją: ${currentAnswers[1]}\n- Próby naprawy: ${currentAnswers[2]}\n- Sygnały przed usterką: ${currentAnswers[3]}`;
+                await finalizeInvestigation(manualReport, updatedMessages);
+            }
+        } else {
+            // STANDARDOWY PROCES GEMINI AI
+            try {
+                const res = await fetch("/api/claims-ai-investigate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        inventoryName: selectedClaim.inventoryName,
+                        inventoryNumber: selectedClaim.inventoryNumber,
+                        siteName: selectedClaim.siteName,
+                        warehouseNotes: selectedClaim.description,
+                        daysOnSite,
+                        messages: updatedMessages,
+                        isInitial: false
+                    })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const newAiMsg = { role: "assistant", content: data.reply };
+                    setAiMessages([...updatedMessages, newAiMsg]);
+
+                    if (data.isComplete) {
+                        await finalizeInvestigation(data.caseContext, [...updatedMessages, newAiMsg]);
+                    }
+                } else {
+                    throw new Error();
+                }
+            } catch (err) {
+                // Awaryjne przełączenie na fail-safe w trakcie rozmowy
+                setBackupStep(0);
+                setAiMessages([...updatedMessages, { role: "assistant", content: `⚠️ Serwer AI napotkał problem. Przełączam na tryb awaryjny.\n\nPytanie: ${BACKUP_QUESTIONS[0]}` }]);
+            } finally {
+                setAiLoading(false);
+            }
+        }
     };
 
-    const sendMessage = async () => {
+    // ZAKOŃCZENIE WYWIADU, RAPORT DO BAZY I ZMIANA STATUSU NA W_TOKU (DLA SZEFA)
+    const finalizeInvestigation = async (reportText: string, chatHistory: any[]) => {
+        if (!selectedClaim) return;
+        try {
+            // Konwertujemy historię chatu AI na oficjalne wiadomości do bazy
+            const formattedMessages: ChatMessage[] = chatHistory.map((m, idx) => ({
+                id: `${Date.now()}-${idx}`,
+                senderId: m.role === "user" ? user.uid : "AI_SYSTEM",
+                senderName: m.role === "user" ? `${user.firstName} ${user.lastName}` : "Sędzia AI CLS",
+                senderRole: m.role === "user" ? "KIEROWNIK" : "AI",
+                text: m.content,
+                timestamp: new Date().toISOString(),
+                visibleToWarehouse: true
+            }));
+
+            await updateDoc(doc(db, "claims", selectedClaim.id), {
+                status: "W_TOKU",
+                aiReport: reportText,
+                messages: formattedMessages
+            });
+
+            alert("🎉 Przesłuchanie zakończone! Raport został wygenerowany i wysłany do Zarządu.");
+            setSelectedClaim(null);
+            fetchData();
+        } catch (e) { alert("Błąd podczas kończenia przesłuchania."); }
+    };
+
+    // TRADYCYJNY CZAT DYREKCJA ➔ KIEROWNIK (DLA SPRAW W_TOKU)
+    const sendRegularMessage = async () => {
         if (!messageText.trim() || !selectedClaim) return;
         setIsSending(true);
         const newMsg: ChatMessage = {
             id: Date.now().toString(),
-            senderId: user?.uid || "",
-            senderName: `${user?.firstName} ${user?.lastName}`,
-            senderRole: chatRoleName,
+            senderId: user.uid,
+            senderName: `${user.firstName} ${user.lastName}`,
+            senderRole: canManageClaims ? "DYREKCJA" : "KIEROWNIK",
             text: messageText,
             timestamp: new Date().toISOString(),
-            visibleToWarehouse: canManageClaims ? visibleToWarehouse : true
+            visibleToWarehouse: true
         };
         try {
             await updateDoc(doc(db, "claims", selectedClaim.id), { messages: arrayUnion(newMsg) });
             setSelectedClaim({ ...selectedClaim, messages: [...(selectedClaim.messages || []), newMsg] });
-            setMessageText(""); setVisibleToWarehouse(false);
+            setMessageText("");
         } catch (e) { console.error(e); } finally { setIsSending(false); }
     };
 
     const handleVerdictSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedClaim) return;
-
         try {
             await updateDoc(doc(db, "claims", selectedClaim.id), {
                 decisionInternal: verdictData.internal,
                 decisionWarehouse: verdictData.warehouse,
                 status: "ZAMKNIETA"
             });
-            alert("Wyrok został wydany. Sprawa została zamknięta.");
+            alert("Wyrok został ogłoszony. Sprawa zamknięta i zarchiwizowana.");
             setIsVerdictModalOpen(false);
             fetchData();
-            setSelectedClaim(null); // Zamknięcie widoku po wydaniu wyroku
+            setSelectedClaim(null);
         } catch (e) { alert("Błąd zapisu wyroku."); }
     };
 
-    if (loading) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Wczytywanie wokandy...</div>;
+    if (loading) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Otwieranie drzwi sali rozpraw...</div>;
 
-    // Filtrowanie spraw na aktywne i zamknięte
     const activeClaims = claims.filter(c => c.status !== "ZAMKNIETA");
     const archivedClaims = claims.filter(c => c.status === "ZAMKNIETA");
     const displayedClaims = activeTab === "AKTYWNE" ? activeClaims : archivedClaims;
@@ -221,42 +307,26 @@ export default function ClaimsCenter() {
             <div className="flex items-center gap-4 mb-6">
                 <div className="text-4xl shadow-lg bg-white w-14 h-14 flex items-center justify-center rounded-full">⚖️</div>
                 <div>
-                    <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Wewnętrzny Sąd PESAM</h1>
-                    <p className="text-slate-500 text-sm font-medium italic">Centrum Likwidacji Szkód</p>
+                    <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Sąd PESAM (CLS)</h1>
+                    <p className="text-slate-500 text-sm font-medium italic">Wydział orzekania o szkodach sprzętowych</p>
                 </div>
             </div>
 
             <div className="flex-1 flex gap-6 overflow-hidden relative">
-                {/* LISTA SPRAW */}
+                {/* 1. LISTA SPRAW */}
                 <div className="w-1/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden font-sans">
-
-                    {/* ZAKŁADKI */}
                     <div className="flex bg-slate-100 p-2 m-4 rounded-xl shadow-inner">
-                        <button
-                            onClick={() => { setActiveTab("AKTYWNE"); setSelectedClaim(null); }}
-                            className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'AKTYWNE' ? 'bg-white text-blue-600 shadow' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                            Wokanda ({activeClaims.length})
-                        </button>
-                        <button
-                            onClick={() => { setActiveTab("ARCHIWUM"); setSelectedClaim(null); }}
-                            className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'ARCHIWUM' ? 'bg-white text-slate-800 shadow' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                            Archiwum ({archivedClaims.length})
-                        </button>
+                        <button onClick={() => { setActiveTab("AKTYWNE"); setSelectedClaim(null); }} className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'AKTYWNE' ? 'bg-white text-blue-600 shadow' : 'text-slate-500'}`}>Wokanda ({activeClaims.length})</button>
+                        <button onClick={() => { setActiveTab("ARCHIWUM"); setSelectedClaim(null); }} className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'ARCHIWUM' ? 'bg-white text-slate-800 shadow' : 'text-slate-500'}`}>Archiwum ({archivedClaims.length})</button>
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-4 space-y-3 pt-0">
-                        {displayedClaims.length === 0 && (
-                            <p className="text-center text-slate-400 mt-10 text-sm italic">
-                                {activeTab === "AKTYWNE" ? "Brak aktywnych spraw." : "Brak zamkniętych spraw."}
-                            </p>
-                        )}
+                        {displayedClaims.length === 0 && <p className="text-center text-slate-400 mt-10 text-sm italic">Brak spraw.</p>}
                         {displayedClaims.map(claim => (
-                            <div key={claim.id} onClick={() => { setSelectedClaim(claim); setShowAiDrawer(false); }} className={`p-4 border rounded-2xl cursor-pointer transition ${selectedClaim?.id === claim.id ? 'bg-blue-50 border-blue-400 shadow-md scale-[1.02]' : 'bg-white hover:border-slate-300 shadow-sm'}`}>
+                            <div key={claim.id} onClick={() => handleSelectClaim(claim)} className={`p-4 border rounded-2xl cursor-pointer transition ${selectedClaim?.id === claim.id ? 'bg-blue-50 border-blue-400 shadow-md scale-[1.02]' : 'bg-white hover:border-slate-300 shadow-sm'}`}>
                                 <div className="flex justify-between items-start mb-2">
                                     <span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span>
-                                    <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-100 text-red-700' : claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'}`}>{claim.status === "ZAMKNIETA" ? "ZAMKNIĘTA" : claim.status}</span>
+                                    <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-500 text-white animate-pulse' : claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'}`}>{claim.status === "ZAMKNIETA" ? "ZAMKNIĘTA" : claim.status === "NOWA" ? "WYJAŚNIANIE" : claim.status}</span>
                                 </div>
                                 <p className="text-[10px] text-slate-500 font-mono italic">ID: {claim.claimId} • {claim.siteName}</p>
                             </div>
@@ -264,190 +334,146 @@ export default function ClaimsCenter() {
                     </div>
                 </div>
 
-                {/* OBSZAR ROZPRAWY */}
+                {/* 2. OBSZAR ROZPRAWY */}
                 <div className="w-2/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden relative">
                     {!selectedClaim ? (
                         <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
                             <div className="text-6xl mb-4 opacity-20">🔨</div>
-                            <p>Wybierz sprawę z listy po lewej stronie.</p>
+                            <p>Wybierz sprawę, aby otworzyć akta.</p>
                         </div>
                     ) : (
                         <>
-                            {/* BOCZNY PANEL AI (DRAWER) - ZAKTUALIZOWANY WIDOK LISTY PYTAŃ */}
-                            <div className={`absolute top-0 right-0 h-full w-80 bg-slate-900 text-white z-30 shadow-2xl transition-transform duration-300 transform ${showAiDrawer ? 'translate-x-0' : 'translate-x-full'}`}>
-                                <div className="p-6 h-full flex flex-col">
-                                    <div className="flex justify-between items-center mb-6">
-                                        <h3 className="text-purple-400 font-black uppercase text-xs tracking-widest">✨ Podpowiedź AI</h3>
-                                        <button onClick={() => setShowAiDrawer(false)} className="text-slate-400 hover:text-white">✕</button>
-                                    </div>
-
-                                    <div className="flex-1 overflow-y-auto text-sm leading-relaxed text-slate-300">
-                                        {aiAdvice ? (
-                                            <div className="space-y-2">
-                                                {aiAdvice.split('\n').filter(q => q.trim() !== "").map((question, i) => (
-                                                    <button
-                                                        key={i}
-                                                        onClick={() => {
-                                                            const cleanQuestion = question.replace(/^\d+\.\s*/, '').replace(/^-\s*/, '');
-
-                                                            // Używamy funkcji callback w setMessageText, aby DOKLEIĆ tekst, a nie go nadpisać
-                                                            setMessageText(prev => {
-                                                                const currentText = prev.trim();
-                                                                // Jeśli pole jest puste, wstawiamy samo pytanie. 
-                                                                // Jeśli coś tam już jest, dodajemy nową linię, myślnik i kolejne pytanie.
-                                                                return currentText ? `${currentText}\n- ${cleanQuestion}` : `- ${cleanQuestion}`;
-                                                            });
-
-                                                            // USUNĘLIŚMY setShowAiDrawer(false); - dzięki temu panel zostaje otwarty!
-                                                        }}
-                                                        className="w-full text-left p-3 bg-slate-800 hover:bg-purple-900 rounded-xl border border-slate-700 hover:border-purple-500 text-sm text-slate-200 transition shadow-sm group"
-                                                    >
-                                                        <span className="text-purple-400 font-bold mr-2 opacity-50 group-hover:opacity-100 transition">✦</span>
-                                                        {question}
-                                                    </button>
-                                                ))}
-                                                <p className="text-[10px] text-slate-500 mt-4 text-center italic">Kliknij wybrane pytanie, aby użyć go w czacie.</p>
-                                            </div>
-                                        ) : (
-                                            <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
-                                                <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-                                                Analizuję akta sprawy...
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-
                             <div className="p-6 border-b bg-slate-50 shadow-sm z-10 flex justify-between items-center">
                                 <div>
                                     <h2 className="text-xl font-black text-slate-800 uppercase">{selectedClaim.inventoryName} (Nr: {selectedClaim.inventoryNumber})</h2>
-                                    <p className="text-sm font-bold text-red-600 mt-1">Zarzut: {selectedClaim.description}</p>
+                                    <p className="text-xs font-bold text-red-600 mt-1">Zgłoszenie usterki: {selectedClaim.description}</p>
                                 </div>
-                                {canManageClaims && selectedClaim.status !== "ZAMKNIETA" && (
+                                {canManageClaims && selectedClaim.status === "W_TOKU" && (
                                     <button onClick={() => { setVerdictData({ internal: "", warehouse: "" }); setIsVerdictModalOpen(true); }} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition">Wydaj Wyrok</button>
                                 )}
                             </div>
 
-                            {/* 1. SEKCJA PRZYPISYWANIA KIEROWNIKA ZE WSKAŹNIKIEM PRACY AI */}
-                            {canManageClaims && (selectedClaim.assignedManagers || []).length === 0 && selectedClaim.status !== "ZAMKNIETA" && (
-                                <div className="bg-orange-50 border-b border-orange-200 p-4">
-                                    <p className="text-xs font-black text-orange-800 mb-2 uppercase tracking-widest">🚨 Sprawa wymaga przypisania kierownika:</p>
-                                    <div className="flex items-center gap-4">
-                                        <select
-                                            disabled={aiGenerating}
-                                            onChange={(e) => assignManagerAndStartInvestigation(e.target.value)}
-                                            className="p-2.5 text-sm border border-orange-300 rounded-xl font-bold bg-white outline-none focus:ring-2 focus:ring-orange-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                                        >
-                                            <option value="">-- Wybierz kierownika do przesłuchania --</option>
-                                            {managers.map(m => <option key={m.uid} value={m.uid}>{m.name}</option>)}
-                                        </select>
-
-                                        {/* Wizualny feedback, że system "myśli" */}
-                                        {aiGenerating && (
-                                            <div className="flex items-center gap-3 text-orange-700 animate-pulse">
-                                                <div className="w-5 h-5 border-3 border-orange-600 border-t-transparent rounded-full animate-spin"></div>
-                                                <span className="text-[11px] font-black uppercase tracking-tighter">Asystent analizuje dowody i przygotowuje pytania...</span>
-                                            </div>
-                                        )}
+                            {/* SCENARIUSZ A: PRZESŁUCHANIE KIEROWNIKA PRZEZ AI (STATUS NOWA) */}
+                            {selectedClaim.status === "NOWA" && selectedClaim.assignedManagers.includes(user.uid) && (
+                                <div className="flex-1 flex flex-col overflow-hidden bg-slate-900 text-slate-100">
+                                    <div className="p-4 bg-slate-950 border-b border-slate-800 flex justify-between items-center">
+                                        <span className="text-[10px] font-black text-purple-400 uppercase tracking-widest animate-pulse">✨ Wstępne przesłuchanie techniczne prowadzone przez AI</span>
+                                        {daysOnSite && <span className="text-[10px] font-bold text-slate-400 font-mono">Sprzęt był na budowie: {daysOnSite} dni</span>}
                                     </div>
-                                </div>
-                            )}
 
-                            {/* 2. OBSZAR ROZPRAWY (CZAT) Z OBSŁUGĄ DOWODÓW FOTOGRAFICZNYCH */}
-                            <div className="flex-1 p-6 overflow-y-auto bg-slate-50/50 space-y-4">
-                                {(selectedClaim.messages || []).map((msg) => {
-                                    // 1. Filtr widoczności dla magazyniera
-                                    if (user?.roleId === "magazynier" && !msg.visibleToWarehouse) return null;
-
-                                    const isMe = msg.senderId === user?.uid;
-
-                                    // 2. Obsługa technicznych odpowiedzi JSON od AI (żeby nie straszyły użytkownika)
-                                    const isJson = msg.text?.trim().startsWith('{') && msg.text?.trim().endsWith('}');
-                                    const displayText = isJson ? "Asystent przetworzył dane techniczne i wygenerował raport." : msg.text;
-
-                                    return (
-                                        <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                                            <div className={`p-4 rounded-2xl shadow-sm max-w-[85%] ${isMe
-                                                ? 'bg-blue-600 text-white rounded-br-sm'
-                                                : msg.senderRole === 'AI'
-                                                    ? 'bg-purple-100 border border-purple-200 text-purple-900 rounded-bl-sm'
-                                                    : 'bg-white border border-slate-200 text-slate-800 rounded-bl-sm'
-                                                }`}>
-
-                                                {/* Nagłówek: Nazwa nadawcy i Rola */}
-                                                <div className="flex justify-between gap-4 mb-2 opacity-60 font-black text-[9px] uppercase tracking-wider border-b border-black/5 pb-1">
-                                                    <span>{msg.senderName}</span>
-                                                    <span>{msg.senderRole}</span>
+                                    {/* Czat z AI */}
+                                    <div className="flex-1 p-6 overflow-y-auto space-y-4">
+                                        {aiMessages.map((msg, i) => (
+                                            <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                                <div className={`p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed ${msg.role === 'user' ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-100 border border-slate-700'}`}>
+                                                    <p className="text-[9px] uppercase tracking-widest font-black opacity-40 mb-1">{msg.role === 'user' ? 'Kierownik' : 'Sędzia AI PESAM'}</p>
+                                                    <p className="whitespace-pre-wrap">{msg.content}</p>
                                                 </div>
-
-                                                {/* WYŚWIETLANIE DOWODÓW (ZDJĘĆ) - Obsługa wielu zdjęć */}
-                                                {(msg.imageUrls?.length ? msg.imageUrls : (msg.imageUrl ? [msg.imageUrl] : [])).map((url, idx) => (
-                                                    <div key={idx} className="mb-3 mt-1 rounded-xl overflow-hidden border border-black/10 shadow-lg bg-black/5 group cursor-zoom-in relative">
-                                                        <img
-                                                            src={url}
-                                                            alt={`Zabezpieczony dowód w sprawie ${idx + 1}`}
-                                                            className="max-h-80 w-full object-contain hover:scale-105 transition-transform duration-300"
-                                                            onClick={() => window.open(url, '_blank')}
-                                                        />
-                                                        <div className="absolute top-2 right-2 bg-black/50 text-white text-[8px] px-2 py-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                                                            Powiększ dowód nr {idx + 1}
-                                                        </div>
-                                                    </div>
-                                                ))}
-
-                                                {/* Treść wiadomości */}
-                                                <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                                                    {displayText}
-                                                </p>
-
-                                                {/* Data/Godzina (Opcjonalnie dla profesjonalnego wyglądu akt) */}
-                                                <p className={`text-[8px] mt-2 opacity-40 ${isMe ? 'text-right' : 'text-left'}`}>
-                                                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                </p>
                                             </div>
-                                        </div>
-                                    );
-                                })}
+                                        ))}
+                                        <div ref={chatEndRef} />
+                                    </div>
 
-                                {/* Punkt kotwiczenia dla automatycznego przewijania w dół */}
-                                <div ref={chatEndRef} />
-                            </div>
-
-                            {/* WYNIK SPRAWY - WIDOK FINALNY */}
-                            {selectedClaim.status === "ZAMKNIETA" && (
-                                <div className="p-8 bg-slate-900 text-white border-t-4 border-slate-600">
-                                    <h3 className="font-black text-slate-400 text-xl mb-4 tracking-tighter uppercase">📁 ZARCHIWIZOWANE ORZECZENIE SĄDU</h3>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
-                                            <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">Decyzja Wewnętrzna / Kadrowa</h4>
-                                            <p className="text-sm text-slate-200 leading-relaxed">{selectedClaim.decisionInternal || "Brak danych."}</p>
-                                        </div>
-                                        <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
-                                            <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">Wytyczne dla Magazynu</h4>
-                                            <p className="text-sm text-slate-200 leading-relaxed">{selectedClaim.decisionWarehouse || "Brak danych."}</p>
-                                        </div>
+                                    {/* Stopka wpisywania dla AI */}
+                                    <div className="p-4 bg-slate-950 border-t border-slate-800 flex gap-3 items-center">
+                                        <input
+                                            type="text"
+                                            disabled={aiLoading}
+                                            value={messageText}
+                                            onChange={e => setMessageText(e.target.value)}
+                                            onKeyDown={e => e.key === "Enter" && handleSendToAi()}
+                                            placeholder={aiLoading ? "System analizuje Twoją odpowiedź..." : "Wpisz swoje wyjaśnienia i kliknij Enter..."}
+                                            className="flex-1 p-3.5 bg-slate-900 border border-slate-800 rounded-xl text-sm outline-none focus:border-purple-500 text-white placeholder-slate-500 font-medium"
+                                        />
+                                        <button
+                                            onClick={handleSendToAi}
+                                            disabled={aiLoading || !messageText.trim()}
+                                            className="bg-purple-600 hover:bg-purple-700 text-white font-black px-6 py-3.5 rounded-xl transition disabled:opacity-50"
+                                        >
+                                            {aiLoading ? "..." : "Wyślij"}
+                                        </button>
                                     </div>
                                 </div>
                             )}
 
-                            {/* ZABEZPIECZENIE: Operator || [] dla pewności */}
-                            {selectedClaim.status !== "ZAMKNIETA" && (selectedClaim.assignedManagers || []).length > 0 && (
-                                <div className="p-5 bg-white border-t border-slate-200">
-                                    {canManageClaims && (
-                                        <div className="flex justify-between items-center mb-3">
-                                            <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border">
-                                                <input type="checkbox" checked={visibleToWarehouse} onChange={e => setVisibleToWarehouse(e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
-                                                <span className="text-[10px] font-black text-slate-600 uppercase">Widoczne dla Magazynu</span>
-                                            </label>
-                                            <button onClick={askAiForHelp} disabled={aiGenerating} className={`text-xs font-black px-4 py-2 rounded-xl flex items-center gap-2 transition ${showAiDrawer ? 'bg-purple-600 text-white shadow-inner' : 'text-purple-700 bg-purple-100 hover:bg-purple-200'}`}>
-                                                {aiGenerating ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : '✨ Analiza AI'}
+                            {/* SCENARIUSZ B: SZEF / INNY UŻYTKOWNIK OTWIERA SPRAWĘ O STATUSIE "NOWA" (OCZEKUJANIĘ NA KIEROWNIKA) */}
+                            {selectedClaim.status === "NOWA" && !selectedClaim.assignedManagers.includes(user.uid) && (
+                                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-slate-50 text-slate-500">
+                                    <span className="text-5xl mb-4">⏳</span>
+                                    <h4 className="text-lg font-black text-slate-700 uppercase">Oczekiwanie na wyjaśnienia</h4>
+                                    <p className="text-sm max-w-md mt-2">
+                                        Asystent AI CLS prowadzi obecnie wstępne przesłuchanie techniczne z Kierownikiem Budowy.
+                                        Sprawa pojawi się na wokandzie i zostanie przekazana do Dyrekcji natychmiast po zakończeniu wywiadu.
+                                    </p>
+                                </div>
+                            )}
+
+                            {/* SCENARIUSZ C: SPRAWA W TOKU / ZAKOŃCZONA (DLA SZEFA I KIEROWNIKA) */}
+                            {selectedClaim.status !== "NOWA" && (
+                                <div className="flex-1 flex flex-col overflow-hidden bg-slate-50/50">
+
+                                    {/* RAPORT GENEROWANY PRZEZ AI - Widoczny dla Szefa */}
+                                    {selectedClaim.aiReport && (
+                                        <div className="bg-purple-50 border-b border-purple-200 p-5 shadow-sm">
+                                            <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> Protokół ustaleń Asystenta AI:</h4>
+                                            <p className="text-xs text-purple-950 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-purple-200">{selectedClaim.aiReport}</p>
+                                        </div>
+                                    )}
+
+                                    {/* Czat tradycyjny */}
+                                    <div className="flex-1 p-6 overflow-y-auto space-y-4">
+                                        {selectedClaim.messages.map((msg) => (
+                                            <div key={msg.id} className={`flex flex-col ${msg.senderId === user.uid ? 'items-end' : 'items-start'}`}>
+                                                <div className={`p-4 rounded-2xl shadow-sm max-w-[80%] ${msg.senderId === user.uid ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-800'}`}>
+                                                    <div className="flex justify-between gap-4 mb-2 opacity-50 font-black text-[9px] uppercase tracking-wider">
+                                                        <span>{msg.senderName}</span>
+                                                        <span>{msg.senderRole}</span>
+                                                    </div>
+                                                    <p className="text-sm whitespace-pre-wrap">{msg.text}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                        <div ref={chatEndRef} />
+                                    </div>
+
+                                    {/* WYROK SĄDU (Gdy sprawa jest zamknięta) */}
+                                    {selectedClaim.status === "ZAMKNIETA" && (
+                                        <div className="p-6 bg-slate-900 text-white border-t border-slate-800">
+                                            <h3 className="font-black text-xs text-slate-400 uppercase tracking-widest mb-4">🔨 ORZECZENIE DYREKCJI (ZAMKNIĘTE)</h3>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
+                                                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Decyzja Kadrowa:</h4>
+                                                    <p className="text-sm">{selectedClaim.decisionInternal || "Brak decyzji."}</p>
+                                                </div>
+                                                <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
+                                                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Decyzja Magazynowa:</h4>
+                                                    <p className="text-sm">{selectedClaim.decisionWarehouse || "Brak wytycznych."}</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Panel wysyłania wiadomości (Dla spraw w toku) */}
+                                    {selectedClaim.status === "W_TOKU" && (
+                                        <div className="p-4 bg-white border-t border-slate-200 flex gap-3">
+                                            <input
+                                                type="text"
+                                                disabled={isSending}
+                                                value={messageText}
+                                                onChange={e => setMessageText(e.target.value)}
+                                                onKeyDown={e => e.key === "Enter" && sendRegularMessage()}
+                                                placeholder="Zadaj pytanie / odpowiedz Dyrekcji..."
+                                                className="flex-1 p-3 border rounded-xl text-sm outline-none focus:border-blue-500"
+                                            />
+                                            <button
+                                                onClick={sendRegularMessage}
+                                                disabled={isSending || !messageText.trim()}
+                                                className="bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-3 rounded-xl transition"
+                                            >
+                                                Wyślij
                                             </button>
                                         </div>
                                     )}
-                                    <div className="flex gap-3">
-                                        <textarea value={messageText} onChange={e => setMessageText(e.target.value)} placeholder={canManageClaims ? "Zadaj pytanie kierownikowi..." : "Złóż wyjaśnienia..."} className="flex-1 border border-slate-300 rounded-2xl p-4 text-sm outline-none focus:ring-2 focus:ring-blue-500 resize-none h-20 shadow-inner" />
-                                        <button onClick={sendMessage} disabled={!messageText.trim() || isSending} className="bg-blue-600 hover:bg-blue-700 text-white font-black px-8 rounded-2xl shadow-lg transition disabled:opacity-50">{isSending ? '...' : 'Wyślij'}</button>
-                                    </div>
                                 </div>
                             )}
                         </>
