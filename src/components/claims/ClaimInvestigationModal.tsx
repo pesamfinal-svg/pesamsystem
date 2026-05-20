@@ -44,6 +44,24 @@ const generateClaimId = (): string => {
     return `SZK-${dd}${mm}${yy}-${rand}`;
 };
 
+// ─── POMOCNICZA FUNKCJA FETCH Z BEZPIECZNYM TIMEOUTEM 20 SEKUND ───
+const fetchWithTimeout = async (resource: string, options: RequestInit & { timeout?: number } = {}) => {
+    const { timeout = 20000 } = options; // Ustawione na 20 sekund (bezpieczny start serwera + Google Search)
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await fetch(resource, {
+            ...options,
+            signal: controller.signal
+        });
+        clearTimeout(id);
+        return response;
+    } catch (error) {
+        clearTimeout(id);
+        throw error;
+    }
+};
+
 // Kompresja/resize zdjęcia przed uploadem
 const resizeImage = (file: File, maxWidth = 1200): Promise<File> => {
     return new Promise((resolve) => {
@@ -86,17 +104,7 @@ const uploadPhoto = async (file: File, claimTempId: string): Promise<string> => 
 };
 
 export default function ClaimInvestigationModal({
-    isOpen,
-    onClose,
-    onClaimCreated,
-    inventoryId,
-    inventoryName,
-    inventoryNumber,
-    siteName,
-    reportedByUid,
-    reportedByName,
-    warehouseNotes,
-    declaredStatus
+    isOpen, onClose, onClaimCreated, inventoryId, inventoryName, inventoryNumber, siteName, reportedByUid, reportedByName, warehouseNotes, declaredStatus
 }: ClaimInvestigationModalProps) {
     // Chat state
     const [displayMessages, setDisplayMessages] = useState<DisplayMessage[]>([]);
@@ -118,7 +126,7 @@ export default function ClaimInvestigationModal({
     const [selectedKierownikId, setSelectedKierownikId] = useState("");
 
     // TRYB AWARYJNY (FAIL-SAFE) DLA MAGAZYNIERA
-    const [backupStep, setBackupStep] = useState<number | null>(null); // null = AI, 0-3 = awaryjne kroki
+    const [backupStep, setBackupStep] = useState<number | null>(null);
     const [backupAnswers, setBackupAnswers] = useState<string[]>([]);
 
     // Photo state
@@ -139,7 +147,7 @@ export default function ClaimInvestigationModal({
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [displayMessages, isAiTyping]);
 
-    // Initialize investigation when modal opens
+    // Initialize data and chat once when opened
     useEffect(() => {
         if (isOpen && !isInitialized) {
             initializeInvestigation();
@@ -147,7 +155,7 @@ export default function ClaimInvestigationModal({
         if (!isOpen) {
             resetState();
         }
-    }, [isOpen]);
+    }, [isOpen, isInitialized]);
 
     const resetState = () => {
         setDisplayMessages([]);
@@ -187,8 +195,8 @@ export default function ClaimInvestigationModal({
                 .filter(u => u.roleId === "kierownik");
             setKierownicy(list);
 
-            // 3. Wywołaj asystenta AI
-            const res = await fetch("/api/claims-ai-investigate", {
+            // 3. Wywołaj asystenta AI z limitem czasowym 20s
+            const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -202,11 +210,12 @@ export default function ClaimInvestigationModal({
                     purchasePrice: pPrice,
                     role: "MAGAZYN"
                 }),
+                timeout: 20000 // Zrywa po 20 sekundach bez odpowiedzi
             });
 
             if (res.ok) {
                 const data = await res.json();
-                const aiReply = data.reply || "Błąd inicjalizacji.";
+                const aiReply = data.reply || "Analizuję usterkę...";
                 setDisplayMessages([{ role: "assistant", content: aiReply }]);
                 setApiMessages([{ role: "assistant", content: aiReply }]);
 
@@ -218,8 +227,7 @@ export default function ClaimInvestigationModal({
                 throw new Error("AI Offline");
             }
         } catch (err) {
-            console.error("Init error:", err);
-            // URUCHOMIENIE TRYBU AWARYJNEGO (FAIL-SAFE)
+            console.error("Init error (Uruchomienie trybu awaryjnego):", err);
             setBackupStep(0);
             const firstBackupQ = "Czy urządzenie nadaje się do naprawy, czy to całkowity złom?";
             setDisplayMessages([
@@ -313,7 +321,6 @@ export default function ClaimInvestigationModal({
                 setBackupStep(3);
                 setIsAiTyping(false);
             } else {
-                // Koniec pytań awaryjnych - składamy raport techniczny ręcznie
                 const manualReport = `RAPORT MAGAZYNU (ZABEZPIECZONY AWARYJNIE):\nSprzęt: ${inventoryName}\nStan: ${warehouseNotes || declaredStatus}\nDiagnoza serwisu: ${currentAnswers[0]}\nGwarancja: ${currentAnswers[1]}\nPróby naprawy: ${currentAnswers[2]}\nUstalona cena rynkowa: ${currentAnswers[3]}\nZdjęcia: Tak (w bazie)`;
                 setCaseContext(manualReport);
                 setIsComplete(true);
@@ -323,9 +330,9 @@ export default function ClaimInvestigationModal({
                 setIsAiTyping(false);
             }
         } else {
-            // --- STANDARDOWY PROCES AI ---
+            // --- STANDARDOWY PROCES AI Z TIMEOUTEM 20s ---
             try {
-                const res = await fetch("/api/claims-ai-investigate", {
+                const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -339,6 +346,7 @@ export default function ClaimInvestigationModal({
                         purchasePrice,
                         role: "MAGAZYN"
                     }),
+                    timeout: 20000 // Zrywa po 20 sekundach bez odpowiedzi
                 });
                 const data = await res.json();
                 const aiReply = data.reply || "Analizuję...";
@@ -354,7 +362,7 @@ export default function ClaimInvestigationModal({
                     setCaseContext(data.caseContext);
                 }
             } catch (err) {
-                // Przełączenie awaryjne w trakcie czatu
+                console.error("Błąd zapytania, uruchamiam awaryjny tryb pytań:", err);
                 setBackupStep(0);
                 const fallbackQ = "Czy sprzęt nadaje się do naprawy, czy to całkowity złom?";
                 setDisplayMessages((prev) => [
@@ -393,7 +401,6 @@ export default function ClaimInvestigationModal({
 
         const claimId = generateClaimId();
 
-        // Mapujemy historię wywiadu AI na format czatu sędziowskiego
         const investigationMessages = displayMessages.map((msg, i) => {
             return {
                 id: `inv_${i}_${Date.now()}`,
@@ -407,7 +414,6 @@ export default function ClaimInvestigationModal({
             };
         });
 
-        // Końcowy raport wewnętrzny
         const summaryMessage = {
             id: `summary_${Date.now()}`,
             senderId: "system_ai",
@@ -431,9 +437,9 @@ export default function ClaimInvestigationModal({
                 reportedBy: reportedByUid,
                 reportedByName,
                 description: shortDescription,
-                status: "NOWA", // <--- Sprawa trafia do Kierownika jako "NOWA" (Przesłuchanie)
+                status: "NOWA",
                 createdAt: new Date().toISOString(),
-                assignedManagers: [selectedKierownikId], // Przypisujemy wybranego kierownika!
+                assignedManagers: [selectedKierownikId],
                 messages: [...investigationMessages, summaryMessage],
                 evidencePhotos: allUploadedPhotoUrls,
                 investigationComplete: true,

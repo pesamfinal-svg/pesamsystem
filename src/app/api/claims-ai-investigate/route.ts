@@ -5,7 +5,7 @@ import { GoogleGenAI } from '@google/genai';
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-    location: 'global'
+    location: 'global' // <-- PRZYWRÓCONO: Lokalizacja globalna
 });
 
 export async function POST(req: Request) {
@@ -25,7 +25,7 @@ export async function POST(req: Request) {
             purchasePrice
         } = payload;
 
-        // Używamy modelu Gemini 3.1 Flash, który świetnie radzi sobie z wyszukiwaniem w internecie
+        // PRZYWRÓCONO: Twój wybrany model gemini-3-flash-preview
         const modelName = 'gemini-3-flash-preview';
         const clientMessages = messages || [];
         const targetRole = role || "MAGAZYN";
@@ -164,7 +164,7 @@ export async function POST(req: Request) {
                 systemInstruction: systemInstruction,
                 temperature: 0.2,
                 responseMimeType: "application/json",
-                // ─── AKTYWACJA GOOGLE SEARCH GROUNDING (Wyszukiwanie w locie) ───
+                // ─── GOOGLE SEARCH GROUNDING ───
                 tools: [{ googleSearch: {} }]
             }
         });
