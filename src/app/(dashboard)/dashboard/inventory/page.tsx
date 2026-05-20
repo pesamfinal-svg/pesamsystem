@@ -74,6 +74,10 @@ export default function InventoryPage() {
     const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
     const [showSpecs, setShowSpecs] = useState(false);
 
+    // NOWE STANY DLA NADAWANIA NUMERU PRZEZ MAGAZYNIERA
+    const [isAssignNumberOpen, setIsAssignNumberOpen] = useState(false);
+    const [newInvNumber, setNewInvNumber] = useState("");
+
     // MODAL SERWISOWY
     const [isServiceModalOpen, setIsServiceModalOpen] = useState(false);
     const [serviceData, setServiceData] = useState({ newStatus: "sprawne", description: "", cost: "" });
@@ -329,6 +333,47 @@ export default function InventoryPage() {
         }
     };
 
+    // --- NOWA FUNKCJA: NADAWANIE NUMERU PRZEZ MAGAZYNIERA ---
+    const handleAssignNumber = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedItem || !newInvNumber.trim()) return;
+
+        // Sprawdzamy, czy ktoś inny nie używa już tego numeru w firmie
+        const isTaken = items.some(i => i.inventoryNumber.toLowerCase() === newInvNumber.trim().toLowerCase() && i.id !== selectedItem.id);
+        if (isTaken) return alert("⚠️ Ten numer magazynowy jest już zajęty przez inny sprzęt!");
+
+        setIsUploading(true);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const itemRef = doc(db, "inventory", selectedItem.id);
+                const historyRef = doc(collection(db, `inventory/${selectedItem.id}/history`));
+
+                transaction.update(itemRef, {
+                    inventoryNumber: newInvNumber.trim(),
+                    status: "sprawne" // Zmieniamy status z "do nadania..." na "sprawne"
+                });
+
+                // Dodajemy wpis o nadaniu kodu do historii
+                transaction.set(historyRef, {
+                    date: new Date().toISOString(),
+                    type: "NADAJ_KOD",
+                    description: `Nadano właściwy numer magazynowy urządzenia: ${newInvNumber.trim()}. Stan zmieniony na: sprawne.`,
+                    status: "sprawne",
+                    user: `${user?.firstName} ${user?.lastName}`
+                });
+            });
+
+            alert("✅ Nadano właściwy numer magazynowy!");
+            setIsAssignNumberOpen(false);
+            setSelectedItem(null); // Zamykamy kartę
+            fetchItems(); // Odświeżamy tabelę
+        } catch (error: any) {
+            alert("Błąd: " + error.message);
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
     // LOGIKA FILTROWANIA
     const filteredItems = items.filter(item => {
         if (item.type !== activeTab) return false;
@@ -463,10 +508,33 @@ export default function InventoryPage() {
             {selectedItem && (
                 <div className="fixed inset-0 bg-black/60 z-40 flex justify-end" onClick={() => setSelectedItem(null)}>
                     <div className="bg-white w-full max-w-xl h-full p-8 shadow-2xl animate-slide-in overflow-y-auto" onClick={e => e.stopPropagation()}>
-                        <div className="flex justify-between items-start mb-6">
-                            <h2 className="text-2xl font-black text-slate-800">{selectedItem.name}</h2>
-                            <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900">&times;</button>
+                        <div className="flex justify-between items-start mb-4">
+                            <div className="flex-1">
+                                <h2 className="text-2xl font-black text-slate-800">{selectedItem.name}</h2>
+                                {selectedItem.status === "do nadania numeru" && (
+                                    <span className="inline-block bg-red-100 text-red-800 text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-wider mt-1 animate-pulse">
+                                        ⚠️ Oczekuje na kod magazynowy
+                                    </span>
+                                )}
+                            </div>
+                            <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
+
+                        {/* DUŻY ŻÓŁTY BANER OSTRZEGAWCZY DLA MAGAZYNIERA */}
+                        {selectedItem.status === "do nadania numeru" && (
+                            <div className="bg-yellow-50 border-2 border-yellow-200 rounded-2xl p-4 mb-6 flex flex-col sm:flex-row items-center justify-between gap-3 animate-fade-in shadow-sm">
+                                <div className="text-xs text-yellow-800 font-bold text-center sm:text-left">
+                                    <span className="text-lg">📢</span> Ten sprzęt został kupiony bezpośrednio na budowę. <br />
+                                    Nie posiada jeszcze kodu kreskowego ani numeru!
+                                </div>
+                                <button
+                                    onClick={() => { setNewInvNumber(""); setIsAssignNumberOpen(true); }}
+                                    className="bg-yellow-500 hover:bg-yellow-600 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow transition whitespace-nowrap"
+                                >
+                                    🏷️ Nadaj Numer Teraz
+                                </button>
+                            </div>
+                        )}
 
                         {/* AKCJE SERWISOWE I SĄDOWE */}
                         <div className="flex flex-wrap gap-3 mb-8">
@@ -695,6 +763,50 @@ export default function InventoryPage() {
                 </div>
             )}
 
+            {/* MODAL: NADAWANIE NUMERU MAGAZYNOWEGO (DLA URZĄDZEŃ OD KSIĘGOWOŚCI) */}
+            {isAssignNumberOpen && selectedItem && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-t-4 border-yellow-500">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-lg font-black text-slate-800">🏷️ Nadaj numer magazynowy</h2>
+                            <button onClick={() => setIsAssignNumberOpen(false)} className="text-2xl text-slate-400 hover:text-slate-800">&times;</button>
+                        </div>
+
+                        <div className="bg-slate-50 border p-4 rounded-xl mb-4 text-xs">
+                            <span className="font-bold text-slate-400 uppercase">Nazwa urządzenia:</span>
+                            <p className="font-bold text-slate-800 text-sm mt-0.5">{selectedItem.name}</p>
+                            <p className="text-[10px] text-slate-400 mt-2">Cena zakupu: {selectedItem.purchasePrice} zł • FV: {selectedItem.invoiceNumber}</p>
+                        </div>
+
+                        <form onSubmit={handleAssignNumber} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-1.5">Wpisz lub zeskanuj kod:</label>
+                                <input
+                                    required
+                                    autoFocus
+                                    type="text"
+                                    placeholder="np. 254"
+                                    value={newInvNumber}
+                                    onChange={e => setNewInvNumber(e.target.value)}
+                                    className="w-full p-3 border-2 rounded-xl text-center font-bold text-xl outline-none focus:border-yellow-500 bg-slate-50 uppercase"
+                                />
+                            </div>
+
+                            <p className="text-[10px] text-slate-400 text-center leading-relaxed">
+                                Zatwierdzenie zmieni status na <span className="text-green-600 font-bold">SPRAWNE</span> i trwale przypisze ten kod do karty urządzenia w systemie.
+                            </p>
+
+                            <div className="flex gap-3 pt-4 border-t">
+                                <button type="button" onClick={() => setIsAssignNumberOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                                <button type="submit" disabled={isUploading || !newInvNumber.trim()} className="flex-1 py-3 bg-yellow-500 hover:bg-yellow-600 text-white font-black rounded-xl shadow-md transition disabled:opacity-50">
+                                    {isUploading ? "Zapisywanie..." : "ZAPISZ KOD"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
             {/* MODAL ZGŁOSZENIA SZKODY - ClaimInvestigationModal */}
             {investigationData && (
                 <ClaimInvestigationModal
@@ -717,4 +829,4 @@ export default function InventoryPage() {
             )}
         </div>
     );
-}
+} 

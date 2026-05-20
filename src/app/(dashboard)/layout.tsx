@@ -56,6 +56,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             icon: "👷",
             requiredPermission: ["workersManage", "workersIssueWarehouse", "workersIssueSite"]
         },
+        {
+            name: "Wprowadź produkty na stan budowy",
+            path: "/dashboard/admin/workers/add-to-site",
+            icon: "📥",
+            requiredPermission: "workersAddToSite"
+        },
 
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },
         { name: "Sąd PESAM", path: "/dashboard/claims", icon: "⚖️", requiredPermission: "viewClaims" },

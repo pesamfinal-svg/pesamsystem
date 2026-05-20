@@ -24,7 +24,8 @@ export const ALL_PERMISSIONS = {
     // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",
     workersIssueWarehouse: "Pracownicy fizyczni: Wydawanie z Magazynu Głównego",
-    workersIssueSite: "Pracownicy fizyczni: Wydawanie ze swoich budów"
+    workersIssueSite: "Pracownicy fizyczni: Wydawanie ze swoich budów",
+    workersAddToSite: "Wprowadź na stan budowy"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;
