@@ -35,6 +35,7 @@ interface Claim {
     messages: ChatMessage[];
     evidencePhotos?: string[]; // Wszystkie zdjęcia dowodowe z całej sprawy
     aiReport?: string; // Oficjalny raport z przesłuchania Kierownika
+    caseContext?: string; // Oficjalny raport z przesłuchania Magazyniera
     decisionInternal?: string;
     decisionWarehouse?: string;
 }
@@ -269,10 +270,8 @@ export default function ClaimsCenter() {
     const finalizeInvestigation = async (reportText: string, chatHistory: any[]) => {
         if (!selectedClaim) return;
         try {
-            // Pobieramy dotychczasowe wiadomości w sprawie (czyli rozmowę Magazyniera + Zdjęcia!)
             const existingMessages = selectedClaim.messages || [];
 
-            // Konwertujemy nową historię chatu z Kierownikiem na format czatu
             const formattedKierownikMessages: ChatMessage[] = chatHistory.map((m, idx) => ({
                 id: `${Date.now()}-kierownik-${idx}`,
                 senderId: m.role === "user" ? user.uid : "AI_SYSTEM",
@@ -283,13 +282,12 @@ export default function ClaimsCenter() {
                 visibleToWarehouse: true
             }));
 
-            // --- NAJWAŻNIEJSZE: Łączymy obie rozmowy chronologicznie w jedną całość! ---
             const finalMergedMessages = [...existingMessages, ...formattedKierownikMessages];
 
             await updateDoc(doc(db, "claims", selectedClaim.id), {
                 status: "W_TOKU",
                 aiReport: reportText,
-                messages: finalMergedMessages // Zapisujemy połączoną historię!
+                messages: finalMergedMessages
             });
 
             alert("🎉 Przesłuchanie zakończone! Raport oraz pełne zeznania zostały połączone i wysłane do Zarządu.");
@@ -472,25 +470,52 @@ export default function ClaimsCenter() {
                                     {/* Czat tradycyjny */}
                                     <div className="flex-1 p-6 overflow-y-auto space-y-4">
 
-                                        {/* RAPORT GENEROWANY PRZEZ AI - Przeniesiony DO ŚRODKA kontenera scrollowanego na samą górę! */}
+                                        {/* BOKS 1: DEDYKOWANE PODSUMOWANIE MAGAZYNU + ZDJĘCIA (NA GŁÓWNYM EKRANIE) */}
+                                        {selectedClaim.caseContext && (
+                                            <div className="bg-slate-100 border border-slate-200 p-5 rounded-2xl shadow-sm mb-4">
+                                                <h4 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1"><span>📋</span> 1. Ustalenia z Magazynierem (AI):</h4>
+                                                <p className="text-xs text-slate-800 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-slate-200">{selectedClaim.caseContext}</p>
+
+                                                {/* Zdjęcia dowodowe na głównym ekranie */}
+                                                {selectedClaim.evidencePhotos && selectedClaim.evidencePhotos.length > 0 && (
+                                                    <div className="mt-4 border-t border-slate-200/50 pt-4">
+                                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">📸 Załączone dowody fotograficzne ({selectedClaim.evidencePhotos.length}):</p>
+                                                        <div className="flex gap-2 overflow-x-auto pb-1">
+                                                            {selectedClaim.evidencePhotos.map((url, i) => (
+                                                                <a key={i} href={url} target="_blank" rel="noreferrer" className="shrink-0">
+                                                                    <img src={url} alt={`Dowód ${i + 1}`} className="w-20 h-20 rounded-xl object-cover border border-slate-200 shadow-sm hover:scale-105 transition-transform" />
+                                                                </a>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* BOKS 2: DEDYKOWANE PODSUMOWANIE KIEROWNIKA (NA GŁÓWNYM EKRANIE) */}
                                         {selectedClaim.aiReport && (
-                                            <div className="bg-purple-50 border border-purple-200 p-5 rounded-2xl shadow-sm mb-4">
-                                                <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> Protokół ustaleń Asystenta AI:</h4>
+                                            <div className="bg-purple-50 border border-purple-200 p-5 rounded-2xl shadow-sm">
+                                                <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> 2. Ustalenia z Kierownikiem Budowy (AI):</h4>
                                                 <p className="text-xs text-purple-950 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-purple-200">{selectedClaim.aiReport}</p>
                                             </div>
                                         )}
 
-                                        {selectedClaim.messages.map((msg) => (
-                                            <div key={msg.id} className={`flex flex-col ${msg.senderId === user.uid ? 'items-end' : 'items-start'}`}>
-                                                <div className={`p-4 rounded-2xl shadow-sm max-w-[80%] ${msg.senderId === user.uid ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-800'}`}>
-                                                    <div className="flex justify-between gap-4 mb-2 opacity-50 font-black text-[9px] uppercase tracking-wider">
-                                                        <span>{msg.senderName}</span>
-                                                        <span>{msg.senderRole}</span>
+                                        {selectedClaim.messages.map((msg) => {
+                                            // Filtrujemy i ukrywamy systemowe, automatyczne czaty z AI, aby zostawić tylko czystą rozmowę Dyrekcja <=> Kierownik
+                                            if (msg.senderRole === "AI") return null;
+
+                                            return (
+                                                <div key={msg.id} className={`flex flex-col ${msg.senderId === user.uid ? 'items-end' : 'items-start'}`}>
+                                                    <div className={`p-4 rounded-2xl shadow-sm max-w-[80%] ${msg.senderId === user.uid ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-800'}`}>
+                                                        <div className="flex justify-between gap-4 mb-2 opacity-50 font-black text-[9px] uppercase tracking-wider">
+                                                            <span>{msg.senderName}</span>
+                                                            <span>{msg.senderRole}</span>
+                                                        </div>
+                                                        <p className="text-sm whitespace-pre-wrap">{msg.text}</p>
                                                     </div>
-                                                    <p className="text-sm whitespace-pre-wrap">{msg.text}</p>
                                                 </div>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                         <div ref={chatEndRef} />
                                     </div>
 
@@ -582,63 +607,55 @@ export default function ClaimsCenter() {
                 </div>
             )}
 
-            {/* MODAL: AKTA ŚLEDZTWA (TRANSKRYPT OBU PRZESŁUCHAŃ DLA SZEFA) */}
+            {/* MODAL: PEŁNE AKTA ŚLEDZTWA (TRANSKRYPT BEZ PODSUMOWAŃ - CZYSTA ROZMOWA CHRONOLOGICZNA) */}
             {isHistoryModalOpen && selectedClaim && (
                 <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden border-4 border-purple-600 animate-fade-in">
                         <div className="p-6 bg-slate-900 text-white flex justify-between items-center">
                             <div>
                                 <h2 className="text-xl font-black uppercase tracking-tighter">📄 PEŁNE AKTA ŚLEDZTWA: {selectedClaim.inventoryName}</h2>
-                                <p className="text-xs text-slate-400 mt-1">Pełny, szczegółowy zapis rozmów technicznych oraz ustaleń asystenta</p>
+                                <p className="text-xs text-slate-400 mt-1">Pełny, szczegółowy zapis rozmów technicznych oraz zeznań bez streszczeń</p>
                             </div>
                             <button onClick={() => setIsHistoryModalOpen(false)} className="text-slate-400 hover:text-white text-3xl leading-none">&times;</button>
                         </div>
 
-                        <div className="flex-1 p-6 overflow-y-auto bg-slate-50 space-y-6">
+                        <div className="flex-1 p-6 overflow-y-auto bg-slate-50 space-y-4">
+                            <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 pl-1">Zapis przebiegu przesłuchania (Czat chronologiczny):</h4>
+                            <div className="space-y-3">
+                                {selectedClaim.messages.map((msg, i) => {
+                                    // Pokazujemy całą historię czatu (Magazynier <=> AI, potem Kierownik <=> AI, potem ewentualny live czat z Dyrekcją)
+                                    const isKierownik = msg.senderRole === "KIEROWNIK";
+                                    const isAI = msg.senderRole === "AI";
+                                    const isMagazyn = msg.senderRole === "MAGAZYN";
 
-                            {/* BOKS 1: ZGŁOSZENIE I DIAGNOZA MAGAZYNU + KARUZELA ZDJĘĆ */}
-                            <div className="bg-slate-100 border border-slate-200 p-5 rounded-2xl shadow-sm">
-                                <h4 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3 pl-1">📋 1. Pierwotne Zgłoszenie i Diagnoza Magazynu:</h4>
-                                <div className="bg-white p-4 rounded-xl border border-slate-200">
-                                    <p className="text-sm font-bold text-slate-800">{selectedClaim.description.split(" | ")[0]}</p>
-                                </div>
-
-                                {/* Wyświetlanie dowodów fotograficznych jako pozioma karuzela */}
-                                {selectedClaim.evidencePhotos && selectedClaim.evidencePhotos.length > 0 && (
-                                    <div className="mt-4 border-t border-slate-200/50 pt-4">
-                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">📸 Zabezpieczone zdjęcia dowodowe ({selectedClaim.evidencePhotos.length}):</p>
-                                        <div className="flex gap-3 overflow-x-auto pb-2">
-                                            {selectedClaim.evidencePhotos.map((url, i) => (
-                                                <a key={i} href={url} target="_blank" rel="noreferrer" className="shrink-0 group relative">
-                                                    <img src={url} alt={`Dowód ${i + 1}`} className="w-24 h-24 rounded-xl object-cover border border-slate-200 hover:scale-105 transition-transform shadow-sm" />
-                                                </a>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* BOKS 2: PODSUMOWANIE WYJAŚNIEŃ KIEROWNIKA (RAPORT CLS) */}
-                            {selectedClaim.aiReport && (
-                                <div className="bg-purple-50 border border-purple-200 p-5 rounded-2xl shadow-sm">
-                                    <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> 2. Protokół ustaleń Asystenta AI (Wyjaśnienia Kierownika):</h4>
-                                    <p className="text-xs text-purple-950 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-purple-200">{selectedClaim.aiReport}</p>
-                                </div>
-                            )}
-
-                            {/* BOKS 3: PEŁNY CZAT CHRONOLOGICZNY (Magazynier z AI, potem Kierownik z AI, potem Dyrekcja) */}
-                            <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-sm space-y-4">
-                                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b pb-2 mb-2">💬 3. Pełny zapis przebiegu przesłuchania (Czat chronologiczny):</h4>
-                                <div className="space-y-4">
-                                    {selectedClaim.messages.map((msg, i) => (
-                                        <div key={i} className={`flex flex-col ${msg.senderRole === "KIEROWNIK" || msg.senderRole === "DYREKCJA" ? "items-end" : "items-start"}`}>
-                                            <div className={`p-4 rounded-2xl max-w-[85%] text-sm ${msg.senderRole === "KIEROWNIK" ? "bg-blue-600 text-white" : msg.senderRole === "DYREKCJA" ? "bg-slate-900 text-white" : msg.senderRole === "AI" ? "bg-purple-100 text-purple-900 border border-purple-200" : "bg-white border text-slate-800"}`}>
+                                    return (
+                                        <div key={i} className={`flex flex-col ${isKierownik || msg.senderRole === "DYREKCJA" ? "items-end" : "items-start"}`}>
+                                            <div className={`p-4 rounded-2xl max-w-[85%] text-sm ${isKierownik
+                                                    ? "bg-blue-600 text-white"
+                                                    : msg.senderRole === "DYREKCJA"
+                                                        ? "bg-slate-900 text-white"
+                                                        : isAI
+                                                            ? "bg-purple-100 text-purple-900 border border-purple-200"
+                                                            : "bg-white border text-slate-800"
+                                                }`}>
                                                 <p className="text-[9px] uppercase tracking-widest font-black opacity-40 mb-1">{msg.senderName} ({msg.senderRole})</p>
+
+                                                {/* Wyświetlanie dowodów fotograficznych bezpośrednio w wątku czatu magazyniera */}
+                                                {isMagazyn && msg.imageUrls && msg.imageUrls.length > 0 && (
+                                                    <div className="mb-3 mt-1 rounded-xl overflow-hidden border border-black/10 shadow-md bg-black/5 flex gap-2 p-2">
+                                                        {msg.imageUrls.map((url, imgIdx) => (
+                                                            <a key={imgIdx} href={url} target="_blank" rel="noreferrer" className="block">
+                                                                <img src={url} alt={`Dowód`} className="w-16 h-16 rounded-lg object-cover hover:scale-105 transition-transform" />
+                                                            </a>
+                                                        ))}
+                                                    </div>
+                                                )}
+
                                                 <p className="whitespace-pre-wrap">{msg.text}</p>
                                             </div>
                                         </div>
-                                    ))}
-                                </div>
+                                    );
+                                })}
                             </div>
                         </div>
 
