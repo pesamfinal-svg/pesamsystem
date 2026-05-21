@@ -32,7 +32,7 @@ interface Claim {
     createdAt: string;
     assignedManagers: string[];
     messages: ChatMessage[];
-    aiReport?: string; // Oficjalny raport z przesłuchania Kierownika
+    aiReport?: string;
     decisionInternal?: string;
     decisionWarehouse?: string;
 }
@@ -44,6 +44,24 @@ const BACKUP_QUESTIONS = [
     "Czy na budowie były podejmowane jakiekolwiek próby samodzielnej naprawy lub rozkręcania urządzenia?",
     "Czy przed wystąpieniem usterki były jakieś sygnały ostrzegawcze (np. przegrzewanie się, spadek mocy)?"
 ];
+
+// ─── POMOCNICZA FUNKCJA FETCH Z LIMITU CZASOWEGO 60 SEKUND (DLA SĄDU) ───
+const fetchWithTimeout = async (resource: string, options: RequestInit & { timeout?: number } = {}) => {
+    const { timeout = 60000 } = options; // Zwiększone do 60 sekund
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await fetch(resource, {
+            ...options,
+            signal: controller.signal
+        });
+        clearTimeout(id);
+        return response;
+    } catch (error) {
+        clearTimeout(id);
+        throw error;
+    }
+};
 
 export default function ClaimsCenter() {
     const { user } = useAuth();
@@ -99,7 +117,6 @@ export default function ClaimsCenter() {
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [selectedClaim?.messages, aiMessages]);
 
     // --- ZABEZPIECZENIE I WALIDACJA REAC-HOOKS (EARLY RETURN) ---
-    // Jeśli profil się ładuje, wyświetlamy loader. Od tej linii w dół TypeScript wie, że user istnieje.
     if (!user) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Ładowanie profilu użytkownika...</div>;
 
     const canManageClaims = hasPermission("manageClaims", user.rolePermissions, user.permissionOverrides);
@@ -132,7 +149,6 @@ export default function ClaimsCenter() {
         setBackupStep(null);
         setBackupAnswers([]);
 
-        // Sprawdzamy czy zalogowany użytkownik to przypisany Kierownik i sprawa jest NOWA
         const isMyInvestigation = claim.status === "NOWA" && claim.assignedManagers.includes(user.uid);
 
         if (isMyInvestigation) {
@@ -141,7 +157,7 @@ export default function ClaimsCenter() {
             setDaysOnSite(days);
 
             try {
-                const res = await fetch("/api/claims-ai-investigate", {
+                const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -151,19 +167,21 @@ export default function ClaimsCenter() {
                         warehouseNotes: claim.description,
                         declaredStatus: "uszkodzone",
                         daysOnSite: days,
-                        isInitial: true
-                    })
+                        isInitial: true,
+                        role: "KIEROWNIK" // <-- POPRAWKA: Przesyłamy rolę, by AI rozmawiało z Kierownikiem!
+                    }),
+                    timeout: 60000 // 60 sekund
                 });
 
                 if (res.ok) {
                     const data = await res.json();
                     setAiMessages([{ role: "assistant", content: data.reply }]);
                 } else {
-                    throw new Error();
+                    throw new Error("AI Offline");
                 }
             } catch (err) {
-                // URUCHOMIENIE TRYBU AWARYJNEGO (FAIL-SAFE)
                 setBackupStep(0);
+                const firstBackupQ = "Czy urządzenie nadaje się do naprawy, czy to całkowity złom?";
                 setAiMessages([{ role: "assistant", content: `[TRYB AWARYJNY SĘDZIEGO] Witaj Kierowniku. Serwer AI jest chwilowo przeciążony. Przeprowadzę z Tobą uproszczone przesłuchanie techniczne.\n\nPytanie 1: ${BACKUP_QUESTIONS[0]}` }]);
             } finally {
                 setAiLoading(false);
@@ -178,11 +196,12 @@ export default function ClaimsCenter() {
 
         const updatedMessages = [...aiMessages, { role: "user", content: messageText }];
         setAiMessages(updatedMessages);
+        const userAnsw = messageText;
         setMessageText("");
 
         if (backupStep !== null) {
             // TRYB AWARYJNY (FAIL-SAFE)
-            const currentAnswers = [...backupAnswers, messageText];
+            const currentAnswers = [...backupAnswers, userAnsw];
             setBackupAnswers(currentAnswers);
 
             const nextStep = backupStep + 1;
@@ -191,14 +210,13 @@ export default function ClaimsCenter() {
                 setAiMessages([...updatedMessages, { role: "assistant", content: `Pytanie ${nextStep + 1}: ${BACKUP_QUESTIONS[nextStep]}` }]);
                 setAiLoading(false);
             } else {
-                // Koniec pytań awaryjnych - składamy raport ręcznie
                 const manualReport = `RAPORT KOŃCOWY SĘDZIEGO (TRYB AWARYJNY):\nUrządzenie: ${selectedClaim.inventoryName}\nBudowa: ${selectedClaim.siteName}\nUstalenia z Kierownikiem:\n- Okoliczności awarii: ${currentAnswers[0]}\n- Zgodność z instrukcją: ${currentAnswers[1]}\n- Próby naprawy: ${currentAnswers[2]}\n- Sygnały przed usterką: ${currentAnswers[3]}`;
                 await finalizeInvestigation(manualReport, updatedMessages);
             }
         } else {
             // STANDARDOWY PROCES GEMINI AI
             try {
-                const res = await fetch("/api/claims-ai-investigate", {
+                const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -208,8 +226,10 @@ export default function ClaimsCenter() {
                         warehouseNotes: selectedClaim.description,
                         daysOnSite,
                         messages: updatedMessages,
-                        isInitial: false
-                    })
+                        isInitial: false,
+                        role: "KIEROWNIK" // <-- POPRAWKA: Przesyłamy rolę, by AI kontynuowało rozmowę z Kierownikiem!
+                    }),
+                    timeout: 60000 // 60 sekund
                 });
 
                 if (res.ok) {
@@ -221,23 +241,32 @@ export default function ClaimsCenter() {
                         await finalizeInvestigation(data.caseContext, [...updatedMessages, newAiMsg]);
                     }
                 } else {
-                    throw new Error();
+                    throw new Error("AI Offline");
                 }
             } catch (err) {
-                // Awaryjne przełączenie na fail-safe w trakcie rozmowy
-                setBackupStep(0);
-                setAiMessages([...updatedMessages, { role: "assistant", content: `⚠️ Serwer AI napotkał problem. Przełączam na tryb awaryjny.\n\nPytanie: ${BACKUP_QUESTIONS[0]}` }]);
+                // Awaryjne przełączenie
+                let startingStep = 0;
+                if (updatedMessages.length >= 5) {
+                    startingStep = 3;
+                } else if (updatedMessages.length >= 3) {
+                    startingStep = 2;
+                } else if (updatedMessages.length >= 1) {
+                    startingStep = 1;
+                }
+
+                setBackupStep(startingStep);
+                const fallbackQ = BACKUP_QUESTIONS[startingStep];
+
+                setAiMessages([...updatedMessages, { role: "assistant", content: `⚠️ Serwer AI przestał odpowiadać. Przełączam na tryb awaryjny.\n\nPytanie: ${fallbackQ}` }]);
             } finally {
                 setAiLoading(false);
             }
         }
     };
 
-    // ZAKOŃCZENIE WYWIADU, RAPORT DO BAZY I ZMIANA STATUSU NA W_TOKU (DLA SZEFA)
     const finalizeInvestigation = async (reportText: string, chatHistory: any[]) => {
         if (!selectedClaim) return;
         try {
-            // Konwertujemy historię chatu AI na oficjalne wiadomości do bazy
             const formattedMessages: ChatMessage[] = chatHistory.map((m, idx) => ({
                 id: `${Date.now()}-${idx}`,
                 senderId: m.role === "user" ? user.uid : "AI_SYSTEM",
@@ -260,7 +289,6 @@ export default function ClaimsCenter() {
         } catch (e) { alert("Błąd podczas kończenia przesłuchania."); }
     };
 
-    // TRADYCYJNY CZAT DYREKCJA ➔ KIEROWNIK (DLA SPRAW W_TOKU)
     const sendRegularMessage = async () => {
         if (!messageText.trim() || !selectedClaim) return;
         setIsSending(true);
@@ -396,7 +424,7 @@ export default function ClaimsCenter() {
                                 </div>
                             )}
 
-                            {/* SCENARIUSZ B: SZEF / INNY UŻYTKOWNIK OTWIERA SPRAWĘ O STATUSIE "NOWA" (OCZEKUJANIĘ NA KIEROWNIKA) */}
+                            {/* SCENARIUSZ B: SZEF / INNY UŻYTKOWNIK OTWIERA SPRAWĘ O STATUSIE "NOWA" (OCZEKIWANIĘ NA KIEROWNIKA) */}
                             {selectedClaim.status === "NOWA" && !selectedClaim.assignedManagers.includes(user.uid) && (
                                 <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-slate-50 text-slate-500">
                                     <span className="text-5xl mb-4">⏳</span>

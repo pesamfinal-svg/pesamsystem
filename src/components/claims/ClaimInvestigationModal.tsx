@@ -44,9 +44,17 @@ const generateClaimId = (): string => {
     return `SZK-${dd}${mm}${yy}-${rand}`;
 };
 
-// ─── POMOCNICZA FUNKCJA FETCH Z BEZPIECZNYM TIMEOUTEM 20 SEKUND ───
+// ─── SZTYWNE PYTANIA AWARYJNE DLA MAGAZYNIERA (FAIL-SAFE) ───
+const BACKUP_QUESTIONS = [
+    "Czy urządzenie nadaje się do naprawy, czy to całkowity złom?",
+    "Z którego roku jest sprzęt i czy jest na niego gwarancja?",
+    "Czy urządzenie było już w zewnętrznym serwisie na wycenie? Jeśli tak, co uznał serwis i na ile wyceniono naprawę?",
+    "Jaka jest orientacyjna cena rynkowa nowego takiego urządzenia?"
+];
+
+// ─── POMOCNICZA FUNKCJA FETCH Z BEZPIECZNYM TIMEOUTEM 60 SEKUND ───
 const fetchWithTimeout = async (resource: string, options: RequestInit & { timeout?: number } = {}) => {
-    const { timeout = 20000 } = options; // Ustawione na 20 sekund (bezpieczny start serwera + Google Search)
+    const { timeout = 60000 } = options; // Zwiększone do 60 sekund
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
@@ -188,14 +196,27 @@ export default function ClaimInvestigationModal({
                 setPurchasePrice(pPrice);
             }
 
-            // 2. Pobierz aktywnych kierowników budów do przypisania na koniec
+            // 2. Pobierz użytkowników z bazy
             const usersSnap = await getDocs(collection(db, "users"));
-            const list = usersSnap.docs
-                .map(d => ({ uid: d.id, name: `${d.data().firstName} ${d.data().lastName}`, roleId: d.data().roleId }))
-                .filter(u => u.roleId === "kierownik");
+            const allUsers = usersSnap.docs.map(d => ({
+                uid: d.id,
+                name: `${d.data().firstName} ${d.data().lastName}`,
+                roleId: d.data().roleId || ""
+            }));
+
+            // --- PANCERNE ZABEZPIECZENIE: IGNORUJEMY WIELKOŚĆ LITER ---
+            let list = allUsers.filter(u =>
+                u.roleId.toLowerCase() === "kierownik" ||
+                u.roleId.toLowerCase() === "manager"
+            );
+
+            // --- KOŁO RATUNKOWE: JEŚLI BRAK KIEROWNIKÓW, POKAŻ WSZYSTKICH ---
+            if (list.length === 0) {
+                list = allUsers;
+            }
             setKierownicy(list);
 
-            // 3. Wywołaj asystenta AI z limitem czasowym 20s
+            // 3. Wywołaj asystenta AI z limitem czasowym 60s
             const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -210,7 +231,7 @@ export default function ClaimInvestigationModal({
                     purchasePrice: pPrice,
                     role: "MAGAZYN"
                 }),
-                timeout: 20000 // Zrywa po 20 sekundach bez odpowiedzi
+                timeout: 60000
             });
 
             if (res.ok) {
@@ -274,7 +295,6 @@ export default function ClaimInvestigationModal({
                 : "";
         const apiText = text + photoNote;
 
-        // Update display
         const newDisplayMsg: DisplayMessage = {
             role: "user",
             content: text || `[Zdjęcia: ${newPhotoUrls.length} szt.]`,
@@ -330,7 +350,7 @@ export default function ClaimInvestigationModal({
                 setIsAiTyping(false);
             }
         } else {
-            // --- STANDARDOWY PROCES AI Z TIMEOUTEM 20s ---
+            // --- STANDARDOWY PROCES AI Z TIMEOUTEM 60s ---
             try {
                 const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                     method: "POST",
@@ -346,7 +366,7 @@ export default function ClaimInvestigationModal({
                         purchasePrice,
                         role: "MAGAZYN"
                     }),
-                    timeout: 20000 // Zrywa po 20 sekundach bez odpowiedzi
+                    timeout: 60000 // 60 sekund
                 });
                 const data = await res.json();
                 const aiReply = data.reply || "Analizuję...";
@@ -363,11 +383,27 @@ export default function ClaimInvestigationModal({
                 }
             } catch (err) {
                 console.error("Błąd zapytania, uruchamiam awaryjny tryb pytań:", err);
-                setBackupStep(0);
-                const fallbackQ = "Czy sprzęt nadaje się do naprawy, czy to całkowity złom?";
+
+                // ─── INTELIGENTNA ANALIZA ETAPU ROZMOWY (FAIL-SAFE) ───
+                let startingStep = 0;
+                if (updatedApi.length >= 5) {
+                    startingStep = 3;
+                } else if (updatedApi.length >= 3) {
+                    startingStep = 2;
+                } else if (updatedApi.length >= 1) {
+                    startingStep = 1;
+                }
+
+                setBackupStep(startingStep);
+                const fallbackQ = BACKUP_QUESTIONS[startingStep];
+
                 setDisplayMessages((prev) => [
                     ...prev,
                     { role: "assistant", content: `⚠️ Serwer AI przestał odpowiadać. Przełączam na tryb awaryjny.\n\nPytanie: ${fallbackQ}` },
+                ]);
+                setApiMessages((prev) => [
+                    ...prev,
+                    { role: "assistant", content: fallbackQ }
                 ]);
             } finally {
                 setIsAiTyping(false);
