@@ -47,7 +47,7 @@ export default function DashboardPage() {
         }
     }, [firebaseUser, authLoading, router]);
 
-    // 1. POBIERANIE DANYCH GLOBALNYCH
+    // 1. POBIERANIE DANYCH GLOBALNYCH (Katalog, Budowy, Ogólne Alerty)
     useEffect(() => {
         const fetchGlobalData = async () => {
             if (!user) return;
@@ -68,7 +68,7 @@ export default function DashboardPage() {
                 const protoSnap = await getDocs(q);
                 setPendingProtocolsCount(protoSnap.size);
 
-                // --- POPRAWIONE: GLOBALNY SĄD (Szukamy spraw, gdzie kierownik jest OSKARŻONY/PRZYPISANY) ---
+                // --- POPRAWIONE: GLOBALNY SĄD (Szukamy spraw, w których Kierownik jest OSKARŻONY/PRZYPISANY) ---
                 const claimsQ = query(collection(db, "claims"), where("assignedManagers", "array-contains", user.uid));
                 const claimsSnap = await getDocs(claimsQ);
                 const activeClaims = claimsSnap.docs.map(d => d.data()).filter(c => c.status !== "ZAMKNIETA");
@@ -103,6 +103,7 @@ export default function DashboardPage() {
             if (!activeManagerSiteId || !isManager) return;
             setStatsLoading(true);
             try {
+                // Pobieramy protokoły wejściowe i wyjściowe dla AKTUALNIE WYBRANEJ budowy
                 const protoInSnap = await getDocs(query(collection(db, "protocols"), where("destinationId", "==", activeManagerSiteId)));
                 const protoOutSnap = await getDocs(query(collection(db, "protocols"), where("sourceId", "==", activeManagerSiteId)));
 
