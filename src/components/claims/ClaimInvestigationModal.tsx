@@ -54,7 +54,7 @@ const BACKUP_QUESTIONS = [
 
 // ─── POMOCNICZA FUNKCJA FETCH Z BEZPIECZNYM TIMEOUTEM 60 SEKUND ───
 const fetchWithTimeout = async (resource: string, options: RequestInit & { timeout?: number } = {}) => {
-    const { timeout = 60000 } = options; // Zwiększone do 60 sekund
+    const { timeout = 60000 } = options;
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
@@ -196,27 +196,49 @@ export default function ClaimInvestigationModal({
                 setPurchasePrice(pPrice);
             }
 
-            // 2. Pobierz użytkowników z bazy
-            const usersSnap = await getDocs(collection(db, "users"));
-            const allUsers = usersSnap.docs.map(d => ({
-                uid: d.id,
-                name: `${d.data().firstName} ${d.data().lastName}`,
-                roleId: d.data().roleId || ""
-            }));
+            // 2. POBIERZ WSZYSTKIE ROLE (by znać domyślne uprawnienie 'viewClaims' dla roli)
+            const rolesSnap = await getDocs(collection(db, "roles"));
+            const rolesMap: Record<string, Record<string, boolean>> = {};
+            rolesSnap.docs.forEach(d => {
+                rolesMap[d.id] = d.data().permissions || {};
+            });
 
-            // --- PANCERNE ZABEZPIECZENIE: IGNORUJEMY WIELKOŚĆ LITER ---
-            let list = allUsers.filter(u =>
-                u.roleId.toLowerCase() === "kierownik" ||
-                u.roleId.toLowerCase() === "manager"
-            );
+            // 3. POBIERZ UŻYTKOWNIKÓW I ROZSTRZYGNIJ UPRAWNIENIA (Czysta logika uprawnień)
+            const usersSnap = await getDocs(collection(db, "users"));
+            const validKierownicy = usersSnap.docs.map(docSnap => {
+                const userData = docSnap.data();
+                const uid = docSnap.id;
+                const name = `${userData.firstName || ""} ${userData.lastName || ""}`.trim();
+                const roleId = userData.roleId || "";
+                const overrides = userData.permissionOverrides || {};
+
+                // Rozstrzygamy "viewClaims" (Sąd: Dostęp do panelu) identycznie jak funkcja hasPermission
+                let hasViewClaims = false;
+
+                // A. Najpierw sprawdzamy indywidualne wyjątki
+                if ("viewClaims" in overrides) {
+                    hasViewClaims = overrides.viewClaims;
+                }
+                // B. Jeśli brak wyjątków, sprawdzamy domyślne uprawnienia Roli
+                else if (roleId && rolesMap[roleId]) {
+                    hasViewClaims = !!rolesMap[roleId].viewClaims;
+                }
+
+                return { uid, name, hasViewClaims };
+            }).filter(u => u.hasViewClaims); // Zostawiamy TYLKO osoby z aktywnym uprawnieniem do sądu!
 
             // --- KOŁO RATUNKOWE: JEŚLI BRAK KIEROWNIKÓW, POKAŻ WSZYSTKICH ---
-            if (list.length === 0) {
-                list = allUsers;
+            if (validKierownicy.length === 0) {
+                const allUsers = usersSnap.docs.map(d => ({
+                    uid: d.id,
+                    name: `${d.data().firstName || ""} ${d.data().lastName || ""}`.trim()
+                }));
+                setKierownicy(allUsers);
+            } else {
+                setKierownicy(validKierownicy);
             }
-            setKierownicy(list);
 
-            // 3. Wywołaj asystenta AI z limitem czasowym 60s
+            // 4. Wywołaj asystenta AI z limitem czasowym 60s
             const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -366,7 +388,7 @@ export default function ClaimInvestigationModal({
                         purchasePrice,
                         role: "MAGAZYN"
                     }),
-                    timeout: 60000 // 60 sekund
+                    timeout: 60000
                 });
                 const data = await res.json();
                 const aiReply = data.reply || "Analizuję...";
