@@ -1,34 +1,31 @@
 // src/app/(dashboard)/my-site/page.tsx
 "use client";
 
-import { useState, useEffect } from "react";
-import { collection, getDocs, query, orderBy, where } from "firebase/firestore";
+import { useState, useEffect, Suspense } from "react";
+import { collection, getDocs, doc, query, orderBy, where } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 // --- INTERFEJSY ---
 interface InventoryItem {
     id: string; name: string; inventoryNumber: string; type: "UNIQUE" | "BULK"; subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL"; category: string;
     imageUrl: string; allocations: Record<string, number>; unit?: string;
 }
-interface Site {
-    id: string;
-    name: string;
-    status?: string;
-    location?: string;
-}
+interface Site { id: string; name: string; status?: string; location?: string; }
 interface Protocol {
     protocolId: string; type: string; createdAt: string;
     status: string; createdByName: string; items: any[];
     sourceId?: string; destinationId?: string;
-    documentSource?: string; paperDocumentSource?: string; // <- Dodane do interfejsu
+    documentSource?: string; paperDocumentSource?: string;
 }
 
-export default function MySiteHub() {
+// Osobny podkomponent, by bezpiecznie korzystać z useSearchParams() w Next.js bez błędów deopt
+function MySiteHubContent() {
     const { user } = useAuth();
     const router = useRouter();
+    const searchParams = useSearchParams();
 
     const [mySites, setMySites] = useState<Site[]>([]);
     const [selectedSiteId, setSelectedSiteId] = useState("");
@@ -47,6 +44,19 @@ export default function MySiteHub() {
 
     const canViewSiteState = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
 
+    // Odczytywanie parametru ?view= z adresu URL (np. ?view=INVENTORY lub ?view=HISTORY)
+    useEffect(() => {
+        if (searchParams) {
+            const viewParam = searchParams.get("view");
+            if (viewParam) {
+                const upperView = viewParam.toUpperCase();
+                if (["HUB", "INVENTORY", "HISTORY", "DAMAGES", "CLAIMS"].includes(upperView)) {
+                    setActiveView(upperView as any);
+                }
+            }
+        }
+    }, [searchParams]);
+
     useEffect(() => {
         if (user && !canViewSiteState) {
             alert("Brak uprawnień do przeglądania stanów na budowach.");
@@ -62,7 +72,12 @@ export default function MySiteHub() {
                 const allSites = sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[];
                 const userAssigned = user?.assignedSites || [];
 
-                const filteredSites = allSites.filter(s => userAssigned.includes("ALL") || userAssigned.includes(s.id));
+                // Ukrywamy wydania prywatne (Wpis ręczny) oraz budowy zakończone
+                const filteredSites = allSites.filter(s =>
+                    (userAssigned.includes("ALL") || userAssigned.includes(s.id)) &&
+                    s.location !== "Wpis ręczny" &&
+                    s.status !== "ZAKOŃCZONA"
+                );
                 setMySites(filteredSites);
 
                 if (filteredSites.length > 0) setSelectedSiteId(filteredSites[0].id);
@@ -105,34 +120,23 @@ export default function MySiteHub() {
         fetchDataForSite();
     }, [selectedSiteId, canViewSiteState]);
 
-    // ZMODYFIKOWANA FUNKCJA SPRAWDZAJĄCA NIEZGODNOŚCI
     const checkDiscrepancies = (protocol: Protocol) => {
-        // Ignorujemy wydania i protokoły jeszcze niezaakceptowane
         if (protocol.type !== "ZWROT" || protocol.status === "OCZEKUJACY") return false;
+        if (protocol.documentSource === "PAPER" && protocol.paperDocumentSource === "BRAK_PROTOKOLU") return true;
 
-        // 1. Sprawdzamy na poziomie całego protokołu (np. Brak protokołu papierowego)
-        if (protocol.documentSource === "PAPER" && protocol.paperDocumentSource === "BRAK_PROTOKOLU") {
-            return true;
-        }
-
-        // 2. Sprawdzamy każdą pozycję w protokole (Wspólna logika dla aplikacji i papieru)
         return protocol.items.some(item => {
-            // Bezpieczne pobieranie ilości:
-            // declaredQty to ilość zgłoszona przez apkę LUB ilość z kwitów papierowych
             const decQty = item.declaredQty !== undefined ? item.declaredQty : (item.quantity !== undefined ? item.quantity : 1);
             const recQty = item.receivedQty !== undefined ? item.receivedQty : decQty;
-
             const decStatus = item.declaredStatus || "sprawne";
             const finStatus = item.finalStatus || decStatus;
-
             const hasNotes = !!item.warehouseNotes;
 
             return (
-                decQty !== recQty ||             // Różnica w ilości (Zgłoszono/Kwit vs Przyjęto fizycznie)
-                decStatus !== finStatus ||       // Magazyn przyjął z innym statusem niż deklarowano
-                finStatus === "uszkodzone" ||    // Przedmiot zjechał uszkodzony (zawsze wymaga uwagi)
-                hasNotes ||                      // Magazynier zostawił notatkę
-                item.isNewManual                 // Magazynier dopisał coś "z palca" (nie było tego na liście/kwicie)
+                decQty !== recQty ||
+                decStatus !== finStatus ||
+                finStatus === "uszkodzone" ||
+                hasNotes ||
+                item.isNewManual
             );
         });
     };
@@ -223,11 +227,8 @@ export default function MySiteHub() {
                                                         {p.items.map((item: any, itemIdx: number) => {
                                                             const decQty = item.declaredQty !== undefined ? item.declaredQty : (item.quantity !== undefined ? item.quantity : (item.receivedQty || 1));
                                                             const recQty = item.receivedQty !== undefined ? item.receivedQty : decQty;
-
-                                                            // Sprawdzamy różnice (teraz dotyczy to RÓWNIEŻ PAPIERU)
                                                             const isQtyDiff = !isIssue && !isPending && decQty !== recQty;
                                                             const isStatusDiff = !isIssue && !isPending && item.declaredStatus && item.finalStatus && item.declaredStatus !== item.finalStatus;
-
                                                             const hasNotes = !!item.warehouseNotes;
                                                             const hasItemAlert = isQtyDiff || isStatusDiff || hasNotes || item.isNewManual || item.finalStatus === "uszkodzone";
 
@@ -242,13 +243,11 @@ export default function MySiteHub() {
                                                                             <p className="text-[10px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "BRAK"}</p>
                                                                         </div>
                                                                         <div className="text-right">
-                                                                            {/* Jeśli to wydanie z magazynu lub oczekujący zwrot, wyświetlamy prosto */}
                                                                             {isIssue || isPending ? (
                                                                                 <div className="flex flex-col items-end gap-1">
                                                                                     <p className="font-black text-slate-700 bg-slate-100 px-2 py-1 rounded">Ilość: {decQty} {item.unit || "szt."}</p>
                                                                                 </div>
                                                                             ) : (
-                                                                                /* W przeciwnym razie to sfinalizowany ZWROT (aplikacyjny lub papierowy) - pokazujemy detale */
                                                                                 <div className="flex flex-col items-end text-xs">
                                                                                     {isQtyDiff ? (
                                                                                         <div className="bg-orange-100 text-orange-800 px-2 py-1 rounded border border-orange-200 shadow-sm">
@@ -257,9 +256,7 @@ export default function MySiteHub() {
                                                                                     ) : (
                                                                                         <p className="font-black text-slate-700 bg-slate-100 px-2 py-1 rounded">Ilość: {recQty} {item.unit || "szt."}</p>
                                                                                     )}
-
                                                                                     {isStatusDiff && <p className="mt-1 text-[10px] text-red-600 font-bold">Zgłoszono: {item.declaredStatus} ➔ Przyjęto: {item.finalStatus}</p>}
-
                                                                                     {(!isStatusDiff && item.finalStatus && item.finalStatus !== "sprawne") && (
                                                                                         <p className="mt-1 text-[10px] text-red-600 font-bold uppercase bg-red-100 px-2 py-0.5 rounded">{item.finalStatus}</p>
                                                                                     )}
@@ -501,5 +498,13 @@ export default function MySiteHub() {
                 </>
             )}
         </div>
+    );
+}
+
+export default function MySitePage() {
+    return (
+        <Suspense fallback={<div className="p-10 text-center animate-pulse text-slate-500">Wczytywanie budowy...</div>}>
+            <MySiteHubContent />
+        </Suspense>
     );
 }

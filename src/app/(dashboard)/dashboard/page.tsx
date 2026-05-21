@@ -47,7 +47,7 @@ export default function DashboardPage() {
         }
     }, [firebaseUser, authLoading, router]);
 
-    // 1. POBIERANIE DANYCH GLOBALNYCH (Katalog, Budowy, Ogólne Alerty)
+    // 1. POBIERANIE DANYCH GLOBALNYCH
     useEffect(() => {
         const fetchGlobalData = async () => {
             if (!user) return;
@@ -68,9 +68,9 @@ export default function DashboardPage() {
                 const protoSnap = await getDocs(q);
                 setPendingProtocolsCount(protoSnap.size);
 
-                // --- GLOBALNY SĄD (Niezależny od wybranej budowy) ---
-                // Pobieramy sprawy sądowe, w których zalogowany użytkownik jest zgłaszającym
-                const claimsSnap = await getDocs(query(collection(db, "claims"), where("reportedByUid", "==", user.uid)));
+                // --- POPRAWIONE: GLOBALNY SĄD (Szukamy spraw, gdzie kierownik jest OSKARŻONY/PRZYPISANY) ---
+                const claimsQ = query(collection(db, "claims"), where("assignedManagers", "array-contains", user.uid));
+                const claimsSnap = await getDocs(claimsQ);
                 const activeClaims = claimsSnap.docs.map(d => d.data()).filter(c => c.status !== "ZAMKNIETA");
                 setManagerActiveClaimsCount(activeClaims.length);
 
@@ -103,7 +103,6 @@ export default function DashboardPage() {
             if (!activeManagerSiteId || !isManager) return;
             setStatsLoading(true);
             try {
-                // Pobieramy protokoły wejściowe i wyjściowe dla AKTUALNIE WYBRANEJ budowy
                 const protoInSnap = await getDocs(query(collection(db, "protocols"), where("destinationId", "==", activeManagerSiteId)));
                 const protoOutSnap = await getDocs(query(collection(db, "protocols"), where("sourceId", "==", activeManagerSiteId)));
 
@@ -307,7 +306,7 @@ export default function DashboardPage() {
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fade-in">
                             {/* KAFELEK 1: Stan Magazynu Podręcznego */}
-                            <Link href="/dashboard/my-site" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                            <Link href="/dashboard/my-site?view=INVENTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                                 <div>
                                     <p className="text-slate-400 text-[10px] font-black uppercase">Magazyn Podręczny</p>
                                     <p className="text-4xl font-black text-blue-600 mt-2">{itemsOnManagerSite.length}</p>
@@ -317,7 +316,7 @@ export default function DashboardPage() {
                             </Link>
 
                             {/* KAFELEK 2: Wydania z Magazynu (Ostatnie 7 dni) */}
-                            <Link href="/dashboard/my-site" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                            <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                                 <div>
                                     <p className="text-slate-400 text-[10px] font-black uppercase">Wydania z Magazynu (7 dni)</p>
                                     <p className="text-4xl font-black text-slate-800 mt-2">{managerRecentIssues.length}</p>
@@ -327,7 +326,7 @@ export default function DashboardPage() {
                             </Link>
 
                             {/* KAFELEK 3: Zakupy Bezpośrednie od Księgowej (Ostatnie 7 dni) */}
-                            <Link href="/dashboard/my-site" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                            <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                                 <div>
                                     <p className="text-slate-400 text-[10px] font-black uppercase">Zakupy bezpośrednie (7 dni)</p>
                                     <p className="text-4xl font-black text-orange-600 mt-2">{managerRecentDirectPurchases.length}</p>
@@ -337,7 +336,7 @@ export default function DashboardPage() {
                             </Link>
 
                             {/* KAFELEK 4: Oczekujące zwroty do akceptacji */}
-                            <Link href="/dashboard/my-site" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                            <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                                 <div>
                                     <p className="text-slate-400 text-[10px] font-black uppercase">Wysłane Zwroty (Oczekujące)</p>
                                     <p className="text-4xl font-black text-purple-600 mt-2">{managerPendingReturns.length}</p>

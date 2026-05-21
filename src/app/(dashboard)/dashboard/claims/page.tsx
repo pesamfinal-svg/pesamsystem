@@ -32,7 +32,7 @@ interface Claim {
     createdAt: string;
     assignedManagers: string[];
     messages: ChatMessage[];
-    aiReport?: string;
+    aiReport?: string; // Oficjalny raport z przesłuchania Kierownika
     decisionInternal?: string;
     decisionWarehouse?: string;
 }
@@ -47,7 +47,7 @@ const BACKUP_QUESTIONS = [
 
 // ─── POMOCNICZA FUNKCJA FETCH Z LIMITU CZASOWEGO 60 SEKUND (DLA SĄDU) ───
 const fetchWithTimeout = async (resource: string, options: RequestInit & { timeout?: number } = {}) => {
-    const { timeout = 60000 } = options; // Zwiększone do 60 sekund
+    const { timeout = 60000 } = options;
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
@@ -82,8 +82,9 @@ export default function ClaimsCenter() {
     const [backupStep, setBackupStep] = useState<number | null>(null);
     const [backupAnswers, setBackupAnswers] = useState<string[]>([]);
 
-    // MODAL WYROKU (SZEF)
+    // MODALE (SZEF)
     const [isVerdictModalOpen, setIsVerdictModalOpen] = useState(false);
+    const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false); // NOWY MODAL AKT ŚLEDZTWA
     const [verdictData, setVerdictData] = useState({ internal: "", warehouse: "" });
 
     const chatEndRef = useRef<HTMLDivElement>(null);
@@ -168,9 +169,9 @@ export default function ClaimsCenter() {
                         declaredStatus: "uszkodzone",
                         daysOnSite: days,
                         isInitial: true,
-                        role: "KIEROWNIK" // <-- POPRAWKA: Przesyłamy rolę, by AI rozmawiało z Kierownikiem!
+                        role: "KIEROWNIK"
                     }),
-                    timeout: 60000 // 60 sekund
+                    timeout: 60000
                 });
 
                 if (res.ok) {
@@ -181,7 +182,6 @@ export default function ClaimsCenter() {
                 }
             } catch (err) {
                 setBackupStep(0);
-                const firstBackupQ = "Czy urządzenie nadaje się do naprawy, czy to całkowity złom?";
                 setAiMessages([{ role: "assistant", content: `[TRYB AWARYJNY SĘDZIEGO] Witaj Kierowniku. Serwer AI jest chwilowo przeciążony. Przeprowadzę z Tobą uproszczone przesłuchanie techniczne.\n\nPytanie 1: ${BACKUP_QUESTIONS[0]}` }]);
             } finally {
                 setAiLoading(false);
@@ -227,9 +227,9 @@ export default function ClaimsCenter() {
                         daysOnSite,
                         messages: updatedMessages,
                         isInitial: false,
-                        role: "KIEROWNIK" // <-- POPRAWKA: Przesyłamy rolę, by AI kontynuowało rozmowę z Kierownikiem!
+                        role: "KIEROWNIK"
                     }),
-                    timeout: 60000 // 60 sekund
+                    timeout: 60000
                 });
 
                 if (res.ok) {
@@ -244,7 +244,6 @@ export default function ClaimsCenter() {
                     throw new Error("AI Offline");
                 }
             } catch (err) {
-                // Awaryjne przełączenie
                 let startingStep = 0;
                 if (updatedMessages.length >= 5) {
                     startingStep = 3;
@@ -376,8 +375,25 @@ export default function ClaimsCenter() {
                                     <h2 className="text-xl font-black text-slate-800 uppercase">{selectedClaim.inventoryName} (Nr: {selectedClaim.inventoryNumber})</h2>
                                     <p className="text-xs font-bold text-red-600 mt-1">Zgłoszenie usterki: {selectedClaim.description}</p>
                                 </div>
-                                {canManageClaims && selectedClaim.status === "W_TOKU" && (
-                                    <button onClick={() => { setVerdictData({ internal: "", warehouse: "" }); setIsVerdictModalOpen(true); }} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition">Wydaj Wyrok</button>
+
+                                {/* NAGŁÓWEK AKCJI SZEFA: WYDAJ WYROK + ZOBACZ PRZEBIEG ŚLEDZTWA */}
+                                {selectedClaim.status === "W_TOKU" && (
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => setIsHistoryModalOpen(true)}
+                                            className="bg-purple-100 hover:bg-purple-200 text-purple-800 font-black px-4 py-2.5 rounded-xl border border-purple-200 text-xs shadow-sm transition"
+                                        >
+                                            📄 Zobacz Przebieg Śledztwa
+                                        </button>
+                                        {canManageClaims && (
+                                            <button
+                                                onClick={() => { setVerdictData({ internal: "", warehouse: "" }); setIsVerdictModalOpen(true); }}
+                                                className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition text-xs"
+                                            >
+                                                Wydaj Wyrok
+                                            </button>
+                                        )}
+                                    </div>
                                 )}
                             </div>
 
@@ -436,20 +452,21 @@ export default function ClaimsCenter() {
                                 </div>
                             )}
 
-                            {/* SCENARIUSZ C: SPRAWA W TOKU / ZAKOŃCZONA (DLA SZEFA I KIEROWNIKA) */}
+                            {/* SCENARIUSZ C: SPRAWA W TOKU / ZAKOŃCZONA (WIDOK PRZEBIEGU CZATU + PODSUMOWANIA) */}
                             {selectedClaim.status !== "NOWA" && (
                                 <div className="flex-1 flex flex-col overflow-hidden bg-slate-50/50">
 
-                                    {/* RAPORT GENEROWANY PRZEZ AI - Widoczny dla Szefa */}
-                                    {selectedClaim.aiReport && (
-                                        <div className="bg-purple-50 border-b border-purple-200 p-5 shadow-sm">
-                                            <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> Protokół ustaleń Asystenta AI:</h4>
-                                            <p className="text-xs text-purple-950 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-purple-200">{selectedClaim.aiReport}</p>
-                                        </div>
-                                    )}
-
                                     {/* Czat tradycyjny */}
                                     <div className="flex-1 p-6 overflow-y-auto space-y-4">
+
+                                        {/* RAPORT GENEROWANY PRZEZ AI - Przeniesiony DO ŚRODKA kontenera scrollowanego na samą górę! */}
+                                        {selectedClaim.aiReport && (
+                                            <div className="bg-purple-50 border border-purple-200 p-5 rounded-2xl shadow-sm mb-4">
+                                                <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> Protokół ustaleń Asystenta AI:</h4>
+                                                <p className="text-xs text-purple-950 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-purple-200">{selectedClaim.aiReport}</p>
+                                            </div>
+                                        )}
+
                                         {selectedClaim.messages.map((msg) => (
                                             <div key={msg.id} className={`flex flex-col ${msg.senderId === user.uid ? 'items-end' : 'items-start'}`}>
                                                 <div className={`p-4 rounded-2xl shadow-sm max-w-[80%] ${msg.senderId === user.uid ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-800'}`}>
@@ -548,6 +565,47 @@ export default function ClaimsCenter() {
                                 <button type="submit" className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition uppercase tracking-widest">Podpisz i ogłoś wyrok</button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: AKTA ŚLEDZTWA (TRANSKRYPT PRZESŁUCHANIA DLA SZEFA) */}
+            {isHistoryModalOpen && selectedClaim && (
+                <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden border-4 border-purple-600 animate-fade-in">
+                        <div className="p-6 bg-slate-900 text-white flex justify-between items-center">
+                            <div>
+                                <h2 className="text-xl font-black uppercase tracking-tighter">📄 PEŁNE AKTA ŚLEDZTWA: {selectedClaim.inventoryName}</h2>
+                                <p className="text-xs text-slate-400 mt-1">Pełny, szczegółowy zapis rozmów technicznych oraz ustaleń asystenta</p>
+                            </div>
+                            <button onClick={() => setIsHistoryModalOpen(false)} className="text-slate-400 hover:text-white text-3xl leading-none">&times;</button>
+                        </div>
+
+                        <div className="flex-1 p-6 overflow-y-auto bg-slate-50 space-y-4">
+                            {/* Szczegółowe podsumowanie AI na samej górze akt */}
+                            {selectedClaim.aiReport && (
+                                <div className="bg-purple-50 border border-purple-200 p-5 rounded-2xl shadow-sm mb-6">
+                                    <h4 className="text-xs font-black text-purple-900 uppercase tracking-widest mb-2 flex items-center gap-1"><span>✨</span> Podsumowanie śledztwa (Raport Końcowy CLS):</h4>
+                                    <p className="text-xs text-purple-950 whitespace-pre-wrap leading-relaxed font-semibold bg-white p-4 rounded-xl border border-purple-200">{selectedClaim.aiReport}</p>
+                                </div>
+                            )}
+
+                            <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 pl-1">Zapis przebiegu przesłuchania (Czat):</h4>
+                            <div className="space-y-3">
+                                {selectedClaim.messages.map((msg, i) => (
+                                    <div key={i} className={`flex flex-col ${msg.senderRole === "KIEROWNIK" ? "items-end" : "items-start"}`}>
+                                        <div className={`p-4 rounded-2xl max-w-[85%] text-sm ${msg.senderRole === "KIEROWNIK" ? "bg-blue-600 text-white" : msg.senderRole === "AI" ? "bg-purple-100 text-purple-900 border border-purple-200" : "bg-white border text-slate-800"}`}>
+                                            <p className="text-[9px] uppercase tracking-widest font-black opacity-40 mb-1">{msg.senderName} ({msg.senderRole})</p>
+                                            <p className="whitespace-pre-wrap">{msg.text}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="p-4 border-t bg-white flex justify-end">
+                            <button onClick={() => setIsHistoryModalOpen(false)} className="px-6 py-3 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition">Zamknij Akta</button>
+                        </div>
                     </div>
                 </div>
             )}
