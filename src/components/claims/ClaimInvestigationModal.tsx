@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { collection, addDoc, doc, getDoc, getDocs } from "firebase/firestore";
+import { collection, addDoc, doc, getDoc, getDocs, query, where, orderBy, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 
@@ -50,6 +50,14 @@ const BACKUP_QUESTIONS = [
     "Z którego roku jest sprzęt i czy jest na niego gwarancja?",
     "Czy urządzenie było już w zewnętrznym serwisie na wycenie? Jeśli tak, co uznał serwis i na ile wyceniono naprawę?",
     "Jaka jest orientacyjna cena rynkowa nowego takiego urządzenia?"
+];
+
+// Sztywne pytania awaryjne dla Kierownika (Używane przy starcie awaryjnym)
+const KIEROWNIK_BACKUP_QUESTIONS = [
+    "W jakich dokładnie okolicznościach doszło do uszkodzenia tego sprzętu na budowie i kto na nim wtedy pracował?",
+    "Czy sprzęt był używany zgodnie z przeznaczeniem i instrukcją obsługi?",
+    "Czy na budowie były podejmowane jakiekolwiek próby samodzielnej naprawy lub rozkręcania urządzenia?",
+    "Czy przed wystąpieniem usterki były jakieś sygnały ostrzegawcze (np. przegrzewanie się, spadek mocy)?"
 ];
 
 // ─── POMOCNICZA FUNKCJA FETCH Z BEZPIECZNYM TIMEOUTEM 60 SEKUND ───
@@ -452,13 +460,62 @@ export default function ClaimInvestigationModal({
         setPendingFiles((prev) => prev.filter((_, i) => i !== index));
     };
 
+    // --- OBLICZANIE CZASU PRACY PRZED WYBOREM SĄDU ---
+    const calculateDaysOnSiteForModal = async () => {
+        try {
+            const q = query(collection(db, "protocols"), where("type", "==", "WYDANIE"), orderBy("createdAt", "desc"), limit(30));
+            const snap = await getDocs(q);
+            for (const d of snap.docs) {
+                const p = d.data();
+                const hasItem = p.items?.some((i: any) => i.inventoryId === inventoryId);
+                if (hasItem && p.destinationName === siteName) {
+                    const issueDate = new Date(p.createdAt);
+                    const currentDate = new Date();
+                    const diffTime = Math.abs(currentDate.getTime() - issueDate.getTime());
+                    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                }
+            }
+        } catch (e) { console.error(e); }
+        return null;
+    };
+
     const submitToCourt = async () => {
         if (!caseContext || isSubmitting) return;
         if (!selectedKierownikId) return alert("Musisz przypisać kierownika budowy odpowiedzialnego za ten sprzęt!");
         setIsSubmitting(true);
 
         const claimId = generateClaimId();
+        const days = await calculateDaysOnSiteForModal();
 
+        // ─── TWORZENIE PIERWSZYCH PYTAŃ DLA KIEROWNIKA W TLE PRZEZ AI ───
+        let firstQuestionForKierownik = `Witaj Kierowniku Budowy. Zgłoszono uszkodzenie urządzenia ${inventoryName} z budowy ${siteName}.\n\nProszę o wyjaśnienie okoliczności powstania tej usterki.`;
+
+        try {
+            const res = await fetchWithTimeout("/api/claims-ai-investigate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    inventoryName,
+                    inventoryNumber,
+                    siteName,
+                    warehouseNotes: caseContext, // Przekazujemy gotowy raport Magazyniera!
+                    role: "KIEROWNIK",
+                    isInitial: true,
+                    daysOnSite: days
+                }),
+                timeout: 30000
+            });
+            if (res.ok) {
+                const data = await res.json();
+                firstQuestionForKierownik = data.reply;
+            } else {
+                throw new Error();
+            }
+        } catch (e) {
+            firstQuestionForKierownik = `Witaj Kierowniku Budowy. Sąd PESAM rozpoczyna procedurę wyjaśniającą.\n\nPytanie 1: ${KIEROWNIK_BACKUP_QUESTIONS[0]}`;
+        }
+
+        // Zapisujemy pierwszą rozmowę Magazyniera ze zdjęciami
         const investigationMessages = displayMessages.map((msg, i) => {
             return {
                 id: `inv_${i}_${Date.now()}`,
@@ -472,15 +529,27 @@ export default function ClaimInvestigationModal({
             };
         });
 
+        // Wewnętrzne podsumowanie techniczne Magazyniera
         const summaryMessage = {
             id: `summary_${Date.now()}`,
             senderId: "system_ai",
-            senderName: "Sędzia AI CLS",
+            senderName: "Sędzia AI CLS 🤖",
             senderRole: "AI",
             text: `📋 PROTOKÓŁ WSTĘPNY – PRZEKAZANIE DO ZARZĄDU\n\nUwagi magazyniera: ${warehouseNotes || "Brak"}\nStatus: ${declaredStatus}\n\nAnaliza AI:\n${caseContext}\n\n📸 Łącznie zebranych zdjęć dowodowych: ${allUploadedPhotoUrls.length}`,
             timestamp: new Date().toISOString(),
             visibleToWarehouse: false,
             imageUrl: null,
+        };
+
+        // ─── NOWOŚĆ: Dodajemy pierwsze wygenerowane pytanie dla Kierownika do bazy ───
+        const initialKierownikMessage = {
+            id: `kierownik_init_${Date.now()}`,
+            senderId: "system_ai",
+            senderName: "Sędzia AI CLS 🤖",
+            senderRole: "AI",
+            text: firstQuestionForKierownik,
+            timestamp: new Date().toISOString(),
+            visibleToWarehouse: true
         };
 
         const shortDescription = `Zgłoszenie: ${declaredStatus}. ${warehouseNotes} | Wnioski AI: ${caseContext?.slice(0, 100).replace(/\n/g, " ") || "Brak"}`;
@@ -498,7 +567,7 @@ export default function ClaimInvestigationModal({
                 status: "NOWA",
                 createdAt: new Date().toISOString(),
                 assignedManagers: [selectedKierownikId],
-                messages: [...investigationMessages, summaryMessage],
+                messages: [...investigationMessages, summaryMessage, initialKierownikMessage],
                 evidencePhotos: allUploadedPhotoUrls,
                 investigationComplete: true,
                 caseContext,

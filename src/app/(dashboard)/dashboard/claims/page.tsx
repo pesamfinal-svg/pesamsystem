@@ -29,13 +29,15 @@ interface Claim {
     reportedBy: string;
     reportedByName: string;
     description: string;
-    status: "NOWA" | "W_TOKU" | "ZAMKNIETA";
+    status: "NOWA" | "W_TOKU" | "DO_AKCEPTACJI" | "ZAMKNIETA";
     createdAt: string;
     assignedManagers: string[];
     messages: ChatMessage[];
-    evidencePhotos?: string[]; // Wszystkie zdjęcia dowodowe z całej sprawy
-    aiReport?: string; // Oficjalny raport z przesłuchania Kierownika
-    caseContext?: string; // Oficjalny raport z przesłuchania Magazyniera
+    evidencePhotos?: string[];
+    aiReport?: string;
+    caseContext?: string;
+    decisionInternalDyrektor?: string;
+    decisionWarehouseDyrektor?: string;
     decisionInternal?: string;
     decisionWarehouse?: string;
 }
@@ -48,7 +50,6 @@ const BACKUP_QUESTIONS = [
     "Czy przed wystąpieniem usterki były jakieś sygnały ostrzegawcze (np. przegrzewanie się, spadek mocy)?"
 ];
 
-// ─── POMOCNICZA FUNKCJA FETCH Z LIMITU CZASOWEGO 60 SEKUND (DLA SĄDU) ───
 const fetchWithTimeout = async (resource: string, options: RequestInit & { timeout?: number } = {}) => {
     const { timeout = 60000 } = options;
     const controller = new AbortController();
@@ -85,9 +86,9 @@ export default function ClaimsCenter() {
     const [backupStep, setBackupStep] = useState<number | null>(null);
     const [backupAnswers, setBackupAnswers] = useState<string[]>([]);
 
-    // MODALE (SZEF)
+    // MODALE (SZEF / ZARZĄD)
     const [isVerdictModalOpen, setIsVerdictModalOpen] = useState(false);
-    const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false); // MODAL PEŁNYCH AKT ŚLEDZTWA
+    const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
     const [verdictData, setVerdictData] = useState({ internal: "", warehouse: "" });
 
     const chatEndRef = useRef<HTMLDivElement>(null);
@@ -109,7 +110,6 @@ export default function ClaimsCenter() {
                 } as Claim;
             });
 
-            // Zabezpieczenie widoczności: Kierownik widzi tylko swoje sprawy
             if (!canViewAllClaims) {
                 allClaims = allClaims.filter(c => c.assignedManagers.includes(user.uid) || c.reportedBy === user.uid);
             }
@@ -124,6 +124,7 @@ export default function ClaimsCenter() {
     if (!user) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Ładowanie profilu użytkownika...</div>;
 
     const canManageClaims = hasPermission("manageClaims", user.rolePermissions, user.permissionOverrides);
+    const canManageClaimsFinal = hasPermission("manageClaimsFinal", user.rolePermissions, user.permissionOverrides);
     const canViewAllClaims = hasPermission("viewAllClaims", user.rolePermissions, user.permissionOverrides);
 
     const chatRoleName = canManageClaims ? "DYREKCJA" : user.roleId === "magazynier" ? "MAGAZYN" : "KIEROWNIK";
@@ -156,38 +157,22 @@ export default function ClaimsCenter() {
         const isMyInvestigation = claim.status === "NOWA" && claim.assignedManagers.includes(user.uid);
 
         if (isMyInvestigation) {
-            setAiLoading(true);
+            // Obliczamy dni na budowie dla promptu AI w tle
             const days = await calculateDaysOnSite(claim);
             setDaysOnSite(days);
 
-            try {
-                const res = await fetchWithTimeout("/api/claims-ai-investigate", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        inventoryName: claim.inventoryName,
-                        inventoryNumber: claim.inventoryNumber,
-                        siteName: claim.siteName,
-                        warehouseNotes: claim.description,
-                        declaredStatus: "uszkodzone",
-                        daysOnSite: days,
-                        isInitial: true,
-                        role: "KIEROWNIK"
-                    }),
-                    timeout: 60000
-                });
+            // --- OPTYMALIZACJA 0 SEKUND: Wczytujemy pre-generowane pytanie bezpośrednio z bazy ---
+            const existingMessages = claim.messages || [];
+            // Szukamy ostatniej wiadomości dodanej przez AI na etapie NOWA (przesłuchania kierownika)
+            const lastAiMsg = existingMessages[existingMessages.length - 1];
 
-                if (res.ok) {
-                    const data = await res.json();
-                    setAiMessages([{ role: "assistant", content: data.reply }]);
-                } else {
-                    throw new Error("AI Offline");
-                }
-            } catch (err) {
+            if (lastAiMsg && lastAiMsg.senderRole === "AI") {
+                // Jeśli w bazie czeka już wygenerowane pytanie – wczytujemy je natychmiast! (Brak ładowania)
+                setAiMessages([{ role: "assistant", content: lastAiMsg.text }]);
+            } else {
+                // Zabezpieczenie na wypadek braku pytania w bazie – robimy szybki start awaryjny
                 setBackupStep(0);
-                setAiMessages([{ role: "assistant", content: `[TRYB AWARYJNY SĘDZIEGO] Witaj Kierowniku. Serwer AI jest chwilowo przeciążony. Przeprowadzę z Tobą uproszczone przesłuchanie techniczne.\n\nPytanie 1: ${BACKUP_QUESTIONS[0]}` }]);
-            } finally {
-                setAiLoading(false);
+                setAiMessages([{ role: "assistant", content: `[TRYB AWARYJNY SĘDZIEGO] Witaj Kierowniku. Rozpoczynamy procedurę wyjaśniającą.\n\nPytanie 1: ${BACKUP_QUESTIONS[0]}` }]);
             }
         }
     };
@@ -219,6 +204,13 @@ export default function ClaimsCenter() {
         } else {
             // STANDARDOWY PROCES GEMINI AI
             try {
+                // Konwertujemy historię na format oczekiwany przez Gemini (tylko od momentu startu wywiadu z kierownikiem)
+                // Pomijamy wiadomości Magazyniera, by nie mylić modelu
+                const activeInterrogationMessages = updatedMessages.map(m => ({
+                    role: m.role,
+                    content: m.content
+                }));
+
                 const res = await fetchWithTimeout("/api/claims-ai-investigate", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -228,7 +220,7 @@ export default function ClaimsCenter() {
                         siteName: selectedClaim.siteName,
                         warehouseNotes: selectedClaim.description,
                         daysOnSite,
-                        messages: updatedMessages,
+                        messages: activeInterrogationMessages,
                         isInitial: false,
                         role: "KIEROWNIK"
                     }),
@@ -247,6 +239,7 @@ export default function ClaimsCenter() {
                     throw new Error("AI Offline");
                 }
             } catch (err) {
+                // Awaryjne przełączenie
                 let startingStep = 0;
                 if (updatedMessages.length >= 5) {
                     startingStep = 3;
@@ -258,7 +251,6 @@ export default function ClaimsCenter() {
 
                 setBackupStep(startingStep);
                 const fallbackQ = BACKUP_QUESTIONS[startingStep];
-
                 setAiMessages([...updatedMessages, { role: "assistant", content: `⚠️ Serwer AI przestał odpowiadać. Przełączam na tryb awaryjny.\n\nPytanie: ${fallbackQ}` }]);
             } finally {
                 setAiLoading(false);
@@ -274,7 +266,7 @@ export default function ClaimsCenter() {
             const formattedKierownikMessages: ChatMessage[] = chatHistory.map((m, idx) => ({
                 id: `${Date.now()}-kierownik-${idx}`,
                 senderId: m.role === "user" ? user.uid : "AI_SYSTEM",
-                senderName: m.role === "user" ? `${user.firstName} ${user.lastName}` : "Sędzia AI CLS",
+                senderName: m.role === "user" ? `${user.firstName} ${user.lastName}` : "Sędzia AI CLS 🤖",
                 senderRole: m.role === "user" ? "KIEROWNIK" : "AI",
                 text: m.content,
                 timestamp: new Date().toISOString(),
@@ -319,34 +311,50 @@ export default function ClaimsCenter() {
     const handleVerdictSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedClaim) return;
+
         try {
-            await updateDoc(doc(db, "claims", selectedClaim.id), {
-                decisionInternal: verdictData.internal,
-                decisionWarehouse: verdictData.warehouse,
-                status: "ZAMKNIETA"
-            });
-            alert("Wyrok został ogłoszony. Sprawa zamknięta i zarchiwizowana.");
+            if (canManageClaimsFinal) {
+                await updateDoc(doc(db, "claims", selectedClaim.id), {
+                    decisionInternal: verdictData.internal,
+                    decisionWarehouse: verdictData.warehouse,
+                    status: "ZAMKNIETA"
+                });
+                alert("Wyrok ostateczny Szefa został ogłoszony. Sprawa zamknięta i zarchiwizowana.");
+            } else {
+                await updateDoc(doc(db, "claims", selectedClaim.id), {
+                    decisionInternalDyrektor: verdictData.internal,
+                    decisionWarehouseDyrektor: verdictData.warehouse,
+                    status: "DO_AKCEPTACJI"
+                });
+                alert("Wyrok I instancji Dyrektora został zapisany. Sprawa oczekuje na ostateczną decyzję Szefa.");
+            }
             setIsVerdictModalOpen(false);
             fetchData();
             setSelectedClaim(null);
         } catch (e) { alert("Błąd zapisu wyroku."); }
     };
 
-    if (loading) return <div className="p-10 text-center animate-pulse text-slate-500 italic">Otwieranie drzwi sali rozpraw...</div>;
+    const openVerdictModal = () => {
+        if (!selectedClaim) return;
+        if (canManageClaimsFinal && selectedClaim.status === "DO_AKCEPTACJI") {
+            setVerdictData({
+                internal: selectedClaim.decisionInternalDyrektor || "",
+                warehouse: selectedClaim.decisionWarehouseDyrektor || ""
+            });
+        } else {
+            setVerdictData({ internal: "", warehouse: "" });
+        }
+        setIsVerdictModalOpen(true);
+    };
 
     const activeClaims = claims.filter(c => c.status !== "ZAMKNIETA");
     const archivedClaims = claims.filter(c => c.status === "ZAMKNIETA");
     const displayedClaims = activeTab === "AKTYWNE" ? activeClaims : archivedClaims;
 
-    // --- INTELIGENTNE I BEZBŁĘDNE FILTROWANIE CZATU ROBOCZEGO (LIVE) ---
-    // Szukamy indeksu OSTATNIEJ wiadomości systemowej AI (Rola "AI")
+    // INTELIGENTNE I BEZBŁĘDNE FILTROWANIE CZATU ROBOCZEGO (LIVE)
     const messages = selectedClaim?.messages || [];
-    const lastAiSystemMsgIndex = messages.map(m => m.senderRole).lastIndexOf("AI");
-
-    // Dolny czat roboczy na żywo wyświetli wyłącznie wiadomości wysłane PO zakończeniu przesłuchań!
-    const liveMessages = lastAiSystemMsgIndex !== -1
-        ? messages.slice(lastAiSystemMsgIndex + 1)
-        : messages;
+    const lastAiSystemMsgIndex = messages.map(m => m.senderName).lastIndexOf("Sędzia AI CLS 🤖");
+    const liveMessages = lastAiSystemMsgIndex !== -1 ? messages.slice(lastAiSystemMsgIndex + 1) : messages;
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto h-[90vh] flex flex-col animate-fade-in relative">
@@ -360,7 +368,7 @@ export default function ClaimsCenter() {
 
             <div className="flex-1 flex gap-6 overflow-hidden relative">
                 {/* 1. LISTA SPRAW */}
-                <div className="w-1/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden font-sans">
+                <div className="w-1/3 bg-white rounded-3xl shadow-sm border border-slate-200 flex flex-col overflow-hidden font-sans font-medium">
                     <div className="flex bg-slate-100 p-2 m-4 rounded-xl shadow-inner">
                         <button onClick={() => { setActiveTab("AKTYWNE"); setSelectedClaim(null); }} className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'AKTYWNE' ? 'bg-white text-blue-600 shadow' : 'text-slate-500'}`}>Wokanda ({activeClaims.length})</button>
                         <button onClick={() => { setActiveTab("ARCHIWUM"); setSelectedClaim(null); }} className={`flex-1 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition ${activeTab === 'ARCHIWUM' ? 'bg-white text-slate-800 shadow' : 'text-slate-500'}`}>Archiwum ({archivedClaims.length})</button>
@@ -372,7 +380,12 @@ export default function ClaimsCenter() {
                             <div key={claim.id} onClick={() => handleSelectClaim(claim)} className={`p-4 border rounded-2xl cursor-pointer transition ${selectedClaim?.id === claim.id ? 'bg-blue-50 border-blue-400 shadow-md scale-[1.02]' : 'bg-white hover:border-slate-300 shadow-sm'}`}>
                                 <div className="flex justify-between items-start mb-2">
                                     <span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span>
-                                    <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-500 text-white animate-pulse' : claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'}`}>{claim.status === "ZAMKNIETA" ? "ZAMKNIĘTA" : claim.status === "NOWA" ? "WYJAŚNIANIE" : claim.status}</span>
+                                    <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-500 text-white animate-pulse' :
+                                            claim.status === 'DO_AKCEPTACJI' ? 'bg-yellow-500 text-white animate-pulse' :
+                                                claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'
+                                        }`}>
+                                        {claim.status === "ZAMKNIETA" ? "ZAMKNIĘTA" : claim.status === "NOWA" ? "WYJAŚNIANIE" : claim.status === "DO_AKCEPTACJI" ? "U SZEFA" : claim.status}
+                                    </span>
                                 </div>
                                 <p className="text-[10px] text-slate-500 font-mono italic">ID: {claim.claimId} • {claim.siteName}</p>
                             </div>
@@ -395,28 +408,34 @@ export default function ClaimsCenter() {
                                     <p className="text-xs font-bold text-red-600 mt-1">Zgłoszenie usterki: {selectedClaim.description}</p>
                                 </div>
 
-                                {/* NAGŁÓWEK AKCJI SZEFA: WYDAJ WYROK + ZOBACZ PRZEBIEG ŚLEDZTWA */}
-                                {selectedClaim.status === "W_TOKU" && (
-                                    <div className="flex gap-2">
+                                {/* PRZYCISKI AKCJI ZALEŻNE OD STATUSU I ROLI */}
+                                <div className="flex gap-2">
+                                    {selectedClaim.status !== "NOWA" && (
                                         <button
                                             onClick={() => setIsHistoryModalOpen(true)}
                                             className="bg-purple-100 hover:bg-purple-200 text-purple-800 font-black px-4 py-2.5 rounded-xl border border-purple-200 text-xs shadow-sm transition"
                                         >
                                             📄 Zobacz Przebieg Śledztwa
                                         </button>
-                                        {canManageClaims && (
-                                            <button
-                                                onClick={() => { setVerdictData({ internal: "", warehouse: "" }); setIsVerdictModalOpen(true); }}
-                                                className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition text-xs"
-                                            >
-                                                Wydaj Wyrok
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
+                                    )}
+
+                                    {/* Dyrektor może wydać wyrok I instancji, gdy sprawa jest W_TOKU */}
+                                    {canManageClaims && !canManageClaimsFinal && selectedClaim.status === "W_TOKU" && (
+                                        <button onClick={openVerdictModal} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition text-xs">
+                                            Wydaj Wyrok (I Instancja)
+                                        </button>
+                                    )}
+
+                                    {/* Szef widzi przycisk orzekania ostatecznego zawsze, gdy sprawa jest W_TOKU lub DO_AKCEPTACJI */}
+                                    {canManageClaimsFinal && (selectedClaim.status === "W_TOKU" || selectedClaim.status === "DO_AKCEPTACJI") && (
+                                        <button onClick={openVerdictModal} className="bg-red-600 hover:bg-red-700 text-white font-black px-5 py-2.5 rounded-xl shadow-lg transition text-xs animate-pulse">
+                                            {selectedClaim.status === "DO_AKCEPTACJI" ? "Zatwierdź / Zmień Wyrok" : "Wydaj Wyrok (Ostateczny)"}
+                                        </button>
+                                    )}
+                                </div>
                             </div>
 
-                            {/* SCENARIUSZ A: PRZESŁUCHANIE KIEROWNIKA PRZEZ AI (STATUS NOWA) */}
+                            {/* SCENARIUSZ A: PRZESŁUCHANIE KIEROWNIKA PRZEZ AI */}
                             {selectedClaim.status === "NOWA" && selectedClaim.assignedManagers.includes(user.uid) && (
                                 <div className="flex-1 flex flex-col overflow-hidden bg-slate-900 text-slate-100">
                                     <div className="p-4 bg-slate-950 border-b border-slate-800 flex justify-between items-center">
@@ -448,11 +467,7 @@ export default function ClaimsCenter() {
                                             placeholder={aiLoading ? "System analizuje Twoją odpowiedź..." : "Wpisz swoje wyjaśnienia i kliknij Enter..."}
                                             className="flex-1 p-3.5 bg-slate-900 border border-slate-800 rounded-xl text-sm outline-none focus:border-purple-500 text-white placeholder-slate-500 font-medium"
                                         />
-                                        <button
-                                            onClick={handleSendToAi}
-                                            disabled={aiLoading || !messageText.trim()}
-                                            className="bg-purple-600 hover:bg-purple-700 text-white font-black px-6 py-3.5 rounded-xl transition disabled:opacity-50"
-                                        >
+                                        <button onClick={handleSendToAi} disabled={aiLoading || !messageText.trim()} className="bg-purple-600 hover:bg-purple-700 text-white font-black px-6 py-3.5 rounded-xl transition">
                                             {aiLoading ? "..." : "Wyślij"}
                                         </button>
                                     </div>
@@ -508,9 +523,26 @@ export default function ClaimsCenter() {
                                             </div>
                                         )}
 
-                                        {/* RENDERING CZATU: Pokazuje wyłącznie wiadomości po zakończeniu wywiadów */}
+                                        {/* PROPOZYCJA WYROKU DYREKTORA (Widoczna, gdy status to DO_AKCEPTACJI) */}
+                                        {selectedClaim.status === "DO_AKCEPTACJI" && (
+                                            <div className="bg-yellow-50 border border-yellow-200 p-5 rounded-2xl shadow-sm animate-fade-in">
+                                                <h4 className="text-xs font-black text-yellow-900 uppercase tracking-widest mb-2">⏳ 3. Propozycja Wyroku Dyrekcji (I Instancja):</h4>
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                                                    <div className="bg-white p-4 rounded-xl border text-xs">
+                                                        <span className="font-bold text-slate-500 uppercase">Decyzja Kadrowa:</span>
+                                                        <p className="mt-1 font-semibold text-slate-800">{selectedClaim.decisionInternalDyrektor || "Brak danych."}</p>
+                                                    </div>
+                                                    <div className="bg-white p-4 rounded-xl border text-xs">
+                                                        <span className="font-bold text-slate-500 uppercase">Decyzja Magazynowa:</span>
+                                                        <p className="mt-1 font-semibold text-slate-800">{selectedClaim.decisionWarehouseDyrektor || "Brak danych."}</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* RENDERING TRADYCYJNEGO CZATU ROBOCZEGO (PO PRZESŁUCHANIACH) */}
                                         {liveMessages.map((msg) => {
-                                            if (user?.roleId === "magazynier" && !msg.visibleToWarehouse) return null;
+                                            if (msg.senderRole === "AI") return null;
                                             const isMe = msg.senderId === user.uid;
 
                                             return (
@@ -528,25 +560,25 @@ export default function ClaimsCenter() {
                                         <div ref={chatEndRef} />
                                     </div>
 
-                                    {/* WYROK SĄDU (Gdy sprawa jest zamknięta) */}
+                                    {/* WYROK SZEFA (Gdy sprawa jest całkowicie zamknięta) */}
                                     {selectedClaim.status === "ZAMKNIETA" && (
                                         <div className="p-6 bg-slate-900 text-white border-t border-slate-800">
-                                            <h3 className="font-black text-xs text-slate-400 uppercase tracking-widest mb-4">🔨 ORZECZENIE DYREKCJI (ZAMKNIĘTE)</h3>
+                                            <h3 className="font-black text-xs text-slate-400 uppercase tracking-widest mb-4 font-mono">🔨 OSTATECZNE ORZECZENIE SZEFA (ZAMKNIĘTE)</h3>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
-                                                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Decyzja Kadrowa:</h4>
+                                                <div className="bg-slate-850 p-4 rounded-xl border border-slate-850">
+                                                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Ostateczna Decyzja Kadrowa:</h4>
                                                     <p className="text-sm">{selectedClaim.decisionInternal || "Brak decyzji."}</p>
                                                 </div>
-                                                <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
-                                                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Decyzja Magazynowa:</h4>
+                                                <div className="bg-slate-850 p-4 rounded-xl border border-slate-850">
+                                                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Ostateczna Decyzja Magazynowa:</h4>
                                                     <p className="text-sm">{selectedClaim.decisionWarehouse || "Brak wytycznych."}</p>
                                                 </div>
                                             </div>
                                         </div>
                                     )}
 
-                                    {/* Panel wysyłania wiadomości (Dla spraw w toku) */}
-                                    {selectedClaim.status === "W_TOKU" && (
+                                    {/* Panel wysyłania wiadomości (Dla spraw w toku i do akceptacji) */}
+                                    {(selectedClaim.status === "W_TOKU" || selectedClaim.status === "DO_AKCEPTACJI") && (
                                         <div className="p-4 bg-white border-t border-slate-200 flex gap-3">
                                             <input
                                                 type="text"
@@ -554,16 +586,10 @@ export default function ClaimsCenter() {
                                                 value={messageText}
                                                 onChange={e => setMessageText(e.target.value)}
                                                 onKeyDown={e => e.key === "Enter" && sendRegularMessage()}
-                                                placeholder="Zadaj pytanie / odpowiedz Dyrekcji..."
+                                                placeholder="Zadaj pytanie / odpowiedz na wątki rozprawy..."
                                                 className="flex-1 p-3 border rounded-xl text-sm outline-none focus:border-blue-500"
                                             />
-                                            <button
-                                                onClick={sendRegularMessage}
-                                                disabled={isSending || !messageText.trim()}
-                                                className="bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-3 rounded-xl transition"
-                                            >
-                                                Wyślij
-                                            </button>
+                                            <button onClick={sendRegularMessage} disabled={isSending || !messageText.trim()} className="bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-3 rounded-xl transition">Wyślij</button>
                                         </div>
                                     )}
                                 </div>
@@ -573,43 +599,51 @@ export default function ClaimsCenter() {
                 </div>
             </div>
 
-            {/* MODAL WYDAWANIA WYROKU */}
+            {/* MODAL WYDAWANIA I AKCEPTACJI WYROKU */}
             {isVerdictModalOpen && selectedClaim && (
                 <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-fade-in border-4 border-red-600">
                         <div className="p-6 bg-red-600 text-white flex justify-between items-center">
-                            <h2 className="text-2xl font-black uppercase tracking-tighter">Wydawanie Wyroku: {selectedClaim.inventoryName}</h2>
+                            <h2 className="text-2xl font-black uppercase tracking-tighter">
+                                {canManageClaimsFinal && selectedClaim.status === "DO_AKCEPTACJI" ? "Orzekanie Ostateczne (Szef)" : "Wydawanie Wyroku (I Instancja)"}
+                            </h2>
                             <button onClick={() => setIsVerdictModalOpen(false)} className="text-white opacity-60 hover:opacity-100">✕</button>
                         </div>
 
                         <form onSubmit={handleVerdictSubmit} className="p-8 space-y-6">
                             <div>
-                                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">1. Decyzja Kadrowo-Finansowa (Widzi tylko Zarząd i Kierownik)</label>
+                                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">
+                                    {canManageClaimsFinal ? "Ostateczna Decyzja Kadrowo-Finansowa (Zarząd/Szef)" : "1. Proponowana Decyzja Kadrowo-Finansowa (Dyrektor)"}
+                                </label>
                                 <textarea
                                     required
                                     rows={4}
                                     placeholder="Np. Obciążyć kosztami naprawy w 50% pracownika Jana Kowalskiego. Naganę wpisać do akt."
                                     value={verdictData.internal}
                                     onChange={e => setVerdictData({ ...verdictData, internal: e.target.value })}
-                                    className="w-full p-4 border-2 border-slate-200 rounded-2xl outline-none focus:border-red-500 text-sm transition-all"
+                                    className="w-full p-4 border-2 border-slate-200 rounded-2xl outline-none focus:border-red-500 text-sm transition-all font-semibold"
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">2. Wytyczne dla Magazynu (Widoczne dla magazynierów)</label>
+                                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-3 italic">
+                                    {canManageClaimsFinal ? "Ostateczne Wytyczne dla Magazynu (Zarząd/Szef)" : "2. Proponowane Wytyczne dla Magazynu (Dyrektor)"}
+                                </label>
                                 <textarea
                                     required
                                     rows={4}
-                                    placeholder="Np. Sprzęt nie nadaje się do naprawy. Złomować natychmiast. Zamówić nowy egzemplarz modelu Hilti."
+                                    placeholder="Np. Sprzęt nie nadaje się do naprawy. Złomować natychmiast."
                                     value={verdictData.warehouse}
                                     onChange={e => setVerdictData({ ...verdictData, warehouse: e.target.value })}
-                                    className="w-full p-4 border-2 border-slate-200 rounded-2xl outline-none focus:border-blue-500 text-sm transition-all"
+                                    className="w-full p-4 border-2 border-slate-200 rounded-2xl outline-none focus:border-blue-500 text-sm transition-all font-semibold"
                                 />
                             </div>
 
                             <div className="flex gap-4 pt-4">
                                 <button type="button" onClick={() => setIsVerdictModalOpen(false)} className="flex-1 py-4 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition">Anuluj</button>
-                                <button type="submit" className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition uppercase tracking-widest">Podpisz i ogłoś wyrok</button>
+                                <button type="submit" className="flex-1 py-4 bg-red-600 text-white font-black rounded-2xl shadow-xl hover:bg-red-700 transition uppercase tracking-widest">
+                                    {canManageClaimsFinal ? "Zatwierdź i Ogłoś Wyrok Ostateczny" : "Podpisz i Przekaż do Szefa"}
+                                </button>
                             </div>
                         </form>
                     </div>
