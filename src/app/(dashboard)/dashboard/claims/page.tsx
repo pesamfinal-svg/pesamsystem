@@ -132,20 +132,26 @@ export default function ClaimsCenter() {
     // ZABEZPIECZENIE: Znak zapytania przy user?.roleId
     const chatRoleName = canManageClaims ? "DYREKCJA" : user?.roleId === "magazynier" ? "MAGAZYN" : "KIEROWNIK";
 
-    // OBLICZANIE ILE DNI SPRZĘT BYŁ NA BUDOWIE
+    // OBLICZANIE ILE DNI SPRZĘT BYŁ NA BUDOWIE (Odczyt z indywidualnej historii urządzenia)
     const calculateDaysOnSite = async (claim: Claim) => {
         try {
-            const q = query(collection(db, "protocols"), where("type", "==", "WYDANIE"), orderBy("createdAt", "desc"), limit(30));
-            const snap = await getDocs(q);
-            for (const d of snap.docs) {
-                const p = d.data();
-                const hasItem = p.items?.some((i: any) => i.inventoryId === claim.inventoryId);
-                if (hasItem && p.destinationName === claim.siteName) {
-                    const issueDate = new Date(p.createdAt);
-                    const currentDate = new Date(claim.createdAt);
-                    const diffTime = Math.abs(currentDate.getTime() - issueDate.getTime());
-                    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const historySnap = await getDocs(query(collection(db, `inventory/${claim.inventoryId}/history`), orderBy("date", "desc")));
+            const history = historySnap.docs.map(d => d.data());
+
+            // Szukamy OSTATNIEGO momentu, gdy sprzęt trafił na budowę
+            let issueDateStr = null;
+            for (const entry of history) {
+                if (entry.type === "WYDANIE" || entry.type === "DOSTAWA_BEZP" || entry.type === "ZAKUP") {
+                    issueDateStr = entry.documentDate || entry.date;
+                    break; // Znaleźliśmy najświeższe wydanie w teren, przerywamy!
                 }
+            }
+
+            if (issueDateStr) {
+                const issueDate = new Date(issueDateStr);
+                const currentDate = new Date(claim.createdAt); // Data wszczęcia sprawy w CLS
+                const diffTime = Math.abs(currentDate.getTime() - issueDate.getTime());
+                return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
             }
         } catch (e) { console.error("Błąd obliczania dni:", e); }
         return null;

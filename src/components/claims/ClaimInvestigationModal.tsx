@@ -463,19 +463,24 @@ export default function ClaimInvestigationModal({
     // --- OBLICZANIE CZASU PRACY PRZED WYBOREM SĄDU ---
     const calculateDaysOnSiteForModal = async () => {
         try {
-            const q = query(collection(db, "protocols"), where("type", "==", "WYDANIE"), orderBy("createdAt", "desc"), limit(30));
-            const snap = await getDocs(q);
-            for (const d of snap.docs) {
-                const p = d.data();
-                const hasItem = p.items?.some((i: any) => i.inventoryId === inventoryId);
-                if (hasItem && p.destinationName === siteName) {
-                    const issueDate = new Date(p.createdAt);
-                    const currentDate = new Date();
-                    const diffTime = Math.abs(currentDate.getTime() - issueDate.getTime());
-                    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const historySnap = await getDocs(query(collection(db, `inventory/${inventoryId}/history`), orderBy("date", "desc")));
+            const history = historySnap.docs.map(d => d.data());
+
+            let issueDateStr = null;
+            for (const entry of history) {
+                if (entry.type === "WYDANIE" || entry.type === "DOSTAWA_BEZP" || entry.type === "ZAKUP") {
+                    issueDateStr = entry.documentDate || entry.date;
+                    break;
                 }
             }
-        } catch (e) { console.error(e); }
+
+            if (issueDateStr) {
+                const issueDate = new Date(issueDateStr);
+                const currentDate = new Date();
+                const diffTime = Math.abs(currentDate.getTime() - issueDate.getTime());
+                return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            }
+        } catch (e) { console.error("Błąd obliczania dni:", e); }
         return null;
     };
 
