@@ -156,16 +156,17 @@ export default function ClaimsCenter() {
         setAiMessages([]);
         setBackupStep(null);
         setBackupAnswers([]);
+        // PANCERNE ZABEZPIECZENIE: Zawsze odblokowujemy pole wpisywania przy wejściu w sprawę
+        setAiLoading(false);
 
         const isMyInvestigation = claim.status === "NOWA" && claim.assignedManagers.includes(user.uid);
 
         if (isMyInvestigation) {
-            setAiLoading(true);
             const days = await calculateDaysOnSite(claim);
             setDaysOnSite(days);
 
-            // OPTYMALIZACJA 0 SEKUND: Wczytujemy pre-generowane pytanie bezpośrednio z bazy
             const existingMessages = claim.messages || [];
+            // Znajdźmy pierwsze wygenerowane pytanie dla kierownika (będzie to ostatnia wiadomość przed wejściem)
             const lastAiMsg = existingMessages[existingMessages.length - 1];
 
             if (lastAiMsg && lastAiMsg.senderRole === "AI") {
@@ -436,8 +437,8 @@ export default function ClaimsCenter() {
                                 <div className="flex justify-between items-start mb-2">
                                     <span className="font-black text-slate-800 text-sm truncate">{claim.inventoryName}</span>
                                     <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${claim.status === 'NOWA' ? 'bg-red-500 text-white animate-pulse' :
-                                            claim.status === 'DO_AKCEPTACJI' ? 'bg-yellow-500 text-white animate-pulse' :
-                                                claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'
+                                        claim.status === 'DO_AKCEPTACJI' ? 'bg-yellow-500 text-white animate-pulse' :
+                                            claim.status === 'W_TOKU' ? 'bg-orange-100 text-orange-700' : 'bg-slate-200 text-slate-600'
                                         }`}>
                                         {claim.status === "ZAMKNIETA" ? "ZAMKNIĘTA" : claim.status === "NOWA" ? "WYJAŚNIANIE" : claim.status === "DO_AKCEPTACJI" ? "U SZEFA" : claim.status}
                                     </span>
@@ -759,12 +760,12 @@ export default function ClaimsCenter() {
                                         return (
                                             <div key={i} className={`flex flex-col ${isKierownik || msg.senderRole === "DYREKCJA" ? "items-end" : "items-start"}`}>
                                                 <div className={`p-4 rounded-2xl max-w-[85%] text-sm ${isKierownik
-                                                        ? "bg-blue-600 text-white"
-                                                        : msg.senderRole === "DYREKCJA"
-                                                            ? "bg-slate-900 text-white"
-                                                            : isAI
-                                                                ? "bg-purple-100 text-purple-900 border border-purple-200"
-                                                                : "bg-white border text-slate-800"
+                                                    ? "bg-blue-600 text-white"
+                                                    : msg.senderRole === "DYREKCJA"
+                                                        ? "bg-slate-900 text-white"
+                                                        : isAI
+                                                            ? "bg-purple-100 text-purple-900 border border-purple-200"
+                                                            : "bg-white border text-slate-800"
                                                     }`}>
                                                     <p className="text-[9px] uppercase tracking-widest font-black opacity-40 mb-1">{msg.senderName} ({msg.senderRole})</p>
 
