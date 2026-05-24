@@ -5,7 +5,7 @@ import { GoogleGenAI } from '@google/genai';
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-    location: 'global' // <-- PRZYWRÓCONO: Lokalizacja globalna
+    location: 'global' // <-- Twój parametr lokalizacji
 });
 
 export async function POST(req: Request) {
@@ -25,7 +25,7 @@ export async function POST(req: Request) {
             purchasePrice
         } = payload;
 
-        // PRZYWRÓCONO: Twój wybrany model gemini-3-flash-preview
+        // Twój wybrany model gemini-3-flash-preview
         const modelName = 'gemini-3-flash-preview';
         const clientMessages = messages || [];
         const targetRole = role || "MAGAZYN";
@@ -57,7 +57,7 @@ export async function POST(req: Request) {
             systemInstruction = `Jesteś Asystentem Śledczym CLS (Centrum Likwidacji Szkód) w firmie budowlanej PESAM. Twoim rozmówcą jest KIEROWNIK BUDOWY, z którego budowy "${siteName}" zjechało uszkodzone urządzenie "${inventoryName}" (Nr: ${inventoryNumber || 'brak'}).
     Twoje zadanie: przeprowadzić dociekliwe, techniczne przesłuchanie wstępne Kierownika i wygenerować raport końcowy dla Dyrekcji.
 
-    ZASADY WYKORZYSTANIA GOOGLE SEARCH (INTERNETU):
+    ZASADY WYKORZYSTANIA GOOGLE SEARCH (INTERNETU) DO AUDYTU OSPRZĘTU I EKSPLOATACJI:
     1. Masz stały dostęp do wyszukiwarki Google. Użyj jej, aby wyszukać specyfikację urządzenia "${inventoryName}".
     2. Zrozum kontekst: jesteśmy firmą budowlaną. Jeśli mowa o "Aligator", "Krokodyl" itp., chodzi o piły brzeszczotowe (np. DeWalt Aligator do Ytongu/Porothermu), a nie o zwierzęta!
     3. Wyszukaj instrukcję obsługi lub wytyczne serwisowe dla tego modelu. Dowiedz się, jak wygląda standardowy serwis bieżący tego urządzenia (np. smarowanie, czyszczenie filtrów z pyłu, naciąg łańcucha).
@@ -72,12 +72,13 @@ export async function POST(req: Request) {
 
     OBOWIĄZKOWE PUNKTY DO USTALENIA:
     1. OKOLICZNOŚCI: Kto pracował na sprzęcie i w jakich warunkach doszło do awarii?
-    2. EKSPLOATACJA I SERWIS BIEŻĄCY: Czy sprzęt był konserwowany na budowie zgodnie z wytycznymi producenta (które wyszukałeś w Google)? Kto za to odpowiadał?
-    3. PRÓBY NAPRAWY: Czy na budowie próbowano go rozkręcać / naprawiać na własną rękę?
+    2. AUDYT OSPRZĘTU: Czy osprzęt (brzeszczot/tarcza/wiertło) był prawidłowo dobrany do ciętego materiału (zgodnie z analizą powyżej)? Jaki to był model?
+    3. SERWIS BIEŻĄCY: Czy czyszczono urządzenie z pyłu (np. Ytongowego/gipsowego, który zatyka wentylację i działa ściernie na zębatki) i czy robiono przerwy chłodzące?
+    4. PRÓBY NAPRAWY: Czy na budowie próbowano go rozkręcać / naprawiać na własną rękę?
 
     FORMAT ODPOWIEDZI (WYŁĄCZNIE CZYSTY JSON):
     Gdy zbierasz informacje: {"reply":"Twoje jedno pytanie do kierownika...","isComplete":false,"caseContext":null}
-    Gdy masz już komplet informacji i chcesz zakończyć wywiad: {"reply":"Dziękuję za wyjaśnienia. Raport został wygenerowany i przekazany do Dyrekcji w celu wydania wyroku.","isComplete":true,"caseContext":"RAPORT KOŃCOWY ASYSTENTA AI:\\nUrządzenie: ${inventoryName} (Nr: ${inventoryNumber})\\nBudowa: ${siteName}\\nCzas na budowie: ${daysOnSite || 'Brak danych'} dni\\nPierwotne zgłoszenie: ${warehouseNotes}\\nUstalenia z Kierownikiem:\\n- Okoliczności: [Wpisz co ustaliłeś]\\n- Eksploatacja i serwis bieżący: [Opisz co ustaliłeś na podstawie zaleceń producenta i odpowiedzi kierownika]\\n- Próby naprawy: [Wpisz czy próbowali sami naprawiać]"}`;
+    Gdy masz już komplet informacji i chcesz zakończyć wywiad: {"reply":"Dziękuję za wyjaśnienia. Raport został wygenerowany i przekazany do Dyrekcji w celu wydania wyroku.","isComplete":true,"caseContext":"RAPORT KOŃCOWY ASYSTENTA AI:\\nUrządzenie: ${inventoryName} (Nr: ${inventoryNumber})\\nBudowa: ${siteName}\\nCzas na budowie: ${daysOnSite || 'Brak danych'} dni\\nPierwotne zgłoszenie: ${warehouseNotes}\\nUstalenia z Kierownikiem:\\n- Okoliczności: [Wpisz co ustaliłeś]\\n- Dobór osprzętu (Audyt): [Opisz, czy osprzęt był dobrany prawidłowo, czy doszło do błędu materiałowego]\\n- Eksploatacja i serwis bieżący: [Opisz czy czyszczono filtry/robiono przerwy]\\n- Próby naprawy: [Wpisz czy próbowali sami naprawiać]"}`;
 
             initialPrompt = `Uruchomienie procedury przesłuchania Kierownika Budowy. 
     Sprzęt: "${inventoryName}" (Nr mag: ${inventoryNumber}), Budowa: "${siteName}".
@@ -104,7 +105,7 @@ export async function POST(req: Request) {
                 }
             }
 
-            let priceRule = "Wyszukaj w Google orientacyjną cenę rynkową nowego urządzenia o nazwie '" + inventoryName + "' i sprawdź czy pokrywa się z wartością w bazie.";
+            let priceRule = "Cena zakupu sprzętu jest znana i wynosi: " + purchasePrice + " zł.";
             if (!purchasePrice || Number(purchasePrice) === 0) {
                 priceRule = `⚠️ ALARM: Brak ceny zakupu tego urządzenia w bazie! Wyszukaj w Google, ile kosztuje nowe urządzenie "${inventoryName}". Następnie zapytaj magazyniera: 'Nie mamy ceny tego urządzenia w bazie, ale z moich ustaleń wynika, że kosztuje około [Wpisz wyszukaną kwotę] zł. Czy potwierdzasz taką wartość rynkową?'`;
             }
@@ -125,7 +126,7 @@ export async function POST(req: Request) {
 
     OBOWIĄZKOWE INFORMACJE DO ZEBRANIA:
     1. ROKOWANIA: Czy sprzęt nadaje się do naprawy, czy to złom?
-    2. SERWIS: Czy sprzęt był już w serwisie na diagnozie/naprawie? Jeśli tak, co uznał serwis za przyczynę i jaki jest koszt?
+    2. SERWIS: Czy sprzęt był już w serwisie na diagnozie/naprawie? Jeśli tak, co uznał serwis i jaki był koszt?
     3. GWARANCJA I CENA: Ustal stan gwarancji i cenę rynkową sprzętu (zgodnie z regułami powyżej, posługując się danymi wyszukanymi w Google).
     4. DOKUMENTACJA ZDJĘCIOWA: Czy są zdjęcia w systemie? 
 
