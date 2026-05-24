@@ -20,6 +20,7 @@ export const ALL_PERMISSIONS = {
     viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
     viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
     manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)",
+    manageClaimsFinal: "Sąd: Ostateczna akceptacja i zmiana wyroków (Szef)", // <-- DODAJ TO!
 
     // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",
