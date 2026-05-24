@@ -21,6 +21,7 @@ export const ALL_PERMISSIONS = {
     viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
     manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)",
     manageClaimsFinal: "Sąd: Ostateczna akceptacja i zmiana wyroków (Szef)", // <-- DODAJ TO!
+    manageSettings: "Zarządzanie: Globalne ustawienia systemu (Sklep, Sąd CLS)", // <-- DODAJ TĘ LINIĘ!
 
     // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",

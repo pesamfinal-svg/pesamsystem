@@ -555,7 +555,7 @@ export default function ClaimInvestigationModal({
         const shortDescription = `Zgłoszenie: ${declaredStatus}. ${warehouseNotes} | Wnioski AI: ${caseContext?.slice(0, 100).replace(/\n/g, " ") || "Brak"}`;
 
         try {
-            await addDoc(collection(db, "claims"), {
+            const docRef = await addDoc(collection(db, "claims"), {
                 claimId,
                 inventoryId,
                 inventoryName,
@@ -573,7 +573,26 @@ export default function ClaimInvestigationModal({
                 caseContext,
             });
 
-            onClaimCreated(claimId, "temp-doc-id");
+            // --- NOWOŚĆ: AUTOMATYCZNE POWIADOMIENIE E-MAIL O NOWYM ŚLEDZTWIE ---
+            try {
+                await fetch("/api/claims-email", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        type: "NEW_CLAIM",
+                        claimId,
+                        inventoryName,
+                        inventoryNumber,
+                        siteName,
+                        managerUid: selectedKierownikId,
+                        managerName: kierownicy.find(k => k.uid === selectedKierownikId)?.name || "Kierownik"
+                    })
+                });
+            } catch (emailErr) {
+                console.error("Błąd wysyłki e-mail o nowej sprawie:", emailErr);
+            }
+
+            onClaimCreated(claimId, docRef.id);
         } catch (err) {
             console.error("Create claim error:", err);
             alert("Błąd tworzenia sprawy w bazie. Spróbuj ponownie.");

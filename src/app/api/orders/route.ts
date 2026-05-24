@@ -285,6 +285,22 @@ export async function POST(req: Request) {
         const body: OrderPayload = await req.json();
         const { orderId, siteId, siteName, user, cart, notes, sections } = body;
 
+        // --- DYNAMICZNE POBIERANIE LISTY MAILI ZE SKLEPU Z BAZY FIRESTORE ---
+        let recipients = process.env.EMAIL_WAREHOUSE || ""; // Domyślny fallback (.env)
+        try {
+            // Bezpieczne pobranie konfiguracji przez Admin SDK
+            const settingsSnap = await adminDb.doc("settings/system").get();
+            if (settingsSnap.exists) {
+                const settingsData = settingsSnap.data();
+                const dbRecipients = settingsData?.orderEmailRecipients || [];
+                if (dbRecipients.length > 0) {
+                    recipients = dbRecipients.join(", ");
+                }
+            }
+        } catch (dbErr) {
+            console.error("Błąd pobierania dynamicznych maili z Firestore:", dbErr);
+        }
+
         // 1. Zapis zamówienia do Firestore (Admin SDK)
         const orderRef = adminDb.collection('orders').doc(orderId);
         await orderRef.set({
@@ -391,10 +407,10 @@ export async function POST(req: Request) {
             </div>
         </div>`;
 
-        // 6. Wysyłka do MAGAZYNU
+        // 6. Wysyłka do MAGAZYNU i BIURA (Dynamiczna lista odbiorców z bazy)
         await transporter.sendMail({
             from: `"PESAM System" <${process.env.EMAIL_USER}>`,
-            to: process.env.EMAIL_WAREHOUSE || process.env.EMAIL_USER,
+            to: recipients, // <-- Dynamiczna lista z Firestore!
             subject: `📦 Nowe zamówienie [${siteName}] · ${orderId}`,
             html: emailHtml('Wiadomość do: Magazyn PESAM'),
             attachments: [{
