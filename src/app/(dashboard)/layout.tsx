@@ -48,6 +48,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
         { name: "Twoja Budowa", path: "/dashboard/my-site", icon: "🏢", requiredPermission: "viewSiteState" },
         { name: "Zarządzanie Pracownikami", path: "/dashboard/admin/users", icon: "👥", requiredPermission: "manageUsers" },
+        { name: "Import Sprzętu", path: "/dashboard/admin/import", icon: "📊", requiredPermission: "manageImport" },
 
         // ZMIANA: Widoczne, jeśli ma JAKIEKOLWIEK uprawnienie do modułu pracowników fizycznych
         {

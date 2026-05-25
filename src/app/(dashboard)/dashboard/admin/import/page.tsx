@@ -3,12 +3,25 @@
 import { useState, useEffect } from "react";
 import { db } from "@/lib/firebase/config";
 import { collection, writeBatch, doc, getDocs } from "firebase/firestore";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { useRouter } from "next/navigation";
+import { hasPermission } from "@/lib/auth/permissions";
 
 export default function ImportPage() {
+    const { user } = useAuth();
+    const router = useRouter();
+
     const [inputText, setInputText] = useState("");
     const [loading, setLoading] = useState(false);
     const [importType, setImportType] = useState<"UNIQUE" | "BULK">("UNIQUE");
     const [sitesMap, setSitesMap] = useState<Record<string, string>>({});
+
+    useEffect(() => {
+        if (user && !hasPermission("manageImport", user.rolePermissions, user.permissionOverrides)) {
+            alert("Brak uprawnień do importu danych.");
+            router.push("/dashboard");
+        }
+    }, [user, router]);
 
     // Pobieramy mapę budów (Nazwa -> ID), aby automatycznie przypisać lokalizację
     useEffect(() => {
