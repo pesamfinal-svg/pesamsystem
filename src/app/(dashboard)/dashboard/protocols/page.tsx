@@ -1,7 +1,7 @@
 // src/app/(dashboard)/protocols/page.tsx
 "use client";
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, Fragment } from "react";
 import { collection, getDocs, doc, setDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db } from "@/lib/firebase/config";
@@ -20,6 +20,7 @@ interface InventoryItem {
     id: string; name: string; type: "UNIQUE" | "BULK"; subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL"; inventoryNumber: string;
     category: string; availableQuantity: number; totalQuantity: number; unit?: string;
     currentLocation: string; status: string; allocations: Record<string, number>;
+    lastOperationDate?: string; // <-- Ochrona chronologiczna
 }
 interface Accessory { id: string; name: string; quantity: number; mustReturn: boolean; }
 interface CartItem {
@@ -41,7 +42,7 @@ interface ReturnCartItem {
 interface PaperReturnCartItem {
     cartItemId: string; dbId?: string; isManual: boolean; name: string; type: "UNIQUE" | "BULK";
     inventoryNumber: string; unit: string; maxQty: number;
-    declaredQty: number; // <--- DODANO
+    declaredQty: number;
     receivedQty: number;
     finalStatus: string; notes: string;
 }
@@ -86,6 +87,7 @@ export default function ProtocolsHub() {
     const [isAddFromSiteOpen, setIsAddFromSiteOpen] = useState(false);
     const [acceptSiteTab, setAcceptSiteTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
     const [isAddManualToAcceptOpen, setIsAddManualToAcceptOpen] = useState(false);
+    const [acceptReturnDocDate, setAcceptReturnDocDate] = useState(() => new Date().toISOString().split('T')[0]);
 
     // Stany dla ZWROTÓW PAPIEROWYCH
     const [isPaperReturnModalOpen, setIsPaperReturnModalOpen] = useState(false);
@@ -105,7 +107,7 @@ export default function ProtocolsHub() {
         declaredStatus: string;
     } | null>(null);
 
-    // --- NOWE STANY: DATY I TRYB RATUNKOWY ---
+    // DATY I TRYB RATUNKOWY
     const [issueDocDate, setIssueDocDate] = useState(() => new Date().toISOString().split('T')[0]);
     const [isIssueArchival, setIsIssueArchival] = useState(false);
     const [paperDocDate, setPaperDocDate] = useState(() => new Date().toISOString().split('T')[0]);
@@ -125,6 +127,17 @@ export default function ProtocolsHub() {
     const [accQty, setAccQty] = useState(1);
     const [accMustReturn, setAccMustReturn] = useState(true);
 
+    // --- NOWE STANY DLA HISTORII PROTOKOŁÓW ---
+    const [historyProtocols, setHistoryProtocols] = useState<any[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [expandedProtocolId, setExpandedProtocolId] = useState<string | null>(null);
+
+    const [histFilterSite, setHistFilterSite] = useState("");
+    const [histFilterType, setHistFilterType] = useState("ALL");
+    const [histFilterSearch, setHistFilterSearch] = useState("");
+    const [histFilterDateFrom, setHistFilterDateFrom] = useState("");
+    const [histFilterDateTo, setHistFilterDateTo] = useState("");
+
     const fetchData = async () => {
         setLoading(true);
         try {
@@ -133,10 +146,25 @@ export default function ProtocolsHub() {
 
             const invSnap = await getDocs(query(collection(db, "inventory"), orderBy("name", "asc")));
             setInventory(invSnap.docs.map(d => ({ id: d.id, ...d.data() })) as InventoryItem[]);
+
+            await fetchHistoryProtocols();
         } catch (error) {
             console.error("Błąd podczas pobierania danych:", error);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchHistoryProtocols = async () => {
+        setHistoryLoading(true);
+        try {
+            const q = query(collection(db, "protocols"), orderBy("createdAt", "desc"));
+            const snap = await getDocs(q);
+            setHistoryProtocols(snap.docs.map(d => ({ dbId: d.id, ...d.data() })));
+        } catch (error) {
+            console.error("Błąd podczas pobierania historii protokołów:", error);
+        } finally {
+            setHistoryLoading(false);
         }
     };
 
@@ -189,7 +217,7 @@ export default function ProtocolsHub() {
         setIsAddManualToAcceptOpen(false);
         setPaperBulkPickModal(null);
 
-        // Czyszczenie nowych stanów po zamknięciu okien
+        // Czyszczenie stanów po zamknięciu okien
         setIssueDocDate(new Date().toISOString().split('T')[0]);
         setIsIssueArchival(false);
         setPaperDocDate(new Date().toISOString().split('T')[0]);
@@ -197,7 +225,7 @@ export default function ProtocolsHub() {
         setPaperSearchInvNumber("");
     };
 
-    // 1. Budowy dla zwykłych akcji (Zwrot z Aplikacji) - Ukrywamy Wpisy Ręczne i Zakończone
+    // Budowy dla zwykłych akcji
     const userSites = sites.filter(s => {
         const sitesArray = user?.assignedSites || [];
         const isAssigned = sitesArray.includes("ALL") || sitesArray.includes(s.id);
@@ -205,13 +233,12 @@ export default function ProtocolsHub() {
         return isAssigned && isRealActiveSite;
     });
 
-    // 2. Budowy do auto-uzupełniania w Wydaniach (Bez śmieci)
+    // Budowy do auto-uzupełniania w Wydaniach
     const activeRealSites = sites.filter(s => s.location !== "Wpis ręczny" && s.status !== "ZAKOŃCZONA");
 
     // -------------------------------------------------------------------------
     // LOGIKA KOSZYKA WYDANIA
     // -------------------------------------------------------------------------
-
     const filteredInventory = inventory.filter(item => {
         if (item.type !== activeTab) return false;
         if (item.subType === "MAIN_CAT") return false;
@@ -223,7 +250,19 @@ export default function ProtocolsHub() {
     });
 
     const addToCart = (item: InventoryItem) => {
-        if (item.availableQuantity <= 0) return alert(`Przedmiot w lokalizacji: ${item.currentLocation}. Najpierw zrób zwrot!`);
+        if (item.availableQuantity <= 0) {
+            if (item.type === "UNIQUE") {
+                const confirmTransfer = window.confirm(
+                    `⚠️ BEZPOŚREDNIE PRZENIESIENIE SPRZĘTU!\n\n` +
+                    `Urządzenie "${item.name}" przebywa obecnie na budowie: ${item.currentLocation || "nieznanej"}.\n\n` +
+                    `Czy chcesz dokonać bezpośredniego przeniesienia tego urządzenia na nową budowę (bez tworzenia sztucznego zwrotu na magazyn)?`
+                );
+                if (!confirmTransfer) return;
+            } else {
+                return alert(`Przedmiot w lokalizacji: ${item.currentLocation}. Najpierw zrób zwrot!`);
+            }
+        }
+
         if (item.status !== "sprawne") return alert(`Przedmiot ma status: ${item.status.toUpperCase()}!`);
         if (cart.find(i => i.dbId === item.id)) return alert("Ten przedmiot jest już w koszyku!");
 
@@ -291,49 +330,65 @@ export default function ProtocolsHub() {
     const handleIssueSubmit = async () => {
         if (!issueSiteInput.trim() || cart.length === 0) return alert("Podaj budowę i wybierz przedmioty!");
 
-        // --- NOWOŚĆ: INTELIGENTNY STRAŻNIK DAT (Tylko dla standardowych wydań) ---
-        if (!isIssueArchival) {
-            setIsSubmitting(true); // Blokuje przycisk na ułamek sekundy podczas sprawdzania
-            try {
-                const conflictingItems = [];
+        setIsSubmitting(true);
 
-                for (const cartItem of cart) {
-                    if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+        // Mapa przechowująca ustaloną chronologicznie datę ostatniej operacji dla każdego urządzenia UNIQUE z koszyka
+        const resolvedLastOpDates: Record<string, string> = {};
 
-                    // Pobieramy najnowszy wpis z historii tego urządzenia
+        try {
+            for (const cartItem of cart) {
+                if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+
+                const localItem = inventory.find(i => i.id === cartItem.dbId);
+                let lastOp: string = localItem?.lastOperationDate || "";
+
+                // Samouzdrawianie danych: jeśli brak pola lastOperationDate w karcie sprzętu, pobierz chronologicznie najnowszą datę z historii
+                if (!lastOp) {
                     const historyRef = collection(db, `inventory/${cartItem.dbId}/history`);
-                    // Sortujemy po dacie systemowej malejąco, by pobrać najświeższy fizycznie wpis
-                    const q = query(historyRef, orderBy("date", "desc"), limit(1));
+                    const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
                     const snap = await getDocs(q);
 
                     if (!snap.empty) {
                         const lastDoc = snap.docs[0].data();
-                        // Szukamy daty z dokumentu (lub jeśli to stary wpis - bierzemy datę systemową)
-                        const lastDocDate = lastDoc.documentDate || lastDoc.date.split('T')[0];
-
-                        // PORÓWNANIE DAT: Jeśli wprowadzamy stary papier, a sprzęt ma nowszą historię
-                        if (lastDocDate > issueDocDate) {
-                            conflictingItems.push(`- ${cartItem.name} (nr ${cartItem.inventoryNumber || 'brak'}): ma już nowszą operację z dnia ${lastDocDate}`);
-                        }
+                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
+                    } else {
+                        lastOp = "";
                     }
                 }
+                resolvedLastOpDates[cartItem.dbId] = lastOp;
+            }
+        } catch (err) {
+            console.error("Błąd podczas badania chronologii historycznej przed transakcją:", err);
+        }
 
-                // Jeśli znaleziono konflikty, blokujemy wysyłkę i informujemy magazyniera
-                if (conflictingItems.length > 0) {
-                    setIsSubmitting(false); // Odblokowujemy przycisk
-                    return alert(
-                        `⚠️ BLOKADA: KONFLIKT DAT!\n\n` +
-                        `Próbujesz wydać sprzęt z datą wsteczną (${issueDocDate}), ale system wykrył nowsze wpisy (np. nowsze zwroty) dla poniższych przedmiotów:\n\n` +
-                        conflictingItems.join("\n") +
-                        `\n\nJeśli wprowadzasz ZALEGŁY papier Wydania dla sprzętu, który zdążył już wrócić, MUSISZ zaznaczyć opcję:\n☑️ "Protokół archiwalny (Nie zdejmuj sprzętu z półki)"!`
-                    );
+        // --- INTELIGENTNE OSTRZEŻENIE DLA MAGAZYNIERA (SOFT-WARNING) ---
+        if (!isIssueArchival) {
+            const conflictingItems: string[] = [];
+            for (const cartItem of cart) {
+                if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+                const lastOp = resolvedLastOpDates[cartItem.dbId];
+                if (lastOp && issueDocDate < lastOp) {
+                    conflictingItems.push(`- ${cartItem.name} (nr Mag: ${cartItem.inventoryNumber || 'brak'}): posiada już nowszy ruch z dnia ${lastOp}`);
                 }
-            } catch (err) {
-                console.error("Błąd podczas walidacji dat:", err);
+            }
+
+            if (conflictingItems.length > 0) {
+                const proceed = window.confirm(
+                    `⚠️ DETEKCJA WPISU WSTECZNEGO / POTENCJALNY BŁĄD!\n\n` +
+                    `System wykrył, że poniższy sprzęt posiada już nowsze operacje w bazie niż wpisywana data wydania (${issueDocDate}):\n\n` +
+                    conflictingItems.join("\n") +
+                    `\n\nMożliwe przyczyny:\n` +
+                    `1. Wprowadzasz zaległy papier wstecz (Wtedy kliknij [ OK ] aby kontynuować).\n` +
+                    `2. Pomyliłeś numer magazynowy sprzętu na półce (Wtedy kliknij [ ANULUJ ], aby sprawdzić sprzęt).\n\n` +
+                    `Czy chcesz kontynuować zapis?`
+                );
+                if (!proceed) {
+                    setIsSubmitting(false);
+                    return; // Przerywa wysyłkę i pozwala magazynierowi poprawić dane
+                }
             }
         }
 
-        setIsSubmitting(true);
         try {
             await runTransaction(db, async (transaction) => {
                 const itemDocs: Record<string, any> = {};
@@ -400,28 +455,77 @@ export default function ProtocolsHub() {
                         const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId!];
                         const data = itemDoc.data();
 
-                        // JESLI NIE JEST ARCHIWALNY - NORMALNIE ZDEJMUJEMY Z MAGAZYNU
-                        if (!isIssueArchival) {
-                            const newAvailable = data.availableQuantity - cartItem.issueQty;
-                            if (newAvailable < 0) throw `Brak wystarczającej ilości dla: ${data.name}`;
+                        // Ochrona chronologiczna dla UNIQUE
+                        const lastOpDate = data.lastOperationDate || resolvedLastOpDates[cartItem.dbId!] || "";
+                        const isNewerOrEqual = !lastOpDate || (issueDocDate >= lastOpDate);
+
+                        // 1. Zmiana stanów aktywnych magazynu zachodzi tylko gdy:
+                        // - Nie jest to protokół archiwalny ORAZ
+                        // - Wpis jest nowszy lub równy chronologicznie ostatniemu znanemu ruchowi
+                        if (!isIssueArchival && isNewerOrEqual) {
+                            let newAvailable = data.availableQuantity - cartItem.issueQty;
+
+                            // Przeniesienie bezpośrednie sprzętu UNIQUE:
+                            // Jeśli sprzęt UNIQUE był na innej budowie (dostępność = 0), po przeniesieniu jego dostępność w magazynie nadal wynosi 0
+                            if (data.type === "UNIQUE" && data.availableQuantity === 0) {
+                                newAvailable = 0;
+                            } else if (newAvailable < 0) {
+                                throw `Brak wystarczającej ilości dla: ${data.name}`;
+                            }
 
                             const currentAllocations = data.allocations || {};
-                            const newAllocations = { ...currentAllocations, [siteId]: (currentAllocations[siteId] || 0) + cartItem.issueQty };
+                            const newAllocations = { ...currentAllocations };
 
-                            const updateData: any = { availableQuantity: newAvailable, allocations: newAllocations };
-                            if (data.type === "UNIQUE") updateData.currentLocation = siteName;
+                            // Dla sprzętu UNIQUE czyścimy poprzednie alokacje budów, aby zachować idealny porządek
+                            if (data.type === "UNIQUE") {
+                                Object.keys(newAllocations).forEach(k => delete newAllocations[k]);
+                            }
+                            newAllocations[siteId] = (newAllocations[siteId] || 0) + cartItem.issueQty;
+
+                            const updateData: any = {
+                                availableQuantity: newAvailable,
+                                allocations: newAllocations,
+                                lastOperationDate: issueDocDate // Zapisujemy nową najświeższą datę operacji
+                            };
+
+                            if (data.type === "UNIQUE") {
+                                updateData.currentLocation = siteName;
+                            }
 
                             transaction.update(itemRef, updateData);
+                        } else if (data.type === "UNIQUE" && !isNewerOrEqual) {
+                            // Samouzdrawianie danych: zapisujemy dotychczasową (wykrytą jako nowszą) datę na stałe do karty urządzenia
+                            transaction.update(itemRef, {
+                                lastOperationDate: lastOpDate
+                            });
                         }
 
+                        // 2. Dodawanie wpisu do historii
                         if (data.type === "UNIQUE") {
                             const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
+
+                            const wasOnOtherSite = data.availableQuantity === 0 && data.currentLocation && data.currentLocation !== "MAGAZYN";
+
+                            let historyDescription = "";
+                            if (isIssueArchival) {
+                                historyDescription = `[ZALEGŁY WPIS - BEZ ZMIANY STANÓW] Wydano na budowę: ${siteName}`;
+                            } else if (isNewerOrEqual) {
+                                if (wasOnOtherSite) {
+                                    historyDescription = `[Przeniesienie bezpośrednie] Pobrano z budowy ${data.currentLocation} i wydano na budowę: ${siteName}`;
+                                } else {
+                                    historyDescription = `Wydano na budowę: ${siteName}`;
+                                }
+                            } else {
+                                historyDescription = `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Wydano na budowę: ${siteName}`;
+                            }
+
                             transaction.set(historyRef, {
                                 date: new Date().toISOString(),
-                                documentDate: issueDocDate, // Nowe pole - data dokumentu
+                                documentDate: issueDocDate,
                                 type: "WYDANIE",
-                                description: `${isIssueArchival ? '[ZALEGŁY WPIS - BEZ ZMIANY STANÓW] ' : ''}Wydano na budowę: ${siteName}`,
-                                status: data.status, user: `${user?.firstName} ${user?.lastName}`
+                                description: historyDescription,
+                                status: data.status,
+                                user: `${user?.firstName} ${user?.lastName}`
                             });
                         }
 
@@ -441,8 +545,8 @@ export default function ProtocolsHub() {
                     protocolId, type: "WYDANIE", sourceId: "MAGAZYN", destinationId: siteId, destinationName: siteName,
                     createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
-                    documentDate: issueDocDate, // Data kwitu
-                    isArchival: isIssueArchival, // Flaga dla archiwalnych
+                    documentDate: issueDocDate,
+                    isArchival: isIssueArchival,
                     items: finalProtocolItems
                 });
             });
@@ -524,10 +628,10 @@ export default function ProtocolsHub() {
             alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
             closeModal();
             fetchPendingProtocols();
+            fetchHistoryProtocols();
         } catch (error: any) { alert("Błąd: " + error.message); } finally { setIsSubmitting(false); }
     };
 
-    // Filtrowanie sprzętu uwzględniające to, co już zablokowane w innych protokołach
     const inventoryOnSelectedSite = inventory
         .map(i => {
             const siteQty = i.allocations?.[returnSiteId] || 0;
@@ -550,7 +654,7 @@ export default function ProtocolsHub() {
     const openPaperReturnModal = async () => {
         await fetchPendingProtocols();
         setPaperReturnActiveTab("UNIQUE");
-        setReturnPhotos([]); // <--- Resetujemy zdjęcia
+        setReturnPhotos([]);
         setIsPaperReturnModalOpen(true);
     };
 
@@ -565,14 +669,12 @@ export default function ProtocolsHub() {
 
         const isSearching = paperSearchName.trim() !== "" || paperSearchInvNumber.trim() !== "";
 
-        // TRYB RATUNKOWY (Tylko dla UNIQUE i tylko jak użytkownik czegoś szuka)
         if (paperReturnActiveTab === "UNIQUE" && isSearching) {
             const matchName = item.name.toLowerCase().includes(paperSearchName.toLowerCase());
             const matchInv = (item.inventoryNumber || "").toLowerCase().includes(paperSearchInvNumber.toLowerCase());
             return matchName && matchInv;
         }
 
-        // STANDARDOWE ZACHOWANIE (Jeśli nie szuka, pokazuj tylko to, co formalnie jest na budowie)
         if (!paperReturnSiteId) return false;
         const siteQty = item.allocations?.[paperReturnSiteId] || 0;
         const lockedQty = lockedInPending[item.id] || 0;
@@ -588,17 +690,15 @@ export default function ProtocolsHub() {
     const addToPaperReturnCart = (item: InventoryItem & { availableToReturn: number }) => {
         if (paperReturnCart.find(i => i.dbId === item.id)) return;
 
-        // Jeśli to sprzęt typu BULK, otwórz modal do podania ilości
         if (item.type === "BULK") {
             setPaperBulkPickModal({ item, qty: 1 });
             return;
         }
 
-        // Dla sprzętu UNIQUE (ilość zawsze 1), dodaj od razu
         setPaperReturnCart(prev => [...prev, {
             cartItemId: Date.now().toString(), dbId: item.id, isManual: false, name: item.name, type: item.type,
             inventoryNumber: item.inventoryNumber || "", unit: item.unit || "szt.", maxQty: item.availableToReturn,
-            declaredQty: 1, // <--- DODANO
+            declaredQty: 1,
             receivedQty: 1,
             finalStatus: "sprawne", notes: ""
         }]);
@@ -615,12 +715,12 @@ export default function ProtocolsHub() {
         setPaperReturnCart(prev => [...prev, {
             cartItemId: Date.now().toString(), dbId: item.id, isManual: false, name: item.name, type: item.type,
             inventoryNumber: item.inventoryNumber || "", unit: item.unit || "szt.", maxQty: item.availableToReturn,
-            declaredQty: qty, // Ustawia ilość z kwitów
-            receivedQty: qty, // Ustawia fizyczną ilość na tę samą wartość
+            declaredQty: qty,
+            receivedQty: qty,
             finalStatus: "sprawne", notes: ""
         }]);
 
-        setPaperBulkPickModal(null); // Zamknij modal
+        setPaperBulkPickModal(null);
     };
 
     const updatePaperReturnItem = (cartItemId: string, field: keyof PaperReturnCartItem, value: any) => {
@@ -636,7 +736,7 @@ export default function ProtocolsHub() {
         setPaperReturnCart(prev => [...prev, {
             cartItemId: Date.now().toString(), isManual: true, name: manualName.trim(), type: "BULK",
             inventoryNumber: "RĘCZNY PAPIER", unit: manualUnit, maxQty: 999999,
-            declaredQty: Number(manualQty), // <--- DODANO
+            declaredQty: Number(manualQty),
             receivedQty: Number(manualQty),
             finalStatus: "sprawne", notes: "Dopisane z papieru"
         }]);
@@ -647,21 +747,69 @@ export default function ProtocolsHub() {
         if (!paperReturnSiteId || paperReturnCart.length === 0) return alert("Wybierz budowę i dodaj przynajmniej jeden przedmiot!");
 
         setIsSubmitting(true);
-        try {
-            // 1. LOGIKA WYTRYCHU
-            // Wytrych działa TYLKO wtedy, gdy zaznaczono "Brak protokołu" i wpisano hasło
-            const isBackdoorUsed = paperDocSource === "BRAK_PROTOKOLU" && paperDocReference.trim().toLowerCase() === "jebacto";
 
-            // Jeśli użyto wytrychu, wymuszamy źródło jako "KIEROWCA" i anulujemy alert
+        const resolvedLastOpDates: Record<string, string> = {};
+
+        try {
+            for (const cartItem of paperReturnCart) {
+                if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+
+                const localItem = inventory.find(i => i.id === cartItem.dbId);
+                let lastOp: string = localItem?.lastOperationDate || "";
+
+                if (!lastOp) {
+                    const historyRef = collection(db, `inventory/${cartItem.dbId}/history`);
+                    const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
+                    const snap = await getDocs(q);
+
+                    if (!snap.empty) {
+                        const lastDoc = snap.docs[0].data();
+                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
+                    } else {
+                        lastOp = "";
+                    }
+                }
+                resolvedLastOpDates[cartItem.dbId] = lastOp;
+            }
+        } catch (err) {
+            console.error("Błąd badania chronologii dla zwrotu papierowego:", err);
+        }
+
+        // --- INTELIGENTNE OSTRZEŻENIE DLA ZWROTÓW PAPIEROWYCH (SOFT-WARNING) ---
+        const conflictingItems: string[] = [];
+        for (const cartItem of paperReturnCart) {
+            if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+            const lastOp = resolvedLastOpDates[cartItem.dbId];
+            if (lastOp && paperDocDate < lastOp) {
+                conflictingItems.push(`- ${cartItem.name} (nr Mag: ${cartItem.inventoryNumber || 'brak'}): posiada już nowszy ruch z dnia ${lastOp}`);
+            }
+        }
+
+        if (conflictingItems.length > 0) {
+            const proceed = window.confirm(
+                `⚠️ DETEKCJA ZWROTU WSTECZNY / POTENCJALNY BŁĄD!\n\n` +
+                `System wykrył, że wprowadzany zwrot z dnia ${paperDocDate} jest starszy niż nowsze operacje na tym sprzęcie w bazie:\n\n` +
+                conflictingItems.join("\n") +
+                `\n\nMożliwe przyczyny:\n` +
+                `1. Wprowadzasz zaległy papier zwrotu wstecz (Wtedy kliknij [ OK ] aby kontynuować).\n` +
+                `2. Pomyliłeś numer magazynowy sprzętu (Wtedy kliknij [ ANULUJ ], aby zweryfikować dane).\n\n` +
+                `Czy chcesz kontynuować zapis?`
+            );
+            if (!proceed) {
+                setIsSubmitting(false);
+                return;
+            }
+        }
+
+        try {
+            const isBackdoorUsed = paperDocSource === "BRAK_PROTOKOLU" && paperDocReference.trim().toLowerCase() === "jebacto";
             const finalPaperSource = isBackdoorUsed ? "KIEROWCA" : paperDocSource;
             const requiresManagerAlert = (finalPaperSource === "BRAK_PROTOKOLU");
 
-            // Ukrywamy słowo-klucz przed zapisem w bazie
             const finalPaperReference = isBackdoorUsed
                 ? "[Obejście - Wpisano jako Kierowca]"
                 : paperDocReference;
 
-            // 2. Wgrywanie zdjęć do Firebase Storage
             const photoURLs: string[] = [];
             if (returnPhotos.length > 0) {
                 const storage = getStorage();
@@ -674,14 +822,12 @@ export default function ProtocolsHub() {
                 }
             }
 
-            // 3. Transakcja Firestore
             await runTransaction(db, async (transaction) => {
                 const siteName = sites.find(s => s.id === paperReturnSiteId)?.name || "Nieznana budowa";
                 const protocolRef = doc(collection(db, "protocols"));
                 const protocolId = `PAP-ZWR-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
 
                 const itemDocs: Record<string, any> = {};
-                // Pobieramy z bazy wszystkie dokumenty (poza wpisami ręcznymi)
                 for (const item of paperReturnCart) {
                     if (!item.isManual && item.dbId) {
                         const itemRef = doc(db, "inventory", item.dbId);
@@ -695,7 +841,6 @@ export default function ProtocolsHub() {
 
                 for (const cartItem of paperReturnCart) {
                     if (cartItem.isManual) {
-                        // Tworzenie nowego wirtualnego bytu dla wpisu ręcznego
                         const newDocRef = doc(collection(db, "inventory"));
                         transaction.set(newDocRef, {
                             name: cartItem.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Wpis ręczny z papieru",
@@ -710,8 +855,8 @@ export default function ProtocolsHub() {
                             type: "BULK",
                             inventoryNumber: "RĘCZNY ZWROT",
                             unit: cartItem.unit,
-                            declaredQty: cartItem.declaredQty, // <-- Zapis ilości z kwitu
-                            receivedQty: cartItem.receivedQty, // <-- Zapis ilości fizycznej
+                            declaredQty: cartItem.declaredQty,
+                            receivedQty: cartItem.receivedQty,
                             finalStatus: "sprawne",
                             warehouseNotes: cartItem.notes,
                             accessories: []
@@ -722,7 +867,6 @@ export default function ProtocolsHub() {
 
                         if (itemData.type === "BULK") {
                             const currentSiteQty = itemData.allocations?.[paperReturnSiteId] || 0;
-                            // Odejmujemy TYLKO to co fizycznie przyjechało
                             const newSiteQty = Math.max(0, currentSiteQty - cartItem.receivedQty);
                             const newAvailable = itemData.availableQuantity + cartItem.receivedQty;
 
@@ -731,35 +875,52 @@ export default function ProtocolsHub() {
                                 availableQuantity: newAvailable
                             });
                         } else if (itemData.type === "UNIQUE") {
+                            const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[cartItem.dbId!] || "";
+                            const isNewerOrEqual = !lastOpDate || (paperDocDate >= lastOpDate);
 
-                            // Logika wykrywania Wymuszonego Zwrotu
-                            const wasOnWarehouse = itemData.availableQuantity === 1;
-                            const prevLocation = itemData.currentLocation || "Nieznana";
-                            const isForceful = prevLocation !== siteName && !wasOnWarehouse;
+                            if (isNewerOrEqual) {
+                                const wasOnWarehouse = itemData.availableQuantity === 1;
+                                const prevLocation = itemData.currentLocation || "Nieznana";
+                                const isForceful = prevLocation !== siteName && !wasOnWarehouse;
 
-                            let forceWarning = "";
-                            if (wasOnWarehouse) {
-                                forceWarning = "[⚠️ WYMUSZONY ZWROT - Wg systemu był w Magazynie] ";
-                            } else if (isForceful) {
-                                forceWarning = `[⚠️ WYMUSZONY ZWROT - Ściągnięto systemowo z innej budowy: ${prevLocation}] `;
+                                let forceWarning = "";
+                                if (wasOnWarehouse) {
+                                    forceWarning = "[⚠️ WYMUSZONY ZWROT - Wg systemu był w Magazynie] ";
+                                } else if (isForceful) {
+                                    forceWarning = `[⚠️ WYMUSZONY ZWROT - Ściągnięto systemowo z innej budowy: ${prevLocation}] `;
+                                }
+
+                                transaction.update(itemRef, {
+                                    currentLocation: "MAGAZYN",
+                                    status: cartItem.finalStatus,
+                                    availableQuantity: 1,
+                                    allocations: {},
+                                    lastOperationDate: paperDocDate
+                                });
+
+                                const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
+                                transaction.set(historyRef, {
+                                    date: new Date().toISOString(),
+                                    documentDate: paperDocDate,
+                                    type: "ZWROT",
+                                    description: `${forceWarning}Zwrot papierowy z: ${siteName}. Nr Dok: ${finalPaperReference || 'Brak'}. Źródło: ${finalPaperSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
+                                    status: cartItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`
+                                });
+                            } else {
+                                // Samouzdrawianie danych: starsza operacja wsteczna nie zmienia lokalizacji aktywnej, uzdrawia pole daty
+                                transaction.update(itemRef, {
+                                    lastOperationDate: lastOpDate
+                                });
+
+                                const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
+                                transaction.set(historyRef, {
+                                    date: new Date().toISOString(),
+                                    documentDate: paperDocDate,
+                                    type: "ZWROT",
+                                    description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Zwrot papierowy z: ${siteName}. Nr Dok: ${finalPaperReference || 'Brak'}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
+                                    status: cartItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`
+                                });
                             }
-
-                            // Czyścimy wszystkie przypisania i dajemy na Magazyn
-                            transaction.update(itemRef, {
-                                currentLocation: "MAGAZYN",
-                                status: cartItem.finalStatus,
-                                availableQuantity: 1,
-                                allocations: {}
-                            });
-
-                            const historyRef = doc(collection(db, `inventory/${cartItem.dbId}/history`));
-                            transaction.set(historyRef, {
-                                date: new Date().toISOString(),
-                                documentDate: paperDocDate, // data dokumentu
-                                type: "ZWROT",
-                                description: `${forceWarning}Zwrot papierowy z: ${siteName}. Nr Dok: ${finalPaperReference || 'Brak'}. Źródło: ${finalPaperSource}. Przyjęto jako: ${cartItem.finalStatus}. Uwagi: ${cartItem.notes}`,
-                                status: cartItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`
-                            });
                         }
 
                         finalProtocolItems.push({
@@ -768,8 +929,8 @@ export default function ProtocolsHub() {
                             type: cartItem.type,
                             inventoryNumber: cartItem.inventoryNumber,
                             unit: cartItem.unit,
-                            declaredQty: cartItem.declaredQty, // <-- Zapis ilości z kwitu
-                            receivedQty: cartItem.receivedQty, // <-- Zapis ilości fizycznej
+                            declaredQty: cartItem.declaredQty,
+                            receivedQty: cartItem.receivedQty,
                             finalStatus: cartItem.finalStatus,
                             warehouseNotes: cartItem.notes,
                             accessories: []
@@ -792,7 +953,7 @@ export default function ProtocolsHub() {
                     acceptedByName: `${user?.firstName} ${user?.lastName}`,
                     status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
-                    documentDate: paperDocDate, // Data z kwitu
+                    documentDate: paperDocDate,
                     acceptedAt: new Date().toISOString(),
                     items: finalProtocolItems,
                     requiresManagerAlert,
@@ -809,7 +970,6 @@ export default function ProtocolsHub() {
             setIsSubmitting(false);
         }
     };
-
 
     // -------------------------------------------------------------------------
     // AKCEPTACJA ZWROTU PRZEZ MAGAZYNIERA (Aplikacyjna)
@@ -840,6 +1000,10 @@ export default function ProtocolsHub() {
         setAcceptInputs(initialInputs);
         setSelectedProtocol(protocol);
         setReturnPhotos([]);
+
+        // Domyślnie ustawiamy datę fizycznego przyjęcia na datę zgłoszenia zwrotu przez kierownika
+        const protocolDate = protocol.createdAt ? protocol.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
+        setAcceptReturnDocDate(protocolDate);
     };
 
     const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -917,6 +1081,59 @@ export default function ProtocolsHub() {
         }
 
         setIsSubmitting(true);
+
+        const resolvedLastOpDates: Record<string, string> = {};
+        const acceptDate = acceptReturnDocDate; // Używamy wybranej przez magazyniera daty fizycznego przyjęcia
+
+        try {
+            for (const item of selectedProtocol.items) {
+                if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
+
+                const localItem = inventory.find(i => i.id === item.inventoryId);
+                let lastOp: string = localItem?.lastOperationDate || "";
+
+                if (!lastOp) {
+                    const historyRef = collection(db, `inventory/${item.inventoryId}/history`);
+                    const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
+                    const snap = await getDocs(q);
+
+                    if (!snap.empty) {
+                        const lastDoc = snap.docs[0].data();
+                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
+                    } else {
+                        lastOp = "";
+                    }
+                }
+                resolvedLastOpDates[item.inventoryId] = lastOp;
+            }
+        } catch (err) {
+            console.error("Błąd badania chronologii dla akceptacji zwrotu:", err);
+        }
+
+        // --- INTELIGENTNE OSTRZEŻENIE PRZY AKCEPTACJI ZWROTÓW (SOFT-WARNING) ---
+        const conflictingItems: string[] = [];
+        for (const item of selectedProtocol.items) {
+            if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
+            const lastOp = resolvedLastOpDates[item.inventoryId];
+            if (lastOp && acceptDate < lastOp) {
+                conflictingItems.push(`- ${item.name} (nr Mag: ${item.inventoryNumber || 'brak'}): posiada nowszy ruch z dnia ${lastOp}`);
+            }
+        }
+
+        if (conflictingItems.length > 0) {
+            const proceed = window.confirm(
+                `⚠️ OSTRZEŻENIE: ZWROT WSTECZNY DLA AKTYWNEGO SPRZĘTU!\n\n` +
+                `System wykrył, że wprowadzana fizyczna data zwrotu (${acceptDate}) jest starsza niż nowsze operacje na tym sprzęcie w bazie:\n\n` +
+                conflictingItems.join("\n") +
+                `\n\nSprzęt ten został już wydany na kolejną budowę. Jeśli klikniesz [ OK ], zwrot zostanie zarejestrowany jako wpis wsteczny w historii, ale system NIE ŚCIĄGNIE tego sprzętu z obecnej budowy.\n\n` +
+                `Czy chcesz kontynuować akceptację?`
+            );
+            if (!proceed) {
+                setIsSubmitting(false);
+                return;
+            }
+        }
+
         try {
             const photoURLs: string[] = [];
             if (returnPhotos.length > 0) {
@@ -1015,21 +1232,43 @@ export default function ProtocolsHub() {
                             availableQuantity: newAvailable
                         });
                     } else if (itemData.type === "UNIQUE") {
-                        transaction.update(itemRef, {
-                            currentLocation: "MAGAZYN",
-                            status: workerInput.finalStatus,
-                            availableQuantity: 1,
-                            [`allocations.${selectedProtocol.sourceId}`]: 0
-                        });
+                        const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[item.inventoryId] || "";
+                        const isNewerOrEqual = !lastOpDate || (acceptDate >= lastOpDate);
 
-                        const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
-                        transaction.set(historyRef, {
-                            date: new Date().toISOString(),
-                            type: "ZWROT",
-                            description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${workerInput.createClaim ? ' [Zgłoszono do Centrum Likwidacji Szkód]' : ''}`,
-                            status: workerInput.finalStatus,
-                            user: `${user?.firstName} ${user?.lastName}`
-                        });
+                        if (isNewerOrEqual) {
+                            transaction.update(itemRef, {
+                                currentLocation: "MAGAZYN",
+                                status: workerInput.finalStatus,
+                                availableQuantity: 1,
+                                [`allocations.${selectedProtocol.sourceId}`]: 0,
+                                lastOperationDate: acceptDate
+                            });
+
+                            const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(),
+                                documentDate: acceptDate,
+                                type: "ZWROT",
+                                description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${workerInput.createClaim ? ' [Zgłoszono do Centrum Likwidacji Szkód]' : ''}`,
+                                status: workerInput.finalStatus,
+                                user: `${user?.firstName} ${user?.lastName}`
+                            });
+                        } else {
+                            // Samouzdrawianie danych przy akceptacji: starsza operacja wsteczna nie zmienia stanu aktywnego
+                            transaction.update(itemRef, {
+                                lastOperationDate: lastOpDate
+                            });
+
+                            const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(),
+                                documentDate: acceptDate,
+                                type: "ZWROT",
+                                description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Zwrócono z: ${selectedProtocol.sourceName}. Przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}`,
+                                status: workerInput.finalStatus,
+                                user: `${user?.firstName} ${user?.lastName}`
+                            });
+                        }
                     }
 
                     updatedItemsForProtocol.push({
@@ -1064,6 +1303,65 @@ export default function ProtocolsHub() {
         }
     };
 
+    // Funkcja badająca niezgodności ilościowe/statusowe/brak protokołów papierowych
+    const checkDiscrepancies = (protocol: any) => {
+        if (protocol.type !== "ZWROT" || protocol.status === "OCZEKUJACY") return false;
+        if (protocol.documentSource === "PAPER" && protocol.paperDocumentSource === "BRAK_PROTOKOLU") return true;
+
+        return protocol.items?.some((item: any) => {
+            const decQty = item.declaredQty !== undefined ? item.declaredQty : (item.quantity !== undefined ? item.quantity : 1);
+            const recQty = item.receivedQty !== undefined ? item.receivedQty : decQty;
+            const decStatus = item.declaredStatus || "sprawne";
+            const finStatus = item.finalStatus || decStatus;
+            const hasNotes = !!item.warehouseNotes;
+
+            return (
+                decQty !== recQty ||
+                decStatus !== finStatus ||
+                finStatus === "uszkodzone" ||
+                hasNotes ||
+                item.isNewManual
+            );
+        }) || false;
+    };
+
+    // --- FILTROWANIE DLA HISTORII PROTOKOŁÓW ---
+    const filteredHistoryProtocols = historyProtocols.filter(p => {
+        // Filtrowanie po budowie
+        if (histFilterSite) {
+            const isMatch = p.destinationId === histFilterSite || p.sourceId === histFilterSite;
+            if (!isMatch) return false;
+        }
+
+        // Filtrowanie po typie
+        if (histFilterType !== "ALL") {
+            if (histFilterType === "WYDANIE" && p.type !== "WYDANIE") return false;
+            if (histFilterType === "ZWROT_APP" && (p.type !== "ZWROT" || p.documentSource === "PAPER")) return false;
+            if (histFilterType === "ZWROT_PAPER" && (p.type !== "ZWROT" || p.documentSource !== "PAPER")) return false;
+        }
+
+        // Zaawansowane przeszukiwanie (id, nazwa sprzętu, nr inwentarzowy)
+        if (histFilterSearch.trim()) {
+            const searchLower = histFilterSearch.toLowerCase();
+            const idMatches = (p.protocolId || "").toLowerCase().includes(searchLower);
+            const refMatches = (p.paperReference || "").toLowerCase().includes(searchLower);
+            const creatorMatches = (p.createdByName || "").toLowerCase().includes(searchLower);
+            const itemMatches = p.items?.some((item: any) =>
+                (item.name || "").toLowerCase().includes(searchLower) ||
+                (item.inventoryNumber || "").toLowerCase().includes(searchLower)
+            );
+
+            if (!idMatches && !refMatches && !itemMatches && !creatorMatches) return false;
+        }
+
+        // Zakres dat na podstawie daty protokołu (documentDate lub createdAt)
+        const pDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
+        if (histFilterDateFrom && pDate < histFilterDateFrom) return false;
+        if (histFilterDateTo && pDate > histFilterDateTo) return false;
+
+        return true;
+    });
+
     if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie modułu protokołów...</div>;
 
     return (
@@ -1071,28 +1369,28 @@ export default function ProtocolsHub() {
             <h1 className="text-3xl font-bold text-slate-800 tracking-tight mb-8">Centrum Protokołów</h1>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
-                {/* 1. WYDANIE (Klucz: protocolsIssue) */}
+                {/* 1. WYDANIE */}
                 {user && hasPermission("protocolsIssue", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={() => setIsIssueModalOpen(true)} className="bg-green-50 hover:bg-green-100 border border-green-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">📤</div><h3 className="font-bold text-green-900">Wystaw Wydanie</h3><p className="text-xs text-green-700 mt-1">Z magazynu na budowę</p>
                     </div>
                 )}
 
-                {/* 2. ZWROT APLIKACYJNY (Klucz: protocolsReturnApp) */}
+                {/* 2. ZWROT APLIKACYJNY */}
                 {user && hasPermission("protocolsReturnApp", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={openReturnModal} className="bg-blue-50 hover:bg-blue-100 border border-blue-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">📲</div><h3 className="font-bold text-blue-900">Zgłoś Zwrot</h3><p className="text-xs text-blue-700 mt-1">Kierownik: z budowy do magazynu</p>
                     </div>
                 )}
 
-                {/* 3. ZWROT PAPIEROWY (Klucz: protocolsReturnPaper) */}
+                {/* 3. ZWROT PAPIEROWY */}
                 {user && hasPermission("protocolsReturnPaper", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={openPaperReturnModal} className="bg-orange-50 hover:bg-orange-100 border border-orange-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">📝</div><h3 className="font-bold text-orange-900">Wprowadź Zwrot</h3><p className="text-xs text-orange-700 mt-1">Przepisz z papieru</p>
                     </div>
                 )}
 
-                {/* 4. AKCEPTACJA (Klucz: acceptReturns - pozostaje bez zmian) */}
+                {/* 4. AKCEPTACJA */}
                 {user && hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides) && (
                     <div onClick={openAcceptModal} className="bg-purple-50 hover:bg-purple-100 border border-purple-200 p-6 rounded-2xl cursor-pointer transition shadow-sm group relative">
                         <div className="text-3xl mb-2 group-hover:scale-110 transition">✅</div><h3 className="font-bold text-purple-900">Akceptuj Zwroty</h3><p className="text-xs text-purple-700 mt-1">Magazyn: weryfikacja i przyjęcie</p>
@@ -1100,9 +1398,237 @@ export default function ProtocolsHub() {
                 )}
             </div>
 
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center text-slate-500">
-                Lista ostatnio wystawionych protokołów pojawi się tutaj... (Faza 4)
-            </div>
+            {/* --- SEKCJA: HISTORIA PROTOKOŁÓW --- */}
+            {user && hasPermission("viewProtocolHistory", user.rolePermissions, user.permissionOverrides) ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mt-8">
+                    <div className="border-b pb-4 mb-6">
+                        <h2 className="text-xl font-bold text-slate-800">Historia Protokołów</h2>
+                        <p className="text-xs text-slate-500 mt-0.5">Wyszukiwarka i pełne zestawienie dokumentów operacyjnych magazynu</p>
+                    </div>
+
+                    {/* FILTRY WYSZUKIWARKI */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                        <div>
+                            <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1.5">Wybierz budowę</label>
+                            <select
+                                value={histFilterSite}
+                                onChange={e => setHistFilterSite(e.target.value)}
+                                className="w-full p-2.5 text-xs bg-white border border-slate-200 rounded-lg outline-none font-semibold text-slate-700"
+                            >
+                                <option value="">-- Wszystkie budowy --</option>
+                                {sites.map(s => (
+                                    <option key={s.id} value={s.id}>{s.name}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1.5">Typ protokołu</label>
+                            <select
+                                value={histFilterType}
+                                onChange={e => setHistFilterType(e.target.value)}
+                                className="w-full p-2.5 text-xs bg-white border border-slate-200 rounded-lg outline-none font-semibold text-slate-700"
+                            >
+                                <option value="ALL">Wszystkie dokumenty</option>
+                                <option value="WYDANIE">📤 Wydania na budowę</option>
+                                <option value="ZWROT_APP">📲 Zwroty aplikacyjne</option>
+                                <option value="ZWROT_PAPER">📝 Zwroty papierowe</option>
+                            </select>
+                        </div>
+
+                        <div className="lg:col-span-2">
+                            <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1.5">Szukaj (ID, Nazwa sprzętu, Nr inwentarzowy, Pracownik)</label>
+                            <input
+                                type="text"
+                                placeholder="Wpisz szukaną frazę..."
+                                value={histFilterSearch}
+                                onChange={e => setHistFilterSearch(e.target.value)}
+                                className="w-full p-2.5 text-xs bg-white border border-slate-200 rounded-lg outline-none font-semibold text-slate-700"
+                            />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1.5">Od daty</label>
+                                <input
+                                    type="date"
+                                    value={histFilterDateFrom}
+                                    onChange={e => setHistFilterDateFrom(e.target.value)}
+                                    className="w-full p-2 text-xs bg-white border border-slate-200 rounded-lg outline-none font-semibold text-slate-700"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1.5">Do daty</label>
+                                <input
+                                    type="date"
+                                    value={histFilterDateTo}
+                                    onChange={e => setHistFilterDateTo(e.target.value)}
+                                    className="w-full p-2 text-xs bg-white border border-slate-200 rounded-lg outline-none font-semibold text-slate-700"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* LISTA WYNIKÓW */}
+                    {historyLoading ? (
+                        <div className="text-center py-12 text-slate-500 animate-pulse text-sm">Pobieranie historii...</div>
+                    ) : filteredHistoryProtocols.length === 0 ? (
+                        <div className="text-center py-12 text-slate-400 border border-dashed rounded-xl bg-slate-50 text-sm">
+                            Brak protokołów spełniających kryteria wyszukiwania.
+                        </div>
+                    ) : (
+                        <div className="border border-slate-100 rounded-xl overflow-hidden shadow-sm">
+                            <table className="w-full text-left border-collapse bg-white">
+                                <thead className="bg-slate-50 text-slate-400 text-[10px] font-bold uppercase tracking-wider border-b border-slate-100">
+                                    <tr>
+                                        <th className="p-4">Kod Protokołu</th>
+                                        <th className="p-4">Typ</th>
+                                        <th className="p-4">Budowa</th>
+                                        <th className="p-4">Data dokumentu</th>
+                                        <th className="p-4">Wystawił</th>
+                                        <th className="p-4">Ilość pozycji</th>
+                                        <th className="p-4 text-right">Szczegóły</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
+                                    {[...filteredHistoryProtocols]
+                                        .sort((a, b) => {
+                                            const dateA = a.documentDate || (a.createdAt ? a.createdAt.split("T")[0] : "");
+                                            const dateB = b.documentDate || (b.createdAt ? b.createdAt.split("T")[0] : "");
+
+                                            // Sortowanie główne: data dokumentu malejąco (od najnowszej)
+                                            if (dateA !== dateB) {
+                                                return dateB.localeCompare(dateA);
+                                            }
+                                            // Sortowanie pomocnicze: data systemowa malejąco (remisy)
+                                            return (b.createdAt || "").localeCompare(a.createdAt || "");
+                                        })
+                                        .map(p => {
+                                            const isExpanded = expandedProtocolId === p.dbId;
+                                            const pDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "-");
+                                            const totalItems = p.items?.length || 0;
+
+                                            const hasAlert = checkDiscrepancies(p);
+                                            const isNoDoc = p.documentSource === "PAPER" && p.paperDocumentSource === "BRAK_PROTOKOLU";
+
+                                            return (
+                                                <Fragment key={p.dbId}>
+                                                    <tr
+                                                        className={`transition cursor-pointer 
+                                                        ${isExpanded ? 'bg-slate-50/70' : 'hover:bg-slate-50/50'} 
+                                                        ${hasAlert ? 'bg-red-50/30 hover:bg-red-50/50 border-l-4 border-l-red-500' : ''}`}
+                                                        onClick={() => setExpandedProtocolId(isExpanded ? null : p.dbId)}
+                                                    >
+                                                        <td className="p-4 font-bold font-mono text-slate-800">
+                                                            <div className="flex items-center gap-2">
+                                                                <span>{p.protocolId}</span>
+                                                                {hasAlert && (
+                                                                    <span className="bg-red-100 text-red-700 text-[9px] px-2 py-0.5 rounded font-black uppercase tracking-wider animate-pulse whitespace-nowrap">
+                                                                        {isNoDoc ? '⚠️ BRAK PROTOKOŁU' : '⚠️ NIEZGODNOŚĆ'}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                        <td className="p-4">
+                                                            {p.type === "WYDANIE" ? (
+                                                                <span className="bg-green-100 text-green-800 text-[10px] font-black px-2 py-1 rounded uppercase">Wydanie</span>
+                                                            ) : p.documentSource === "PAPER" ? (
+                                                                <span className="bg-orange-100 text-orange-800 text-[10px] font-black px-2 py-1 rounded uppercase">Zwrot (Papier)</span>
+                                                            ) : (
+                                                                <span className="bg-blue-100 text-blue-800 text-[10px] font-black px-2 py-1 rounded uppercase">Zwrot (App)</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="p-4 font-semibold text-slate-800">
+                                                            {p.type === "WYDANIE" ? p.destinationName : p.sourceName}
+                                                        </td>
+                                                        <td className="p-4 font-bold text-slate-600">{pDate}</td>
+                                                        <td className="p-4 text-xs text-slate-500">{p.createdByName || "System"}</td>
+                                                        <td className="p-4 text-xs font-semibold">{totalItems} szt.</td>
+                                                        <td className="p-4 text-right">
+                                                            <button className="text-slate-400 hover:text-slate-800 text-xs font-black">
+                                                                {isExpanded ? "▲ UKRYJ" : "▼ POKAŻ"}
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                    {isExpanded && (
+                                                        <tr>
+                                                            <td colSpan={7} className="p-5 bg-slate-50 border-t border-b border-slate-100">
+                                                                <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-inner space-y-4">
+                                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-b pb-3 mb-3 text-xs text-slate-500">
+                                                                        <div>
+                                                                            <span className="font-bold uppercase text-slate-400 block text-[9px] tracking-wider">Metadane systemowe</span>
+                                                                            <p className="mt-1 font-semibold text-slate-800">Data utworzenia w bazie: <span className="font-normal text-slate-600">{new Date(p.createdAt).toLocaleString()}</span></p>
+                                                                            {p.acceptedAt && <p className="font-semibold text-slate-800">Zaakceptowano: <span className="font-normal text-slate-600">{new Date(p.acceptedAt).toLocaleString()}</span></p>}
+                                                                        </div>
+                                                                        <div>
+                                                                            <span className="font-bold uppercase text-slate-400 block text-[9px] tracking-wider">Szczegóły dokumentu papierowego</span>
+                                                                            <p className="mt-1 font-semibold text-slate-800">Nr Kwitu/Odnośnik: <span className="font-bold text-orange-700">{p.paperReference || "Brak / Nie dotyczy"}</span></p>
+                                                                            {p.paperDocumentSource && <p className="font-semibold text-slate-800">Przekazał: <span className="font-semibold text-slate-600">{p.paperDocumentSource}</span></p>}
+                                                                        </div>
+                                                                        {p.photos && p.photos.length > 0 && (
+                                                                            <div>
+                                                                                <span className="font-bold uppercase text-slate-400 block text-[9px] tracking-wider">Załączone zdjęcia</span>
+                                                                                <div className="flex gap-2 mt-1">
+                                                                                    {p.photos.map((url: string, index: number) => (
+                                                                                        <a key={index} href={url} target="_blank" rel="noreferrer" className="w-10 h-10 border rounded bg-slate-100 overflow-hidden flex items-center justify-center hover:opacity-80 transition">
+                                                                                            <img src={url} alt="zalacznik" className="object-cover w-full h-full" />
+                                                                                        </a>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+
+                                                                    <div>
+                                                                        <p className="font-bold text-xs uppercase text-slate-400 tracking-wider mb-2">Spis sprzętu i materiałów</p>
+                                                                        <div className="space-y-1.5">
+                                                                            {p.items?.map((item: any, idx: number) => (
+                                                                                <div key={idx} className="flex justify-between items-center p-2.5 rounded-lg border border-slate-100 bg-slate-50/50 text-xs">
+                                                                                    <div>
+                                                                                        <span className="font-bold text-slate-800">{item.name}</span>
+                                                                                        <span className="font-mono text-[10px] text-slate-500 ml-2">Nr: {item.inventoryNumber || "BRAK"}</span>
+                                                                                    </div>
+                                                                                    <div className="text-right flex items-center gap-4">
+                                                                                        {p.type === "WYDANIE" ? (
+                                                                                            <span className="font-bold text-slate-700">Wydana ilość: <span className="text-sm font-black text-green-600">{item.quantity} {item.unit}</span></span>
+                                                                                        ) : (
+                                                                                            <div className="flex items-center gap-3">
+                                                                                                {item.declaredQty !== undefined && (
+                                                                                                    <span className="text-[11px] text-slate-500">Zadeklarowane: <b>{item.declaredQty} {item.unit}</b></span>
+                                                                                                )}
+                                                                                                <span className="font-bold text-slate-700">Przyjęte fizycznie: <span className="text-sm font-black text-blue-600">{item.receivedQty ?? item.declaredQty ?? 1} {item.unit}</span></span>
+                                                                                                {item.finalStatus && (
+                                                                                                    <span className={`px-1.5 py-0.5 rounded font-bold uppercase text-[9px] ${item.finalStatus === 'sprawne' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                                                                                        {item.finalStatus}
+                                                                                                    </span>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        )}
+                                                                                        {item.warehouseNotes && (
+                                                                                            <span className="italic text-[11px] text-slate-500 border-l pl-2">Notatka: {item.warehouseNotes}</span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </Fragment>
+                                            );
+                                        })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            ) : (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center text-slate-400 mt-8">
+                    Brak uprawnień do przeglądania historii protokołów.
+                </div>
+            )}
 
             {/* MODAL 1: WYDANIE */}
             {isIssueModalOpen && (
@@ -1134,6 +1660,10 @@ export default function ProtocolsHub() {
                                         const isAvailable = item.availableQuantity > 0;
                                         const isBroken = item.status !== "sprawne";
                                         const isInCart = !!cart.find(i => i.dbId === item.id);
+
+                                        // Sprzęt jest zdatny do dodania jeśli: jest dostępny na magazynie LUB jest typu UNIQUE i nie jest uszkodzony
+                                        const canAdd = isAvailable || (item.type === "UNIQUE" && !isBroken);
+
                                         return (
                                             <div key={item.id} className={`flex justify-between items-center p-3 border rounded-xl shadow-sm transition
                                                 ${isInCart ? 'bg-green-50 border-green-300' : isAvailable ? 'bg-white' : 'bg-slate-100 opacity-60'}
@@ -1146,8 +1676,17 @@ export default function ProtocolsHub() {
                                                 </div>
                                                 {isInCart ? (
                                                     <span className="text-[10px] bg-green-100 text-green-700 font-black px-2 py-1 rounded-lg uppercase">W koszyku</span>
-                                                ) : isAvailable && !isBroken ? (
-                                                    <button onClick={() => addToCart(item)} className="bg-slate-100 hover:bg-green-600 hover:text-white text-green-600 w-10 h-10 rounded-lg font-black text-xl transition">+</button>
+                                                ) : canAdd ? (
+                                                    <button
+                                                        onClick={() => addToCart(item)}
+                                                        className={`w-10 h-10 rounded-lg font-black text-lg transition flex items-center justify-center ${isAvailable
+                                                            ? 'bg-slate-100 hover:bg-green-600 hover:text-white text-green-600'
+                                                            : 'bg-orange-50 hover:bg-orange-600 hover:text-white text-orange-600 border border-orange-200'
+                                                            }`}
+                                                        title={!isAvailable ? "Przenieś bezpośrednio z innej budowy" : "Dodaj do koszyka"}
+                                                    >
+                                                        {isAvailable ? "+" : "🔄"}
+                                                    </button>
                                                 ) : (
                                                     <div className="text-[10px] text-red-500 font-bold text-center uppercase leading-tight">Zablokowane</div>
                                                 )}
@@ -1353,7 +1892,7 @@ export default function ProtocolsHub() {
                                     {!returnSiteId ? (
                                         <div className="text-center p-10 text-slate-400">Wybierz budowę z listy powyżej.</div>
                                     ) : filteredReturnInventory.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400">Brak dostępnego sprzętu w tej kategorii (lub cały jest już zgłoszony i oczekuje na magazynie).</div>
+                                        <div className="text-center p-10 text-slate-400">Brak dostępnego sprzętu w tej kategorii.</div>
                                     ) : filteredReturnInventory.map(item => (
                                         <div key={item.id} className="flex justify-between items-center p-3 border rounded-xl bg-white hover:border-blue-300 transition shadow-sm">
                                             <div>
@@ -1454,7 +1993,7 @@ export default function ProtocolsHub() {
                                 </div>
                                 <div className="w-[45%]">
                                     <label className="block text-[11px] font-black text-slate-400 uppercase mb-1">Jednostka</label>
-                                    <select value={manualUnit} onChange={(e) => setManualUnit(e.target.value)} className="w-full p-3 border-2 rounded-xl outline-none focus:border-blue-500 font-bold bg-white text-center cursor-pointer">
+                                    <select value={manualUnit} onChange={(e) => setManualUnit(e.target.value)} className="w-full p-3 border-2 rounded-xl outline-none focus:border-orange-500 font-bold bg-white text-center cursor-pointer">
                                         <option value="szt.">szt.</option><option value="kg">kg</option><option value="mb">mb</option><option value="m²">m²</option><option value="m³">m³</option><option value="kpl.">kpl.</option><option value="opak.">opak.</option>
                                     </select>
                                 </div>
@@ -1498,7 +2037,7 @@ export default function ProtocolsHub() {
                                         <button onClick={() => setPaperReturnActiveTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'MANUAL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}>WPISY RĘCZNE</button>
                                     </div>
 
-                                    {/* NOWE: WYSZUKIWARKA RATUNKOWA */}
+                                    {/* WYSZUKIWARKA RATUNKOWA */}
                                     {paperReturnActiveTab === "UNIQUE" && (
                                         <div className="flex gap-2">
                                             <input type="text" placeholder="Szukaj nazwy..." value={paperSearchName} onChange={e => setPaperSearchName(e.target.value)} className="w-full p-2 border rounded-lg text-sm bg-white outline-none focus:border-orange-400" />
@@ -1510,7 +2049,7 @@ export default function ProtocolsHub() {
                                     {!paperReturnSiteId ? (
                                         <div className="text-center p-10 text-slate-400">Wybierz budowę, by zobaczyć co na niej jest.</div>
                                     ) : filteredPaperInventory.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400">Brak sprzętu na budowie (wyszukaj nr inwentarzowy, aby użyć zwrotu ratunkowego).</div>
+                                        <div className="text-center p-10 text-slate-400">Brak sprzętu na budowie.</div>
                                     ) : (
                                         filteredPaperInventory.map(item => {
                                             const isFormallyOnSite = item.availableToReturn > 0;
@@ -1533,17 +2072,13 @@ export default function ProtocolsHub() {
 
                             {/* PRAWA STRONA */}
                             <div className="w-[55%] flex flex-col bg-white">
-                                {/* NAGŁÓWEK PRAWEJ STRONY - SKOMPRESOWANY LIFTING */}
                                 <div className="p-4 border-b bg-white flex flex-col gap-3">
                                     <div className="flex gap-4 items-start">
-
-                                        {/* NOWE: DATA DOKUMENTU */}
                                         <div className="w-1/4">
                                             <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Data z Kwitu</label>
                                             <input type="date" value={paperDocDate} onChange={e => setPaperDocDate(e.target.value)} className="w-full p-2 text-sm border-2 rounded-lg outline-none focus:border-orange-500 font-bold bg-slate-50" />
                                         </div>
 
-                                        {/* WYBÓR ŹRÓDŁA */}
                                         <div className="flex-1">
                                             <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
                                                 Źródło dokumentu
@@ -1576,7 +2111,6 @@ export default function ProtocolsHub() {
                                             </div>
                                         </div>
 
-                                        {/* NR DOKUMENTU / WYTRYCH */}
                                         <div className="flex-1">
                                             <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">
                                                 Nr dokumentu / Uwagi (Opcj.)
@@ -1591,7 +2125,6 @@ export default function ProtocolsHub() {
                                         </div>
                                     </div>
 
-                                    {/* KOMUNIKAT DLA BRAKU PROTOKOŁU */}
                                     {paperDocSource === "BRAK_PROTOKOLU" && (
                                         <div className="bg-red-50 border border-red-200 rounded-lg p-2 text-[11px] text-red-700 font-bold flex items-center gap-2">
                                             <span>⚠️ System powiadomi kierownictwo o braku protokołu.</span>
@@ -1599,7 +2132,6 @@ export default function ProtocolsHub() {
                                     )}
                                 </div>
 
-                                {/* WĄSKA BELKA Z OPCJAMI (ZDJĘCIA + WPIS RĘCZNY) */}
                                 <div className="flex justify-between items-center px-4 py-2.5 bg-slate-100 border-b border-slate-200">
                                     <span className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Koszyk Zwrotu</span>
                                     <div className="flex gap-2">
@@ -1616,7 +2148,6 @@ export default function ProtocolsHub() {
                                     </div>
                                 </div>
 
-                                {/* MINIATURY ZDJĘĆ (POJAWIAJĄ SIĘ TYLKO JAK SĄ ZDJĘCIA) */}
                                 {returnPhotos.length > 0 && (
                                     <div className="px-4 py-2 border-b bg-slate-50 flex gap-2 overflow-x-auto">
                                         {returnPhotos.map((photo, index) => (
@@ -1628,7 +2159,6 @@ export default function ProtocolsHub() {
                                     </div>
                                 )}
 
-                                {/* KOSZYK */}
                                 <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-2">
                                     {paperReturnCart.length === 0 ? (
                                         <div className="text-center p-8 text-slate-400 border-2 border-dashed rounded-xl">Wybierz pozycje z lewej strony lub dodaj ręcznie.</div>
@@ -1675,7 +2205,6 @@ export default function ProtocolsHub() {
                                     )}
                                 </div>
 
-                                {/* STOPKA */}
                                 <div className="p-4 border-t bg-white flex gap-3">
                                     <button onClick={closeModal} className="w-1/3 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-bold rounded-xl border border-slate-200 transition">ANULUJ</button>
                                     <button onClick={handlePaperReturnSubmit} disabled={isSubmitting || paperReturnCart.length === 0} className="w-2/3 py-3 bg-orange-500 hover:bg-orange-600 text-white text-sm font-black rounded-xl shadow-md disabled:bg-slate-300 transition">
@@ -1839,7 +2368,7 @@ export default function ProtocolsHub() {
                                                                         {inputState.finalStatus === "uszkodzone" && (
                                                                             <label className="flex items-center gap-2 p-2 bg-red-50 border border-red-200 rounded cursor-pointer mt-1 animate-fade-in">
                                                                                 <input type="checkbox" checked={inputState.createClaim || false} onChange={(e) => setAcceptInputs({ ...acceptInputs, [item.inventoryId]: { ...inputState, createClaim: e.target.checked } })} className="w-4 h-4 text-red-600 rounded border-red-300 focus:ring-red-500" />
-                                                                                <span className="text-xs font-bold text-red-800">⚖️ Zgłoś od razu do Centrum Likwidacji Szkód</span>
+                                                                                <span className="text-xs font-bold text-red-800">⚖️ Zgłoś od razu do CLS</span>
                                                                             </label>
                                                                         )}
                                                                     </div>
@@ -1851,7 +2380,7 @@ export default function ProtocolsHub() {
                                                             </div>
 
                                                             {item.accessories && item.accessories.length > 0 && (
-                                                                <div className="mt-3 p-3 bg-orange-50 border border-orange-200 rounded text-xs">
+                                                                <div className="mt-3 p-3 bg-orange-50 border-orange-200 rounded text-xs">
                                                                     <p className="font-bold text-orange-800 mb-2">Fizyczna weryfikacja osprzętu z wydania:</p>
                                                                     <div className="space-y-1">
                                                                         {item.accessories.map((acc: any, i: number) => (
@@ -1903,9 +2432,17 @@ export default function ProtocolsHub() {
                                             </div>
                                         </div>
 
-                                        <div className="p-6 border-t bg-slate-50 flex gap-4 items-center">
-                                            <p className="text-[10px] text-slate-400 flex-1 leading-tight">Zatwierdzenie zdejmie sprzęt z budowy i przywróci na magazyn.</p>
-                                            <button onClick={() => handleAcceptSubmit(false)} disabled={isSubmitting} className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300">
+                                        <div className="p-6 border-t bg-slate-50 flex gap-4 items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-wider">Fizyczna data przyjęcia:</label>
+                                                <input
+                                                    type="date"
+                                                    value={acceptReturnDocDate}
+                                                    onChange={e => setAcceptReturnDocDate(e.target.value)}
+                                                    className="p-2 border-2 rounded-lg text-xs font-bold outline-none focus:border-purple-500 bg-white"
+                                                />
+                                            </div>
+                                            <button onClick={() => handleAcceptSubmit(false)} disabled={isSubmitting} className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl shadow-xl disabled:bg-slate-300 transition">
                                                 {isSubmitting ? "ZAPISYWANIE..." : "AKCEPTUJ ZWROT"}
                                             </button>
                                         </div>

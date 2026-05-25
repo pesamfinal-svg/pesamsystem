@@ -1,7 +1,7 @@
 // src/app/(dashboard)/my-site/page.tsx
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import React, { useState, useEffect, Suspense, Fragment } from "react";
 import { collection, getDocs, doc, query, orderBy, where } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -21,7 +21,7 @@ interface Protocol {
     documentSource?: string; paperDocumentSource?: string;
 }
 
-// Osobny podkomponent, by bezpiecznie korzystać z useSearchParams() w Next.js bez błędów deopt
+// Podkomponent MySiteHubContent
 function MySiteHubContent() {
     const { user } = useAuth();
     const router = useRouter();
@@ -42,9 +42,12 @@ function MySiteHubContent() {
 
     const [expandedProtocolId, setExpandedProtocolId] = useState<string | null>(null);
 
+    // Stan selektywnego wyboru urządzeń do druku PDF
+    const [selectedPrintIds, setSelectedPrintIds] = useState<string[]>([]);
+
     const canViewSiteState = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
 
-    // Odczytywanie parametru ?view= z adresu URL (np. ?view=INVENTORY lub ?view=HISTORY)
+    // Odczytywanie parametru ?view= z adresu URL
     useEffect(() => {
         if (searchParams) {
             const viewParam = searchParams.get("view");
@@ -72,7 +75,6 @@ function MySiteHubContent() {
                 const allSites = sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[];
                 const userAssigned = user?.assignedSites || [];
 
-                // Ukrywamy wydania prywatne (Wpis ręczny) oraz budowy zakończone
                 const filteredSites = allSites.filter(s =>
                     (userAssigned.includes("ALL") || userAssigned.includes(s.id)) &&
                     s.location !== "Wpis ręczny" &&
@@ -151,9 +153,9 @@ function MySiteHubContent() {
             if (inventoryActiveTab === "BULK" && (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Wpis ręczny")) return false;
             if (inventoryActiveTab === "MANUAL" && item.subType !== "MANUAL" && item.category !== "Wpis ręczny") return false;
             if (inventorySearchQuery) {
-                const query = inventorySearchQuery.toLowerCase();
-                const matchesName = item.name.toLowerCase().includes(query);
-                const matchesNum = item.inventoryNumber ? item.inventoryNumber.toLowerCase().includes(query) : false;
+                const queryStr = inventorySearchQuery.toLowerCase();
+                const matchesName = item.name.toLowerCase().includes(queryStr);
+                const matchesNum = item.inventoryNumber ? item.inventoryNumber.toLowerCase().includes(queryStr) : false;
                 if (!matchesName && !matchesNum) return false;
             }
             return true;
@@ -161,6 +163,27 @@ function MySiteHubContent() {
     };
 
     const filteredInventoryList = getFilteredInventory();
+
+    // Logika wybiórczego zaznaczania wierszy do wydruku
+    const handleTogglePrintSelect = (itemId: string) => {
+        setSelectedPrintIds(prev =>
+            prev.includes(itemId) ? prev.filter(id => id !== itemId) : [...prev, itemId]
+        );
+    };
+
+    const handleSelectAllVisiblePrint = () => {
+        const visibleIds = filteredInventoryList.map(item => item.id);
+        setSelectedPrintIds(visibleIds);
+    };
+
+    const handleClearPrintSelect = () => {
+        setSelectedPrintIds([]);
+    };
+
+    // Budowanie ostatecznej listy przedmiotów, która ukaże się na wydruku PDF
+    const itemsToPrint = selectedPrintIds.length > 0
+        ? itemsOnSite.filter(item => selectedPrintIds.includes(item.id))
+        : filteredInventoryList;
 
     if (!canViewSiteState) return null;
     if (loading && mySites.length === 0) return <div className="p-10 text-center text-slate-500 animate-pulse">Analizowanie przypisanych budów...</div>;
@@ -287,18 +310,27 @@ function MySiteHubContent() {
                         <div className="bg-slate-800 text-white p-6 flex justify-between items-center shrink-0">
                             <div>
                                 <h3 className="font-bold text-xl">Wykaz sprzętu na budowie</h3>
-                                <p className="text-slate-400 text-xs mt-1">To wszystko masz fizycznie u siebie na placu.</p>
+                                <p className="text-slate-400 text-xs mt-1 font-medium">To wszystko masz fizycznie u siebie na placu.</p>
                             </div>
-                            <button onClick={() => { setActiveView("HUB"); setInventorySearchQuery(""); setInventoryActiveTab("ALL"); }} className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-2 rounded-lg transition">Powrót</button>
+                            <div className="flex gap-2.5">
+                                {/* PRZYCISK DRUKOWANIA PDF */}
+                                <button
+                                    onClick={() => window.print()}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white font-black px-4 py-2.5 rounded-xl transition shadow-md text-xs sm:text-sm flex items-center gap-1.5"
+                                >
+                                    🖨️ {selectedPrintIds.length > 0 ? `Drukuj wybrane (${selectedPrintIds.length})` : "Drukuj wykaz (PDF)"}
+                                </button>
+                                <button onClick={() => { setActiveView("HUB"); setInventorySearchQuery(""); setInventoryActiveTab("ALL"); setSelectedPrintIds([]); }} className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-2.5 rounded-xl transition text-xs sm:text-sm">Powrót</button>
+                            </div>
                         </div>
 
                         {/* PASEK Z FILTRAMI (ZAKŁADKI + WYSZUKIWARKA) */}
                         <div className="bg-slate-50 border-b border-slate-200 p-4 flex flex-col sm:flex-row justify-between items-center gap-4 shrink-0">
                             <div className="flex gap-2 bg-white p-1 rounded-xl shadow-sm border border-slate-200 w-full sm:w-auto overflow-x-auto">
-                                <button onClick={() => setInventoryActiveTab("ALL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'ALL' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>WSZYSTKO</button>
-                                <button onClick={() => setInventoryActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'UNIQUE' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>NARZĘDZIA</button>
-                                <button onClick={() => setInventoryActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'BULK' ? 'bg-orange-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>RUSZTOWANIA</button>
-                                <button onClick={() => setInventoryActiveTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'MANUAL' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>INNE (RĘCZNE)</button>
+                                <button onClick={() => { setInventoryActiveTab("ALL"); setSelectedPrintIds([]); }} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'ALL' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>WSZYSTKO</button>
+                                <button onClick={() => { setInventoryActiveTab("UNIQUE"); setSelectedPrintIds([]); }} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'UNIQUE' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>NARZĘDZIA</button>
+                                <button onClick={() => { setInventoryActiveTab("BULK"); setSelectedPrintIds([]); }} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'BULK' ? 'bg-orange-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>RUSZTOWANIA</button>
+                                <button onClick={() => { setInventoryActiveTab("MANUAL"); setSelectedPrintIds([]); }} className={`px-4 py-2 rounded-lg text-xs font-black transition-all whitespace-nowrap ${inventoryActiveTab === 'MANUAL' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>INNE (RĘCZNE)</button>
                             </div>
 
                             <div className="relative w-full sm:w-72">
@@ -307,61 +339,87 @@ function MySiteHubContent() {
                                     type="text"
                                     placeholder="Szukaj (nazwa lub nr mag.)..."
                                     value={inventorySearchQuery}
-                                    onChange={(e) => setInventorySearchQuery(e.target.value)}
+                                    onChange={(e) => { setInventorySearchQuery(e.target.value); setSelectedPrintIds([]); }}
                                     className="w-full pl-10 pr-4 py-2 bg-white border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 text-sm font-medium shadow-sm transition"
                                 />
                                 {inventorySearchQuery && (
-                                    <button onClick={() => setInventorySearchQuery("")} className="absolute inset-y-0 right-3 flex items-center text-slate-400 hover:text-red-500 font-bold">&times;</button>
+                                    <button onClick={() => { setInventorySearchQuery(""); setSelectedPrintIds([]); }} className="absolute inset-y-0 right-3 flex items-center text-slate-400 hover:text-red-500 font-bold">&times;</button>
                                 )}
                             </div>
                         </div>
 
-                        {/* TABELA Z WYKAZEM (SCROLLOWALNA W PIONIE) */}
+                        {/* TABELA Z WYKAZEM */}
                         <div className="flex-1 overflow-auto bg-white relative">
                             <table className="w-full text-left border-collapse relative">
-                                <thead className="bg-slate-50 text-xs uppercase font-black text-slate-400 tracking-wider sticky top-0 z-10 shadow-sm">
+                                <thead className="bg-slate-50 text-xs uppercase font-black text-slate-400 tracking-wider sticky top-0 z-10 shadow-sm border-b">
                                     <tr>
-                                        <th className="p-4 pl-6 w-24">Zdjęcie</th>
+                                        <th className="p-4 pl-6 w-12 text-center">
+                                            <input
+                                                type="checkbox"
+                                                checked={filteredInventoryList.length > 0 && filteredInventoryList.every(item => selectedPrintIds.includes(item.id))}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        handleSelectAllVisiblePrint();
+                                                    } else {
+                                                        handleClearPrintSelect();
+                                                    }
+                                                }}
+                                                className="w-4 h-4 cursor-pointer rounded text-blue-600 focus:ring-blue-500 border-slate-300"
+                                                title="Zaznacz / odznacz wszystkie widoczne"
+                                            />
+                                        </th>
+                                        <th className="p-4 w-24">Zdjęcie</th>
                                         <th className="p-4">Przedmiot</th>
                                         <th className="p-4 text-center">Nr Mag.</th>
                                         <th className="p-4 text-right pr-6">Ilość na budowie</th>
                                     </tr>
                                 </thead>
-                                <tbody>
+                                <tbody className="divide-y divide-slate-100 text-sm">
                                     {filteredInventoryList.length === 0 ? (
                                         <tr>
-                                            <td colSpan={4} className="p-16 text-center">
+                                            <td colSpan={5} className="p-16 text-center">
                                                 <div className="text-4xl mb-3 opacity-30">📦</div>
                                                 <p className="text-slate-500 font-medium">Brak wyników w tej kategorii lub dla tego wyszukiwania.</p>
                                             </td>
                                         </tr>
                                     ) : (
-                                        filteredInventoryList.map(item => (
-                                            <tr key={item.id} className="border-b border-slate-100 last:border-0 hover:bg-slate-50 transition">
-                                                <td className="p-4 pl-6">
-                                                    <div className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center overflow-hidden">
-                                                        {item.imageUrl ? (
-                                                            <img src={item.imageUrl} alt="" className="w-full h-full object-cover" />
-                                                        ) : (
-                                                            <span className="text-xl opacity-30">📷</span>
-                                                        )}
-                                                    </div>
-                                                </td>
-                                                <td className="p-4">
-                                                    <p className="font-bold text-slate-800">{item.name}</p>
-                                                    {item.subType === "MANUAL" && <span className="inline-block mt-1 text-[9px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-black uppercase tracking-wider">Wpis ręczny</span>}
-                                                </td>
-                                                <td className="p-4 text-center font-mono text-slate-500 text-sm">
-                                                    {item.inventoryNumber || <span className="opacity-50">-</span>}
-                                                </td>
-                                                <td className="p-4 pr-6 text-right">
-                                                    <span className={`font-black text-2xl ${item.subType === 'MANUAL' ? 'text-slate-700' : 'text-blue-600'}`}>
-                                                        {item.allocations[selectedSiteId]}
-                                                    </span>
-                                                    <span className="text-xs font-bold text-slate-400 ml-1">{item.unit || "szt."}</span>
-                                                </td>
-                                            </tr>
-                                        ))
+                                        filteredInventoryList.map(item => {
+                                            const isSelectedForPrint = selectedPrintIds.includes(item.id);
+                                            return (
+                                                <tr key={item.id} className={`border-b border-slate-100 last:border-0 hover:bg-slate-50 transition ${isSelectedForPrint ? 'bg-blue-50/40' : ''}`}>
+                                                    <td className="p-4 pl-6 text-center">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelectedForPrint}
+                                                            onChange={() => handleTogglePrintSelect(item.id)}
+                                                            className="w-4 h-4 cursor-pointer rounded text-blue-600 focus:ring-blue-500 border-slate-300"
+                                                        />
+                                                    </td>
+                                                    <td className="p-4">
+                                                        <div className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center overflow-hidden">
+                                                            {item.imageUrl ? (
+                                                                <img src={item.imageUrl} alt="" className="w-full h-full object-cover" />
+                                                            ) : (
+                                                                <span className="text-xl opacity-30">📷</span>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-4">
+                                                        <p className="font-bold text-slate-800">{item.name}</p>
+                                                        {item.subType === "MANUAL" && <span className="inline-block mt-1 text-[9px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-black uppercase tracking-wider">Wpis ręczny</span>}
+                                                    </td>
+                                                    <td className="p-4 text-center font-mono text-slate-500 text-sm">
+                                                        {item.inventoryNumber || <span className="opacity-50">-</span>}
+                                                    </td>
+                                                    <td className="p-4 pr-6 text-right">
+                                                        <span className={`font-black text-2xl ${item.subType === 'MANUAL' ? 'text-slate-700' : 'text-blue-600'}`}>
+                                                            {item.allocations[selectedSiteId]}
+                                                        </span>
+                                                        <span className="text-xs font-bold text-slate-400 ml-1">{item.unit || "szt."}</span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })
                                     )}
                                 </tbody>
                             </table>
@@ -450,52 +508,161 @@ function MySiteHubContent() {
     };
 
     return (
-        <div className="p-6 md:p-10 max-w-7xl mx-auto min-h-screen">
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-                <div>
-                    <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Twoja Budowa</h1>
-                    <p className="text-slate-500 text-sm">Centrum operacyjne dla kierownika budowy</p>
+        <div className="relative">
+            {/* --- FORCE LAYOUT RESET DLA WYDRUKU (WYCINA SIDEBAR I HEADER PROJEKTU) --- */}
+            <style dangerouslySetInnerHTML={{
+                __html: `
+                @media print {
+                    /* Bezwzględne ukrycie menu bocznego, nagłówków i pasków nawigacji */
+                    aside, nav, header, 
+                    [id*="sidebar"], [class*="sidebar"], [class*="Sidebar"], 
+                    [class*="menu"], [class*="navbar"], [class*="Header"],
+                    button, .print\\:hidden {
+                        display: none !important;
+                        width: 0 !important;
+                        height: 0 !important;
+                        overflow: hidden !important;
+                        opacity: 0 !important;
+                    }
+                    /* Rozciągnięcie kontenera głównego na pełną szerokość kartki A4 */
+                    body, html, main, 
+                    div[class*="content"], 
+                    div[class*="wrapper"], 
+                    div[class*="container"],
+                    div[class*="layout"] {
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        width: 100% !important;
+                        max-width: 100% !important;
+                        min-width: 100% !important;
+                        left: 0 !important;
+                        right: 0 !important;
+                        position: relative !important;
+                        display: block !important;
+                    }
+                }
+            `}} />
+
+            {/* --- WIDOK EKRANOWY (UKRYTY NA WYDRUKU) --- */}
+            <div className="p-6 md:p-10 max-w-7xl mx-auto min-h-screen print:hidden">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+                    <div>
+                        <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Twoja Budowa</h1>
+                        <p className="text-slate-500 text-sm">Centrum operacyjne dla kierownika budowy</p>
+                    </div>
+
+                    {mySites.length > 0 && (
+                        <select
+                            value={selectedSiteId}
+                            onChange={(e) => { setSelectedSiteId(e.target.value); setActiveView("HUB"); setSelectedPrintIds([]); }}
+                            className="p-3 bg-white border border-slate-300 rounded-xl font-bold text-blue-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer transition hover:bg-slate-50"
+                        >
+                            {mySites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                    )}
                 </div>
 
-                {mySites.length > 0 && (
-                    <select
-                        value={selectedSiteId}
-                        onChange={(e) => { setSelectedSiteId(e.target.value); setActiveView("HUB"); }}
-                        className="p-3 bg-white border border-slate-300 rounded-xl font-bold text-blue-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer transition hover:bg-slate-50"
-                    >
-                        {mySites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                    </select>
+                {!selectedSiteId ? (
+                    <div className="bg-white border border-dashed border-slate-300 h-64 flex flex-col items-center justify-center rounded-3xl text-slate-500 shadow-sm">
+                        <div className="text-4xl mb-3 opacity-50">🏗️</div>
+                        <span className="font-bold">Nie przypisano Cię do żadnej budowy.</span>
+                        <span className="text-sm mt-1">Skontaktuj się z administratorem.</span>
+                    </div>
+                ) : (
+                    <>
+                        <div className="bg-slate-900 text-white p-8 rounded-3xl mb-8 relative overflow-hidden shadow-xl transition-all">
+                            <div className="relative z-10 flex justify-between items-end">
+                                <div>
+                                    <p className="text-blue-400 text-[10px] font-black uppercase tracking-[0.2em] mb-2">Panel Zarządzania</p>
+                                    <h2 className="text-4xl font-black mb-1">{mySites.find(s => s.id === selectedSiteId)?.name}</h2>
+                                    <p className="text-slate-400 text-sm font-medium">📍 {mySites.find(s => s.id === selectedSiteId)?.location || "Lokalizacja nieznana"}</p>
+                                </div>
+                                <div className="text-right hidden md:block">
+                                    <p className="text-slate-400 text-xs font-bold uppercase mb-1">Status Budowy</p>
+                                    <div className="bg-green-500/20 text-green-400 border border-green-500/30 px-3 py-1 rounded-lg text-sm font-black flex items-center gap-2">
+                                        <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
+                                        AKTYWNA
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="absolute right-[-5%] top-[-30%] text-[12rem] opacity-5 select-none pointer-events-none transform -rotate-12">🏗️</div>
+                        </div>
+
+                        {renderContent()}
+                    </>
                 )}
             </div>
 
-            {!selectedSiteId ? (
-                <div className="bg-white border border-dashed border-slate-300 h-64 flex flex-col items-center justify-center rounded-3xl text-slate-500 shadow-sm">
-                    <div className="text-4xl mb-3 opacity-50">🏗️</div>
-                    <span className="font-bold">Nie przypisano Cię do żadnej budowy.</span>
-                    <span className="text-sm mt-1">Skontaktuj się z administratorem.</span>
-                </div>
-            ) : (
-                <>
-                    <div className="bg-slate-900 text-white p-8 rounded-3xl mb-8 relative overflow-hidden shadow-xl transition-all">
-                        <div className="relative z-10 flex justify-between items-end">
-                            <div>
-                                <p className="text-blue-400 text-[10px] font-black uppercase tracking-[0.2em] mb-2">Panel Zarządzania</p>
-                                <h2 className="text-4xl font-black mb-1">{mySites.find(s => s.id === selectedSiteId)?.name}</h2>
-                                <p className="text-slate-400 text-sm font-medium">📍 {mySites.find(s => s.id === selectedSiteId)?.location || "Lokalizacja nieznana"}</p>
-                            </div>
-                            <div className="text-right hidden md:block">
-                                <p className="text-slate-400 text-xs font-bold uppercase mb-1">Status Budowy</p>
-                                <div className="bg-green-500/20 text-green-400 border border-green-500/30 px-3 py-1 rounded-lg text-sm font-black flex items-center gap-2">
-                                    <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
-                                    AKTYWNA
-                                </div>
-                            </div>
+            {/* --- DEDYKOWANY ARKUSZ WYDRUKU (WIDOCZNY TYLKO NA PODGLĄDZIE DRUKU / PDF) --- */}
+            {selectedSiteId && (
+                <div className="hidden print:block p-8 bg-white text-black font-sans leading-tight">
+                    {/* Nagłówek raportu */}
+                    <div className="border-b-4 border-slate-900 pb-4 mb-6 flex justify-between items-end">
+                        <div>
+                            <h1 className="text-2xl font-black uppercase tracking-wider text-slate-900">Arkusz Inwentaryzacyjny Sprzętu</h1>
+                            <p className="text-md font-extrabold text-slate-800 mt-1">Budowa: {mySites.find(s => s.id === selectedSiteId)?.name}</p>
+                            <p className="text-xs text-slate-500 mt-0.5">📍 {mySites.find(s => s.id === selectedSiteId)?.location || "Adres nieznany"}</p>
                         </div>
-                        <div className="absolute right-[-5%] top-[-30%] text-[12rem] opacity-5 select-none pointer-events-none transform -rotate-12">🏗️</div>
+                        <div className="text-right">
+                            <p className="text-sm font-bold text-slate-900">Data spisu: {new Date().toLocaleDateString("pl-PL")}</p>
+                            <p className="text-xs text-slate-400">System Zarządzania Magazynem PESAM</p>
+                        </div>
                     </div>
 
-                    {renderContent()}
-                </>
+                    {/* Tabela do fizycznej inwentaryzacji */}
+                    <table className="w-full text-left border-collapse border-2 border-slate-800">
+                        <thead>
+                            <tr className="bg-slate-100 text-slate-900 text-xs font-black uppercase border-b-2 border-slate-800">
+                                <th className="p-3 border border-slate-400 w-16 text-center">Zdj.</th>
+                                <th className="p-3 border border-slate-400">Przedmiot / Nazwa sprzętu</th>
+                                <th className="p-3 border border-slate-400 text-center w-36">Nr Magazynowy</th>
+                                <th className="p-3 border border-slate-400 text-center w-28">Ilość systemowa</th>
+                                <th className="p-3 border border-slate-400 text-center w-32">[ ✓ ] Stan fizyczny</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-300 text-sm">
+                            {itemsToPrint.map((item, idx) => (
+                                <tr key={item.id} className="border-b border-slate-300">
+                                    <td className="p-2 border border-slate-300 text-center">
+                                        <div className="w-10 h-10 mx-auto rounded border border-slate-300 flex items-center justify-center overflow-hidden bg-slate-50">
+                                            {item.imageUrl ? (
+                                                <img src={item.imageUrl} alt="" className="object-cover w-full h-full" />
+                                            ) : (
+                                                <span className="text-slate-300 text-[9px] uppercase font-bold">brak</span>
+                                            )}
+                                        </div>
+                                    </td>
+                                    <td className="p-3 border border-slate-300 font-bold text-slate-900">
+                                        {item.name}
+                                        {item.subType === "MANUAL" && <span className="ml-2 text-[9px] border border-slate-300 px-1.5 py-0.5 rounded text-slate-500 uppercase font-black bg-slate-100">Ręczny</span>}
+                                    </td>
+                                    <td className="p-3 border border-slate-300 text-center font-mono text-xs text-slate-700">
+                                        {item.inventoryNumber || "-"}
+                                    </td>
+                                    <td className="p-3 border border-slate-300 text-center font-black text-slate-900 text-base">
+                                        {item.allocations[selectedSiteId]} <span className="text-xs font-normal text-slate-500">{item.unit || "szt."}</span>
+                                    </td>
+                                    <td className="p-3 border border-slate-300 text-center">
+                                        {/* Puste pole (checkbox) do fizycznego odhaczenia ołówkiem */}
+                                        <div className="w-5 h-5 border-2 border-slate-500 rounded mx-auto"></div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+
+                    {/* Sekcja podpisów na dole arkusza */}
+                    <div className="mt-16 pt-8 border-t border-dashed border-slate-400 grid grid-cols-2 gap-16 text-xs text-slate-500">
+                        <div>
+                            <p className="border-b border-slate-400 pb-10"></p>
+                            <p className="mt-2 text-center font-bold text-slate-700">Podpis osoby kontrolującej stan placu</p>
+                        </div>
+                        <div>
+                            <p className="border-b border-slate-400 pb-10"></p>
+                            <p className="mt-2 text-center font-bold text-slate-700">Podpis Kierownika Budowy</p>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );

@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, updateDoc } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc } from "firebase/firestore";
 import { initializeApp } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signOut } from "firebase/auth";
 import { db } from "@/lib/firebase/config";
@@ -168,6 +168,25 @@ export default function UsersManagementPage() {
         });
     };
 
+    // Usunięcie użytkownika z bazy danych
+    const handleDeleteUser = async (uid: string, fullName: string) => {
+        const confirmDelete = window.confirm(
+            `⚠️ USUWANIE PRACOWNIKA!\n\n` +
+            `Czy na pewno chcesz bezpowrotnie usunąć pracownika "${fullName}" z systemu?\n` +
+            `Ta operacja zablokuje jego dostęp do systemu i usunie profil z bazy danych.`
+        );
+        if (!confirmDelete) return;
+
+        try {
+            await deleteDoc(doc(db, "users", uid));
+            alert("Pracownik został pomyślnie usunięty z bazy danych!");
+            fetchData(); // Odświeżenie listy
+        } catch (error: any) {
+            console.error("Błąd usuwania użytkownika:", error);
+            alert("Błąd: " + error.message);
+        }
+    };
+
     // Zapis użytkownika
     const handleSaveUser = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -287,8 +306,10 @@ export default function UsersManagementPage() {
                                                 <span className="text-slate-400 text-xs">Brak</span>
                                             )}
                                         </td>
-                                        <td className="p-4 text-right">
+                                        <td className="p-4 text-right space-x-2.5">
                                             <button onClick={() => openModal(u)} className="text-blue-600 hover:underline text-sm font-medium">Edytuj</button>
+                                            <span className="text-slate-300">|</span>
+                                            <button onClick={() => handleDeleteUser(u.uid, `${u.firstName} ${u.lastName}`)} className="text-red-600 hover:underline text-sm font-medium">Usuń</button>
                                         </td>
                                     </tr>
                                 );

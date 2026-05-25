@@ -15,6 +15,8 @@ export const ALL_PERMISSIONS = {
     protocolsReturnApp: "Protokoły: Zwrot elektroniczny",
     protocolsReturnPaper: "Protokoły: Zwrot z papieru",
     acceptReturns: "Protokoły: Akceptacja zwrotów",
+    viewProtocolHistory: "Protokoły: Historia i zaawansowana wyszukiwarka", // <-- DODANO NOWE UPRAWNIENIE
+
 
     viewSiteState: "Podgląd: Stany na budowach",
     viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
