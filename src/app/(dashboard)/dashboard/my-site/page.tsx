@@ -147,6 +147,19 @@ function MySiteHubContent() {
         setExpandedProtocolId(prev => prev === protocolId ? null : protocolId);
     };
 
+    // Dynamiczne pobieranie osprzętu z ostatniego wydania dla danego przedmiotu na tej budowie
+    const getAccessoriesForItem = (itemId: string) => {
+        const lastIssueProto = siteProtocols.find(p =>
+            p.type === "WYDANIE" &&
+            p.destinationId === selectedSiteId &&
+            p.items.some(i => i.inventoryId === itemId)
+        );
+        if (!lastIssueProto) return [];
+
+        const foundItem = lastIssueProto.items.find(i => i.inventoryId === itemId);
+        return foundItem?.accessories?.filter((acc: any) => acc.mustReturn) || [];
+    };
+
     const getFilteredInventory = () => {
         return itemsOnSite.filter(item => {
             if (inventoryActiveTab === "UNIQUE" && item.type !== "UNIQUE") return false;
@@ -407,6 +420,16 @@ function MySiteHubContent() {
                                                     <td className="p-4">
                                                         <p className="font-bold text-slate-800">{item.name}</p>
                                                         {item.subType === "MANUAL" && <span className="inline-block mt-1 text-[9px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-black uppercase tracking-wider">Wpis ręczny</span>}
+
+                                                        {/* Wyświetlanie osprzętu na ekranie */}
+                                                        {getAccessoriesForItem(item.id).length > 0 && (
+                                                            <div className="mt-1.5 pl-3 border-l-2 border-orange-300 text-[10px] text-orange-800 font-semibold space-y-0.5">
+                                                                <span className="uppercase text-[9px] text-slate-400 block tracking-wider font-bold">Osprzęt do zwrotu:</span>
+                                                                {getAccessoriesForItem(item.id).map((acc: any, accIdx: number) => (
+                                                                    <p key={accIdx}>• {acc.name} ({acc.quantity || 1} szt.)</p>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                     </td>
                                                     <td className="p-4 text-center font-mono text-slate-500 text-sm">
                                                         {item.inventoryNumber || <span className="opacity-50">-</span>}
@@ -635,6 +658,16 @@ function MySiteHubContent() {
                                     <td className="p-3 border border-slate-300 font-bold text-slate-900">
                                         {item.name}
                                         {item.subType === "MANUAL" && <span className="ml-2 text-[9px] border border-slate-300 px-1.5 py-0.5 rounded text-slate-500 uppercase font-black bg-slate-100">Ręczny</span>}
+
+                                        {/* Wyświetlanie osprzętu na wydruku PDF */}
+                                        {getAccessoriesForItem(item.id).length > 0 && (
+                                            <div className="mt-1 pl-3 border-l-2 border-orange-400 text-[10px] text-orange-900 font-bold leading-normal">
+                                                <span className="uppercase text-[8px] text-slate-400 block font-black">Osprzęt:</span>
+                                                {getAccessoriesForItem(item.id).map((acc: any, accIdx: number) => (
+                                                    <p key={accIdx} className="font-medium">• {acc.name} ({acc.quantity || 1} szt.)</p>
+                                                ))}
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="p-3 border border-slate-300 text-center font-mono text-xs text-slate-700">
                                         {item.inventoryNumber || "-"}

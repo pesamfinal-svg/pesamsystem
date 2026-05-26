@@ -1,7 +1,7 @@
 // src/app/(dashboard)/inventory/page.tsx
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Fragment } from "react";
 import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction, where, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
@@ -69,6 +69,10 @@ export default function InventoryPage() {
     const [locFilter, setLocFilter] = useState("ALL");
     const [statusFilter, setStatusFilter] = useState("ALL");
 
+    // STANY SORTOWANIA DLA TABELI
+    const [sortField, setSortField] = useState<keyof InventoryItem>("name");
+    const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
+
     // MODALE I FORMULARZ GŁÓWNY
     const [isFormOpen, setIsFormOpen] = useState(false);
     const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
@@ -86,6 +90,11 @@ export default function InventoryPage() {
     // NOWE STANY DLA NADAWANIA NUMERU PRZEZ MAGAZYNIERA
     const [isAssignNumberOpen, setIsAssignNumberOpen] = useState(false);
     const [newInvNumber, setNewInvNumber] = useState("");
+
+    // STANY ASYSTENTA WOLNYCH NUMERÓW
+    const [showNumberAssistant, setShowNumberAssistant] = useState(false);
+    const [assistantCheckNum, setAssistantCheckNum] = useState("");
+    const [assistantCheckResult, setAssistantCheckResult] = useState<"FREE" | "TAKEN" | null>(null);
 
     // MODAL SERWISOWY
     const [isServiceModalOpen, setIsServiceModalOpen] = useState(false);
@@ -152,6 +161,15 @@ export default function InventoryPage() {
             if (formData.type === "BULK" && !finalInvNumber) {
                 finalInvNumber = generateBulkId(formData.name || "", formData.subType as "MAIN_CAT" | "SUB_ITEM", formData.mainCategoryId || "");
                 generatedDocId = finalInvNumber;
+            }
+
+            // TWARDE ZABEZPIECZENIE PRZED DUBLOWANIEM (DLA SPRZĘTU UNIQUE)
+            if (formData.type === "UNIQUE" && finalInvNumber.trim()) {
+                const isTaken = items.some(i => i.inventoryNumber.toLowerCase() === finalInvNumber.trim().toLowerCase() && i.id !== editingItem?.id);
+                if (isTaken) {
+                    setIsUploading(false);
+                    return alert(`⚠️ BLOKADA ZAPISU!\n\nNumer magazynowy "${finalInvNumber.trim().toUpperCase()}" jest już przypisany do innego sprzętu w bazie. Podaj wolny kod.`);
+                }
             }
 
             let finalCategory = formData.category;
@@ -310,7 +328,6 @@ export default function InventoryPage() {
                     }
                 } else {
                     // PATH_B (Inwentaryzacja z natury)
-                    // Obliczamy sumę aktywnych alokacji na wszystkich budowach
                     const allocations = data.allocations || {};
                     const sumAllocations = Object.values(allocations).reduce((sum, val) => sum + (val || 0), 0);
 
@@ -318,13 +335,11 @@ export default function InventoryPage() {
                     newTotal = qtyNum + sumAllocations;
                 }
 
-                // Zapis w bazie
                 transaction.update(itemRef, {
                     availableQuantity: newAvailable,
                     totalQuantity: newTotal
                 });
 
-                // Zapis do historii przedmiotu
                 const historyRef = doc(collection(db, `inventory/${adjustItem.id}/history`));
                 const desc = adjustType === "PATH_A"
                     ? `${pathAAction === "ADD" ? "Dostawa / Dopisanie" : "Likwidacja / Odpisanie"} ilości o: ${qtyNum} szt. Stan po korekcie: ${newAvailable} (Dostępne) / ${newTotal} (Suma)`
@@ -453,7 +468,54 @@ export default function InventoryPage() {
         }
     };
 
-    // LOGIKA FILTROWANIA
+    // =========================================================================
+    // ASYSTENT NUMERÓW (DYNAMICZNA ANALIZA I WYKRYWANIE PRZEDZIAŁÓW)
+    // =========================================================================
+    const getFreeNumberSuggestions = () => {
+        const occupiedNumbers = items
+            .map(i => parseInt(i.inventoryNumber, 10))
+            .filter(n => !isNaN(n))
+            .sort((a, b) => a - b);
+
+        const activeCenturies = new Set<number>();
+        activeCenturies.add(0); // Domyślna główna pula (1+)
+
+        occupiedNumbers.forEach(num => {
+            const century = Math.floor(num / 100) * 100;
+            activeCenturies.add(century);
+        });
+
+        const suggestions: { rangeLabel: string; nextFreeNum: number }[] = [];
+
+        Array.from(activeCenturies).sort((a, b) => a - b).forEach(century => {
+            let nextFree = century === 0 ? 1 : century;
+            while (occupiedNumbers.includes(nextFree)) {
+                nextFree++;
+            }
+
+            let label = "";
+            if (century === 0) {
+                label = "Ciąg główny (1-399)";
+            } else {
+                label = `Zakres ${century}+`;
+            }
+
+            suggestions.push({ rangeLabel: label, nextFreeNum: nextFree });
+        });
+
+        return suggestions;
+    };
+
+    // LOGIKA FILTROWANIA I SORTOWANIA TABELI
+    const handleSort = (field: keyof InventoryItem) => {
+        if (sortField === field) {
+            setSortOrder(prev => prev === "asc" ? "desc" : "asc");
+        } else {
+            setSortField(field);
+            setSortOrder("asc");
+        }
+    };
+
     const filteredItems = items.filter(item => {
         if (item.type !== activeTab) return false;
         const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || item.inventoryNumber.toLowerCase().includes(searchTerm.toLowerCase());
@@ -462,12 +524,41 @@ export default function InventoryPage() {
         return matchesSearch && matchesLoc && matchesStatus;
     });
 
+    const sortedFilteredItems = [...filteredItems].sort((a, b) => {
+        let valA = a[sortField] ?? "";
+        let valB = b[sortField] ?? "";
+
+        if (sortField === "inventoryNumber") {
+            const numA = parseInt(a.inventoryNumber, 10);
+            const numB = parseInt(b.inventoryNumber, 10);
+            const isNumA = !isNaN(numA);
+            const isNumB = !isNaN(numB);
+
+            if (isNumA && isNumB) {
+                return sortOrder === "asc" ? numA - numB : numB - numA;
+            }
+            if (isNumA) return sortOrder === "asc" ? -1 : 1;
+            if (isNumB) return sortOrder === "asc" ? 1 : -1;
+        }
+
+        if (typeof valA === "string") valA = valA.toLowerCase();
+        if (typeof valB === "string") valB = valB.toLowerCase();
+
+        if (valA < valB) return sortOrder === "asc" ? -1 : 1;
+        if (valA > valB) return sortOrder === "asc" ? 1 : -1;
+        return 0;
+    });
+
     const uniqueLocations = Array.from(new Set(items.filter(i => i.type === activeTab).map(i => i.currentLocation))).sort();
     const mainSystems = items.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
 
+    // Dynamiczne pobieranie unikalnych słowników kategorii i podkategorii do comboboxów
+    const existingCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))).sort();
+    const existingSubcategories = Array.from(new Set(items.map(i => i.subcategory).filter(Boolean))).sort();
+
     const renderBulkGroups = () => {
-        const mainCats = filteredItems.filter(i => i.subType === "MAIN_CAT");
-        const subs = filteredItems.filter(i => i.subType === "SUB_ITEM");
+        const mainCats = sortedFilteredItems.filter(i => i.subType === "MAIN_CAT");
+        const subs = sortedFilteredItems.filter(i => i.subType === "SUB_ITEM");
 
         return mainCats.map(main => (
             <div key={main.id} className="mb-6 border rounded-2xl overflow-hidden shadow-sm bg-white animate-fade-in">
@@ -499,7 +590,6 @@ export default function InventoryPage() {
                                 <td className="p-4 text-center font-mono text-xs text-blue-600 font-bold">{sub.inventoryNumber}</td>
                                 <td className="p-4 text-center font-black">{sub.availableQuantity} / {sub.totalQuantity}</td>
                                 <td className="p-4 text-right space-x-3 whitespace-nowrap">
-                                    {/* DODANY PRZYCISK: KOREKTA STANU DLA ELEMENTU BULK */}
                                     <button
                                         onClick={() => { setAdjustItem(sub); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
                                         className="text-orange-600 hover:underline font-bold text-xs"
@@ -556,11 +646,28 @@ export default function InventoryPage() {
                 activeTab === "UNIQUE" ? (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                         <table className="w-full text-left border-collapse">
-                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
-                                <tr><th className="p-4">Zdjęcie</th><th className="p-4">Nazwa Urządzenia</th><th className="p-4 text-center">Nr Mag.</th><th className="p-4">Status</th><th className="p-4">Lokalizacja</th><th className="p-4 text-center">Stan</th><th className="p-4 text-right">Akcje</th></tr>
+                            {/* DODANO: Klikalne, sortowalne kolumny tabeli z indykatorami kierunku */}
+                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400 select-none">
+                                <tr>
+                                    <th className="p-4">Zdjęcie</th>
+                                    <th onClick={() => handleSort("name")} className="p-4 cursor-pointer hover:bg-slate-100 transition">
+                                        Nazwa Urządzenia {sortField === "name" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
+                                    </th>
+                                    <th onClick={() => handleSort("inventoryNumber")} className="p-4 text-center cursor-pointer hover:bg-slate-100 transition">
+                                        Nr Mag. {sortField === "inventoryNumber" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
+                                    </th>
+                                    <th onClick={() => handleSort("status")} className="p-4 cursor-pointer hover:bg-slate-100 transition">
+                                        Status {sortField === "status" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
+                                    </th>
+                                    <th onClick={() => handleSort("currentLocation")} className="p-4 cursor-pointer hover:bg-slate-100 transition">
+                                        Lokalizacja {sortField === "currentLocation" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
+                                    </th>
+                                    <th className="p-4 text-center">Stan</th>
+                                    <th className="p-4 text-right">Akcje</th>
+                                </tr>
                             </thead>
                             <tbody className="text-sm">
-                                {filteredItems.map(item => (
+                                {sortedFilteredItems.map(item => (
                                     <tr key={item.id} className="border-b border-slate-100 hover:bg-slate-50 transition">
                                         <td className="p-4"><img src={item.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-md border" /></td>
                                         <td className="p-4 cursor-pointer font-bold text-slate-800" onClick={() => openItemCard(item)}>
@@ -578,8 +685,9 @@ export default function InventoryPage() {
                                         </td>
                                         <td className="p-4 text-slate-600">{item.currentLocation}</td>
                                         <td className="p-4 text-center font-bold">{item.availableQuantity} / {item.totalQuantity}</td>
-                                        <td className="p-4 text-right space-x-3">
+                                        <td className="p-4 text-right space-x-3 whitespace-nowrap">
                                             <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                            <span className="text-slate-300">|</span>
                                             <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline text-xs font-bold">Usuń</button>
                                         </td>
                                     </tr>
@@ -624,7 +732,7 @@ export default function InventoryPage() {
                         )}
 
                         <div className="flex flex-wrap gap-3 mb-8">
-                            <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Dodaj wpis serwisowy / Zmień stan</button>
+                            <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
 
                             {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
                                 <button
@@ -746,9 +854,103 @@ export default function InventoryPage() {
 
                             {formData.type === "UNIQUE" && (
                                 <>
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria</label><input value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria</label><input value={formData.subcategory} onChange={e => setFormData({ ...formData, subcategory: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase">Nr Mag.</label><input required value={formData.inventoryNumber} onChange={e => setFormData({ ...formData, inventoryNumber: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+                                    {/* DODANO: Inteligente listy (datalist) z autouzupełnianiem z bazy dla Kategorii i Podkategorii */}
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria</label>
+                                        <input
+                                            list="categories-datalist"
+                                            value={formData.category}
+                                            onChange={e => setFormData({ ...formData, category: e.target.value })}
+                                            className="w-full p-2 border rounded-xl outline-none"
+                                            placeholder="Wpisz lub wybierz..."
+                                        />
+                                        <datalist id="categories-datalist">
+                                            {existingCategories.map(cat => <option key={cat} value={cat} />)}
+                                        </datalist>
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria</label>
+                                        <input
+                                            list="subcategories-datalist"
+                                            value={formData.subcategory}
+                                            onChange={e => setFormData({ ...formData, subcategory: e.target.value })}
+                                            className="w-full p-2 border rounded-xl outline-none"
+                                            placeholder="Wpisz lub wybierz..."
+                                        />
+                                        <datalist id="subcategories-datalist">
+                                            {existingSubcategories.map(sub => <option key={sub} value={sub} />)}
+                                        </datalist>
+                                    </div>
+
+                                    {/* DODANO: Asystent dynamicznego wykrywania i podpowiedzi wolnych numerów magazynowych */}
+                                    <div className="relative">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-[10px] font-bold text-slate-400 uppercase">Nr Mag.</label>
+                                            <button
+                                                type="button"
+                                                onClick={() => { setShowNumberAssistant(!showNumberAssistant); setAssistantCheckNum(""); setAssistantCheckResult(null); }}
+                                                className="text-[10px] font-bold text-blue-600 hover:underline"
+                                            >
+                                                🔍 Podpowiedz wolny
+                                            </button>
+                                        </div>
+                                        <input required value={formData.inventoryNumber} onChange={e => setFormData({ ...formData, inventoryNumber: e.target.value })} className="w-full p-2 border rounded-xl outline-none focus:ring-2" />
+
+                                        {showNumberAssistant && (
+                                            <div className="absolute top-full left-0 right-0 mt-2 bg-white border-2 border-slate-300 rounded-xl p-4 shadow-xl z-50 animate-fade-in text-xs space-y-3">
+                                                <div className="flex justify-between items-center border-b pb-1">
+                                                    <span className="font-bold text-slate-700">Asystent Wolnych Numerów</span>
+                                                    <button type="button" onClick={() => setShowNumberAssistant(false)} className="text-slate-400 font-bold hover:text-slate-700">&times;</button>
+                                                </div>
+                                                <div className="space-y-1.5">
+                                                    <p className="text-[10px] uppercase font-bold text-slate-400">Sugestie na podstawie bazy:</p>
+                                                    {getFreeNumberSuggestions().map(sug => (
+                                                        <button
+                                                            key={sug.nextFreeNum}
+                                                            type="button"
+                                                            onClick={() => { setFormData({ ...formData, inventoryNumber: String(sug.nextFreeNum) }); setShowNumberAssistant(false); }}
+                                                            className="w-full text-left p-1.5 rounded hover:bg-blue-50 text-blue-600 font-bold flex justify-between items-center transition"
+                                                        >
+                                                            <span>{sug.rangeLabel}:</span>
+                                                            <span className="bg-blue-100 px-2 py-0.5 rounded font-black text-xs">[ {sug.nextFreeNum} ]</span>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                                <div className="border-t pt-2 space-y-1.5">
+                                                    <p className="text-[10px] uppercase font-bold text-slate-400">Sprawdź własny kod:</p>
+                                                    <div className="flex gap-2">
+                                                        <input
+                                                            type="text"
+                                                            placeholder="np. KOSZBETON"
+                                                            value={assistantCheckNum}
+                                                            onChange={e => {
+                                                                setAssistantCheckNum(e.target.value);
+                                                                const exists = items.some(i => i.inventoryNumber.toLowerCase() === e.target.value.trim().toLowerCase() && i.id !== editingItem?.id);
+                                                                setAssistantCheckResult(e.target.value.trim() ? (exists ? "TAKEN" : "FREE") : null);
+                                                            }}
+                                                            className="flex-1 p-1 border rounded"
+                                                        />
+                                                        {assistantCheckResult === "FREE" && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => { setFormData({ ...formData, inventoryNumber: assistantCheckNum.trim() }); setShowNumberAssistant(false); }}
+                                                                className="bg-green-600 text-white font-bold px-2 py-1 rounded text-[10px]"
+                                                            >
+                                                                Użyj
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    {assistantCheckResult === "TAKEN" && (
+                                                        <p className="text-[9px] text-red-600 font-bold">❌ Ten kod jest już zajęty!</p>
+                                                    )}
+                                                    {assistantCheckResult === "FREE" && (
+                                                        <p className="text-[9px] text-green-600 font-bold">✅ Kod jest wolny i gotowy do użycia!</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
                                     <div><label className="text-[10px] font-bold text-slate-400 uppercase">Lokalizacja</label><input required value={formData.currentLocation} onChange={e => setFormData({ ...formData, currentLocation: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
                                 </>
                             )}
@@ -885,7 +1087,7 @@ export default function InventoryPage() {
                             <div className="flex gap-3 pt-4 border-t">
                                 <button type="button" onClick={() => setIsAssignNumberOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                                 <button type="submit" disabled={isUploading || !newInvNumber.trim()} className="flex-1 py-3 bg-yellow-500 hover:bg-yellow-600 text-white font-black rounded-xl shadow-md transition disabled:opacity-50">
-                                    {isUploading ? "Zapisywanie..." : "ZAPISYWANIE..."}
+                                    {isUploading ? "Zapisywanie..." : "ZAPISZ KOD"}
                                 </button>
                             </div>
                         </form>

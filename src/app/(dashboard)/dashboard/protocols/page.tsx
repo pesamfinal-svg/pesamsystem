@@ -45,6 +45,7 @@ interface PaperReturnCartItem {
     declaredQty: number;
     receivedQty: number;
     finalStatus: string; notes: string;
+    manualDebts?: { id: string; name: string; quantity: number; }[]; // <-- DODANO TO POLE
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -79,7 +80,14 @@ export default function ProtocolsHub() {
     const [pendingProtocols, setPendingProtocols] = useState<any[]>([]);
     const [selectedProtocol, setSelectedProtocol] = useState<any | null>(null);
 
-    const [acceptInputs, setAcceptInputs] = useState<Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }>>({});
+    const [acceptInputs, setAcceptInputs] = useState<Record<string, {
+        receivedQty: number,
+        finalStatus: string,
+        notes: string,
+        createClaim: boolean,
+        verifiedAccessories: Record<number, boolean>,
+        manualDebts?: { id: string; name: string; quantity: number; }[] // <-- DODANO TO POLE
+    }>>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Stany dla Zdjęć i Dopisywania w Akceptacji
@@ -114,6 +122,15 @@ export default function ProtocolsHub() {
     const [paperSearchName, setPaperSearchName] = useState("");
     const [paperSearchInvNumber, setPaperSearchInvNumber] = useState("");
 
+    // Stany dla formularza braków w zwrotach papierowych
+    const [paperDebtFormOpenFor, setPaperDebtFormOpenFor] = useState<string | null>(null);
+    const [paperDebtName, setPaperDebtName] = useState("");
+    const [paperDebtQty, setPaperDebtQty] = useState(1);
+
+    // Stany dla formularza braków w akceptacji zwrotów aplikacyjnych
+    const [acceptDebtFormOpenFor, setAcceptDebtFormOpenFor] = useState<string | null>(null);
+    const [acceptDebtName, setAcceptDebtName] = useState("");
+    const [acceptDebtQty, setAcceptDebtQty] = useState(1);
     const [investigationDone, setInvestigationDone] = useState(false);
 
     // Filtry (Wydania)
@@ -923,6 +940,27 @@ export default function ProtocolsHub() {
                             }
                         }
 
+                        // Generowanie wirtualnych dokumentów długu w bazie dla zgłoszonych braków osprzętu
+                        if (cartItem.manualDebts && cartItem.manualDebts.length > 0) {
+                            for (const debt of cartItem.manualDebts) {
+                                const debtRef = doc(collection(db, "inventory"));
+                                transaction.set(debtRef, {
+                                    name: `[Zaległy osprzęt] ${debt.name} (od: ${cartItem.name} ${cartItem.inventoryNumber ? 'nr ' + cartItem.inventoryNumber : ''})`,
+                                    type: "BULK",
+                                    subType: "MANUAL",
+                                    inventoryNumber: "OSPRZĘT",
+                                    category: "Zaległości osprzętu",
+                                    subcategory: cartItem.type === "UNIQUE" ? "Osprzęt narzędzi" : "Osprzęt rusztowań",
+                                    unit: "szt.",
+                                    availableQuantity: 0,
+                                    totalQuantity: debt.quantity,
+                                    status: "sprawne",
+                                    allocations: { [paperReturnSiteId]: debt.quantity },
+                                    createdAt: new Date().toISOString()
+                                });
+                            }
+                        }
+
                         finalProtocolItems.push({
                             inventoryId: cartItem.dbId,
                             name: cartItem.name,
@@ -933,7 +971,8 @@ export default function ProtocolsHub() {
                             receivedQty: cartItem.receivedQty,
                             finalStatus: cartItem.finalStatus,
                             warehouseNotes: cartItem.notes,
-                            accessories: []
+                            // Dopisujemy braki do akcesoriów protokołu dla celów historycznych
+                            accessories: cartItem.manualDebts ? cartItem.manualDebts.map(d => ({ name: d.name, quantity: d.quantity, mustReturn: true, isReturning: false })) : []
                         });
                     }
                 }
@@ -980,8 +1019,14 @@ export default function ProtocolsHub() {
     };
 
     const openProtocolDetails = (protocol: any) => {
-        const initialInputs: Record<string, { receivedQty: number, finalStatus: string, notes: string, createClaim: boolean, verifiedAccessories: Record<number, boolean> }> = {};
-
+        const initialInputs: Record<string, {
+            receivedQty: number,
+            finalStatus: string,
+            notes: string,
+            createClaim: boolean,
+            verifiedAccessories: Record<number, boolean>,
+            manualDebts?: { id: string; name: string; quantity: number; }[]
+        }> = {};
         protocol.items.forEach((i: any) => {
             const verAcc: Record<number, boolean> = {};
             if (i.accessories) {
@@ -993,7 +1038,8 @@ export default function ProtocolsHub() {
                 finalStatus: i.declaredStatus || "sprawne",
                 notes: "",
                 createClaim: false,
-                verifiedAccessories: verAcc
+                verifiedAccessories: verAcc,
+                manualDebts: [] // <-- ZAINICJOWANO TABLICĘ
             };
         });
 
@@ -1232,8 +1278,33 @@ export default function ProtocolsHub() {
                             availableQuantity: newAvailable
                         });
                     } else if (itemData.type === "UNIQUE") {
+                        // Generowanie długu dla manualnie zgłoszonych braków osprzętu przy akceptacji
+                        if (workerInput.manualDebts && workerInput.manualDebts.length > 0) {
+                            for (const debt of workerInput.manualDebts) {
+                                const debtRef = doc(collection(db, "inventory"));
+                                transaction.set(debtRef, {
+                                    name: `[Zaległy osprzęt] ${debt.name} (od: ${item.name} ${item.inventoryNumber ? 'nr ' + item.inventoryNumber : ''})`,
+                                    type: "BULK",
+                                    subType: "MANUAL",
+                                    inventoryNumber: "OSPRZĘT",
+                                    category: "Zaległości osprzętu",
+                                    subcategory: item.type === "UNIQUE" ? "Osprzęt narzędzi" : "Osprzęt rusztowań",
+                                    unit: "szt.",
+                                    availableQuantity: 0,
+                                    totalQuantity: debt.quantity,
+                                    status: "sprawne",
+                                    allocations: { [selectedProtocol.sourceId]: debt.quantity },
+                                    createdAt: new Date().toISOString()
+                                });
+                            }
+                        }
+
                         const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[item.inventoryId] || "";
                         const isNewerOrEqual = !lastOpDate || (acceptDate >= lastOpDate);
+
+                        const manualDebtsNote = workerInput.manualDebts && workerInput.manualDebts.length > 0
+                            ? ` | MANUALNE BRAKI OSPRZĘTU: ${workerInput.manualDebts.map(d => `${d.name} (${d.quantity} szt.)`).join(", ")}`
+                            : "";
 
                         if (isNewerOrEqual) {
                             transaction.update(itemRef, {
@@ -1249,7 +1320,7 @@ export default function ProtocolsHub() {
                                 date: new Date().toISOString(),
                                 documentDate: acceptDate,
                                 type: "ZWROT",
-                                description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${workerInput.createClaim ? ' [Zgłoszono do Centrum Likwidacji Szkód]' : ''}`,
+                                description: `Zwrócono z: ${selectedProtocol.sourceName}. Zgłoszono stan: ${item.declaredStatus}, przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${manualDebtsNote}${workerInput.createClaim ? ' [Zgłoszono do Centrum Likwidacji Szkód]' : ''}`,
                                 status: workerInput.finalStatus,
                                 user: `${user?.firstName} ${user?.lastName}`
                             });
@@ -1264,19 +1335,24 @@ export default function ProtocolsHub() {
                                 date: new Date().toISOString(),
                                 documentDate: acceptDate,
                                 type: "ZWROT",
-                                description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Zwrócono z: ${selectedProtocol.sourceName}. Przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}`,
+                                description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Zwrócono z: ${selectedProtocol.sourceName}. Przyjęto jako: ${workerInput.finalStatus}. Uwagi: ${workerInput.notes}${missingAccessoriesNote}${manualDebtsNote}`,
                                 status: workerInput.finalStatus,
                                 user: `${user?.firstName} ${user?.lastName}`
                             });
                         }
                     }
 
+                    const manualDebtsNote = workerInput.manualDebts && workerInput.manualDebts.length > 0
+                        ? ` | MANUALNE BRAKI OSPRZĘTU: ${workerInput.manualDebts.map(d => `${d.name} (${d.quantity} szt.)`).join(", ")}`
+                        : "";
+
                     updatedItemsForProtocol.push({
                         ...item,
                         receivedQty: workerInput.receivedQty,
                         finalStatus: workerInput.finalStatus,
-                        warehouseNotes: workerInput.notes + missingAccessoriesNote,
-                        accessories: finalizedAccessories
+                        warehouseNotes: workerInput.notes + missingAccessoriesNote + manualDebtsNote,
+                        // Łączymy zweryfikowany osprzęt systemowy z tym dodanym ręcznie jako braki
+                        accessories: finalizedAccessories.concat(workerInput.manualDebts ? workerInput.manualDebts.map(d => ({ name: d.name, quantity: d.quantity, mustReturn: true, isReturning: false, verifiedReturning: false })) : [])
                     });
                 }
 
@@ -1871,7 +1947,27 @@ export default function ProtocolsHub() {
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in">
                         <div className="p-6 bg-slate-50 border-b flex justify-between items-center">
-                            <div><h2 className="text-2xl font-black text-blue-600">Zgłoś Zwrot Sprzętu</h2><p className="text-sm text-slate-500">Wybierz co zjeżdża z budowy na magazyn.</p></div>
+                            <div>
+                                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                    <h2 className="text-2xl font-black text-blue-600">Zgłoś Zwrot Sprzętu</h2>
+                                    <button
+                                        type="button"
+                                        onClick={() => alert(
+                                            `🤖 KONTROLA I OCENA SYSTEMOWA PESAM AI\n\n` +
+                                            `Zgodnie z bezpośrednim zaleceniem Dyrekcji oraz Prezesa firmy, cały proces zwrotu materiałów, osprzętu i narzędzi podlega weryfikacji i ocenie przez moduł sztucznej inteligencji (PESAM AI).\n\n` +
+                                            `Zasady zwrotów i konsekwencje dla Kierowników:\n` +
+                                            `1. AI automatycznie weryfikuje kompletność zdawanego sprzętu (rozlicza osprzęt przypisany przy wydaniu).\n` +
+                                            `2. System wychwytuje i blokuje próby zwożenia na magazyn resztek materiałów, odpadów oraz zniszczonych elementów niezdatnych do ponownego użycia („śmieci”).\n` +
+                                            `3. Każda próba zaśmiecenia magazynu lub zdania niekompletnego sprzętu generuje automatyczny raport niezgodności wysyłany bezpośrednio do Szefa i Dyrekcji.\n\n` +
+                                            `Szanujmy czas i porządek na magazynie. Zwozimy wyłącznie sprzęt sprawny, czysty i kompletny!`
+                                        )}
+                                        className="bg-purple-100 hover:bg-purple-200 border border-purple-200 text-purple-800 text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-wider animate-pulse flex items-center gap-1 w-fit transition shadow-sm"
+                                    >
+                                        🤖 PESAM AI: Weryfikacja Aktywna (Kliknij po szczegóły)
+                                    </button>
+                                </div>
+                                <p className="text-sm text-slate-500 mt-1">Wybierz co zjeżdża z budowy na magazyn.</p>
+                            </div>
                             <button onClick={closeModal} className="text-4xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
                         <div className="flex-1 flex overflow-hidden">
@@ -2166,15 +2262,108 @@ export default function ProtocolsHub() {
                                         paperReturnCart.map(cItem => (
                                             <div key={cItem.cartItemId} className={`p-3 border rounded-xl shadow-sm bg-white ${cItem.isManual ? 'border-dashed border-orange-300' : 'border-slate-200'}`}>
                                                 <div className="flex justify-between items-start mb-2">
-                                                    <div>
-                                                        <p className="font-bold text-sm text-slate-800">
-                                                            {cItem.name}
-                                                            {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
-                                                        </p>
-                                                        {!cItem.isManual && <p className="text-[10px] font-mono text-slate-500">Nr Mag: {cItem.inventoryNumber || "-"} | Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-3 flex-wrap">
+                                                            <p className="font-bold text-sm text-slate-800">
+                                                                {cItem.name}
+                                                                {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
+                                                            </p>
+                                                            {/* PRZYCISK ZGŁASZANIA BRAKÓW OSPRZĘTU (W MIEJSCU CZERWONEGO PROSTOKĄTA) */}
+                                                            {!cItem.isManual && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setPaperDebtFormOpenFor(cItem.cartItemId);
+                                                                        setPaperDebtName("");
+                                                                        setPaperDebtQty(1);
+                                                                    }}
+                                                                    className="bg-orange-100 hover:bg-orange-200 text-orange-800 border border-orange-200 px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition whitespace-nowrap ml-2 flex items-center gap-1"
+                                                                >
+                                                                    ⚠️ Zgłoś brak osprzętu
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                        {!cItem.isManual && <p className="text-[10px] font-mono text-slate-500 mt-1">Nr Mag: {cItem.inventoryNumber || "-"} | Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
                                                     </div>
                                                     <button onClick={() => removePaperReturnItem(cItem.cartItemId)} className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-[10px] font-bold">&times; Usuń</button>
                                                 </div>
+
+                                                {/* FORMULARZ INLINE DLA WPISYWANIA BRAKÓW */}
+                                                {paperDebtFormOpenFor === cItem.cartItemId && (
+                                                    <div className="my-2 p-2.5 bg-red-50 border border-red-200 rounded-lg space-y-2 text-xs animate-fade-in">
+                                                        <p className="font-bold text-red-800">Dopisz brakujący element / osprzęt:</p>
+                                                        <div className="flex gap-2">
+                                                            <input
+                                                                type="text"
+                                                                placeholder="np. przedłużka, wiertło, osłona..."
+                                                                value={paperDebtName}
+                                                                onChange={e => setPaperDebtName(e.target.value)}
+                                                                className="flex-1 p-1.5 border rounded bg-white outline-none focus:border-red-400 font-semibold"
+                                                            />
+                                                            <input
+                                                                type="number"
+                                                                min="1"
+                                                                value={paperDebtQty}
+                                                                onChange={e => setPaperDebtQty(Number(e.target.value))}
+                                                                className="w-16 p-1.5 border rounded bg-white text-center font-bold outline-none"
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    if (!paperDebtName.trim()) return;
+                                                                    const updatedCart = paperReturnCart.map(cartItem => {
+                                                                        if (cartItem.cartItemId === cItem.cartItemId) {
+                                                                            const currentDebts = cartItem.manualDebts || [];
+                                                                            return {
+                                                                                ...cartItem,
+                                                                                manualDebts: [...currentDebts, { id: Date.now().toString(), name: paperDebtName.trim(), quantity: paperDebtQty }]
+                                                                            };
+                                                                        }
+                                                                        return cartItem;
+                                                                    });
+                                                                    setPaperReturnCart(updatedCart);
+                                                                    setPaperDebtFormOpenFor(null);
+                                                                    setPaperDebtName("");
+                                                                    setPaperDebtQty(1);
+                                                                }}
+                                                                className="bg-red-600 text-white font-bold px-3 py-1 rounded hover:bg-red-700 transition"
+                                                            >
+                                                                Dodaj
+                                                            </button>
+                                                            <button type="button" onClick={() => setPaperDebtFormOpenFor(null)} className="text-slate-500 hover:text-slate-700">Anuluj</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* LISTA DODANYCH BRAKÓW DLA TEGO SPRZĘTU */}
+                                                {cItem.manualDebts && cItem.manualDebts.length > 0 && (
+                                                    <div className="my-2 pl-3 border-l-2 border-red-500 bg-red-50/50 p-2 rounded-r-lg space-y-1 text-xs">
+                                                        <p className="text-[10px] font-black text-red-800 uppercase tracking-wider">🚨 Zgłoszone braki (Dług budowy):</p>
+                                                        {cItem.manualDebts.map(debt => (
+                                                            <div key={debt.id} className="flex justify-between items-center bg-white p-1 rounded border border-red-100">
+                                                                <span className="font-semibold text-slate-800">↳ {debt.name} ({debt.quantity} szt.)</span>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const updatedCart = paperReturnCart.map(cartItem => {
+                                                                            if (cartItem.cartItemId === cItem.cartItemId) {
+                                                                                return {
+                                                                                    ...cartItem,
+                                                                                    manualDebts: cartItem.manualDebts?.filter(d => d.id !== debt.id)
+                                                                                };
+                                                                            }
+                                                                            return cartItem;
+                                                                        });
+                                                                        setPaperReturnCart(updatedCart);
+                                                                    }}
+                                                                    className="text-red-500 hover:text-red-700 font-bold text-[10px] px-1.5"
+                                                                >
+                                                                    Usuń
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 <div className="flex flex-wrap gap-2 items-center bg-slate-50 p-2 rounded border border-slate-100">
                                                     {cItem.type === "BULK" || cItem.isManual ? (
                                                         <div className="flex items-center gap-3">
@@ -2298,13 +2487,29 @@ export default function ProtocolsHub() {
                                                         <div key={item.inventoryId} className={`p-4 border rounded-xl shadow-sm relative ${isQtyDifferent || isStatusDifferent ? 'bg-orange-50 border-orange-300' : 'bg-slate-50'}`}>
 
                                                             <div className="flex items-start justify-between mb-3">
-                                                                <div>
-                                                                    <p className="font-bold text-slate-800 pr-20">
-                                                                        {item.name}
-                                                                        {item.isNewManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
-                                                                        {item.declaredQty === 0 && !item.isNewManual && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
-                                                                    </p>
-                                                                    <p className="text-[10px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "BRAK"}</p>
+                                                                <div className="flex-1">
+                                                                    <div className="flex items-center gap-3 flex-wrap">
+                                                                        <p className="font-bold text-slate-800 pr-4">
+                                                                            {item.name}
+                                                                            {item.isNewManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
+                                                                            {item.declaredQty === 0 && !item.isNewManual && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
+                                                                        </p>
+                                                                        {/* PRZYCISK ZGŁASZANIA NOWYCH BRAKÓW DLA AKCEPTACJI ZWROTÓW */}
+                                                                        {!item.isNewManual && (
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => {
+                                                                                    setAcceptDebtFormOpenFor(item.inventoryId);
+                                                                                    setAcceptDebtName("");
+                                                                                    setAcceptDebtQty(1);
+                                                                                }}
+                                                                                className="bg-orange-100 hover:bg-orange-200 text-orange-800 border border-orange-200 px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition whitespace-nowrap flex items-center gap-1"
+                                                                            >
+                                                                                ⚠️ Zgłoś brak osprzętu
+                                                                            </button>
+                                                                        )}
+                                                                    </div>
+                                                                    <p className="text-[10px] font-mono text-slate-500 mt-1">Nr Mag: {item.inventoryNumber || "BRAK"}</p>
                                                                 </div>
 
                                                                 <div className="flex flex-col items-end gap-1">
@@ -2395,6 +2600,73 @@ export default function ProtocolsHub() {
                                                                             </label>
                                                                         ))}
                                                                     </div>
+                                                                </div>
+                                                            )}
+
+                                                            {/* FORMULARZ INLINE DLA WPISYWANIA BRAKÓW W AKCEPTACJI */}
+                                                            {acceptDebtFormOpenFor === item.inventoryId && (
+                                                                <div className="mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg space-y-2 text-xs animate-fade-in">
+                                                                    <p className="font-bold text-red-800">Dopisz brakujący element / osprzęt:</p>
+                                                                    <div className="flex gap-2">
+                                                                        <input
+                                                                            type="text"
+                                                                            placeholder="np. przedłużka, wiertło, osłona..."
+                                                                            value={acceptDebtName}
+                                                                            onChange={e => setAcceptDebtName(e.target.value)}
+                                                                            className="flex-1 p-1.5 border rounded bg-white outline-none focus:border-red-400 font-semibold"
+                                                                        />
+                                                                        <input
+                                                                            type="number"
+                                                                            min="1"
+                                                                            value={acceptDebtQty}
+                                                                            onChange={e => setAcceptDebtQty(Number(e.target.value))}
+                                                                            className="w-16 p-1.5 border rounded bg-white text-center font-bold outline-none"
+                                                                        />
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                if (!acceptDebtName.trim()) return;
+                                                                                const updatedInputs = { ...acceptInputs };
+                                                                                const currentDebts = updatedInputs[item.inventoryId].manualDebts || [];
+                                                                                updatedInputs[item.inventoryId].manualDebts = [
+                                                                                    ...currentDebts,
+                                                                                    { id: Date.now().toString(), name: acceptDebtName.trim(), quantity: acceptDebtQty }
+                                                                                ];
+                                                                                setAcceptInputs(updatedInputs);
+                                                                                setAcceptDebtFormOpenFor(null);
+                                                                                setAcceptDebtName("");
+                                                                                setAcceptDebtQty(1);
+                                                                            }}
+                                                                            className="bg-red-600 text-white font-bold px-3 py-1 rounded hover:bg-red-700 transition"
+                                                                        >
+                                                                            Dodaj
+                                                                        </button>
+                                                                        <button type="button" onClick={() => setAcceptDebtFormOpenFor(null)} className="text-slate-500 hover:text-slate-700">Anuluj</button>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+
+                                                            {/* LISTA DODANYCH BRAKÓW W AKCEPTACJI */}
+                                                            {inputState.manualDebts && inputState.manualDebts.length > 0 && (
+                                                                <div className="mt-3 pl-3 border-l-2 border-red-500 bg-red-50/50 p-2 rounded-r-lg space-y-1 text-xs">
+                                                                    <p className="text-[10px] font-black text-red-800 uppercase tracking-wider">🚨 Zgłoszone braki (Dług budowy):</p>
+                                                                    {inputState.manualDebts.map(debt => (
+                                                                        <div key={debt.id} className="flex justify-between items-center bg-white p-1 rounded border border-red-100">
+                                                                            <span className="font-semibold text-slate-800">↳ {debt.name} ({debt.quantity} szt.)</span>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => {
+                                                                                    const updatedInputs = { ...acceptInputs };
+                                                                                    updatedInputs[item.inventoryId].manualDebts =
+                                                                                        updatedInputs[item.inventoryId].manualDebts?.filter(d => d.id !== debt.id);
+                                                                                    setAcceptInputs(updatedInputs);
+                                                                                }}
+                                                                                className="text-red-500 hover:text-red-700 font-bold text-[10px] px-1.5"
+                                                                            >
+                                                                                Usuń
+                                                                            </button>
+                                                                        </div>
+                                                                    ))}
                                                                 </div>
                                                             )}
                                                         </div>
