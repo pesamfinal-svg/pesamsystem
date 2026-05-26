@@ -1,7 +1,7 @@
 // src/app/(dashboard)/inventory/page.tsx
 "use client";
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction, where, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
@@ -37,6 +37,7 @@ interface InventoryItem {
     additionalInfo: string;
     allocations: Record<string, number>;
     createdAt: string;
+    lastOperationDate?: string;
 }
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
@@ -73,6 +74,14 @@ export default function InventoryPage() {
     const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
     const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
     const [showSpecs, setShowSpecs] = useState(false);
+
+    // STANY DLA KOREKTY STANU (DLA SPRZĘTU BULK)
+    const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
+    const [adjustItem, setAdjustItem] = useState<InventoryItem | null>(null);
+    const [adjustType, setAdjustType] = useState<"PATH_A" | "PATH_B">("PATH_A");
+    const [pathAAction, setPathAAction] = useState<"ADD" | "SUBTRACT">("ADD");
+    const [adjustQty, setAdjustQty] = useState<number | "">("");
+    const [isAdjustSubmitting, setIsAdjustSubmitting] = useState(false);
 
     // NOWE STANY DLA NADAWANIA NUMERU PRZEZ MAGAZYNIERA
     const [isAssignNumberOpen, setIsAssignNumberOpen] = useState(false);
@@ -238,7 +247,6 @@ export default function InventoryPage() {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
             const rawHistory = historySnap.docs.map(d => d.data() as HistoryEntry);
 
-            // --- NOWE: Sortowanie chronologiczne po dacie z papieru (Malejąco: od najnowszej do najstarszej) ---
             const sortedHistory = rawHistory.sort((a: any, b: any) => {
                 const dateA = new Date(a.documentDate || a.date).getTime();
                 const dateB = new Date(b.documentDate || b.date).getTime();
@@ -269,9 +277,83 @@ export default function InventoryPage() {
     };
 
     // =========================================================================
+    // MODUŁ: KOREKTA STANU DLA SPRZĘTU BULK
+    // =========================================================================
+    const handleAdjustSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!adjustItem || !adjustQty || Number(adjustQty) <= 0) return;
+
+        setIsAdjustSubmitting(true);
+        const qtyNum = Number(adjustQty);
+
+        try {
+            await runTransaction(db, async (transaction) => {
+                const itemRef = doc(db, "inventory", adjustItem.id);
+                const itemDoc = await transaction.get(itemRef);
+                if (!itemDoc.exists()) throw "Przedmiot nie istnieje w bazie!";
+
+                const data = itemDoc.data() as InventoryItem;
+                let newAvailable = data.availableQuantity;
+                let newTotal = data.totalQuantity;
+
+                if (adjustType === "PATH_A") {
+                    if (pathAAction === "ADD") {
+                        newAvailable += qtyNum;
+                        newTotal += qtyNum;
+                    } else {
+                        newAvailable -= qtyNum;
+                        newTotal -= qtyNum;
+                        if (newAvailable < 0) {
+                            throw `⚠️ Błąd: Nie możesz odjąć ${qtyNum} szt., ponieważ na magazynie dostępnych jest obecnie tylko ${data.availableQuantity} szt.!`;
+                        }
+                        if (newTotal < 0) newTotal = 0;
+                    }
+                } else {
+                    // PATH_B (Inwentaryzacja z natury)
+                    // Obliczamy sumę aktywnych alokacji na wszystkich budowach
+                    const allocations = data.allocations || {};
+                    const sumAllocations = Object.values(allocations).reduce((sum, val) => sum + (val || 0), 0);
+
+                    newAvailable = qtyNum;
+                    newTotal = qtyNum + sumAllocations;
+                }
+
+                // Zapis w bazie
+                transaction.update(itemRef, {
+                    availableQuantity: newAvailable,
+                    totalQuantity: newTotal
+                });
+
+                // Zapis do historii przedmiotu
+                const historyRef = doc(collection(db, `inventory/${adjustItem.id}/history`));
+                const desc = adjustType === "PATH_A"
+                    ? `${pathAAction === "ADD" ? "Dostawa / Dopisanie" : "Likwidacja / Odpisanie"} ilości o: ${qtyNum} szt. Stan po korekcie: ${newAvailable} (Dostępne) / ${newTotal} (Suma)`
+                    : `Inwentaryzacja z natury. Ustawiono fizyczny stan magazynu na: ${qtyNum} szt. Stan po korekcie: ${newAvailable} (Dostępne) / ${newTotal} (Suma) [Wszystkie budowy: ${newTotal - newAvailable} szt.]`;
+
+                transaction.set(historyRef, {
+                    date: new Date().toISOString(),
+                    type: "KOREKTA",
+                    description: desc,
+                    status: data.status,
+                    user: `${user?.firstName} ${user?.lastName}`
+                });
+            });
+
+            alert("✅ Stan magazynowy został pomyślnie skorygowany!");
+            setIsAdjustModalOpen(false);
+            setAdjustItem(null);
+            setAdjustQty("");
+            fetchItems();
+        } catch (error: any) {
+            alert(error.message || error);
+        } finally {
+            setIsAdjustSubmitting(false);
+        }
+    };
+
+    // =========================================================================
     // FUNKCJE DO KARTY URZĄDZENIA: SERWIS
     // =========================================================================
-
     const openServiceModal = () => {
         if (!selectedItem) return;
         setServiceData({
@@ -333,12 +415,10 @@ export default function InventoryPage() {
         }
     };
 
-    // --- NOWA FUNKCJA: NADAWANIE NUMERU PRZEZ MAGAZYNIERA ---
     const handleAssignNumber = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedItem || !newInvNumber.trim()) return;
 
-        // Sprawdzamy, czy ktoś inny nie używa już tego numeru w firmie
         const isTaken = items.some(i => i.inventoryNumber.toLowerCase() === newInvNumber.trim().toLowerCase() && i.id !== selectedItem.id);
         if (isTaken) return alert("⚠️ Ten numer magazynowy jest już zajęty przez inny sprzęt!");
 
@@ -350,10 +430,9 @@ export default function InventoryPage() {
 
                 transaction.update(itemRef, {
                     inventoryNumber: newInvNumber.trim(),
-                    status: "sprawne" // Zmieniamy status z "do nadania..." na "sprawne"
+                    status: "sprawne"
                 });
 
-                // Dodajemy wpis o nadaniu kodu do historii
                 transaction.set(historyRef, {
                     date: new Date().toISOString(),
                     type: "NADAJ_KOD",
@@ -365,8 +444,8 @@ export default function InventoryPage() {
 
             alert("✅ Nadano właściwy numer magazynowy!");
             setIsAssignNumberOpen(false);
-            setSelectedItem(null); // Zamykamy kartę
-            fetchItems(); // Odświeżamy tabelę
+            setSelectedItem(null);
+            fetchItems();
         } catch (error: any) {
             alert("Błąd: " + error.message);
         } finally {
@@ -419,8 +498,17 @@ export default function InventoryPage() {
                                 </td>
                                 <td className="p-4 text-center font-mono text-xs text-blue-600 font-bold">{sub.inventoryNumber}</td>
                                 <td className="p-4 text-center font-black">{sub.availableQuantity} / {sub.totalQuantity}</td>
-                                <td className="p-4 text-right space-x-3">
+                                <td className="p-4 text-right space-x-3 whitespace-nowrap">
+                                    {/* DODANY PRZYCISK: KOREKTA STANU DLA ELEMENTU BULK */}
+                                    <button
+                                        onClick={() => { setAdjustItem(sub); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
+                                        className="text-orange-600 hover:underline font-bold text-xs"
+                                    >
+                                        ⚙️ Korekta Stanu
+                                    </button>
+                                    <span className="text-slate-300">|</span>
                                     <button onClick={() => { setEditingItem(sub); setFormData({ ...sub }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                    <span className="text-slate-300">|</span>
                                     <button onClick={() => handleDelete(sub)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
                                 </td>
                             </tr>
@@ -520,7 +608,6 @@ export default function InventoryPage() {
                             <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
                         </div>
 
-                        {/* DUŻY ŻÓŁTY BANER OSTRZEGAWCZY DLA MAGAZYNIERA */}
                         {selectedItem.status === "do nadania numeru" && (
                             <div className="bg-yellow-50 border-2 border-yellow-200 rounded-2xl p-4 mb-6 flex flex-col sm:flex-row items-center justify-between gap-3 animate-fade-in shadow-sm">
                                 <div className="text-xs text-yellow-800 font-bold text-center sm:text-left">
@@ -536,7 +623,6 @@ export default function InventoryPage() {
                             </div>
                         )}
 
-                        {/* AKCJE SERWISOWE I SĄDOWE */}
                         <div className="flex flex-wrap gap-3 mb-8">
                             <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Dodaj wpis serwisowy / Zmień stan</button>
 
@@ -763,7 +849,7 @@ export default function InventoryPage() {
                 </div>
             )}
 
-            {/* MODAL: NADAWANIE NUMERU MAGAZYNOWEGO (DLA URZĄDZEŃ OD KSIĘGOWOŚCI) */}
+            {/* MODAL: NADAWANIE NUMERU MAGAZYNOWEGO */}
             {isAssignNumberOpen && selectedItem && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-t-4 border-yellow-500">
@@ -799,7 +885,118 @@ export default function InventoryPage() {
                             <div className="flex gap-3 pt-4 border-t">
                                 <button type="button" onClick={() => setIsAssignNumberOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                                 <button type="submit" disabled={isUploading || !newInvNumber.trim()} className="flex-1 py-3 bg-yellow-500 hover:bg-yellow-600 text-white font-black rounded-xl shadow-md transition disabled:opacity-50">
-                                    {isUploading ? "Zapisywanie..." : "ZAPISZ KOD"}
+                                    {isUploading ? "Zapisywanie..." : "ZAPISYWANIE..."}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: KOREKTA STANU (DLA SPRZĘTU BULK) */}
+            {isAdjustModalOpen && adjustItem && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 animate-fade-in border-t-4 border-orange-500">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-black text-slate-800">⚙️ Korekta Stanu Magazynu</h2>
+                            <button onClick={() => { setIsAdjustModalOpen(false); setAdjustItem(null); }} className="text-2xl text-slate-400 hover:text-slate-800">&times;</button>
+                        </div>
+
+                        <div className="bg-slate-50 border p-4 rounded-xl mb-6 text-xs">
+                            <span className="font-bold text-slate-400 uppercase">Wybrany element:</span>
+                            <p className="font-bold text-slate-800 text-sm mt-0.5">{adjustItem.name}</p>
+                            <p className="text-[10px] text-slate-500 mt-2 font-semibold">
+                                Obecny stan w systemie: <span className="text-blue-600">{adjustItem.availableQuantity}</span> (Dostępne) / <span className="text-slate-700">{adjustItem.totalQuantity}</span> (Suma)
+                            </p>
+                        </div>
+
+                        {/* Zakładki wyboru ścieżki */}
+                        <div className="flex bg-slate-100 p-1 rounded-xl mb-6 border">
+                            <button
+                                type="button"
+                                onClick={() => { setAdjustType("PATH_A"); setAdjustQty(""); }}
+                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${adjustType === 'PATH_A' ? 'bg-white shadow text-orange-600' : 'text-slate-400 hover:text-slate-600'}`}
+                            >
+                                📦 Ścieżka A (Dostawa/Odpis)
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setAdjustType("PATH_B"); setAdjustQty(""); }}
+                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${adjustType === 'PATH_B' ? 'bg-white shadow text-orange-600' : 'text-slate-400 hover:text-slate-600'}`}
+                            >
+                                📋 Ścieżka B (Z Natury)
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleAdjustSubmit} className="space-y-5">
+                            {adjustType === "PATH_A" ? (
+                                <>
+                                    <div className="space-y-2">
+                                        <label className="block text-xs font-bold text-slate-600 uppercase">Wybierz rodzaj zmiany:</label>
+                                        <div className="flex gap-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => setPathAAction("ADD")}
+                                                className={`flex-1 py-2.5 rounded-lg text-xs font-black border transition ${pathAAction === 'ADD' ? 'bg-green-50 border-green-300 text-green-700' : 'bg-white border-slate-200 text-slate-500'}`}
+                                            >
+                                                ➕ Dodaj (Dostawa)
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setPathAAction("SUBTRACT")}
+                                                className={`flex-1 py-2.5 rounded-lg text-xs font-black border transition ${pathAAction === 'SUBTRACT' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-500'}`}
+                                            >
+                                                ➖ Odejmij (Strata)
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="block text-xs font-bold text-slate-600 uppercase">
+                                            {pathAAction === "ADD" ? "Ilość do dopisania na magazyn:" : "Ilość do odpisania z magazynu:"}
+                                        </label>
+                                        <input
+                                            required
+                                            type="number"
+                                            min="1"
+                                            value={adjustQty}
+                                            onChange={e => setAdjustQty(e.target.value === "" ? "" : Number(e.target.value))}
+                                            placeholder="np. 50"
+                                            className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-orange-500 font-bold text-center text-lg bg-slate-50"
+                                        />
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 leading-relaxed text-center">
+                                        Zatwierdzenie zmieni **zarówno** ilość dostępną na magazynie, jak i całkowity stan sprzętu w systemie o wskazaną liczbę.
+                                    </p>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="space-y-1.5">
+                                        <label className="block text-xs font-bold text-slate-600 uppercase">
+                                            Dokładna doliczona ilość na magazynie:
+                                        </label>
+                                        <input
+                                            required
+                                            type="number"
+                                            min="0"
+                                            value={adjustQty}
+                                            onChange={e => setAdjustQty(e.target.value === "" ? "" : Number(e.target.value))}
+                                            placeholder="np. 5"
+                                            className="w-full p-3 border rounded-xl outline-none focus:ring-2 focus:ring-orange-500 font-bold text-center text-lg bg-slate-50"
+                                        />
+                                    </div>
+                                    <div className="bg-orange-50 border border-orange-200 p-3 rounded-xl text-[10px] text-orange-800 leading-relaxed space-y-1">
+                                        <p className="font-bold">💡 JAK TO ZADZIAŁA:</p>
+                                        <p>1. Dostępna ilość na magazynie stanie się równa: <span className="font-bold">{adjustQty || 0} szt.</span></p>
+                                        <p>2. Alokacje na budowach pozostaną nienaruszone.</p>
+                                        <p>3. Nowa ilość całkowita zostanie wyliczona automatycznie.</p>
+                                    </div>
+                                </>
+                            )}
+
+                            <div className="flex gap-3 pt-4 border-t">
+                                <button type="button" onClick={() => { setIsAdjustModalOpen(false); setAdjustItem(null); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                                <button type="submit" disabled={isAdjustSubmitting || !adjustQty} className="flex-1 py-3 bg-orange-500 hover:bg-orange-600 text-white font-black rounded-xl shadow-md transition disabled:opacity-50">
+                                    {isAdjustSubmitting ? "Zapisywanie..." : "Zatwierdź korektę"}
                                 </button>
                             </div>
                         </form>
@@ -829,4 +1026,4 @@ export default function InventoryPage() {
             )}
         </div>
     );
-} 
+}
