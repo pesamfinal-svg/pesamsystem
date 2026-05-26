@@ -133,6 +133,12 @@ export default function ProtocolsHub() {
     const [acceptDebtQty, setAcceptDebtQty] = useState(1);
     const [investigationDone, setInvestigationDone] = useState(false);
 
+    // STANY DLA MODALU KOREKT PROTOKOŁÓW
+    const [isCorrectionModalOpen, setIsCorrectionModalOpen] = useState(false);
+    const [correctionParentProtocol, setCorrectionParentProtocol] = useState<any | null>(null);
+    const [correctionCart, setCorrectionCart] = useState<any[]>([]);
+    const [isCorrectionSubmitting, setIsCorrectionSubmitting] = useState(false);
+
     // Filtry (Wydania)
     const [searchName, setSearchName] = useState("");
     const [searchInvNumber, setSearchInvNumber] = useState("");
@@ -1379,6 +1385,418 @@ export default function ProtocolsHub() {
         }
     };
 
+    // FUNKCJA ANULOWANIA PROTOKOŁU (WYCOFYWANIE STANÓW Z OCHRONĄ CHRONOLOGICZNĄ)
+    const handleCancelProtocol = async (p: any) => {
+        const pDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
+        const confirmCancel = window.confirm(
+            `🚫 ANULOWANIE PROTOKOŁU: ${p.protocolId}\n\n` +
+            `Czy na pewno chcesz anulować ten protokół z dnia ${pDate}?\n` +
+            `System automatycznie wycofa stany magazynowe i alokacje na budowach.`
+        );
+        if (!confirmCancel) return;
+
+        setIsSubmitting(true);
+
+        try {
+            // 1. STRAŻNIK CHRONOLOGII DLA ANULOWANIA (Pobieramy najnowsze daty UNIQUE przed transakcją)
+            const resolvedLastOpDates: Record<string, string> = {};
+            for (const item of p.items) {
+                if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
+
+                const localItem = inventory.find(i => i.id === item.inventoryId);
+                let lastOp: string = localItem?.lastOperationDate || "";
+
+                if (!lastOp) {
+                    const historyRef = collection(db, `inventory/${item.inventoryId}/history`);
+                    const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
+                    const snap = await getDocs(q);
+
+                    if (!snap.empty) {
+                        const lastDoc = snap.docs[0].data();
+                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
+                    } else {
+                        lastOp = "";
+                    }
+                }
+                resolvedLastOpDates[item.inventoryId] = lastOp;
+            }
+
+            // Ochrona: jeśli jakikolwiek sprzęt UNIQUE ma już nowszą operację, blokujemy całą akcję
+            const conflictingItems: string[] = [];
+            for (const item of p.items) {
+                if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
+                const lastOp = resolvedLastOpDates[item.inventoryId];
+                if (lastOp && pDate < lastOp) {
+                    conflictingItems.push(`- ${item.name} (nr Mag: ${item.inventoryNumber || 'brak'}): posiada nowszy ruch z dnia ${lastOp}`);
+                }
+            }
+
+            if (conflictingItems.length > 0) {
+                setIsSubmitting(false);
+                return alert(
+                    `⚠️ BLOKADA ANULOWANIA PROTOKOŁU!\n\n` +
+                    `Nie można anulować tego dokumentu, ponieważ poniższy sprzęt zdążył już wyjechać dalej i posiada nowsze operacje w bazie:\n\n` +
+                    conflictingItems.join("\n") +
+                    `\n\nAby anulować ten dokument, musisz najpierw wycofać/anulować nowsze operacje dla wymienionego sprzętu.`
+                );
+            }
+
+            // 2. TRANSAKCJA COFANIA STANÓW
+            await runTransaction(db, async (transaction) => {
+                const protocolRef = doc(db, "protocols", p.dbId);
+
+                // Pobieramy przedmioty z bazy
+                const itemDocs: Record<string, any> = {};
+                for (const item of p.items) {
+                    if (!item.inventoryId || item.isNewManual) continue;
+                    const itemRef = doc(db, "inventory", item.inventoryId);
+                    const itemDoc = await transaction.get(itemRef);
+                    itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
+                }
+
+                for (const item of p.items) {
+                    if (item.isNewManual || !item.inventoryId) continue;
+
+                    const { ref: itemRef, doc: itemDoc } = itemDocs[item.inventoryId];
+                    if (!itemDoc.exists()) continue;
+
+                    const itemData = itemDoc.data();
+                    const qty = item.receivedQty !== undefined ? item.receivedQty : (item.quantity !== undefined ? item.quantity : 1);
+
+                    if (p.type === "WYDANIE") {
+                        // --- WYCOFANIE WYDANIA (Oddajemy na Magazyn, zabieramy z budowy) ---
+                        const newAvailable = itemData.availableQuantity + qty;
+                        const currentAllocations = itemData.allocations || {};
+                        const newAllocations = { ...currentAllocations };
+
+                        const oldSiteQty = newAllocations[p.destinationId] || 0;
+                        newAllocations[p.destinationId] = Math.max(0, oldSiteQty - qty);
+
+                        if (itemData.type === "UNIQUE") {
+                            Object.keys(newAllocations).forEach(k => delete newAllocations[k]);
+                        }
+
+                        const updateData: any = {
+                            availableQuantity: newAvailable,
+                            allocations: newAllocations
+                        };
+
+                        if (itemData.type === "UNIQUE") {
+                            updateData.currentLocation = "MAGAZYN";
+                        }
+
+                        transaction.update(itemRef, updateData);
+
+                        // Dodanie wpisu wycofania do historii UNIQUE
+                        if (itemData.type === "UNIQUE") {
+                            const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(),
+                                documentDate: pDate,
+                                type: "WYCOFANIE",
+                                description: `[Wycofano / Anulowano protokół] Anulowano wydanie na budowę: ${p.destinationName} (Dokument: ${p.protocolId})`,
+                                status: itemData.status,
+                                user: `${user?.firstName} ${user?.lastName}`
+                            });
+                        }
+
+                    } else if (p.type === "ZWROT") {
+                        // --- WYCOFANIE ZWROTU (Zabieramy z Magazynu, oddajemy na budowę) ---
+                        const newAvailable = Math.max(0, itemData.availableQuantity - qty);
+                        const currentAllocations = itemData.allocations || {};
+                        const newAllocations = { ...currentAllocations };
+
+                        newAllocations[p.sourceId] = (newAllocations[p.sourceId] || 0) + qty;
+
+                        const updateData: any = {
+                            availableQuantity: newAvailable,
+                            allocations: newAllocations
+                        };
+
+                        if (itemData.type === "UNIQUE") {
+                            updateData.currentLocation = p.sourceName;
+                        }
+
+                        transaction.update(itemRef, updateData);
+
+                        // Dodanie wpisu wycofania do historii UNIQUE
+                        if (itemData.type === "UNIQUE") {
+                            const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(),
+                                documentDate: pDate,
+                                type: "WYCOFANIE",
+                                description: `[Wycofano / Anulowano protokół] Anulowano zwrot z budowy: ${p.sourceName} (Dokument: ${p.protocolId})`,
+                                status: itemData.status,
+                                user: `${user?.firstName} ${user?.lastName}`
+                            });
+                        }
+                    }
+                }
+
+                // Oznaczamy sam dokument protokołu jako ANULOWANY
+                transaction.update(protocolRef, {
+                    status: "ANULOWANY"
+                });
+            });
+
+            alert("✅ Protokół został pomyślnie anulowany, a stany magazynowe wycofane!");
+            fetchHistoryProtocols();
+            fetchData();
+        } catch (error: any) {
+            alert("Błąd anulowania: " + error);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    // FUNKCJA OTWIERAJĄCA MODAL KOREKTY
+    const openCorrectionModal = (protocol: any) => {
+        setCorrectionParentProtocol(protocol);
+        // Tworzymy głęboką kopię pozycji protokołu do edycji
+        const itemsCopy = protocol.items.map((i: any) => ({
+            inventoryId: i.inventoryId,
+            name: i.name,
+            type: i.type,
+            inventoryNumber: i.inventoryNumber || "",
+            unit: i.unit || "szt.",
+            quantity: i.declaredQty !== undefined ? i.declaredQty : (i.quantity !== undefined ? i.quantity : 1),
+            receivedQty: i.receivedQty !== undefined ? i.receivedQty : (i.declaredQty || 1),
+            finalStatus: i.finalStatus || i.declaredStatus || "sprawne",
+            warehouseNotes: i.warehouseNotes || ""
+        }));
+        setCorrectionCart(itemsCopy);
+        setIsCorrectionModalOpen(true);
+    };
+
+    // FUNKCJA ZAPISU KOREKTY (ZABEZPIECZONA TRANSAKCJĄ I STRAŻNIKIEM CHRONOLOGII)
+    const handleCorrectionSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!correctionParentProtocol) return;
+
+        setIsCorrectionSubmitting(true);
+        const pDate = correctionParentProtocol.documentDate || (correctionParentProtocol.createdAt ? correctionParentProtocol.createdAt.split("T")[0] : "");
+
+        try {
+            // 1. STRAŻNIK CHRONOLOGII (Weryfikacja urządzeń UNIQUE przed transakcją)
+            const resolvedLastOpDates: Record<string, string> = {};
+            for (const item of correctionCart) {
+                if (item.type !== "UNIQUE" || !item.inventoryId) continue;
+
+                const localItem = inventory.find(i => i.id === item.inventoryId);
+                let lastOp: string = localItem?.lastOperationDate || "";
+
+                if (!lastOp) {
+                    const historyRef = collection(db, `inventory/${item.inventoryId}/history`);
+                    const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
+                    const snap = await getDocs(q);
+
+                    if (!snap.empty) {
+                        const lastDoc = snap.docs[0].data();
+                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
+                    } else {
+                        lastOp = "";
+                    }
+                }
+                resolvedLastOpDates[item.inventoryId] = lastOp;
+            }
+
+            // Ochrona: sprawdzamy konflikty
+            const conflictingItems: string[] = [];
+            for (const item of correctionCart) {
+                if (item.type !== "UNIQUE" || !item.inventoryId) continue;
+                const lastOp = resolvedLastOpDates[item.inventoryId];
+                if (lastOp && pDate < lastOp) {
+                    conflictingItems.push(`- ${item.name} (nr Mag: ${item.inventoryNumber}): posiada już nowszy ruch z dnia ${lastOp}`);
+                }
+            }
+
+            if (conflictingItems.length > 0) {
+                setIsCorrectionSubmitting(false);
+                return alert(
+                    `⚠️ BLOKADA ZAPISU KOREKTY!\n\n` +
+                    `Nie można skorygować tego dokumentu, ponieważ poniższy sprzęt zdążył już wyjechać dalej i posiada nowsze operacje w bazie:\n\n` +
+                    conflictingItems.join("\n")
+                );
+            }
+
+            // 2. TRANSAKCJA KORYGOWANIA
+            await runTransaction(db, async (transaction) => {
+                const parentRef = doc(db, "protocols", correctionParentProtocol.dbId);
+                const parentDoc = await transaction.get(parentRef);
+                if (!parentDoc.exists()) throw "Dokument nadrzędny nie istnieje!";
+
+                const originalProtocol = parentDoc.data();
+
+                // Pobieramy stan wszystkich modyfikowanych przedmiotów
+                const itemDocs: Record<string, any> = {};
+                for (const item of correctionCart) {
+                    if (!item.inventoryId) continue;
+                    const itemRef = doc(db, "inventory", item.inventoryId);
+                    const itemDoc = await transaction.get(itemRef);
+                    itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
+                }
+
+                const updatedProtocolItems = [];
+
+                for (let idx = 0; idx < correctionCart.length; idx++) {
+                    const correctedItem = correctionCart[idx];
+                    const originalItem = originalProtocol.items[idx]; // Dopasowanie po indeksie w starym protokole
+
+                    if (!correctedItem.inventoryId) continue;
+
+                    const { ref: itemRef, doc: itemDoc } = itemDocs[correctedItem.inventoryId];
+                    if (!itemDoc.exists()) continue;
+
+                    const itemData = itemDoc.data();
+
+                    if (itemData.type === "BULK") {
+                        // --- KOREKTA ELEMENTÓW BULK ---
+                        const oldQty = originalItem.quantity !== undefined ? originalItem.quantity : (originalItem.receivedQty || 1);
+                        const newQty = correctedItem.quantity;
+                        const delta = newQty - oldQty; // Różnica ilościowa
+
+                        if (delta !== 0) {
+                            if (originalProtocol.type === "WYDANIE") {
+                                // Korekta Wydania: Jeśli nowa ilość jest większa, pobieramy więcej z magazynu
+                                const newAvailable = itemData.availableQuantity - delta;
+                                if (newAvailable < 0) throw `Brak wystarczającej ilości na magazynie dla: ${itemData.name}`;
+
+                                const currentAllocations = itemData.allocations || {};
+                                const newAllocations = { ...currentAllocations };
+                                const oldSiteQty = newAllocations[originalProtocol.destinationId] || 0;
+                                newAllocations[originalProtocol.destinationId] = Math.max(0, oldSiteQty + delta);
+
+                                transaction.update(itemRef, {
+                                    availableQuantity: newAvailable,
+                                    allocations: newAllocations
+                                });
+                            } else if (originalProtocol.type === "ZWROT") {
+                                // Korekta Zwrotu: Jeśli nowa ilość jest większa, przybywa więcej na magazynie
+                                const newAvailable = Math.max(0, itemData.availableQuantity + delta);
+                                const currentAllocations = itemData.allocations || {};
+                                const newAllocations = { ...currentAllocations };
+                                const oldSiteQty = newAllocations[originalProtocol.sourceId] || 0;
+                                newAllocations[originalProtocol.sourceId] = Math.max(0, oldSiteQty - delta);
+
+                                transaction.update(itemRef, {
+                                    availableQuantity: newAvailable,
+                                    allocations: newAllocations
+                                });
+                            }
+                        }
+
+                        updatedProtocolItems.push({
+                            ...originalItem,
+                            quantity: newQty,
+                            declaredQty: newQty,
+                            receivedQty: newQty,
+                            warehouseNotes: correctedItem.warehouseNotes
+                        });
+
+                    } else if (itemData.type === "UNIQUE") {
+                        // --- KOREKTA SPRZĘTU UNIQUE (PODMIANA NR SERYJNEGO LUB STATUSU) ---
+                        const hasIdChanged = originalItem.inventoryId !== correctedItem.inventoryId;
+
+                        if (hasIdChanged) {
+                            // 1. Wycofujemy stare urządzenie na magazyn
+                            const oldItemRef = doc(db, "inventory", originalItem.inventoryId);
+                            transaction.update(oldItemRef, {
+                                currentLocation: "MAGAZYN",
+                                availableQuantity: 1,
+                                allocations: {}
+                            });
+
+                            // Log wycofania starego
+                            const oldHistoryRef = doc(collection(db, `inventory/${originalItem.inventoryId}/history`));
+                            transaction.set(oldHistoryRef, {
+                                date: new Date().toISOString(),
+                                documentDate: pDate,
+                                type: "WYCOFANIE",
+                                description: `[Korekta protokołu ${originalProtocol.protocolId}] Wyrejestrowano urządzenie i przywrócono na magazyn.`,
+                                status: "sprawne",
+                                user: `${user?.firstName} ${user?.lastName}`
+                            });
+
+                            // 2. Pobieramy nowe urządzenie i wysyłamy na budowę/magazyn
+                            const newLocation = originalProtocol.type === "WYDANIE" ? originalProtocol.destinationName : "MAGAZYN";
+                            const newAllocations = originalProtocol.type === "WYDANIE" ? { [originalProtocol.destinationId]: 1 } : {};
+
+                            transaction.update(itemRef, {
+                                currentLocation: newLocation,
+                                availableQuantity: originalProtocol.type === "WYDANIE" ? 0 : 1,
+                                allocations: newAllocations,
+                                status: correctedItem.finalStatus
+                            });
+
+                            // Log rejestracji nowego
+                            const newHistoryRef = doc(collection(db, `inventory/${correctedItem.inventoryId}/history`));
+                            transaction.set(newHistoryRef, {
+                                date: new Date().toISOString(),
+                                documentDate: pDate,
+                                type: originalProtocol.type,
+                                description: `[Korekta protokołu ${originalProtocol.protocolId}] Zarejestrowano urządzenie w lokalizacji: ${newLocation}. Stan: ${correctedItem.finalStatus}.`,
+                                status: correctedItem.finalStatus,
+                                user: `${user?.firstName} ${user?.lastName}`
+                            });
+
+                        } else {
+                            // Jeśli ID się nie zmieniło, ale poprawiono np. tylko status na magazynie przy zwrocie
+                            transaction.update(itemRef, {
+                                status: correctedItem.finalStatus
+                            });
+                        }
+
+                        updatedProtocolItems.push({
+                            ...originalItem,
+                            inventoryId: correctedItem.inventoryId,
+                            name: correctedItem.name,
+                            inventoryNumber: correctedItem.inventoryNumber,
+                            finalStatus: correctedItem.finalStatus,
+                            warehouseNotes: correctedItem.warehouseNotes
+                        });
+                    }
+                }
+
+                // Generujemy powiązany protokół o typie KOREKTA dla celów audytowych
+                const correctionRef = doc(collection(db, "protocols"));
+                const correctionId = `KOR-${originalProtocol.protocolId}`;
+
+                transaction.set(correctionRef, {
+                    protocolId: correctionId,
+                    parentProtocolId: originalProtocol.protocolId,
+                    type: "KOREKTA",
+                    sourceId: originalProtocol.sourceId || "MAGAZYN",
+                    sourceName: originalProtocol.sourceName || "MAGAZYN",
+                    destinationId: originalProtocol.destinationId || "MAGAZYN",
+                    destinationName: originalProtocol.destinationName || "MAGAZYN",
+                    createdBy: user?.uid,
+                    createdByName: `${user?.firstName} ${user?.lastName}`,
+                    status: "ZAAKCEPTOWANY",
+                    createdAt: new Date().toISOString(),
+                    documentDate: pDate,
+                    items: updatedProtocolItems
+                });
+
+                // Aktualizujemy pozycje w dokumencie głównym do stanu faktycznego (skorygowanego)
+                transaction.update(parentRef, {
+                    items: updatedProtocolItems
+                });
+            });
+
+            alert("✅ Protokół został pomyślnie skorygowany!");
+            setIsCorrectionModalOpen(false);
+            setCorrectionParentProtocol(null);
+            setExpandedProtocolId(null);
+            fetchHistoryProtocols();
+            fetchData();
+        } catch (error: any) {
+            alert("Błąd zapisu korekty: " + error);
+        } finally {
+            setIsCorrectionSubmitting(false);
+        }
+    };
+
     // Funkcja badająca niezgodności ilościowe/statusowe/brak protokołów papierowych
     const checkDiscrepancies = (protocol: any) => {
         if (protocol.type !== "ZWROT" || protocol.status === "OCZEKUJACY") return false;
@@ -1659,7 +2077,7 @@ export default function ProtocolsHub() {
                                                                         <p className="font-bold text-xs uppercase text-slate-400 tracking-wider mb-2">Spis sprzętu i materiałów</p>
                                                                         <div className="space-y-1.5">
                                                                             {p.items?.map((item: any, idx: number) => (
-                                                                                <div key={idx} className="flex justify-between items-center p-2.5 rounded-lg border border-slate-100 bg-slate-50/50 text-xs">
+                                                                                <div key={idx} className="flex justify-between items-center p-2.5 rounded-lg border border-slate-50/50 text-xs">
                                                                                     <div>
                                                                                         <span className="font-bold text-slate-800">{item.name}</span>
                                                                                         <span className="font-mono text-[10px] text-slate-500 ml-2">Nr: {item.inventoryNumber || "BRAK"}</span>
@@ -1674,7 +2092,7 @@ export default function ProtocolsHub() {
                                                                                                 )}
                                                                                                 <span className="font-bold text-slate-700">Przyjęte fizycznie: <span className="text-sm font-black text-blue-600">{item.receivedQty ?? item.declaredQty ?? 1} {item.unit}</span></span>
                                                                                                 {item.finalStatus && (
-                                                                                                    <span className={`px-1.5 py-0.5 rounded font-bold uppercase text-[9px] ${item.finalStatus === 'sprawne' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                                                                                    <span className={`px-1.5 py-0.5 rounded font-bold uppercase text-[9px] ${item.finalStatus === 'sprawne' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                                                                                                         {item.finalStatus}
                                                                                                     </span>
                                                                                                 )}
@@ -1688,6 +2106,28 @@ export default function ProtocolsHub() {
                                                                             ))}
                                                                         </div>
                                                                     </div>
+
+                                                                    {/* OPCJA KOREKTY / ANULOWANIA PROTOKOŁU PRZEZ ADMINISTRATORA */}
+                                                                    {p.status !== "ANULOWANY" && p.type !== "KOREKTA" && (
+                                                                        <div className="border-t pt-3 flex justify-end gap-3">
+                                                                            <button
+                                                                                type="button"
+                                                                                disabled={isSubmitting}
+                                                                                onClick={(e) => { e.stopPropagation(); openCorrectionModal(p); }}
+                                                                                className="bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                            >
+                                                                                ✏️ Wystaw Korektę (Popraw pozycje)
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                disabled={isSubmitting}
+                                                                                onClick={(e) => { e.stopPropagation(); handleCancelProtocol(p); }}
+                                                                                className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                            >
+                                                                                🚫 Anuluj Protokół (Wycofaj stany)
+                                                                            </button>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             </td>
                                                         </tr>
@@ -2109,8 +2549,25 @@ export default function ProtocolsHub() {
                     <div className="bg-white rounded-3xl shadow-2xl w-[95vw] h-[90vh] flex flex-col overflow-hidden animate-fade-in border border-orange-200">
                         <div className="p-6 bg-orange-50 border-b border-orange-200 flex justify-between items-center">
                             <div>
-                                <h2 className="text-2xl font-black text-orange-700">Wprowadź Zwrot (Z papieru)</h2>
-                                <p className="text-sm text-orange-600">Przepisz fizyczny dokument. Protokół od razu zostanie zaakceptowany i sprzęt wróci na magazyn.</p>
+                                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                    <h2 className="text-2xl font-black text-orange-700">Wprowadź Zwrot (Z papieru)</h2>
+                                    <button
+                                        type="button"
+                                        onClick={() => alert(
+                                            `🤖 KONTROLA I OCENA SYSTEMOWA PESAM AI\n\n` +
+                                            `Zgodnie z bezpośrednim zaleceniem Dyrekcji oraz Prezesa firmy, cały proces zwrotu materiałów, osprzętu i narzędzi podlega weryfikacji i ocenie przez moduł sztucznej inteligencji (PESAM AI).\n\n` +
+                                            `Zasady zwrotów i konsekwencje dla Kierowników:\n` +
+                                            `1. AI automatycznie weryfikuje kompletność zdawanego sprzętu (rozlicza osprzęt przypisany przy wydaniu).\n` +
+                                            `2. System wychwytuje i blokuje próby zwożenia na magazyn resztek materiałów, odpadów oraz zniszczonych elementów niezdatnych do ponownego użycia („śmieci”).\n` +
+                                            `3. Każda próba zaśmiecenia magazynu lub zdania niekompletnego sprzętu generuje automatyczny raport niezgodności wysyłany bezpośrednio do Szefa i Dyrekcji.\n\n` +
+                                            `Szanujmy czas i porządek na magazynie. Zwozimy wyłącznie sprzęt sprawny, czysty i kompletny!`
+                                        )}
+                                        className="bg-purple-100 hover:bg-purple-200 border border-purple-200 text-purple-800 text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-wider animate-pulse flex items-center gap-1 w-fit transition shadow-sm"
+                                    >
+                                        🤖 PESAM AI: Weryfikacja Aktywna (Kliknij po szczegóły)
+                                    </button>
+                                </div>
+                                <p className="text-sm text-orange-600 mt-1">Przepisz fizyczny dokument. Protokół od razu zostanie zaakceptowany i sprzęt wróci na magazyn.</p>
                             </div>
                             <button onClick={closeModal} className="text-4xl text-orange-400 hover:text-orange-800 leading-none">&times;</button>
                         </div>
@@ -2828,6 +3285,131 @@ export default function ProtocolsHub() {
                     siteName={investigationData.siteName} reportedByUid={user?.uid || ""} reportedByName={`${user?.firstName} ${user?.lastName}`}
                     warehouseNotes={investigationData.warehouseNotes} declaredStatus={investigationData.declaredStatus}
                 />
+            )}
+
+            {/* MODAL KOREKTY PROTOKOŁU (DEDYKOWANY FORMULARZ KORYGUJĄCY) */}
+            {isCorrectionModalOpen && correctionParentProtocol && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-8 max-h-[90vh] overflow-y-auto animate-fade-in border-t-4 border-orange-500">
+                        <div className="flex justify-between items-start mb-6 border-b pb-4">
+                            <div>
+                                <h2 className="text-xl font-black text-slate-800">✏️ Wystaw Korektę Dokumentu</h2>
+                                <p className="text-xs text-slate-500 mt-0.5">Korygujesz: <span className="font-bold text-orange-600">{correctionParentProtocol.protocolId}</span> (Lokalizacja: {correctionParentProtocol.destinationName || correctionParentProtocol.sourceName})</p>
+                            </div>
+                            <button onClick={() => { setIsCorrectionModalOpen(false); setCorrectionParentProtocol(null); }} className="text-3xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
+                        </div>
+
+                        <form onSubmit={handleCorrectionSubmit} className="space-y-5">
+                            <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2">
+                                {correctionCart.map((cItem, index) => {
+                                    const isUnique = cItem.type === "UNIQUE";
+                                    return (
+                                        <div key={index} className="p-4 border border-slate-200 rounded-2xl bg-slate-50/50 space-y-3 relative">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <p className="font-bold text-sm text-slate-800">{cItem.name}</p>
+                                                    <p className="text-[10px] font-mono text-slate-500 mt-0.5">Typ: {isUnique ? 'Narzędzie (UNIQUE)' : 'Rusztowanie (BULK)'} • Obecny kod: {cItem.inventoryNumber || "brak"}</p>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-white p-3 rounded-xl border border-slate-100">
+                                                {isUnique ? (
+                                                    <>
+                                                        {/* Korekta seryjnego numeru UNIQUE */}
+                                                        <div className="sm:col-span-2">
+                                                            <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Skoryguj na wolny numer (Podmień urządzenie):</label>
+                                                            <select
+                                                                value={cItem.inventoryId}
+                                                                onChange={(e) => {
+                                                                    const selectedId = e.target.value;
+                                                                    const foundInv = inventory.find(i => i.id === selectedId);
+                                                                    const updatedCart = [...correctionCart];
+                                                                    updatedCart[index].inventoryId = selectedId;
+                                                                    updatedCart[index].name = foundInv?.name || cItem.name;
+                                                                    updatedCart[index].inventoryNumber = foundInv?.inventoryNumber || "";
+                                                                    setCorrectionCart(updatedCart);
+                                                                }}
+                                                                className="w-full p-2 border rounded-lg text-xs font-bold outline-none bg-white"
+                                                            >
+                                                                <option value={cItem.inventoryId}>{cItem.name} (nr {cItem.inventoryNumber}) [Obecny]</option>
+                                                                {inventory
+                                                                    .filter(inv => inv.name === cItem.name && inv.availableQuantity > 0 && inv.status === "sprawne" && inv.id !== cItem.inventoryId)
+                                                                    .map(inv => (
+                                                                        <option key={inv.id} value={inv.id}>{inv.name} (nr {inv.inventoryNumber}) [Wolny w Magazynie]</option>
+                                                                    ))
+                                                                }
+                                                            </select>
+                                                        </div>
+                                                        {correctionParentProtocol.type === "ZWROT" && (
+                                                            <div className="sm:col-span-2">
+                                                                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Popraw stan techniczny przy zwrocie:</label>
+                                                                <select
+                                                                    value={cItem.finalStatus}
+                                                                    onChange={(e) => {
+                                                                        const updatedCart = [...correctionCart];
+                                                                        updatedCart[index].finalStatus = e.target.value;
+                                                                        setCorrectionCart(updatedCart);
+                                                                    }}
+                                                                    className="p-2 border rounded-lg text-xs font-bold outline-none bg-white"
+                                                                >
+                                                                    <option value="sprawne">✅ Sprawne</option>
+                                                                    <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                                                    <option value="uszkodzone">❌ Uszkodzone</option>
+                                                                </select>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    /* Korekta ilościowa dla BULK */
+                                                    <div>
+                                                        <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Skorygowana Ilość:</label>
+                                                        <div className="flex items-center gap-1.5">
+                                                            <input
+                                                                type="number"
+                                                                min="1"
+                                                                step="any"
+                                                                value={cItem.quantity}
+                                                                onChange={(e) => {
+                                                                    const updatedCart = [...correctionCart];
+                                                                    updatedCart[index].quantity = Number(e.target.value);
+                                                                    setCorrectionCart(updatedCart);
+                                                                }}
+                                                                className="w-20 p-1.5 border rounded-lg text-center font-bold outline-none bg-slate-50"
+                                                            />
+                                                            <span className="text-xs font-bold text-slate-500">{cItem.unit}</span>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                <div className="sm:col-span-2">
+                                                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Uwagi do korektora:</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="np. korekta pomyłki ilościowej..."
+                                                        value={cItem.warehouseNotes}
+                                                        onChange={(e) => {
+                                                            const updatedCart = [...correctionCart];
+                                                            updatedCart[index].warehouseNotes = e.target.value;
+                                                            setCorrectionCart(updatedCart);
+                                                        }}
+                                                        className="w-full text-xs p-2 border rounded-lg outline-none"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="border-t border-slate-100 pt-4 flex justify-end gap-3">
+                                <button type="button" onClick={() => { setIsCorrectionModalOpen(false); setCorrectionParentProtocol(null); }} className="px-5 py-2 text-slate-600 font-medium hover:bg-slate-100 rounded-lg">Anuluj</button>
+                                <button type="submit" disabled={isCorrectionSubmitting} className="px-5 py-2 bg-orange-500 hover:bg-orange-600 text-white font-black rounded-lg shadow-sm disabled:opacity-50 flex items-center gap-2">
+                                    {isCorrectionSubmitting && <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
+                                    {isCorrectionSubmitting ? "Zapisywanie..." : "Zatwierdź Korektę"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             )}
         </div>
     );
