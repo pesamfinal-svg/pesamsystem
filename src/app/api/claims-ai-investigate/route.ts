@@ -54,8 +54,8 @@ export async function POST(req: Request) {
                 }
             }
 
-            systemInstruction = `Jesteś Asystentem Śledczym CLS (Centrum Likwidacji Szkód) w firmie budowlanej PESAM. Twoim rozmówcą jest KIEROWNIK BUDOWY, z którego budowy "${siteName}" zjechało uszkodzone urządzenie "${inventoryName}" (Nr: ${inventoryNumber || 'brak'}).
-    Twoje zadanie: przeprowadzić dociekliwe, techniczne przesłuchanie wstępne Kierownika i wygenerować raport końcowy dla Dyrekcji.
+            systemInstruction = `Jesteś Asystentem CLS AI (Panel Analizy Szkód) w firmie budowlanej PESAM. Twoim rozmówcą jest KIEROWNIK BUDOWY, z którego budowy "${siteName}" zjechało uszkodzone urządzenie "${inventoryName}" (Nr: ${inventoryNumber || 'brak'}).
+    Twoje zadanie: przeprowadzić dociekliwy, techniczny wywiad wyjaśniający okoliczności powstania usterki i wygenerować raport końcowy z wyjaśnieniami dla Dyrekcji.
 
     ZASADY WYKORZYSTANIA GOOGLE SEARCH (INTERNETU) DO AUDYTU OSPRZĘTU I EKSPLOATACJI:
     1. Masz stały dostęp do wyszukiwarki Google. Użyj jej, aby wyszukać specyfikację urządzenia "${inventoryName}".
@@ -66,7 +66,7 @@ export async function POST(req: Request) {
     ANALIZA CZASU NA BUDOWIE:
     ${contextTimeOnSite}
 
-    ZASADY PRZESŁUCHANIA:
+    ZASADY WYWIADU TECHNICZNEGO:
     - Zadajesz tylko JEDNO, konkretne, krótkie pytanie na raz.
     - Magazynier zgłosił uszkodzenie jako: "${warehouseNotes || 'Brak opisu'}". Zacznij od zapytania kierownika, czy potwierdza tę usterkę i jak do niej doszło.
 
@@ -78,9 +78,9 @@ export async function POST(req: Request) {
 
     FORMAT ODPOWIEDZI (WYŁĄCZNIE CZYSTY JSON):
     Gdy zbierasz informacje: {"reply":"Twoje jedno pytanie do kierownika...","isComplete":false,"caseContext":null}
-    Gdy masz już komplet informacji i chcesz zakończyć wywiad: {"reply":"Dziękuję za wyjaśnienia. Raport został wygenerowany i przekazany do Dyrekcji w celu wydania wyroku.","isComplete":true,"caseContext":"RAPORT KOŃCOWY ASYSTENTA AI:\\nUrządzenie: ${inventoryName} (Nr: ${inventoryNumber})\\nBudowa: ${siteName}\\nCzas na budowie: ${daysOnSite || 'Brak danych'} dni\\nPierwotne zgłoszenie: ${warehouseNotes}\\nUstalenia z Kierownikiem:\\n- Okoliczności: [Wpisz co ustaliłeś]\\n- Dobór osprzętu (Audyt): [Opisz, czy osprzęt był dobrany prawidłowo, czy doszło do błędu materiałowego]\\n- Eksploatacja i serwis bieżący: [Opisz czy czyszczono filtry/robiono przerwy]\\n- Próby naprawy: [Wpisz czy próbowali sami naprawiać]"}`;
+    Gdy masz już komplet informacji i chcesz zakończyć wywiad: {"reply":"Dziękuję za wyjaśnienia. Raport został wygenerowany i przekazany do Dyrekcji w celu podjęcia decyzji o rozliczeniu.","isComplete":true,"caseContext":"RAPORT WYJAŚNIAJĄCY ASYSTENTA CLS AI:\\nUrządzenie: ${inventoryName} (Nr: ${inventoryNumber})\\nBudowa: ${siteName}\\nCzas na budowie: ${daysOnSite || 'Brak danych'} dni\\nPierwotne zgłoszenie: ${warehouseNotes}\\nUstalenia z Kierownikiem:\\n- Okoliczności: [Wpisz co ustaliłeś]\\n- Dobór osprzętu (Audyt): [Opisz, czy osprzęt był dobrany prawidłowo, czy doszło do błędu materiałowego]\\n- Eksploatacja i serwis bieżący: [Opisz czy czyszczono filtry/robiono przerwy]\\n- Próby naprawy: [Wpisz czy próbowali sami naprawiać]"}`;
 
-            initialPrompt = `Uruchomienie procedury przesłuchania Kierownika Budowy. 
+            initialPrompt = `Uruchomienie procedury zbierania wyjaśnień od Kierownika Budowy. 
     Sprzęt: "${inventoryName}" (Nr mag: ${inventoryNumber}), Budowa: "${siteName}".
     Magazynier przy odbiorze zgłosił usterkę: "${warehouseNotes || 'Brak uwag'}". 
     Czas na budowie: ${daysOnSite || 'Brak'} dni.
@@ -110,8 +110,8 @@ export async function POST(req: Request) {
                 priceRule = `⚠️ ALARM: Brak ceny zakupu tego urządzenia w bazie! Wyszukaj w Google, ile kosztuje nowe urządzenie "${inventoryName}". Następnie zapytaj magazyniera: 'Nie mamy ceny tego urządzenia w bazie, ale z moich ustaleń wynika, że kosztuje około [Wpisz wyszukaną kwotę] zł. Czy potwierdzasz taką wartość rynkową?'`;
             }
 
-            systemInstruction = `Jesteś Asystentem Śledczym PESAM. Twoim rozmówcą jest MAGAZYNIER odbierający sprzęt "${inventoryName}" z budowy "${siteName}".
-    Twoje zadanie: zebrać techniczny raport wstępny o uszkodzeniu przed przekazaniem sprawy do Zarządu.
+            systemInstruction = `Jesteś Asystentem CLS AI w firmie PESAM. Twoim rozmówcą jest MAGAZYNIER odbierający sprzęt "${inventoryName}" z budowy "${siteName}".
+    Twoje zadanie: zebrać techniczny raport wstępny o uszkodzeniu przed przekazaniem zgłoszenia do Zarządu.
 
     ZASADY WYKORZYSTANIA GOOGLE SEARCH (INTERNETU):
     - Wyszukaj w Google informacje o sprzęcie "${inventoryName}". Dowiedz się, co najczęściej psuje się w tym modelu (np. przekładnia, szczotki silnika, kabel) i wykorzystaj tę wiedzę, zadając pytania.
@@ -120,7 +120,7 @@ export async function POST(req: Request) {
     - ${warrantyRule}
     - ${priceRule}
 
-    PROTOKÓŁ PRZESŁUCHANIA MAGAZYNU:
+    PROTOKÓŁ ANALIZY DLA MAGAZYNU:
     Zadajesz JEDNO konkretne pytanie naraz.
     Magazynier już wstępnie zdiagnozował problem jako: "${warehouseNotes}". POMIŃ pytanie o stan fizyczny (co jest zepsute). Od razu przejdź do pytań o rokowania (naprawa/złom) lub historię serwisową.
 

@@ -50,7 +50,7 @@ export async function POST(req: Request) {
             systemInstruction: {
                 role: 'system',
                 parts: [{
-                    text: `Jesteś Asystentem Śledczym PESAM i inteligentnym doradcą Dyrektora. Twoim zadaniem jest podpowiadanie Dyrektorowi trafnych, dociekliwych pytań do zadania Kierownikowi budowy na czacie. Krótko, konkretnie, w formie listy pytań.`
+                    text: `Jesteś Asystentem CLS AI i doradcą Dyrektora. Twoim zadaniem jest podpowiadanie Dyrektorowi trafnych pytań pomocniczych do zadania Kierownikowi budowy na czacie w celu doprecyzowania okoliczności. Krótko, konkretnie, w formie listy pytań.`
                 }]
             }
         });
