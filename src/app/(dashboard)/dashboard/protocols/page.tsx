@@ -68,6 +68,40 @@ export default function ProtocolsHub() {
     const [manualQty, setManualQty] = useState<number | "">("");
     const [manualUnit, setManualUnit] = useState("szt.");
 
+    // --- NOWE: Wyszukiwarka dla wpisów ręcznych ---
+    const [manualSuggestions, setManualSuggestions] = useState<InventoryItem[]>([]);
+    const [selectedManualItem, setSelectedManualItem] = useState<InventoryItem | null>(null);
+
+    const normalizeString = (str: string) => {
+        return str.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s]/g, "");
+    };
+
+    const handleManualNameChange = (val: string) => {
+        setManualName(val);
+        setSelectedManualItem(null);
+
+        const cleanQuery = normalizeString(val);
+        if (cleanQuery.trim().length > 1) {
+            const queryWords = cleanQuery.split(/\s+/).filter(w => w !== "");
+            const matched = inventory.filter(item => {
+                // Podpowiadamy tylko z przedmiotów masowych (BULK), bo wpisy ręczne nie mogą być unikalnymi maszynami
+                if (item.type !== "BULK") return false;
+                const cleanItemName = normalizeString(item.name);
+                return queryWords.every(word => cleanItemName.includes(word));
+            });
+            setManualSuggestions(matched.slice(0, 5));
+        } else {
+            setManualSuggestions([]);
+        }
+    };
+
+    const selectManualSuggestion = (item: InventoryItem) => {
+        setManualName(item.name);
+        setSelectedManualItem(item);
+        setManualUnit(item.unit || "szt.");
+        setManualSuggestions([]);
+    };
+
     // Stany dla ZWROTU APLIKACYJNEGO
     const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
     const [returnSiteId, setReturnSiteId] = useState("");
@@ -248,6 +282,10 @@ export default function ProtocolsHub() {
         setIsAddManualToAcceptOpen(false);
         setPaperBulkPickModal(null);
 
+        // --- NOWE: Czyszczenie autocomplete'a wpisu ręcznego ---
+        setManualSuggestions([]);
+        setSelectedManualItem(null);
+
         // Czyszczenie stanów po zamknięciu okien
         setIssueDocDate(new Date().toISOString().split('T')[0]);
         setIsIssueArchival(false);
@@ -330,10 +368,18 @@ export default function ProtocolsHub() {
             return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
         }
         setCart(prev => [...prev, {
-            cartItemId: Date.now().toString(), isManual: true, name: manualName.trim(),
-            issueQty: Number(manualQty), unit: manualUnit, accessories: []
+            cartItemId: Date.now().toString(),
+            isManual: true,
+            dbId: selectedManualItem ? selectedManualItem.id : undefined, // Podpięcie ID z bazy!
+            inventoryNumber: selectedManualItem ? selectedManualItem.inventoryNumber : "RĘCZNY",
+            name: manualName.trim(),
+            issueQty: Number(manualQty),
+            unit: manualUnit,
+            accessories: []
         }]);
         setIsManualModalOpen(false);
+        setManualSuggestions([]);
+        setSelectedManualItem(null);
     };
 
     const removeFromCart = (cartItemId: string) => setCart(cart.filter(i => i.cartItemId !== cartItemId));
@@ -424,7 +470,7 @@ export default function ProtocolsHub() {
             await runTransaction(db, async (transaction) => {
                 const itemDocs: Record<string, any> = {};
                 for (const cartItem of cart) {
-                    if (cartItem.isManual || !cartItem.dbId) continue;
+                    if (!cartItem.dbId) continue; // POBIERAMY DOKUMENT NAWET JEŚLI TO isManual (jeśli wybrano go z listy podpowiedzi)
                     const itemRef = doc(db, "inventory", cartItem.dbId);
                     const itemDoc = await transaction.get(itemRef);
 
@@ -458,30 +504,54 @@ export default function ProtocolsHub() {
 
                 for (const cartItem of cart) {
                     if (cartItem.isManual) {
-                        const newDocRef = doc(collection(db, "inventory"));
-                        transaction.set(newDocRef, {
-                            name: cartItem.name,
-                            type: "BULK",
-                            subType: "MANUAL",
-                            inventoryNumber: "RĘCZNY",
-                            category: "Wpis ręczny",
-                            unit: cartItem.unit || "szt.",
-                            availableQuantity: 0,
-                            totalQuantity: cartItem.issueQty,
-                            status: "sprawne",
-                            allocations: { [siteId]: cartItem.issueQty },
-                            createdAt: new Date().toISOString()
-                        });
+                        // SCENARIUSZ 1: Wybrano ISTNIEJĄCY wpis ręczny z podpowiedzi w koszyku
+                        if (cartItem.dbId && itemDocs[cartItem.dbId]) {
+                            const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId];
+                            const data = itemDoc.data();
+                            const currentSiteQty = data.allocations?.[siteId] || 0;
 
-                        finalProtocolItems.push({
-                            inventoryId: newDocRef.id,
-                            isManual: true,
-                            name: cartItem.name,
-                            inventoryNumber: "RĘCZNY",
-                            quantity: cartItem.issueQty,
-                            unit: cartItem.unit || "szt.",
-                            accessories: cartItem.accessories
-                        });
+                            // Zwiększamy całkowitą ilość w bazie i alokację na budowie
+                            transaction.update(itemRef, {
+                                totalQuantity: data.totalQuantity + cartItem.issueQty,
+                                [`allocations.${siteId}`]: currentSiteQty + cartItem.issueQty
+                            });
+
+                            finalProtocolItems.push({
+                                inventoryId: cartItem.dbId,
+                                isManual: true, // Zostaje true by w protokole wciąż wyświetlało "RĘCZNY"
+                                name: cartItem.name,
+                                inventoryNumber: cartItem.inventoryNumber || "RĘCZNY",
+                                quantity: cartItem.issueQty,
+                                unit: cartItem.unit || "szt.",
+                                accessories: cartItem.accessories
+                            });
+                        } else {
+                            // SCENARIUSZ 2: Całkowicie nowy wpis z palca, którego w bazie nie ma
+                            const newDocRef = doc(collection(db, "inventory"));
+                            transaction.set(newDocRef, {
+                                name: cartItem.name,
+                                type: "BULK",
+                                subType: "MANUAL",
+                                inventoryNumber: "RĘCZNY",
+                                category: "Wpis ręczny",
+                                unit: cartItem.unit || "szt.",
+                                availableQuantity: 0,
+                                totalQuantity: cartItem.issueQty,
+                                status: "sprawne",
+                                allocations: { [siteId]: cartItem.issueQty },
+                                createdAt: new Date().toISOString()
+                            });
+
+                            finalProtocolItems.push({
+                                inventoryId: newDocRef.id,
+                                isManual: true,
+                                name: cartItem.name,
+                                inventoryNumber: "RĘCZNY",
+                                quantity: cartItem.issueQty,
+                                unit: cartItem.unit || "szt.",
+                                accessories: cartItem.accessories
+                            });
+                        }
                     } else {
                         const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId!];
                         const data = itemDoc.data();
@@ -2522,9 +2592,49 @@ export default function ProtocolsHub() {
                             <span>📝</span> Wpis ręczny (poza bazą)
                         </h3>
                         <div className="space-y-4 mb-6">
-                            <div>
+                            <div className="relative">
                                 <label className="block text-[11px] font-black text-slate-400 uppercase mb-1">Nazwa przedmiotu / materiału</label>
-                                <input type="text" value={manualName} onChange={(e) => setManualName(e.target.value)} placeholder="np. Drut wiązałkowy fi 1.2" className="w-full p-3 border-2 rounded-xl outline-none focus:border-orange-500 font-bold" />
+                                <input
+                                    type="text"
+                                    value={manualName}
+                                    onChange={(e) => handleManualNameChange(e.target.value)}
+                                    placeholder="np. Drut wiązałkowy fi 1.2"
+                                    className={`w-full p-3 border-2 rounded-xl outline-none focus:border-orange-500 font-bold ${selectedManualItem ? 'bg-green-50 border-green-300 text-green-900' : ''}`}
+                                />
+                                {selectedManualItem && (
+                                    <p className="text-[10px] text-green-600 font-bold mt-1.5 ml-1">✓ Powiązano z istniejącym produktem.</p>
+                                )}
+
+                                {manualSuggestions.length > 0 && (
+                                    <div className="absolute left-0 right-0 mt-1 bg-white border-2 border-slate-200 rounded-xl shadow-xl z-20 overflow-hidden divide-y">
+                                        <div className="p-2 bg-slate-50 text-[9px] font-black text-slate-400 uppercase tracking-wider">Sugestie z całej bazy:</div>
+                                        {manualSuggestions.map(s => {
+                                            // Sprawdzamy, czy przedmiot jest na wpisanej budowie
+                                            const currentSiteId = sites.find(site => site.name.toLowerCase() === issueSiteInput.trim().toLowerCase())?.id;
+                                            const siteQty = currentSiteId ? (s.allocations?.[currentSiteId] || 0) : 0;
+
+                                            return (
+                                                <div
+                                                    key={s.id}
+                                                    onClick={() => selectManualSuggestion(s)}
+                                                    className="p-2.5 hover:bg-orange-50 cursor-pointer flex justify-between items-center transition"
+                                                >
+                                                    <div className="flex flex-col">
+                                                        <span className="text-sm font-bold text-slate-700">{s.name}</span>
+                                                        <span className="text-[10px] text-slate-400 font-mono">Nr: {s.inventoryNumber}</span>
+                                                    </div>
+
+                                                    {/* ZIELONA ETYKIETA: Pokazuje czy i ile sztuk jest już na wybranej budowie */}
+                                                    {siteQty > 0 && (
+                                                        <span className="bg-green-100 text-green-800 text-[9px] px-2 py-0.5 rounded-md font-black uppercase tracking-wider border border-green-200">
+                                                            Na tej budowie: {siteQty} {s.unit || 'szt.'}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
                             <div className="flex gap-3">
                                 <div className="flex-1">
