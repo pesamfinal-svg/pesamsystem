@@ -138,6 +138,14 @@ export default function ProtocolsHub() {
     const [correctionParentProtocol, setCorrectionParentProtocol] = useState<any | null>(null);
     const [correctionCart, setCorrectionCart] = useState<any[]>([]);
     const [isCorrectionSubmitting, setIsCorrectionSubmitting] = useState(false);
+    const [correctionSearchQueries, setCorrectionSearchQueries] = useState<Record<number, string>>({}); // Szukarka w korekcie (indeks -> tekst)
+
+    // STANY DLA INTELIGENTNEGO ANULOWANIA PROTOKOŁÓW
+    const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
+    const [cancelProtocol, setCancelProtocol] = useState<any | null>(null);
+    const [cancelItemHistories, setCancelItemHistories] = useState<Record<string, any[]>>({});
+    const [cancelItemDestinations, setCancelItemDestinations] = useState<Record<string, string>>({}); // inventoryId -> docelowe sourceId lub "MAGAZYN"
+    const [resolvedLastOpDates, setResolvedLastOpDates] = useState<Record<string, string>>({}); // Przechowuje sprawdzoną chronologię
 
     // Filtry (Wydania)
     const [searchName, setSearchName] = useState("");
@@ -1385,76 +1393,97 @@ export default function ProtocolsHub() {
         }
     };
 
-    // FUNKCJA ANULOWANIA PROTOKOŁU (WYCOFYWANIE STANÓW Z OCHRONĄ CHRONOLOGICZNĄ)
+    // OTWIERANIE MODALU ANULOWANIA (Dynamiczne uzdrawianie typów z bazy)
     const handleCancelProtocol = async (p: any) => {
         const pDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
-        const confirmCancel = window.confirm(
-            `🚫 ANULOWANIE PROTOKOŁU: ${p.protocolId}\n\n` +
-            `Czy na pewno chcesz anulować ten protokół z dnia ${pDate}?\n` +
-            `System automatycznie wycofa stany magazynowe i alokacje na budowach.`
-        );
-        if (!confirmCancel) return;
-
         setIsSubmitting(true);
 
         try {
-            // 1. STRAŻNIK CHRONOLOGII DLA ANULOWANIA (Pobieramy najnowsze daty UNIQUE przed transakcją)
-            const resolvedLastOpDates: Record<string, string> = {};
-            for (const item of p.items) {
+            // Rejestrujemy rzeczywiste typy urządzeń bezpośrednio z Katalogu (Kompensacja starych błędów zapisu w bazie)
+            const resolvedItems = p.items.map((item: any) => {
+                const dbItem = inventory.find(inv => inv.id === item.inventoryId);
+                return {
+                    ...item,
+                    type: dbItem ? dbItem.type : (item.type || "BULK")
+                };
+            });
+            const resolvedProtocol = { ...p, items: resolvedItems };
+
+            const histories: Record<string, any[]> = {};
+            const defaultDestinations: Record<string, string> = {};
+            const lastOpDates: Record<string, string> = {};
+
+            for (const item of resolvedItems) {
                 if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
 
+                // 1. Sprawdzanie Strażnika Chronologii
                 const localItem = inventory.find(i => i.id === item.inventoryId);
                 let lastOp: string = localItem?.lastOperationDate || "";
 
-                if (!lastOp) {
-                    const historyRef = collection(db, `inventory/${item.inventoryId}/history`);
-                    const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
-                    const snap = await getDocs(q);
+                // 2. Pobieranie historii (3 ostatnie wpisy) dla podglądu przez Magazyniera
+                const historyRef = collection(db, `inventory/${item.inventoryId}/history`);
+                const q = query(historyRef, orderBy("documentDate", "desc"), limit(3));
+                const snap = await getDocs(q);
 
-                    if (!snap.empty) {
-                        const lastDoc = snap.docs[0].data();
-                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
+                const historyDocs = snap.docs.map(doc => doc.data());
+                histories[item.inventoryId] = historyDocs;
+
+                if (!lastOp) {
+                    lastOp = historyDocs.length > 0 ? (historyDocs[0].documentDate || historyDocs[0].date?.split('T')[0] || "") : "";
+                }
+                lastOpDates[item.inventoryId] = lastOp;
+
+                // 3. Inteligentne podpowiadanie lokalizacji docelowej przy wycofaniu Wydania
+                if (resolvedProtocol.type === "WYDANIE") {
+                    // Szukamy wpisu chronologicznie tuż przed anulowanym dokumentem
+                    const previousRecord = historyDocs.find(h => h.documentDate < pDate || (h.documentDate === pDate && h.type !== "WYDANIE"));
+
+                    if (previousRecord && previousRecord.description.includes("Pobrano z budowy")) {
+                        const match = previousRecord.description.match(/budowy (.*?) i wydano/);
+                        if (match && match[1]) {
+                            const foundSite = sites.find(s => s.name === match[1]);
+                            defaultDestinations[item.inventoryId] = foundSite ? foundSite.id : "MAGAZYN";
+                        } else {
+                            defaultDestinations[item.inventoryId] = "MAGAZYN";
+                        }
                     } else {
-                        lastOp = "";
+                        defaultDestinations[item.inventoryId] = "MAGAZYN";
                     }
                 }
-                resolvedLastOpDates[item.inventoryId] = lastOp;
             }
 
-            // Ochrona: jeśli jakikolwiek sprzęt UNIQUE ma już nowszą operację, blokujemy całą akcję
-            const conflictingItems: string[] = [];
-            for (const item of p.items) {
-                if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
-                const lastOp = resolvedLastOpDates[item.inventoryId];
-                if (lastOp && pDate < lastOp) {
-                    conflictingItems.push(`- ${item.name} (nr Mag: ${item.inventoryNumber || 'brak'}): posiada nowszy ruch z dnia ${lastOp}`);
-                }
-            }
+            setCancelItemHistories(histories);
+            setCancelItemDestinations(defaultDestinations);
+            setResolvedLastOpDates(lastOpDates);
+            setCancelProtocol(resolvedProtocol); // Zapisujemy protokół ze zweryfikowanymi typami!
+            setIsCancelModalOpen(true);
+        } catch (error) {
+            alert("Błąd podczas przygotowywania anulowania: " + error);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
 
-            if (conflictingItems.length > 0) {
-                setIsSubmitting(false);
-                return alert(
-                    `⚠️ BLOKADA ANULOWANIA PROTOKOŁU!\n\n` +
-                    `Nie można anulować tego dokumentu, ponieważ poniższy sprzęt zdążył już wyjechać dalej i posiada nowsze operacje w bazie:\n\n` +
-                    conflictingItems.join("\n") +
-                    `\n\nAby anulować ten dokument, musisz najpierw wycofać/anulować nowsze operacje dla wymienionego sprzętu.`
-                );
-            }
+    // FAKTYCZNE WYKONANIE ANULOWANIA Z MODALU
+    const confirmCancellation = async () => {
+        if (!cancelProtocol) return;
+        setIsSubmitting(true);
+        const pDate = cancelProtocol.documentDate || (cancelProtocol.createdAt ? cancelProtocol.createdAt.split("T")[0] : "");
 
-            // 2. TRANSAKCJA COFANIA STANÓW
+        try {
             await runTransaction(db, async (transaction) => {
-                const protocolRef = doc(db, "protocols", p.dbId);
+                const protocolRef = doc(db, "protocols", cancelProtocol.dbId);
 
                 // Pobieramy przedmioty z bazy
                 const itemDocs: Record<string, any> = {};
-                for (const item of p.items) {
+                for (const item of cancelProtocol.items) {
                     if (!item.inventoryId || item.isNewManual) continue;
                     const itemRef = doc(db, "inventory", item.inventoryId);
                     const itemDoc = await transaction.get(itemRef);
                     itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
                 }
 
-                for (const item of p.items) {
+                for (const item of cancelProtocol.items) {
                     if (item.isNewManual || !item.inventoryId) continue;
 
                     const { ref: itemRef, doc: itemDoc } = itemDocs[item.inventoryId];
@@ -1463,84 +1492,108 @@ export default function ProtocolsHub() {
                     const itemData = itemDoc.data();
                     const qty = item.receivedQty !== undefined ? item.receivedQty : (item.quantity !== undefined ? item.quantity : 1);
 
-                    if (p.type === "WYDANIE") {
-                        // --- WYCOFANIE WYDANIA (Oddajemy na Magazyn, zabieramy z budowy) ---
-                        const newAvailable = itemData.availableQuantity + qty;
-                        const currentAllocations = itemData.allocations || {};
-                        const newAllocations = { ...currentAllocations };
+                    // --- LOGIKA DLA BULK (Bez zmian, po staremu, matematyka zdejmuje/dodaje ilości) ---
+                    if (itemData.type === "BULK") {
+                        if (cancelProtocol.type === "WYDANIE") {
+                            const newAvailable = itemData.availableQuantity + qty;
+                            const currentAllocations = itemData.allocations || {};
+                            const newAllocations = { ...currentAllocations };
+                            const oldSiteQty = newAllocations[cancelProtocol.destinationId] || 0;
+                            newAllocations[cancelProtocol.destinationId] = Math.max(0, oldSiteQty - qty);
 
-                        const oldSiteQty = newAllocations[p.destinationId] || 0;
-                        newAllocations[p.destinationId] = Math.max(0, oldSiteQty - qty);
+                            transaction.update(itemRef, { availableQuantity: newAvailable, allocations: newAllocations });
+                        } else if (cancelProtocol.type === "ZWROT") {
+                            const newAvailable = Math.max(0, itemData.availableQuantity - qty);
+                            const currentAllocations = itemData.allocations || {};
+                            const newAllocations = { ...currentAllocations };
+                            newAllocations[cancelProtocol.sourceId] = (newAllocations[cancelProtocol.sourceId] || 0) + qty;
 
-                        if (itemData.type === "UNIQUE") {
-                            Object.keys(newAllocations).forEach(k => delete newAllocations[k]);
+                            transaction.update(itemRef, { availableQuantity: newAvailable, allocations: newAllocations });
                         }
+                    }
+                    // --- LOGIKA DLA UNIQUE (Inteligentne wycofywanie z wyborem) ---
+                    else if (itemData.type === "UNIQUE") {
+                        const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[item.inventoryId] || "";
+                        const isNewerOrEqual = !lastOpDate || (pDate >= lastOpDate);
 
-                        const updateData: any = {
-                            availableQuantity: newAvailable,
-                            allocations: newAllocations
-                        };
+                        const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
 
-                        if (itemData.type === "UNIQUE") {
-                            updateData.currentLocation = "MAGAZYN";
-                        }
+                        if (isNewerOrEqual) {
+                            // Ruch jest "świeży". Fizycznie zmieniamy stan (zgodnie z wyborem usera)
+                            if (cancelProtocol.type === "WYDANIE") {
+                                const selectedDestId = cancelItemDestinations[item.inventoryId] || "MAGAZYN";
+                                const isGoingToWarehouse = selectedDestId === "MAGAZYN";
+                                const destSiteName = isGoingToWarehouse ? "MAGAZYN" : sites.find(s => s.id === selectedDestId)?.name || "Nieznana";
 
-                        transaction.update(itemRef, updateData);
+                                transaction.update(itemRef, {
+                                    currentLocation: destSiteName,
+                                    availableQuantity: isGoingToWarehouse ? 1 : 0,
+                                    allocations: isGoingToWarehouse ? {} : { [selectedDestId]: 1 }
+                                });
 
-                        // Dodanie wpisu wycofania do historii UNIQUE
-                        if (itemData.type === "UNIQUE") {
-                            const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+                                transaction.set(historyRef, {
+                                    date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status, user: `${user?.firstName} ${user?.lastName}`,
+                                    description: `[Wycofano / Anulowano protokół] Anulowano wydanie na budowę: ${cancelProtocol.destinationName}. Sprzęt cofnięto fizycznie na: ${destSiteName}`
+                                });
+                            } else if (cancelProtocol.type === "ZWROT") {
+                                transaction.update(itemRef, {
+                                    currentLocation: cancelProtocol.sourceName,
+                                    availableQuantity: 0,
+                                    allocations: { [cancelProtocol.sourceId]: 1 }
+                                });
+
+                                transaction.set(historyRef, {
+                                    date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status, user: `${user?.firstName} ${user?.lastName}`,
+                                    description: `[Wycofano / Anulowano protokół] Anulowano zwrot z budowy. Sprzęt przywrócono fizycznie na budowę: ${cancelProtocol.sourceName}`
+                                });
+                            }
+                        } else {
+                            // Samouzdrawianie i ominięcie! Sprzęt ma już nowszą historię, nie dotykamy jego fizycznej lokalizacji.
+                            transaction.update(itemRef, { lastOperationDate: lastOpDate }); // Tylko stabilizacja daty
+
                             transaction.set(historyRef, {
-                                date: new Date().toISOString(),
-                                documentDate: pDate,
-                                type: "WYCOFANIE",
-                                description: `[Wycofano / Anulowano protokół] Anulowano wydanie na budowę: ${p.destinationName} (Dokument: ${p.protocolId})`,
-                                status: itemData.status,
-                                user: `${user?.firstName} ${user?.lastName}`
-                            });
-                        }
-
-                    } else if (p.type === "ZWROT") {
-                        // --- WYCOFANIE ZWROTU (Zabieramy z Magazynu, oddajemy na budowę) ---
-                        const newAvailable = Math.max(0, itemData.availableQuantity - qty);
-                        const currentAllocations = itemData.allocations || {};
-                        const newAllocations = { ...currentAllocations };
-
-                        newAllocations[p.sourceId] = (newAllocations[p.sourceId] || 0) + qty;
-
-                        const updateData: any = {
-                            availableQuantity: newAvailable,
-                            allocations: newAllocations
-                        };
-
-                        if (itemData.type === "UNIQUE") {
-                            updateData.currentLocation = p.sourceName;
-                        }
-
-                        transaction.update(itemRef, updateData);
-
-                        // Dodanie wpisu wycofania do historii UNIQUE
-                        if (itemData.type === "UNIQUE") {
-                            const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
-                            transaction.set(historyRef, {
-                                date: new Date().toISOString(),
-                                documentDate: pDate,
-                                type: "WYCOFANIE",
-                                description: `[Wycofano / Anulowano protokół] Anulowano zwrot z budowy: ${p.sourceName} (Dokument: ${p.protocolId})`,
-                                status: itemData.status,
-                                user: `${user?.firstName} ${user?.lastName}`
+                                date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status, user: `${user?.firstName} ${user?.lastName}`,
+                                description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Anulowano protokół ${cancelProtocol.protocolId} z dnia ${pDate}. Sprzęt jest już objęty nowszymi operacjami.`
                             });
                         }
                     }
                 }
 
-                // Oznaczamy sam dokument protokołu jako ANULOWANY
+                // Generujemy powiązany protokół o typie ANULOWANIE dla pełnego śladu audytowego (Audit Trail)
+                const cancellationRef = doc(collection(db, "protocols"));
+                const cancellationId = `ANUL-${cancelProtocol.protocolId}`;
+
+                transaction.set(cancellationRef, {
+                    protocolId: cancellationId,
+                    parentProtocolId: cancelProtocol.protocolId,
+                    type: "ANULOWANIE",
+                    sourceId: cancelProtocol.sourceId || "MAGAZYN",
+                    sourceName: cancelProtocol.sourceName || "MAGAZYN",
+                    destinationId: cancelProtocol.destinationId || "MAGAZYN",
+                    destinationName: cancelProtocol.destinationName || "MAGAZYN",
+                    createdBy: user?.uid,
+                    createdByName: `${user?.firstName} ${user?.lastName}`,
+                    status: "ZAAKCEPTOWANY",
+                    createdAt: new Date().toISOString(),
+                    documentDate: pDate,
+                    items: [], // brak aktywnych pozycji
+                    cancelledItems: cancelProtocol.items.map((item: any) => ({
+                        ...item,
+                        warehouseNotes: `[Anulowano w ramach wycofania protokołu ${cancelProtocol.protocolId}]`
+                    }))
+                });
+
+                // Oznaczamy dokument pierwotny jako ANULOWANY
                 transaction.update(protocolRef, {
-                    status: "ANULOWANY"
+                    status: "ANULOWANY",
+                    cancelledAt: new Date().toISOString(),
+                    cancelledByName: `${user?.firstName} ${user?.lastName}`
                 });
             });
 
-            alert("✅ Protokół został pomyślnie anulowany, a stany magazynowe wycofane!");
+            alert("✅ Protokół został pomyślnie anulowany! Zmiany zostały naniesione.");
+            setIsCancelModalOpen(false);
+            setCancelProtocol(null);
             fetchHistoryProtocols();
             fetchData();
         } catch (error: any) {
@@ -1549,22 +1602,27 @@ export default function ProtocolsHub() {
             setIsSubmitting(false);
         }
     };
-
-    // FUNKCJA OTWIERAJĄCA MODAL KOREKTY
+    // FUNKCJA OTWIERAJĄCA MODAL KOREKTY (Dynamiczne rozpoznawanie typu z Katalogu)
     const openCorrectionModal = (protocol: any) => {
         setCorrectionParentProtocol(protocol);
-        // Tworzymy głęboką kopię pozycji protokołu do edycji
-        const itemsCopy = protocol.items.map((i: any) => ({
-            inventoryId: i.inventoryId,
-            name: i.name,
-            type: i.type,
-            inventoryNumber: i.inventoryNumber || "",
-            unit: i.unit || "szt.",
-            quantity: i.declaredQty !== undefined ? i.declaredQty : (i.quantity !== undefined ? i.quantity : 1),
-            receivedQty: i.receivedQty !== undefined ? i.receivedQty : (i.declaredQty || 1),
-            finalStatus: i.finalStatus || i.declaredStatus || "sprawne",
-            warehouseNotes: i.warehouseNotes || ""
-        }));
+        // Tworzymy kopię pozycji protokołu, weryfikując rzeczywisty typ (UNIQUE/BULK) bezpośrednio z Katalogu
+        const itemsCopy = protocol.items.map((i: any) => {
+            const dbItem = inventory.find(inv => inv.id === i.inventoryId);
+            const resolvedType = dbItem ? dbItem.type : (i.type || "BULK");
+
+            return {
+                inventoryId: i.inventoryId,
+                name: i.name,
+                type: resolvedType, // Pobieramy aktualny typ bezpośrednio z bazy danych (zapobiega to błędom ze starych protokołów)
+                inventoryNumber: i.inventoryNumber || "",
+                unit: i.unit || "szt.",
+                quantity: i.declaredQty !== undefined ? i.declaredQty : (i.quantity !== undefined ? i.quantity : 1),
+                receivedQty: i.receivedQty !== undefined ? i.receivedQty : (i.declaredQty || 1),
+                finalStatus: i.finalStatus || i.declaredStatus || "sprawne",
+                warehouseNotes: i.warehouseNotes || "",
+                action: "KEEP" // Domyślna akcja: Pozostaw pozycję na protokole
+            };
+        });
         setCorrectionCart(itemsCopy);
         setIsCorrectionModalOpen(true);
     };
@@ -1601,24 +1659,7 @@ export default function ProtocolsHub() {
                 resolvedLastOpDates[item.inventoryId] = lastOp;
             }
 
-            // Ochrona: sprawdzamy konflikty
-            const conflictingItems: string[] = [];
-            for (const item of correctionCart) {
-                if (item.type !== "UNIQUE" || !item.inventoryId) continue;
-                const lastOp = resolvedLastOpDates[item.inventoryId];
-                if (lastOp && pDate < lastOp) {
-                    conflictingItems.push(`- ${item.name} (nr Mag: ${item.inventoryNumber}): posiada już nowszy ruch z dnia ${lastOp}`);
-                }
-            }
 
-            if (conflictingItems.length > 0) {
-                setIsCorrectionSubmitting(false);
-                return alert(
-                    `⚠️ BLOKADA ZAPISU KOREKTY!\n\n` +
-                    `Nie można skorygować tego dokumentu, ponieważ poniższy sprzęt zdążył już wyjechać dalej i posiada nowsze operacje w bazie:\n\n` +
-                    conflictingItems.join("\n")
-                );
-            }
 
             // 2. TRANSAKCJA KORYGOWANIA
             await runTransaction(db, async (transaction) => {
@@ -1638,6 +1679,7 @@ export default function ProtocolsHub() {
                 }
 
                 const updatedProtocolItems = [];
+                const cancelledProtocolItems = []; // Przechowuje wycofane pozycje na potrzeby historii zmian
 
                 for (let idx = 0; idx < correctionCart.length; idx++) {
                     const correctedItem = correctionCart[idx];
@@ -1649,6 +1691,65 @@ export default function ProtocolsHub() {
                     if (!itemDoc.exists()) continue;
 
                     const itemData = itemDoc.data();
+
+                    // --- OBSŁUGA CAŁKOWITEGO USUNIĘCIA ELEMENTU Z PROTOKOŁU ---
+                    if (correctedItem.action === "DELETE") {
+                        const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[correctedItem.inventoryId] || "";
+                        const isNewerOrEqual = !lastOpDate || (pDate >= lastOpDate);
+                        const historyRef = doc(collection(db, `inventory/${correctedItem.inventoryId}/history`));
+
+                        const qty = originalItem.quantity !== undefined ? originalItem.quantity : (originalItem.receivedQty || 1);
+
+                        if (isNewerOrEqual) {
+                            if (originalProtocol.type === "WYDANIE") {
+                                // Wycofujemy całkowicie na magazyn (ponieważ wydano je przez pomyłkę)
+                                if (itemData.type === "UNIQUE") {
+                                    transaction.update(itemRef, { currentLocation: "MAGAZYN", availableQuantity: 1, allocations: {} });
+                                } else {
+                                    const currentAllocations = itemData.allocations || {};
+                                    const newAllocations = { ...currentAllocations };
+                                    const oldSiteQty = newAllocations[originalProtocol.destinationId] || 0;
+                                    newAllocations[originalProtocol.destinationId] = Math.max(0, oldSiteQty - qty);
+                                    transaction.update(itemRef, { availableQuantity: itemData.availableQuantity + qty, allocations: newAllocations });
+                                }
+                            } else if (originalProtocol.type === "ZWROT") {
+                                // Wycofujemy z powrotem na budowę (ponieważ zwrot zrobiono przez pomyłkę)
+                                if (itemData.type === "UNIQUE") {
+                                    transaction.update(itemRef, { currentLocation: originalProtocol.sourceName, availableQuantity: 0, allocations: { [originalProtocol.sourceId]: 1 } });
+                                } else {
+                                    const currentAllocations = itemData.allocations || {};
+                                    const newAllocations = { ...currentAllocations };
+                                    newAllocations[originalProtocol.sourceId] = (newAllocations[originalProtocol.sourceId] || 0) + qty;
+                                    transaction.update(itemRef, { availableQuantity: Math.max(0, itemData.availableQuantity - qty), allocations: newAllocations });
+                                }
+                            }
+
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status || "sprawne", user: `${user?.firstName} ${user?.lastName}`,
+                                description: `[Korekta protokołu ${originalProtocol.protocolId}] Usunięto tę pozycję z dokumentu głównego. Sprzęt wycofano systemowo.`
+                            });
+                        } else {
+                            // Retrospektywny zapis chronologiczny
+                            transaction.update(itemRef, { lastOperationDate: lastOpDate });
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status || "sprawne", user: `${user?.firstName} ${user?.lastName}`,
+                                description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY STANÓW] Pozycja została usunięta z protokołu ${originalProtocol.protocolId} poprzez korektę.`
+                            });
+                        }
+
+                        // Zapisujemy wycofaną pozycję do śladu audytowego
+                        cancelledProtocolItems.push({
+                            inventoryId: correctedItem.inventoryId,
+                            name: correctedItem.name,
+                            inventoryNumber: correctedItem.inventoryNumber || "",
+                            unit: correctedItem.unit || "szt.",
+                            quantity: qty,
+                            warehouseNotes: correctedItem.warehouseNotes || "Wycofano pozycję z protokołu głównego korektą."
+                        });
+
+                        // WAŻNE: Robimy "continue", czyli omijamy dodawanie tego przedmiotu do tablicy `updatedProtocolItems`. Przedmiot zostaje całkowicie skasowany!
+                        continue;
+                    }
 
                     if (itemData.type === "BULK") {
                         // --- KOREKTA ELEMENTÓW BULK ---
@@ -1695,56 +1796,75 @@ export default function ProtocolsHub() {
                         });
 
                     } else if (itemData.type === "UNIQUE") {
-                        // --- KOREKTA SPRZĘTU UNIQUE (PODMIANA NR SERYJNEGO LUB STATUSU) ---
                         const hasIdChanged = originalItem.inventoryId !== correctedItem.inventoryId;
+                        const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[correctedItem.inventoryId] || "";
+                        const isNewerOrEqual = !lastOpDate || (pDate >= lastOpDate);
 
                         if (hasIdChanged) {
-                            // 1. Wycofujemy stare urządzenie na magazyn
+                            // 1. Wycofywanie STAREGO urządzenia
                             const oldItemRef = doc(db, "inventory", originalItem.inventoryId);
-                            transaction.update(oldItemRef, {
-                                currentLocation: "MAGAZYN",
-                                availableQuantity: 1,
-                                allocations: {}
-                            });
+                            const oldItemDoc = await transaction.get(oldItemRef);
+                            const oldItemData = oldItemDoc.exists() ? oldItemDoc.data() : null;
+                            const oldLastOpDate = oldItemData?.lastOperationDate || resolvedLastOpDates[originalItem.inventoryId] || "";
+                            const isOldNewerOrEqual = !oldLastOpDate || (pDate >= oldLastOpDate);
 
-                            // Log wycofania starego
                             const oldHistoryRef = doc(collection(db, `inventory/${originalItem.inventoryId}/history`));
-                            transaction.set(oldHistoryRef, {
-                                date: new Date().toISOString(),
-                                documentDate: pDate,
-                                type: "WYCOFANIE",
-                                description: `[Korekta protokołu ${originalProtocol.protocolId}] Wyrejestrowano urządzenie i przywrócono na magazyn.`,
-                                status: "sprawne",
-                                user: `${user?.firstName} ${user?.lastName}`
-                            });
 
-                            // 2. Pobieramy nowe urządzenie i wysyłamy na budowę/magazyn
+                            if (isOldNewerOrEqual) {
+                                if (originalProtocol.type === "WYDANIE") {
+                                    // Jeśli korygujemy WYDANIE - stare urządzenie wraca na magazyn (bo jednak nie wyjechało na budowę)
+                                    transaction.update(oldItemRef, {
+                                        currentLocation: "MAGAZYN",
+                                        availableQuantity: 1,
+                                        allocations: {}
+                                    });
+                                    transaction.set(oldHistoryRef, {
+                                        date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: "sprawne", user: `${user?.firstName} ${user?.lastName}`,
+                                        description: `[Korekta protokołu ${originalProtocol.protocolId}] Wyrejestrowano urządzenie z wydania i przywrócono na magazyn.`
+                                    });
+                                } else if (originalProtocol.type === "ZWROT") {
+                                    // Jeśli korygujemy ZWROT - stare urządzenie wraca na budowę (bo jednak nie zjechało na magazyn)
+                                    transaction.update(oldItemRef, {
+                                        currentLocation: originalProtocol.sourceName,
+                                        availableQuantity: 0,
+                                        allocations: { [originalProtocol.sourceId]: 1 }
+                                    });
+                                    transaction.set(oldHistoryRef, {
+                                        date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: "sprawne", user: `${user?.firstName} ${user?.lastName}`,
+                                        description: `[Korekta protokołu ${originalProtocol.protocolId}] Wyrejestrowano urządzenie ze zwrotu i przywrócono na budowę: ${originalProtocol.sourceName}.`
+                                    });
+                                }
+                            } else {
+                                transaction.update(oldItemRef, { lastOperationDate: oldLastOpDate }); // Uzdrawianie starego
+                                transaction.set(oldHistoryRef, {
+                                    date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: "sprawne", user: `${user?.firstName} ${user?.lastName}`,
+                                    description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Usunięto z protokołu ${originalProtocol.protocolId} poprzez korektę.`
+                                });
+                            }
+
+                            // 2. Pobieranie NOWEGO urządzenia
                             const newLocation = originalProtocol.type === "WYDANIE" ? originalProtocol.destinationName : "MAGAZYN";
                             const newAllocations = originalProtocol.type === "WYDANIE" ? { [originalProtocol.destinationId]: 1 } : {};
-
-                            transaction.update(itemRef, {
-                                currentLocation: newLocation,
-                                availableQuantity: originalProtocol.type === "WYDANIE" ? 0 : 1,
-                                allocations: newAllocations,
-                                status: correctedItem.finalStatus
-                            });
-
-                            // Log rejestracji nowego
                             const newHistoryRef = doc(collection(db, `inventory/${correctedItem.inventoryId}/history`));
-                            transaction.set(newHistoryRef, {
-                                date: new Date().toISOString(),
-                                documentDate: pDate,
-                                type: originalProtocol.type,
-                                description: `[Korekta protokołu ${originalProtocol.protocolId}] Zarejestrowano urządzenie w lokalizacji: ${newLocation}. Stan: ${correctedItem.finalStatus}.`,
-                                status: correctedItem.finalStatus,
-                                user: `${user?.firstName} ${user?.lastName}`
-                            });
 
+                            if (isNewerOrEqual) {
+                                transaction.update(itemRef, { currentLocation: newLocation, availableQuantity: originalProtocol.type === "WYDANIE" ? 0 : 1, allocations: newAllocations, status: correctedItem.finalStatus });
+                                transaction.set(newHistoryRef, {
+                                    date: new Date().toISOString(), documentDate: pDate, type: originalProtocol.type, status: correctedItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`,
+                                    description: `[Korekta protokołu ${originalProtocol.protocolId}] Zarejestrowano fizycznie w lokalizacji: ${newLocation}. Stan: ${correctedItem.finalStatus}.`
+                                });
+                            } else {
+                                transaction.update(itemRef, { lastOperationDate: lastOpDate }); // Uzdrawianie nowego
+                                transaction.set(newHistoryRef, {
+                                    date: new Date().toISOString(), documentDate: pDate, type: originalProtocol.type, status: correctedItem.finalStatus, user: `${user?.firstName} ${user?.lastName}`,
+                                    description: `[WPIS RETROSPEKTYWNY - BEZ ZMIANY OBECNEGO STANU] Zarejestrowano w protokole ${originalProtocol.protocolId} z datą w przeszłości.`
+                                });
+                            }
                         } else {
-                            // Jeśli ID się nie zmieniło, ale poprawiono np. tylko status na magazynie przy zwrocie
-                            transaction.update(itemRef, {
-                                status: correctedItem.finalStatus
-                            });
+                            // Jeśli ID się nie zmieniło, ale poprawiono status
+                            if (isNewerOrEqual) {
+                                transaction.update(itemRef, { status: correctedItem.finalStatus });
+                            }
                         }
 
                         updatedProtocolItems.push({
@@ -1775,12 +1895,14 @@ export default function ProtocolsHub() {
                     status: "ZAAKCEPTOWANY",
                     createdAt: new Date().toISOString(),
                     documentDate: pDate,
-                    items: updatedProtocolItems
+                    items: updatedProtocolItems,
+                    cancelledItems: cancelledProtocolItems // Dołączamy usunięte pozycje
                 });
 
                 // Aktualizujemy pozycje w dokumencie głównym do stanu faktycznego (skorygowanego)
                 transaction.update(parentRef, {
-                    items: updatedProtocolItems
+                    items: updatedProtocolItems,
+                    cancelledItems: cancelledProtocolItems // Dołączamy usunięte pozycje
                 });
             });
 
@@ -2009,14 +2131,20 @@ export default function ProtocolsHub() {
                                                 <Fragment key={p.dbId}>
                                                     <tr
                                                         className={`transition cursor-pointer 
+                                                        ${p.status === "ANULOWANY" ? 'bg-slate-100/50 opacity-60 text-slate-400' : ''}
                                                         ${isExpanded ? 'bg-slate-50/70' : 'hover:bg-slate-50/50'} 
-                                                        ${hasAlert ? 'bg-red-50/30 hover:bg-red-50/50 border-l-4 border-l-red-500' : ''}`}
+                                                        ${hasAlert && p.status !== "ANULOWANY" ? 'bg-red-50/30 hover:bg-red-50/50 border-l-4 border-l-red-500' : ''}`}
                                                         onClick={() => setExpandedProtocolId(isExpanded ? null : p.dbId)}
                                                     >
                                                         <td className="p-4 font-bold font-mono text-slate-800">
                                                             <div className="flex items-center gap-2">
-                                                                <span>{p.protocolId}</span>
-                                                                {hasAlert && (
+                                                                <span className={p.status === "ANULOWANY" ? "line-through text-slate-400" : ""}>{p.protocolId}</span>
+                                                                {p.status === "ANULOWANY" && (
+                                                                    <span className="bg-red-100 text-red-700 text-[9px] px-2 py-0.5 rounded font-black uppercase tracking-wider whitespace-nowrap">
+                                                                        🚫 ANULOWANY
+                                                                    </span>
+                                                                )}
+                                                                {hasAlert && p.status !== "ANULOWANY" && (
                                                                     <span className="bg-red-100 text-red-700 text-[9px] px-2 py-0.5 rounded font-black uppercase tracking-wider animate-pulse whitespace-nowrap">
                                                                         {isNoDoc ? '⚠️ BRAK PROTOKOŁU' : '⚠️ NIEZGODNOŚĆ'}
                                                                     </span>
@@ -2024,7 +2152,13 @@ export default function ProtocolsHub() {
                                                             </div>
                                                         </td>
                                                         <td className="p-4">
-                                                            {p.type === "WYDANIE" ? (
+                                                            {p.status === "ANULOWANY" ? (
+                                                                <span className="bg-slate-200 text-slate-600 text-[10px] font-black px-2 py-1 rounded uppercase">ANULOWANY</span>
+                                                            ) : p.type === "ANULOWANIE" ? (
+                                                                <span className="bg-red-100 text-red-800 text-[10px] font-black px-2 py-1 rounded uppercase">Protokół Anulujący</span>
+                                                            ) : p.type === "KOREKTA" ? (
+                                                                <span className="bg-purple-100 text-purple-800 text-[10px] font-black px-2 py-1 rounded uppercase">Korekta</span>
+                                                            ) : p.type === "WYDANIE" ? (
                                                                 <span className="bg-green-100 text-green-800 text-[10px] font-black px-2 py-1 rounded uppercase">Wydanie</span>
                                                             ) : p.documentSource === "PAPER" ? (
                                                                 <span className="bg-orange-100 text-orange-800 text-[10px] font-black px-2 py-1 rounded uppercase">Zwrot (Papier)</span>
@@ -2076,8 +2210,9 @@ export default function ProtocolsHub() {
                                                                     <div>
                                                                         <p className="font-bold text-xs uppercase text-slate-400 tracking-wider mb-2">Spis sprzętu i materiałów</p>
                                                                         <div className="space-y-1.5">
+                                                                            {/* 1. AKTYWNE POZYCJE */}
                                                                             {p.items?.map((item: any, idx: number) => (
-                                                                                <div key={idx} className="flex justify-between items-center p-2.5 rounded-lg border border-slate-50/50 text-xs">
+                                                                                <div key={idx} className="flex justify-between items-center p-2.5 rounded-lg border border-slate-100 text-xs bg-white">
                                                                                     <div>
                                                                                         <span className="font-bold text-slate-800">{item.name}</span>
                                                                                         <span className="font-mono text-[10px] text-slate-500 ml-2">Nr: {item.inventoryNumber || "BRAK"}</span>
@@ -2104,6 +2239,36 @@ export default function ProtocolsHub() {
                                                                                     </div>
                                                                                 </div>
                                                                             ))}
+
+                                                                            {/* 2. WYCOFANE / ANULOWANE POZYCJE (Rysowane przekreślone z czerwoną etykietą) */}
+                                                                            {p.cancelledItems && p.cancelledItems.length > 0 && (
+                                                                                <div className="mt-4 pt-3 border-t border-dashed border-red-200">
+                                                                                    <p className="font-black text-[10px] uppercase text-red-500 tracking-wider mb-2 flex items-center gap-1.5">
+                                                                                        <span>🚫</span> Pozycje wycofane / anulowane w ramach korekty:
+                                                                                    </p>
+                                                                                    <div className="space-y-1.5">
+                                                                                        {p.cancelledItems.map((item: any, idx: number) => (
+                                                                                            <div key={idx} className="flex justify-between items-center p-2.5 rounded-lg border border-red-100 text-xs bg-red-50/20 text-slate-400">
+                                                                                                <div>
+                                                                                                    <span className="font-bold line-through text-slate-500">{item.name}</span>
+                                                                                                    <span className="font-mono text-[10px] text-slate-400 ml-2 line-through">Nr: {item.inventoryNumber || "BRAK"}</span>
+                                                                                                    <span className="ml-3 bg-red-100 text-red-700 text-[9px] px-1.5 py-0.5 rounded font-black uppercase tracking-wider">
+                                                                                                        WYCOFANO KOREKTĄ
+                                                                                                    </span>
+                                                                                                </div>
+                                                                                                <div className="text-right flex items-center gap-4">
+                                                                                                    <span className="font-bold line-through text-slate-400">
+                                                                                                        Ilość pierwotna: {item.quantity || item.receivedQty || 1} {item.unit || "szt."}
+                                                                                                    </span>
+                                                                                                    {item.warehouseNotes && (
+                                                                                                        <span className="italic text-[11px] text-red-500/70 border-l border-red-200 pl-2">Powód: {item.warehouseNotes}</span>
+                                                                                                    )}
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
                                                                         </div>
                                                                     </div>
 
@@ -3303,97 +3468,375 @@ export default function ProtocolsHub() {
                             <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2">
                                 {correctionCart.map((cItem, index) => {
                                     const isUnique = cItem.type === "UNIQUE";
+                                    const originalItem = correctionParentProtocol.items[index];
+                                    const hasIdChanged = originalItem && originalItem.inventoryId !== cItem.inventoryId;
+                                    const isDeleted = cItem.action === "DELETE";
+
+                                    // --- 🤖 PROJEKTOWANIE WIZUALNYCH KART URZĄDZEŃ I RUCHÓW SYSTEMOWYCH (Korekta + Usuwanie) ---
+                                    let previewCards = null;
+
+                                    if (isDeleted && originalItem) {
+                                        // --- PRZYPADEK 0: CAŁKOWITE WYCOFANIE POZYCJI Z PROTOKOŁU (KASOWANIE POMYŁKOWEGO WYDANIA/ZWROTU) ---
+                                        if (correctionParentProtocol.type === "WYDANIE") {
+                                            previewCards = (
+                                                <div className="bg-white border border-red-200 rounded-xl overflow-hidden shadow-sm flex flex-col w-full animate-fade-in">
+                                                    <div className="bg-red-50 px-3 py-1.5 border-b border-red-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-red-600">
+                                                        <span>🚨 Usunięcie pozycji z wydania</span>
+                                                    </div>
+                                                    <div className="p-3 flex-1 space-y-1">
+                                                        <p className="font-bold text-slate-800 text-xs">{cItem.name}</p>
+                                                        <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                            <p>Nr Mag: <b className="text-slate-700">{cItem.inventoryNumber || "brak"}</b></p>
+                                                            <p>Status: <b className="text-red-600">WYCOFANA</b></p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                        <span>📥</span> Sprzęt zostanie całkowicie skasowany z protokołu i wycofany z budowy na MAGAZYN GŁÓWNY.
+                                                    </div>
+                                                </div>
+                                            );
+                                        } else {
+                                            // ANULOWANIE JEDNEGO ZE ZWROTÓW
+                                            previewCards = (
+                                                <div className="bg-white border border-red-200 rounded-xl overflow-hidden shadow-sm flex flex-col w-full animate-fade-in">
+                                                    <div className="bg-red-50 px-3 py-1.5 border-b border-red-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-red-600">
+                                                        <span>🚨 Usunięcie pozycji ze zwrotu</span>
+                                                    </div>
+                                                    <div className="p-3 flex-1 space-y-1">
+                                                        <p className="font-bold text-slate-800 text-xs">{cItem.name}</p>
+                                                        <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                            <p>Nr Mag: <b className="text-slate-700">{cItem.inventoryNumber || "brak"}</b></p>
+                                                            <p>Status: <b className="text-red-600">WYCOFANA</b></p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                        <span>📤</span> Zwrócenie tego sprzętu zostanie anulowane. Wróci on jako dłużny na budowę: {correctionParentProtocol.sourceName}.
+                                                    </div>
+                                                </div>
+                                            );
+                                        }
+                                    } else if (isUnique && originalItem) {
+                                        if (!hasIdChanged) {
+                                            // --- PRZYPADEK A: BEZ PODMIANY URZĄDZENIA ---
+                                            const currentLoc = correctionParentProtocol.type === "WYDANIE"
+                                                ? correctionParentProtocol.destinationName
+                                                : "MAGAZYN";
+
+                                            previewCards = (
+                                                <div className="space-y-3 w-full animate-fade-in">
+                                                    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                                                        <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-slate-400">
+                                                            <span>Karta Urządzenia (Korekta Danych)</span>
+                                                        </div>
+                                                        <div className="p-3 flex-1 space-y-1">
+                                                            <p className="font-bold text-slate-800 text-xs">{cItem.name}</p>
+                                                            <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                                <p>Nr Mag: <b className="text-slate-700">{cItem.inventoryNumber || "brak"}</b></p>
+                                                                <p>Lokalizacja w bazie: <b className="text-slate-700">{currentLoc}</b></p>
+                                                            </div>
+                                                        </div>
+                                                        <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                            <span>⚙️</span> Zostaną zaktualizowane tylko uwagi i status techniczny na: {cItem.finalStatus.toUpperCase()}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        } else {
+                                            // --- PRZYPADEK B: PODMIANA URZĄDZENIA (hasIdChanged === true) ---
+                                            const foundNewInv = inventory.find(inv => inv.id === cItem.inventoryId);
+                                            const newLocName = foundNewInv?.currentLocation || "MAGAZYN";
+
+                                            if (correctionParentProtocol.type === "WYDANIE") {
+                                                previewCards = (
+                                                    <div className="grid grid-cols-1 gap-3 w-full animate-fade-in">
+                                                        {/* Karta 1: Urządzenie Wycofywane */}
+                                                        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                                                            <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-red-500">
+                                                                <span>1. Urządzenie Wycofywane (Zostaje na Magazynie)</span>
+                                                            </div>
+                                                            <div className="p-3 flex-1 space-y-1">
+                                                                <p className="font-bold text-slate-800 text-xs">{originalItem.name}</p>
+                                                                <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                                    <p>Nr Mag: <b className="text-slate-700">{originalItem.inventoryNumber || "brak"}</b></p>
+                                                                    <p>Lokalizacja przed korektą: <b className="text-slate-700">{correctionParentProtocol.destinationName}</b></p>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                                <span>📥</span> Zostanie zdjęte z budowy i wróci na: MAGAZYN GŁÓWNY
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Karta 2: Urządzenie Podmieniane */}
+                                                        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                                                            <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-green-600">
+                                                                <span>2. Urządzenie Podmieniane (Jedzie na Budowę)</span>
+                                                            </div>
+                                                            <div className="p-3 flex-1 space-y-1">
+                                                                <p className="font-bold text-slate-800 text-xs">{cItem.name}</p>
+                                                                <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                                    <p>Nr Mag: <b className="text-slate-700">{cItem.inventoryNumber || "brak"}</b></p>
+                                                                    <p>Obecnie w bazie: <b className="text-slate-700">{newLocName}</b></p>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                                <span>📤</span> Zostanie pobrane i wydane na budowę: {correctionParentProtocol.destinationName}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            } else {
+                                                // KOREKTA ZWROTU
+                                                previewCards = (
+                                                    <div className="grid grid-cols-1 gap-3 w-full animate-fade-in">
+                                                        {/* Karta 1: Urządzenie Wycofywane ze Zwrotu */}
+                                                        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                                                            <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-red-500">
+                                                                <span>1. Wyrejestrowanie Błędnego Zwrotu</span>
+                                                            </div>
+                                                            <div className="p-3 flex-1 space-y-1">
+                                                                <p className="font-bold text-slate-800 text-xs">{originalItem.name}</p>
+                                                                <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                                    <p>Nr Mag: <b className="text-slate-700">{originalItem.inventoryNumber || "brak"}</b></p>
+                                                                    <p>Zarejestrowane jako: <b className="text-slate-700">Zwrot (na magazynie)</b></p>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                                <span>📤</span> Zostanie usunięte z magazynu i cofnięte na budowę: {correctionParentProtocol.sourceName}
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Karta 2: Urządzenie które faktycznie zjechało */}
+                                                        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                                                            <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-green-600">
+                                                                <span>2. Urządzenie Faktycznie Zwracane</span>
+                                                            </div>
+                                                            <div className="p-3 flex-1 space-y-1">
+                                                                <p className="font-bold text-slate-800 text-xs">{cItem.name}</p>
+                                                                <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                                    <p>Nr Mag: <b className="text-slate-700">{cItem.inventoryNumber || "brak"}</b></p>
+                                                                    <p>Obecnie w bazie: <b className="text-slate-700">{newLocName}</b></p>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                                <span>📥</span> Zostanie zdjęte z budowy i poprawnie zwrócone na: MAGAZYN ({cItem.finalStatus.toUpperCase()})
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
+                                        }
+                                    } else if (originalItem) {
+                                        // --- PRZYPADEK C: ELEMENTY ILOŚCIOWE (BULK) ---
+                                        const oldQty = originalItem.quantity !== undefined ? originalItem.quantity : (originalItem.receivedQty || 1);
+                                        const newQty = cItem.quantity;
+                                        const delta = newQty - oldQty;
+
+                                        let actionText = "";
+                                        if (delta === 0) actionText = "⚙️ Brak zmian ilościowych. Korygowane są wyłącznie notatki.";
+                                        else if (correctionParentProtocol.type === "WYDANIE") {
+                                            actionText = delta > 0
+                                                ? `📤 Z magazynu zostanie dociągnięte i wydane: +${delta} ${cItem.unit} na budowę`
+                                                : `📥 Na magazyn wróci nadwyżka z budowy: ${Math.abs(delta)} ${cItem.unit}`;
+                                        } else {
+                                            actionText = delta > 0
+                                                ? `📥 Na magazyn wpłynie dodatkowo: +${delta} ${cItem.unit} (budowa rozliczona)`
+                                                : `📤 Z magazynu zostanie wycofane: ${Math.abs(delta)} ${cItem.unit} (dług budowy wzrośnie)`;
+                                        }
+
+                                        previewCards = (
+                                            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col w-full animate-fade-in">
+                                                <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-orange-500">
+                                                    <span>Materiały Ilościowe (BULK) - Automatyczne Wycofanie</span>
+                                                </div>
+                                                <div className="p-3 flex-1 space-y-1">
+                                                    <p className="font-bold text-slate-800 text-xs">{cItem.name}</p>
+                                                    <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                        <p>Ilość na protokole: <b className="text-slate-700">{oldQty} {cItem.unit}</b></p>
+                                                        <p>Typ materiału: <b className="text-slate-700">Ilościowy (BULK)</b></p>
+                                                    </div>
+                                                </div>
+                                                <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                    {actionText}
+                                                </div>
+                                            </div>
+                                        );
+                                    }
+
                                     return (
-                                        <div key={index} className="p-4 border border-slate-200 rounded-2xl bg-slate-50/50 space-y-3 relative">
-                                            <div className="flex justify-between items-start">
+                                        <div key={index} className="p-5 border border-slate-200 rounded-2xl bg-slate-50/50 space-y-3 relative">
+                                            <div className="flex justify-between items-start border-b pb-2 mb-2">
                                                 <div>
-                                                    <p className="font-bold text-sm text-slate-800">{cItem.name}</p>
+                                                    <p className="font-black text-sm text-slate-800">{cItem.name}</p>
                                                     <p className="text-[10px] font-mono text-slate-500 mt-0.5">Typ: {isUnique ? 'Narzędzie (UNIQUE)' : 'Rusztowanie (BULK)'} • Obecny kod: {cItem.inventoryNumber || "brak"}</p>
                                                 </div>
                                             </div>
 
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-white p-3 rounded-xl border border-slate-100">
-                                                {isUnique ? (
-                                                    <>
-                                                        {/* Korekta seryjnego numeru UNIQUE */}
-                                                        <div className="sm:col-span-2">
-                                                            <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Skoryguj na wolny numer (Podmień urządzenie):</label>
-                                                            <select
-                                                                value={cItem.inventoryId}
-                                                                onChange={(e) => {
-                                                                    const selectedId = e.target.value;
-                                                                    const foundInv = inventory.find(i => i.id === selectedId);
-                                                                    const updatedCart = [...correctionCart];
-                                                                    updatedCart[index].inventoryId = selectedId;
-                                                                    updatedCart[index].name = foundInv?.name || cItem.name;
-                                                                    updatedCart[index].inventoryNumber = foundInv?.inventoryNumber || "";
-                                                                    setCorrectionCart(updatedCart);
-                                                                }}
-                                                                className="w-full p-2 border rounded-lg text-xs font-bold outline-none bg-white"
-                                                            >
-                                                                <option value={cItem.inventoryId}>{cItem.name} (nr {cItem.inventoryNumber}) [Obecny]</option>
-                                                                {inventory
-                                                                    .filter(inv => inv.name === cItem.name && inv.availableQuantity > 0 && inv.status === "sprawne" && inv.id !== cItem.inventoryId)
-                                                                    .map(inv => (
-                                                                        <option key={inv.id} value={inv.id}>{inv.name} (nr {inv.inventoryNumber}) [Wolny w Magazynie]</option>
-                                                                    ))
-                                                                }
-                                                            </select>
-                                                        </div>
-                                                        {correctionParentProtocol.type === "ZWROT" && (
-                                                            <div className="sm:col-span-2">
-                                                                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Popraw stan techniczny przy zwrocie:</label>
-                                                                <select
-                                                                    value={cItem.finalStatus}
-                                                                    onChange={(e) => {
-                                                                        const updatedCart = [...correctionCart];
-                                                                        updatedCart[index].finalStatus = e.target.value;
-                                                                        setCorrectionCart(updatedCart);
-                                                                    }}
-                                                                    className="p-2 border rounded-lg text-xs font-bold outline-none bg-white"
-                                                                >
-                                                                    <option value="sprawne">✅ Sprawne</option>
-                                                                    <option value="do przeglądu">⚠️ Do przeglądu</option>
-                                                                    <option value="uszkodzone">❌ Uszkodzone</option>
-                                                                </select>
-                                                            </div>
-                                                        )}
-                                                    </>
-                                                ) : (
-                                                    /* Korekta ilościowa dla BULK */
+                                            {/* UKŁAD 50/50: Lewa to Formularz, Prawa to Podgląd w postaci Kart */}
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-4 rounded-xl border border-slate-100">
+
+                                                {/* --- LEWA KOLUMNA: EDYCJA DANYCH --- */}
+                                                <div className="space-y-4">
+                                                    {/* Nowy Selektor Wyboru Akcji dla tej pozycji na protokole */}
                                                     <div>
-                                                        <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Skorygowana Ilość:</label>
-                                                        <div className="flex items-center gap-1.5">
-                                                            <input
-                                                                type="number"
-                                                                min="1"
-                                                                step="any"
-                                                                value={cItem.quantity}
-                                                                onChange={(e) => {
-                                                                    const updatedCart = [...correctionCart];
-                                                                    updatedCart[index].quantity = Number(e.target.value);
-                                                                    setCorrectionCart(updatedCart);
-                                                                }}
-                                                                className="w-20 p-1.5 border rounded-lg text-center font-bold outline-none bg-slate-50"
-                                                            />
-                                                            <span className="text-xs font-bold text-slate-500">{cItem.unit}</span>
+                                                        <label className="block text-[10px] font-black text-red-600 uppercase mb-1.5">Akcja dla tej pozycji protokołu:</label>
+                                                        <select
+                                                            value={cItem.action || "KEEP"}
+                                                            onChange={(e) => {
+                                                                const updatedCart = [...correctionCart];
+                                                                updatedCart[index].action = e.target.value;
+                                                                setCorrectionCart(updatedCart);
+                                                            }}
+                                                            className="w-full p-2 border-2 border-red-200 rounded-lg text-xs font-bold outline-none bg-red-50/20 focus:border-red-500"
+                                                        >
+                                                            <option value="KEEP">✅ Pozostaw na dokumencie (lub podmień urządzenie)</option>
+                                                            <option value="DELETE">❌ Wycofaj i skasuj tę pozycję z dokumentu</option>
+                                                        </select>
+                                                    </div>
+
+                                                    {/* Pola konfiguracji wyboru pokazujemy tylko wtedy, gdy NIE usuwamy pozycji */}
+                                                    {!isDeleted && (
+                                                        <>
+                                                            {isUnique ? (
+                                                                <>
+                                                                    {/* Wyszukiwarka inline nad selectem */}
+                                                                    <div>
+                                                                        <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">1. Szukaj urządzenia:</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            placeholder="🔍 Wpisz nazwę lub nr magazynowy..."
+                                                                            value={correctionSearchQueries[index] || ""}
+                                                                            onChange={(e) => setCorrectionSearchQueries(prev => ({ ...prev, [index]: e.target.value }))}
+                                                                            className="w-full p-2 border-2 border-slate-200 rounded-lg text-xs font-semibold outline-none bg-slate-50 focus:border-orange-500 focus:bg-white transition"
+                                                                        />
+                                                                    </div>
+
+                                                                    <div>
+                                                                        <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">2. Wybierz urządzenie do podmiany:</label>
+                                                                        <select
+                                                                            value={cItem.inventoryId}
+                                                                            onChange={(e) => {
+                                                                                const selectedId = e.target.value;
+                                                                                const foundInv = inventory.find(i => i.id === selectedId);
+                                                                                const updatedCart = [...correctionCart];
+                                                                                updatedCart[index].inventoryId = selectedId;
+                                                                                updatedCart[index].name = foundInv?.name || cItem.name;
+                                                                                updatedCart[index].inventoryNumber = foundInv?.inventoryNumber || "";
+                                                                                setCorrectionCart(updatedCart);
+                                                                            }}
+                                                                            className="w-full p-2 border rounded-lg text-xs font-bold outline-none bg-white"
+                                                                        >
+                                                                            <option value={cItem.inventoryId}>
+                                                                                {cItem.name} (nr {cItem.inventoryNumber}) [Obecna lokalizacja w bazie: {cItem.currentLocation || "MAGAZYN"}]
+                                                                            </option>
+                                                                            <optgroup label="Te same urządzenia w systemie">
+                                                                                {inventory
+                                                                                    .filter(inv => {
+                                                                                        if (inv.type !== "UNIQUE" || inv.name !== cItem.name || inv.id === cItem.inventoryId) return false;
+                                                                                        const search = (correctionSearchQueries[index] || "").toLowerCase();
+                                                                                        if (!search) return true;
+                                                                                        return inv.name.toLowerCase().includes(search) || (inv.inventoryNumber || "").toLowerCase().includes(search);
+                                                                                    })
+                                                                                    .map(inv => (
+                                                                                        <option key={inv.id} value={inv.id}>
+                                                                                            {inv.name} (nr {inv.inventoryNumber}) [Lokalizacja: {inv.currentLocation || "MAGAZYN"}]
+                                                                                        </option>
+                                                                                    ))
+                                                                                }
+                                                                            </optgroup>
+                                                                            <optgroup label="Inne urządzenia UNIQUE w systemie">
+                                                                                {inventory
+                                                                                    .filter(inv => {
+                                                                                        if (inv.type !== "UNIQUE" || inv.name === cItem.name || inv.id === cItem.inventoryId) return false;
+                                                                                        const search = (correctionSearchQueries[index] || "").toLowerCase();
+                                                                                        if (!search) return true;
+                                                                                        return inv.name.toLowerCase().includes(search) || (inv.inventoryNumber || "").toLowerCase().includes(search);
+                                                                                    })
+                                                                                    .sort((a, b) => a.name.localeCompare(b.name))
+                                                                                    .map(inv => (
+                                                                                        <option key={inv.id} value={inv.id}>
+                                                                                            {inv.name} (nr {inv.inventoryNumber}) [Lokalizacja: {inv.currentLocation || "MAGAZYN"}]
+                                                                                        </option>
+                                                                                    ))
+                                                                                }
+                                                                            </optgroup>
+                                                                        </select>
+                                                                    </div>
+
+                                                                    {correctionParentProtocol.type === "ZWROT" && (
+                                                                        <div>
+                                                                            <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">Popraw stan techniczny przy zwrocie:</label>
+                                                                            <select
+                                                                                value={cItem.finalStatus}
+                                                                                onChange={(e) => {
+                                                                                    const updatedCart = [...correctionCart];
+                                                                                    updatedCart[index].finalStatus = e.target.value;
+                                                                                    setCorrectionCart(updatedCart);
+                                                                                }}
+                                                                                className="p-2 border rounded-lg text-xs font-bold outline-none bg-white w-full"
+                                                                            >
+                                                                                <option value="sprawne">✅ Sprawne</option>
+                                                                                <option value="do przeglądu">⚠️ Do przeglądu</option>
+                                                                                <option value="uszkodzone">❌ Uszkodzone</option>
+                                                                            </select>
+                                                                        </div>
+                                                                    )}
+                                                                </>
+                                                            ) : (
+                                                                /* Korekta ilościowa dla BULK */
+                                                                <div>
+                                                                    <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">Skorygowana Ilość:</label>
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <input
+                                                                            type="number"
+                                                                            min="1"
+                                                                            step="any"
+                                                                            value={cItem.quantity}
+                                                                            onChange={(e) => {
+                                                                                const updatedCart = [...correctionCart];
+                                                                                updatedCart[index].quantity = Number(e.target.value);
+                                                                                setCorrectionCart(updatedCart);
+                                                                            }}
+                                                                            className="w-20 p-1.5 border rounded-lg text-center font-bold outline-none bg-slate-50"
+                                                                        />
+                                                                        <span className="text-xs font-bold text-slate-500">{cItem.unit}</span>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    )}
+
+                                                    {/* Wpis uwag pozostaje zawsze aktywny */}
+                                                    <div>
+                                                        <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">Uwagi do korektora (notatki):</label>
+                                                        <input
+                                                            type="text"
+                                                            placeholder={isDeleted ? "Wpisz np. usunięto z powodu pomyłki magazyniera..." : "np. korekta pomyłki seryjnej..."}
+                                                            value={cItem.warehouseNotes}
+                                                            onChange={(e) => {
+                                                                const updatedCart = [...correctionCart];
+                                                                updatedCart[index].warehouseNotes = e.target.value;
+                                                                setCorrectionCart(updatedCart);
+                                                            }}
+                                                            className="w-full text-xs p-2 border-2 rounded-lg outline-none focus:border-orange-500"
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* --- PRAWA KOLUMNA: PODGLĄD SYSTEMOWY W POSTACI KART --- */}
+                                                <div className="bg-slate-50/50 border border-slate-200 p-4 rounded-xl flex flex-col justify-between">
+                                                    <div>
+                                                        <p className="font-bold text-xs text-slate-700 uppercase tracking-wider mb-3 flex items-center gap-1.5 border-b border-slate-200 pb-1.5">
+                                                            <span>📋</span> Podgląd operacji systemowych
+                                                        </p>
+                                                        <div className="space-y-3">
+                                                            {previewCards}
                                                         </div>
                                                     </div>
-                                                )}
-                                                <div className="sm:col-span-2">
-                                                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Uwagi do korektora:</label>
-                                                    <input
-                                                        type="text"
-                                                        placeholder="np. korekta pomyłki ilościowej..."
-                                                        value={cItem.warehouseNotes}
-                                                        onChange={(e) => {
-                                                            const updatedCart = [...correctionCart];
-                                                            updatedCart[index].warehouseNotes = e.target.value;
-                                                            setCorrectionCart(updatedCart);
-                                                        }}
-                                                        className="w-full text-xs p-2 border rounded-lg outline-none"
-                                                    />
+                                                    <div className="text-[10px] text-blue-500 font-bold bg-blue-100/30 p-2 rounded border border-blue-100 text-center mt-4">
+                                                        Zabezpieczenie chronologii bazy aktywne
+                                                    </div>
                                                 </div>
+
                                             </div>
                                         </div>
                                     );
@@ -3408,6 +3851,182 @@ export default function ProtocolsHub() {
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL INTELIGENTNEGO ANULOWANIA PROTOKOŁU */}
+            {isCancelModalOpen && cancelProtocol && (
+                <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl p-8 max-h-[90vh] overflow-y-auto animate-fade-in border-t-4 border-red-500">
+                        <div className="flex justify-between items-start mb-6 border-b pb-4">
+                            <div>
+                                <h2 className="text-xl font-black text-red-600">🚫 Konfigurator Anulowania</h2>
+                                <p className="text-xs text-slate-500 mt-0.5">
+                                    Anulujesz dokument: <span className="font-bold">{cancelProtocol.protocolId}</span>
+                                    (Z dnia: {cancelProtocol.documentDate || cancelProtocol.createdAt?.split('T')[0]})
+                                </p>
+                            </div>
+                            <button onClick={() => { setIsCancelModalOpen(false); setCancelProtocol(null); }} className="text-3xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
+                        </div>
+
+                        <div className="bg-blue-50 text-blue-800 text-xs p-4 rounded-xl border border-blue-200 mb-6 flex gap-3">
+                            <span className="text-xl">ℹ️</span>
+                            <p>
+                                Weryfikacja chronologiczna (PESAM AI): Elementy ilościowe ("Bulk") wrócą automatycznie na stan. Dla urządzeń unikalnych ("Unique") system sprawdza, czy anulowanie odbywa się w odpowiedniej kolejności. Przejrzyj historię urządzeń i zdecyduj, dokąd fizycznie wycofać sprzęt (jeśli dotyczy).
+                            </p>
+                        </div>
+
+                        <div className="space-y-6">
+                            {cancelProtocol.items.filter((i: any) => i.type === "UNIQUE" && !i.isNewManual).map((item: any) => {
+                                const pDate = cancelProtocol.documentDate || cancelProtocol.createdAt?.split('T')[0];
+                                const lastOp = resolvedLastOpDates[item.inventoryId];
+                                const isRetroactive = lastOp && pDate < lastOp;
+                                const histories = cancelItemHistories[item.inventoryId] || [];
+
+                                const selectedDestId = cancelItemDestinations[item.inventoryId] || "MAGAZYN";
+                                const isGoingToWarehouse = selectedDestId === "MAGAZYN";
+                                const destSiteName = isGoingToWarehouse ? "MAGAZYN GŁÓWNY" : (sites.find(s => s.id === selectedDestId)?.name || "Nieznana budowa");
+
+                                // --- DYNAMICZNY GENERATOR PASZPORTÓW I ZIELONYCH PODSUMOWAŃ DLA ANULOWANIA ---
+                                let passportTitle = "";
+                                let passportActionText = "";
+                                let passportActionColor = "";
+                                let passportLoc = "";
+
+                                if (isRetroactive) {
+                                    passportTitle = "Karta Urządzenia (Wpis Retrospektywny)";
+                                    passportActionText = `⚠️ Sprzęt ma nowszy ruch z dnia ${lastOp}. System wycofa historię tego dokumentu, ale nie zmieni fizycznego przypisania urządzenia w bazie.`;
+                                    passportActionColor = "bg-yellow-50 text-yellow-800 border-yellow-200";
+                                    passportLoc = `Obecnie na innej budowie w bazie`;
+                                } else {
+                                    if (cancelProtocol.type === "WYDANIE") {
+                                        passportTitle = "Karta Urządzenia (Wycofanie z Budowy)";
+                                        passportActionText = `📥 Zostanie zdjęte z budowy i zwrócone na: ${destSiteName}`;
+                                        passportActionColor = "bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5";
+                                        passportLoc = cancelProtocol.destinationName;
+                                    } else {
+                                        passportTitle = "Karta Urządzenia (Cofnięcie Zwrotu)";
+                                        passportActionText = `📤 Zostanie zdjęte z magazynu i przywrócone jako dłużne na budowę: ${cancelProtocol.sourceName}`;
+                                        passportActionColor = "bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5";
+                                        passportLoc = "MAGAZYN GŁÓWNY";
+                                    }
+                                }
+
+                                return (
+                                    <div key={item.inventoryId} className="p-5 border border-slate-200 rounded-2xl bg-slate-50/50 space-y-3 relative">
+                                        <div className="flex justify-between items-start border-b pb-2 mb-2">
+                                            <div>
+                                                <p className="font-black text-sm text-slate-800">{item.name}</p>
+                                                <p className="text-[10px] font-mono text-slate-500 mt-0.5">Typ: Narzędzie (UNIQUE) • Obecny kod: {item.inventoryNumber || "brak"}</p>
+                                            </div>
+                                        </div>
+
+                                        {/* UKŁAD 50/50: Lewa to konfiguracja i historia, Prawa to paszport urządzenia z zielonym ruchem */}
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-4 rounded-xl border border-slate-100">
+
+                                            {/* --- LEWA STRONA: DECYZJA I HISTORIA --- */}
+                                            <div className="space-y-4">
+                                                {!isRetroactive && cancelProtocol.type === "WYDANIE" ? (
+                                                    <div>
+                                                        <label className="block text-[10px] font-black text-red-600 uppercase mb-1.5">Gdzie fizycznie odłożyć ten sprzęt?</label>
+                                                        <select
+                                                            value={cancelItemDestinations[item.inventoryId] || "MAGAZYN"}
+                                                            onChange={e => setCancelItemDestinations(prev => ({ ...prev, [item.inventoryId]: e.target.value }))}
+                                                            className="w-full text-xs font-bold p-2 border-2 border-red-200 rounded-lg outline-none focus:border-red-500 bg-red-50/30"
+                                                        >
+                                                            <option value="MAGAZYN">MAGAZYN GŁÓWNY</option>
+                                                            <optgroup label="Aktywne budowy (Bezpośredni zwrot na inną budowę)">
+                                                                {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                                            </optgroup>
+                                                        </select>
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-xs text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                        {isRetroactive
+                                                            ? "Urządzenie poszło już dalej w obieg. Parametry docelowe są zablokowane ze względów bezpieczeństwa bazy."
+                                                            : `Wycofanie zwrotu: Sprzęt zostanie ściągnięty z magazynu i przypisany z powrotem do budowy: ${cancelProtocol.sourceName}.`}
+                                                    </div>
+                                                )}
+
+                                                {/* Krótka historia dla ułatwienia decyzji */}
+                                                <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                    <p className="text-[10px] font-black uppercase text-slate-400 mb-2 border-b pb-1">Historia urządzenia (Ostatnie wpisy)</p>
+                                                    <div className="space-y-2 max-h-24 overflow-y-auto pr-1 text-[10px]">
+                                                        {histories.length === 0 ? <p className="text-slate-400 italic">Brak wpisów.</p> : histories.map((h, idx) => (
+                                                            <div key={idx} className="flex gap-2 items-start">
+                                                                <span className="font-bold text-slate-500 w-16 shrink-0">{h.documentDate || h.date?.split('T')[0]}</span>
+                                                                <span className="text-slate-700">{h.description}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* --- PRAWA STRONA: PASZPORT URZĄDZENIA --- */}
+                                            <div className="bg-slate-50/50 border border-slate-200 p-4 rounded-xl flex flex-col justify-between">
+                                                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col w-full">
+                                                    <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-slate-400">
+                                                        <span>{passportTitle}</span>
+                                                    </div>
+                                                    <div className="p-3 flex-1 space-y-1">
+                                                        <p className="font-bold text-slate-800 text-xs">{item.name}</p>
+                                                        <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                            <p>Nr Mag: <b className="text-slate-700">{item.inventoryNumber || "brak"}</b></p>
+                                                            <p>Lokalizacja przed anulowaniem: <b className="text-slate-700">{passportLoc}</b></p>
+                                                        </div>
+                                                    </div>
+                                                    <div className={`p-2.5 px-3 border-t text-[10px] font-bold ${passportActionColor}`}>
+                                                        {passportActionText}
+                                                    </div>
+                                                </div>
+                                                <div className="text-[10px] text-red-500 font-bold bg-red-100/30 p-2 rounded border border-red-100 text-center mt-4 uppercase tracking-wider">
+                                                    Wycofanie transakcji
+                                                </div>
+                                            </div>
+
+                                        </div>
+                                    </div>
+                                );
+                            })}
+
+                            {/* Grupa dla BULK */}
+                            {cancelProtocol.items.filter((i: any) => i.type === "BULK").length > 0 && (
+                                <div className="grid grid-cols-1 gap-3">
+                                    {cancelProtocol.items.filter((i: any) => i.type === "BULK").map((item: any, idx: number) => {
+                                        const qty = item.receivedQty !== undefined ? item.receivedQty : (item.quantity !== undefined ? item.quantity : 1);
+                                        const actionText = cancelProtocol.type === "WYDANIE"
+                                            ? `📥 Z alokacji budowy ${cancelProtocol.destinationName} zostanie zdjęte i zwrócone na MAGAZYN: ${qty} ${item.unit}`
+                                            : `📤 Z magazynu zostanie odjęte i przywrócone na budowę ${cancelProtocol.sourceName}: ${qty} ${item.unit}`;
+
+                                        return (
+                                            <div key={idx} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col w-full animate-fade-in">
+                                                <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-100 flex justify-between items-center text-[9px] font-black uppercase tracking-wider text-orange-500">
+                                                    <span>Materiały Ilościowe (BULK) - Automatyczne Wycofanie</span>
+                                                </div>
+                                                <div className="p-3 flex-1 space-y-1">
+                                                    <p className="font-bold text-slate-800 text-xs">{item.name}</p>
+                                                    <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-500">
+                                                        <p>Ilość na protokole: <b className="text-slate-700">{qty} {item.unit}</b></p>
+                                                        <p>Typ materiału: <b className="text-slate-700">Ilościowy (BULK)</b></p>
+                                                    </div>
+                                                </div>
+                                                <div className="p-2.5 px-3 border-t text-[10px] font-bold bg-green-50 text-green-700 border-green-100 flex items-center gap-1.5">
+                                                    {actionText}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="border-t border-slate-200 mt-6 pt-5 flex justify-end gap-3">
+                            <button onClick={() => { setIsCancelModalOpen(false); setCancelProtocol(null); }} className="px-6 py-2.5 text-slate-600 font-bold hover:bg-slate-100 rounded-xl transition">Przerwij i wróć</button>
+                            <button onClick={confirmCancellation} disabled={isSubmitting} className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white font-black rounded-xl shadow-md disabled:bg-slate-400 transition flex items-center gap-2">
+                                {isSubmitting ? "Przetwarzanie..." : "Potwierdź Anulowanie"}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
