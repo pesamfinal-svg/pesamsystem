@@ -46,6 +46,7 @@ interface PaperReturnCartItem {
     receivedQty: number;
     finalStatus: string; notes: string;
     manualDebts?: { id: string; name: string; quantity: number; }[]; // <-- DODANO TO POLE
+    accessories?: ReturnAccessory[]; // <-- NOWOŚĆ: Przechowywanie spodziewanego osprzętu
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -674,19 +675,35 @@ export default function ProtocolsHub() {
 
     const fetchItemAccessoriesFromLastIssue = async (itemId: string, siteId: string) => {
         try {
-            const q = query(collection(db, "protocols"), where("destinationId", "==", siteId), where("type", "==", "WYDANIE"), orderBy("createdAt", "desc"), limit(10));
+            // USUNIĘTO orderBy oraz limit z zapytania Firestore, aby zapobiec błędowi indeksu bazy danych
+            const q = query(
+                collection(db, "protocols"),
+                where("destinationId", "==", siteId),
+                where("type", "==", "WYDANIE")
+            );
             const snap = await getDocs(q);
 
-            for (const docSnap of snap.docs) {
-                const protocol = docSnap.data();
+            // Sortujemy dokumenty chronologicznie na poziomie kodu aplikacji (nie rzuca błędów bazy)
+            const sortedDocs = snap.docs
+                .map(d => d.data())
+                .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+            for (const protocol of sortedDocs) {
                 const foundItem = protocol.items.find((i: any) => i.inventoryId === itemId);
                 if (foundItem && foundItem.accessories && foundItem.accessories.length > 0) {
                     return foundItem.accessories
                         .filter((acc: any) => acc.mustReturn)
-                        .map((acc: any) => ({ name: acc.name, mustReturn: true, isReturning: false, quantity: acc.quantity || 1 }));
+                        .map((acc: any) => ({
+                            name: acc.name,
+                            mustReturn: true,
+                            isReturning: false,
+                            quantity: acc.quantity || 1
+                        }));
                 }
             }
-        } catch (error) { console.error("Błąd podczas wyszukiwania osprzętu", error); }
+        } catch (error) {
+            console.error("Błąd podczas wyszukiwania osprzętu:", error);
+        }
         return [];
     };
 
@@ -788,7 +805,7 @@ export default function ProtocolsHub() {
         return { ...item, availableToReturn: Math.max(0, siteQty - lockedQty) };
     });
 
-    const addToPaperReturnCart = (item: InventoryItem & { availableToReturn: number }) => {
+    const addToPaperReturnCart = async (item: InventoryItem & { availableToReturn: number }) => {
         if (paperReturnCart.find(i => i.dbId === item.id)) return;
 
         if (item.type === "BULK") {
@@ -796,12 +813,18 @@ export default function ProtocolsHub() {
             return;
         }
 
+        // Pobieramy spodziewany osprzęt z bazy dla wybranej budowy papierowej!
+        const expectedAccessories = await fetchItemAccessoriesFromLastIssue(item.id, paperReturnSiteId);
+
         setPaperReturnCart(prev => [...prev, {
             cartItemId: Date.now().toString(), dbId: item.id, isManual: false, name: item.name, type: item.type,
             inventoryNumber: item.inventoryNumber || "", unit: item.unit || "szt.", maxQty: item.availableToReturn,
             declaredQty: 1,
             receivedQty: 1,
-            finalStatus: "sprawne", notes: ""
+            finalStatus: "sprawne", notes: "",
+            // Domyślnie zaznaczamy, że kierownik oddał osprzęt
+            accessories: expectedAccessories.map((acc: any) => ({ ...acc, isReturning: true })),
+            manualDebts: []
         }]);
     };
 
@@ -1024,7 +1047,43 @@ export default function ProtocolsHub() {
                             }
                         }
 
-                        // Generowanie wirtualnych dokumentów długu w bazie dla zgłoszonych braków osprzętu
+                        // ZABEZPIECZENIE: Skanujemy spodziewany osprzęt pod kątem braków (niezaznaczonych checkboxów)
+                        const finalizedAccessories = [];
+                        let missingAccessoriesNote = "";
+
+                        if (cartItem.accessories && cartItem.accessories.length > 0) {
+                            const missing = [];
+                            for (const acc of cartItem.accessories) {
+                                finalizedAccessories.push({ ...acc, verifiedReturning: acc.isReturning });
+                                if (!acc.isReturning) {
+                                    missing.push(acc);
+                                }
+                            }
+
+                            if (missing.length > 0) {
+                                missingAccessoriesNote = ` | ZALEGŁOŚCI OSPRZĘTU: ${missing.map(a => a.name).join(", ")}`;
+
+                                for (const mAcc of missing) {
+                                    const debtRef = doc(collection(db, "inventory"));
+                                    transaction.set(debtRef, {
+                                        name: `[Zaległy osprzęt] ${mAcc.name} (od: ${cartItem.name} ${cartItem.inventoryNumber ? 'nr ' + cartItem.inventoryNumber : ''})`,
+                                        type: "BULK",
+                                        subType: "MANUAL",
+                                        inventoryNumber: "OSPRZĘT",
+                                        category: "Zaległości osprzętu",
+                                        subcategory: cartItem.type === "UNIQUE" ? "Osprzęt narzędzi" : "Osprzęt rusztowań",
+                                        unit: "szt.",
+                                        availableQuantity: 0,
+                                        totalQuantity: mAcc.quantity || 1,
+                                        status: "sprawne",
+                                        allocations: { [paperReturnSiteId]: mAcc.quantity || 1 },
+                                        createdAt: new Date().toISOString()
+                                    });
+                                }
+                            }
+                        }
+
+                        // Generowanie wirtualnych dokumentów długu w bazie dla ręcznie dopisanych braków osprzętu
                         if (cartItem.manualDebts && cartItem.manualDebts.length > 0) {
                             for (const debt of cartItem.manualDebts) {
                                 const debtRef = doc(collection(db, "inventory"));
@@ -1045,6 +1104,10 @@ export default function ProtocolsHub() {
                             }
                         }
 
+                        const manualDebtsNote = cartItem.manualDebts && cartItem.manualDebts.length > 0
+                            ? ` | MANUALNE BRAKI OSPRZĘTU: ${cartItem.manualDebts.map(d => `${d.name} (${d.quantity} szt.)`).join(", ")}`
+                            : "";
+
                         finalProtocolItems.push({
                             inventoryId: cartItem.dbId,
                             name: cartItem.name,
@@ -1054,9 +1117,9 @@ export default function ProtocolsHub() {
                             declaredQty: cartItem.declaredQty,
                             receivedQty: cartItem.receivedQty,
                             finalStatus: cartItem.finalStatus,
-                            warehouseNotes: cartItem.notes,
-                            // Dopisujemy braki do akcesoriów protokołu dla celów historycznych
-                            accessories: cartItem.manualDebts ? cartItem.manualDebts.map(d => ({ name: d.name, quantity: d.quantity, mustReturn: true, isReturning: false })) : []
+                            warehouseNotes: cartItem.notes + missingAccessoriesNote + manualDebtsNote,
+                            // Łączymy zweryfikowany osprzęt systemowy z tym dodanym ręcznie jako braki
+                            accessories: finalizedAccessories.concat(cartItem.manualDebts ? cartItem.manualDebts.map(d => ({ name: d.name, quantity: d.quantity, mustReturn: true, isReturning: false, verifiedReturning: false })) : [])
                         });
                     }
                 }
@@ -2756,20 +2819,36 @@ export default function ProtocolsHub() {
                                                             <button onClick={() => setReturnCart(returnCart.filter(i => i.dbId !== cItem.dbId))} className="bg-red-100 text-red-600 hover:bg-red-500 hover:text-white transition w-8 h-8 rounded-lg font-bold">&times;</button>
                                                         </div>
                                                     </div>
-                                                    {cItem.accessories.length > 0 && (
-                                                        <div className="mt-3 pl-4 border-l-2 border-orange-300 bg-orange-50 p-3 rounded-r-lg">
-                                                            <p className="text-[10px] font-black text-orange-800 uppercase mb-2">⚠️ Pamiętaj o osprzęcie z wydania:</p>
-                                                            {cItem.accessories.map((acc, idx) => (
-                                                                <label key={idx} className="flex items-center gap-2 cursor-pointer mb-1">
-                                                                    <input type="checkbox" checked={acc.isReturning} onChange={(e) => {
-                                                                        const newCart = [...returnCart];
-                                                                        const targetItem = newCart.find(i => i.dbId === cItem.dbId);
-                                                                        if (targetItem) targetItem.accessories[idx].isReturning = e.target.checked;
-                                                                        setReturnCart(newCart);
-                                                                    }} className="w-4 h-4" />
-                                                                    <span className="text-sm">Zwracam: {acc.name} ({acc.quantity} szt.)</span>
-                                                                </label>
-                                                            ))}
+                                                    {cItem.accessories && cItem.accessories.length > 0 && (
+                                                        <div className="mt-4 pl-4 border-l-4 border-orange-400 bg-orange-50/80 p-3 rounded-r-xl">
+                                                            <p className="text-[10px] font-black text-orange-800 uppercase tracking-widest mb-3 flex items-center gap-1.5">
+                                                                <span>⚠️</span> Powiązany osprzęt (Zaznacz co zwracasz)
+                                                            </p>
+                                                            <div className="space-y-2">
+                                                                {cItem.accessories.map((acc, idx) => (
+                                                                    <label key={idx} className={`flex items-center gap-3 cursor-pointer p-2 rounded-lg transition-colors border ${acc.isReturning ? 'bg-orange-100 border-orange-300' : 'bg-white border-slate-200 hover:border-orange-300'}`}>
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={acc.isReturning || false}
+                                                                            onChange={(e) => {
+                                                                                // Aktualizacja zmuszająca React do przerysowania
+                                                                                setReturnCart(prevCart => prevCart.map(cartItem => {
+                                                                                    if (cartItem.dbId === cItem.dbId) {
+                                                                                        const newAccessories = [...cartItem.accessories];
+                                                                                        newAccessories[idx] = { ...newAccessories[idx], isReturning: e.target.checked };
+                                                                                        return { ...cartItem, accessories: newAccessories };
+                                                                                    }
+                                                                                    return cartItem;
+                                                                                }));
+                                                                            }}
+                                                                            className="w-5 h-5 text-orange-600 rounded border-slate-300 focus:ring-orange-500"
+                                                                        />
+                                                                        <span className={`text-sm font-semibold ${acc.isReturning ? 'text-orange-900' : 'text-slate-600'}`}>
+                                                                            {acc.name} <span className="font-normal opacity-70">({acc.quantity} szt.)</span>
+                                                                        </span>
+                                                                    </label>
+                                                                ))}
+                                                            </div>
                                                         </div>
                                                     )}
                                                 </div>
@@ -3019,6 +3098,35 @@ export default function ProtocolsHub() {
                                                     </div>
                                                     <button onClick={() => removePaperReturnItem(cItem.cartItemId)} className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-[10px] font-bold">&times; Usuń</button>
                                                 </div>
+
+                                                {/* WYŚWIETLANIE SPODZIEWANEGO OSPRZĘTU SYSTEMOWEGO W ZWROCIE PAPIEROWYM */}
+                                                {cItem.accessories && cItem.accessories.length > 0 && (
+                                                    <div className="my-2 pl-3 border-l-2 border-orange-400 bg-orange-50/50 p-2 rounded-r-lg space-y-1.5 text-xs">
+                                                        <p className="text-[10px] font-black text-orange-800 uppercase tracking-wider">⚠️ Powiązany osprzęt (Zaznacz co zwrócono):</p>
+                                                        {cItem.accessories.map((acc, idx) => (
+                                                            <label key={idx} className="flex items-center gap-2 cursor-pointer p-1 hover:bg-orange-100 rounded transition">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={acc.isReturning}
+                                                                    onChange={(e) => {
+                                                                        setPaperReturnCart(prevCart => prevCart.map(cartItem => {
+                                                                            if (cartItem.cartItemId === cItem.cartItemId) {
+                                                                                const newAcc = [...(cartItem.accessories || [])];
+                                                                                newAcc[idx] = { ...newAcc[idx], isReturning: e.target.checked };
+                                                                                return { ...cartItem, accessories: newAcc };
+                                                                            }
+                                                                            return cartItem;
+                                                                        }));
+                                                                    }}
+                                                                    className="w-4 h-4 text-orange-600 rounded border-slate-300 focus:ring-orange-500"
+                                                                />
+                                                                <span className={acc.isReturning ? "text-slate-800 font-semibold" : "text-slate-500 line-through"}>
+                                                                    {acc.name} ({acc.quantity || 1} szt.)
+                                                                </span>
+                                                            </label>
+                                                        ))}
+                                                    </div>
+                                                )}
 
                                                 {/* FORMULARZ INLINE DLA WPISYWANIA BRAKÓW */}
                                                 {paperDebtFormOpenFor === cItem.cartItemId && (
