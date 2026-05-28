@@ -36,6 +36,7 @@ interface ReturnCartItem {
     maxQty: number; returnQty: number; unit?: string;
     declaredStatus: string;
     accessories: ReturnAccessory[];
+    isReturningMainItem?: boolean;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -45,8 +46,10 @@ interface PaperReturnCartItem {
     declaredQty: number;
     receivedQty: number;
     finalStatus: string; notes: string;
-    manualDebts?: { id: string; name: string; quantity: number; }[]; // <-- DODANO TO POLE
-    accessories?: ReturnAccessory[]; // <-- NOWOŚĆ: Przechowywanie spodziewanego osprzętu
+    manualDebts?: { id: string; name: string; quantity: number; }[];
+    accessories?: ReturnAccessory[];
+    isReturningMainItem?: boolean;
+    isGhostItem?: boolean; // <-- Flaga dla wpisu tylko-tekstowego (bez dodawania do bazy)
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -713,7 +716,8 @@ export default function ProtocolsHub() {
 
         setReturnCart(prev => [...prev, {
             dbId: item.id, isManual: false, name: item.name, type: item.type, inventoryNumber: item.inventoryNumber,
-            maxQty: item.availableToReturn, returnQty: 1, unit: item.unit || "szt.", declaredStatus: "sprawne", accessories: expectedAccessories
+            maxQty: item.availableToReturn, returnQty: 1, unit: item.unit || "szt.", declaredStatus: "sprawne", accessories: expectedAccessories,
+            isReturningMainItem: true
         }]);
     };
 
@@ -729,6 +733,28 @@ export default function ProtocolsHub() {
 
     const handleReturnSubmit = async () => {
         if (!returnSiteId || returnCart.length === 0) return alert("Wybierz budowę i przedmioty do zwrotu!");
+
+        const finalReturnItems: any[] = [];
+        for (const i of returnCart) {
+            if (i.isReturningMainItem === false) {
+                const returnedAccs = (i.accessories || []).filter(a => a.isReturning);
+                if (returnedAccs.length === 0) return alert(`Zwracasz sam osprzęt od "${i.name}", ale nie zaznaczyłeś co wróciło!`);
+                for (const acc of returnedAccs) {
+                    finalReturnItems.push({
+                        inventoryId: `ghost-${Date.now()}-${Math.random()}`, isNewManual: false, isGhostItem: true,
+                        name: `${acc.name} (od: ${i.name} ${i.inventoryNumber ? 'nr ' + i.inventoryNumber : ''})`,
+                        type: "BULK", inventoryNumber: "ZWRÓCONY OSPRZĘT", unit: "szt.",
+                        declaredQty: acc.quantity || 1, declaredStatus: "sprawne", accessories: []
+                    });
+                }
+            } else {
+                finalReturnItems.push({
+                    inventoryId: i.dbId, isNewManual: i.isManual, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber, unit: i.unit || "szt.",
+                    declaredQty: i.returnQty, declaredStatus: i.type === "UNIQUE" ? i.declaredStatus : null, accessories: i.accessories
+                });
+            }
+        }
+
         setIsSubmitting(true);
         try {
             const siteName = sites.find(s => s.id === returnSiteId)?.name || "Nieznana budowa";
@@ -738,10 +764,7 @@ export default function ProtocolsHub() {
             await setDoc(protocolRef, {
                 protocolId, type: "ZWROT", documentSource: "APP_ELECTRONIC", sourceId: returnSiteId, sourceName: siteName, destinationId: "MAGAZYN",
                 createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "OCZEKUJACY", createdAt: new Date().toISOString(),
-                items: returnCart.map(i => ({
-                    inventoryId: i.dbId, isNewManual: i.isManual, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber, unit: i.unit || "szt.",
-                    declaredQty: i.returnQty, declaredStatus: i.type === "UNIQUE" ? i.declaredStatus : null, accessories: i.accessories
-                }))
+                items: finalReturnItems
             });
             alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
             closeModal();
@@ -822,9 +845,9 @@ export default function ProtocolsHub() {
             declaredQty: 1,
             receivedQty: 1,
             finalStatus: "sprawne", notes: "",
-            // Domyślnie zaznaczamy, że kierownik oddał osprzęt
             accessories: expectedAccessories.map((acc: any) => ({ ...acc, isReturning: true })),
-            manualDebts: []
+            manualDebts: [],
+            isReturningMainItem: true
         }]);
     };
 
@@ -870,14 +893,31 @@ export default function ProtocolsHub() {
     const handlePaperReturnSubmit = async () => {
         if (!paperReturnSiteId || paperReturnCart.length === 0) return alert("Wybierz budowę i dodaj przynajmniej jeden przedmiot!");
 
-        setIsSubmitting(true);
+        const processedCart: PaperReturnCartItem[] = [];
+        for (const item of paperReturnCart) {
+            if (item.isReturningMainItem === false) {
+                const returnedAccs = (item.accessories || []).filter(a => a.isReturning);
+                if (returnedAccs.length === 0) return alert(`Wybrałeś zwrot osprzętu od "${item.name}", ale nie zaznaczyłeś co wróciło!`);
+                for (const acc of returnedAccs) {
+                    processedCart.push({
+                        cartItemId: `ghost-${Date.now()}-${Math.random()}`, isManual: false, isGhostItem: true,
+                        name: `${acc.name} (od: ${item.name} ${item.inventoryNumber ? 'nr ' + item.inventoryNumber : ''})`,
+                        type: "BULK", inventoryNumber: "ZWRÓCONY OSPRZĘT", unit: "szt.",
+                        maxQty: 999999, declaredQty: acc.quantity || 1, receivedQty: acc.quantity || 1,
+                        finalStatus: item.finalStatus || "sprawne", notes: item.notes, accessories: [], manualDebts: []
+                    });
+                }
+            } else {
+                processedCart.push(item);
+            }
+        }
 
+        setIsSubmitting(true);
         const resolvedLastOpDates: Record<string, string> = {};
 
         try {
-            for (const cartItem of paperReturnCart) {
-                if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
-
+            for (const cartItem of processedCart) {
+                if (cartItem.isManual || cartItem.isGhostItem || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
                 const localItem = inventory.find(i => i.id === cartItem.dbId);
                 let lastOp: string = localItem?.lastOperationDate || "";
 
@@ -885,28 +925,17 @@ export default function ProtocolsHub() {
                     const historyRef = collection(db, `inventory/${cartItem.dbId}/history`);
                     const q = query(historyRef, orderBy("documentDate", "desc"), limit(1));
                     const snap = await getDocs(q);
-
-                    if (!snap.empty) {
-                        const lastDoc = snap.docs[0].data();
-                        lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || "";
-                    } else {
-                        lastOp = "";
-                    }
+                    if (!snap.empty) { const lastDoc = snap.docs[0].data(); lastOp = lastDoc.documentDate || lastDoc.date?.split('T')[0] || ""; }
                 }
                 resolvedLastOpDates[cartItem.dbId] = lastOp;
             }
-        } catch (err) {
-            console.error("Błąd badania chronologii dla zwrotu papierowego:", err);
-        }
+        } catch (err) { console.error("Błąd badania chronologii dla zwrotu papierowego:", err); }
 
-        // --- INTELIGENTNE OSTRZEŻENIE DLA ZWROTÓW PAPIEROWYCH (SOFT-WARNING) ---
         const conflictingItems: string[] = [];
-        for (const cartItem of paperReturnCart) {
-            if (cartItem.isManual || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
+        for (const cartItem of processedCart) {
+            if (cartItem.isManual || cartItem.isGhostItem || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
             const lastOp = resolvedLastOpDates[cartItem.dbId];
-            if (lastOp && paperDocDate < lastOp) {
-                conflictingItems.push(`- ${cartItem.name} (nr Mag: ${cartItem.inventoryNumber || 'brak'}): posiada już nowszy ruch z dnia ${lastOp}`);
-            }
+            if (lastOp && paperDocDate < lastOp) conflictingItems.push(`- ${cartItem.name} (nr Mag: ${cartItem.inventoryNumber || 'brak'}): posiada już nowszy ruch z dnia ${lastOp}`);
         }
 
         if (conflictingItems.length > 0) {
@@ -952,8 +981,8 @@ export default function ProtocolsHub() {
                 const protocolId = `PAP-ZWR-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
 
                 const itemDocs: Record<string, any> = {};
-                for (const item of paperReturnCart) {
-                    if (!item.isManual && item.dbId) {
+                for (const item of processedCart) {
+                    if (!item.isManual && !item.isGhostItem && item.dbId) {
                         const itemRef = doc(db, "inventory", item.dbId);
                         const itemDoc = await transaction.get(itemRef);
                         if (!itemDoc.exists()) throw `Przedmiot ${item.name} nie istnieje!`;
@@ -963,7 +992,17 @@ export default function ProtocolsHub() {
 
                 const finalProtocolItems = [];
 
-                for (const cartItem of paperReturnCart) {
+                for (const cartItem of processedCart) {
+                    if (cartItem.isGhostItem) {
+                        finalProtocolItems.push({
+                            inventoryId: cartItem.cartItemId, isGhostItem: true, name: cartItem.name,
+                            type: "BULK", inventoryNumber: "ZWRÓCONY OSPRZĘT", unit: cartItem.unit,
+                            declaredQty: cartItem.declaredQty, receivedQty: cartItem.receivedQty,
+                            finalStatus: cartItem.finalStatus, warehouseNotes: cartItem.notes, accessories: []
+                        });
+                        continue;
+                    }
+
                     if (cartItem.isManual) {
                         const newDocRef = doc(collection(db, "inventory"));
                         transaction.set(newDocRef, {
@@ -1350,7 +1389,7 @@ export default function ProtocolsHub() {
 
                 const itemDocs: Record<string, any> = {};
                 for (const item of selectedProtocol.items) {
-                    if (!item.inventoryId || item.isNewManual) continue;
+                    if (!item.inventoryId || item.isNewManual || item.isGhostItem) continue;
                     const itemRef = doc(db, "inventory", item.inventoryId);
                     const itemDoc = await transaction.get(itemRef);
                     itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
@@ -1360,6 +1399,14 @@ export default function ProtocolsHub() {
 
                 for (const item of selectedProtocol.items) {
                     const workerInput = acceptInputs[item.inventoryId];
+
+                    if (item.isGhostItem) {
+                        updatedItemsForProtocol.push({
+                            ...item, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus,
+                            warehouseNotes: workerInput.notes, accessories: []
+                        });
+                        continue;
+                    }
 
                     if (item.isNewManual) {
                         const newDocRef = doc(collection(db, "inventory"));
@@ -2796,12 +2843,25 @@ export default function ProtocolsHub() {
                                                 <div key={cItem.dbId} className={`p-4 border rounded-xl shadow-sm ${cItem.isManual ? 'bg-blue-50 border-blue-200' : 'bg-slate-50'}`}>
                                                     <div className="flex items-start justify-between gap-4 mb-2">
                                                         <div className="flex-1">
-                                                            <p className="font-bold text-sm text-slate-800">
+                                                            {cItem.type === "UNIQUE" && cItem.accessories && cItem.accessories.length > 0 && (
+                                                                <label className={`flex items-center gap-2 mb-3 p-2 rounded-lg cursor-pointer border transition ${cItem.isReturningMainItem !== false ? 'bg-blue-50 border-blue-200' : 'bg-slate-100 border-slate-300'}`}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={cItem.isReturningMainItem !== false}
+                                                                        onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, isReturningMainItem: e.target.checked } : i))}
+                                                                        className="w-5 h-5 text-blue-600 rounded border-slate-300"
+                                                                    />
+                                                                    <span className={`text-xs font-bold ${cItem.isReturningMainItem !== false ? 'text-blue-800' : 'text-slate-500'}`}>
+                                                                        {cItem.isReturningMainItem !== false ? "✅ Zwracam główne urządzenie" : "⚠️ Urządzenie zostaje (Zwracam sam osprzęt)"}
+                                                                    </span>
+                                                                </label>
+                                                            )}
+                                                            <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
                                                                 {cItem.name}
                                                                 {cItem.isManual && <span className="ml-2 text-[9px] bg-blue-200 text-blue-800 px-2 rounded uppercase border border-blue-300">Ręczny</span>}
                                                             </p>
-                                                            {!cItem.isManual && <p className="text-[10px] text-slate-500 font-mono mb-2">Nr Mag: {cItem.inventoryNumber || "-"}</p>}
-                                                            {cItem.type === "UNIQUE" && (
+                                                            {!cItem.isManual && <p className={`text-[10px] text-slate-500 font-mono mb-2 ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber || "-"}</p>}
+                                                            {cItem.type === "UNIQUE" && cItem.isReturningMainItem !== false && (
                                                                 <select value={cItem.declaredStatus} onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, declaredStatus: e.target.value } : i))} className="text-xs p-1 border rounded bg-white text-slate-700 outline-none">
                                                                     <option value="sprawne">✅ Sprawne</option>
                                                                     <option value="do przeglądu">⚠️ Do przeglądu</option>
@@ -3075,26 +3135,34 @@ export default function ProtocolsHub() {
                                                 <div className="flex justify-between items-start mb-2">
                                                     <div className="flex-1">
                                                         <div className="flex items-center gap-3 flex-wrap">
-                                                            <p className="font-bold text-sm text-slate-800">
+                                                            {cItem.type === "UNIQUE" && cItem.accessories && cItem.accessories.length > 0 && (
+                                                                <label className={`w-full flex items-center gap-2 mb-2 p-2 rounded-lg cursor-pointer border transition ${cItem.isReturningMainItem !== false ? 'bg-orange-50 border-orange-200' : 'bg-slate-100 border-slate-300'}`}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={cItem.isReturningMainItem !== false}
+                                                                        onChange={(e) => updatePaperReturnItem(cItem.cartItemId, 'isReturningMainItem', e.target.checked)}
+                                                                        className="w-5 h-5 text-orange-600 rounded border-slate-300"
+                                                                    />
+                                                                    <span className={`text-xs font-bold ${cItem.isReturningMainItem !== false ? 'text-orange-800' : 'text-slate-500'}`}>
+                                                                        {cItem.isReturningMainItem !== false ? "✅ Zwracam główne urządzenie" : "⚠️ Urządzenie zostaje na budowie (Zwracam sam osprzęt)"}
+                                                                    </span>
+                                                                </label>
+                                                            )}
+                                                            <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
                                                                 {cItem.name}
                                                                 {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
                                                             </p>
-                                                            {/* PRZYCISK ZGŁASZANIA BRAKÓW OSPRZĘTU (W MIEJSCU CZERWONEGO PROSTOKĄTA) */}
-                                                            {!cItem.isManual && (
+                                                            {!cItem.isManual && cItem.isReturningMainItem !== false && (
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => {
-                                                                        setPaperDebtFormOpenFor(cItem.cartItemId);
-                                                                        setPaperDebtName("");
-                                                                        setPaperDebtQty(1);
-                                                                    }}
+                                                                    onClick={() => { setPaperDebtFormOpenFor(cItem.cartItemId); setPaperDebtName(""); setPaperDebtQty(1); }}
                                                                     className="bg-orange-100 hover:bg-orange-200 text-orange-800 border border-orange-200 px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition whitespace-nowrap ml-2 flex items-center gap-1"
                                                                 >
                                                                     ⚠️ Zgłoś brak osprzętu
                                                                 </button>
                                                             )}
                                                         </div>
-                                                        {!cItem.isManual && <p className="text-[10px] font-mono text-slate-500 mt-1">Nr Mag: {cItem.inventoryNumber || "-"} | Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
+                                                        {!cItem.isManual && <p className={`text-[10px] font-mono text-slate-500 mt-1 ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber || "-"} | Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
                                                     </div>
                                                     <button onClick={() => removePaperReturnItem(cItem.cartItemId)} className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-[10px] font-bold">&times; Usuń</button>
                                                 </div>
@@ -3205,7 +3273,9 @@ export default function ProtocolsHub() {
                                                     </div>
                                                 )}
                                                 <div className="flex flex-wrap gap-2 items-center bg-slate-50 p-2 rounded border border-slate-100">
-                                                    {cItem.type === "BULK" || cItem.isManual ? (
+                                                    {cItem.isReturningMainItem === false ? (
+                                                        <span className="text-[11px] font-bold text-slate-400 px-2 uppercase border-r border-slate-200 mr-2">↳ Parametry urządzenia zablokowane</span>
+                                                    ) : cItem.type === "BULK" || cItem.isManual ? (
                                                         <div className="flex items-center gap-3">
                                                             <div className="flex items-center gap-1.5 bg-white px-2 py-1 rounded border border-slate-200">
                                                                 <label className="text-[10px] text-slate-500 font-bold uppercase">Kwity:</label>
@@ -3332,7 +3402,8 @@ export default function ProtocolsHub() {
                                                                         <p className="font-bold text-slate-800 pr-4">
                                                                             {item.name}
                                                                             {item.isNewManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
-                                                                            {item.declaredQty === 0 && !item.isNewManual && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
+                                                                            {item.isGhostItem && <span className="ml-2 text-[9px] bg-slate-200 text-slate-700 px-2 rounded uppercase border border-slate-300">Tylko Osprzęt</span>}
+                                                                            {item.declaredQty === 0 && !item.isNewManual && !item.isGhostItem && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
                                                                         </p>
                                                                         {/* PRZYCISK ZGŁASZANIA NOWYCH BRAKÓW DLA AKCEPTACJI ZWROTÓW */}
                                                                         {!item.isNewManual && (
