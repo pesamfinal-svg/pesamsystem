@@ -37,6 +37,10 @@ interface ReturnCartItem {
     declaredStatus: string;
     accessories: ReturnAccessory[];
     isReturningMainItem?: boolean;
+    isGhostItem?: boolean;
+    parentInventoryId?: string;
+    returnedAccessoryName?: string;
+    returnedAccessoryQty?: number;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -50,6 +54,9 @@ interface PaperReturnCartItem {
     accessories?: ReturnAccessory[];
     isReturningMainItem?: boolean;
     isGhostItem?: boolean; // <-- Flaga dla wpisu tylko-tekstowego (bez dodawania do bazy)
+    parentInventoryId?: string;
+    returnedAccessoryName?: string;
+    returnedAccessoryQty?: number;
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -730,6 +737,43 @@ export default function ProtocolsHub() {
         }]);
         setIsReturnManualModalOpen(false);
     };
+    // --- NOWOŚĆ: Funkcja zdejmująca zwrócony osprzęt z panelu kierownika ---
+    const clearReturnedAccessoriesFromIssue = async (siteId: string, ghostItems: any[]) => {
+        try {
+            for (const ghost of ghostItems) {
+                if (!ghost.parentInventoryId || !ghost.returnedAccessoryName) continue;
+
+                // Znajdź ostatnie WYDANIE tego urządzenia na tę budowę
+                const q = query(collection(db, "protocols"), where("destinationId", "==", siteId), where("type", "==", "WYDANIE"));
+                const snap = await getDocs(q);
+                const sortedDocs = snap.docs.map(d => ({ docId: d.id, ...d.data() })).sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+                // Znajdź dokument wydania zawierający to urządzenie
+                const targetProtocol: any = sortedDocs.find((p: any) => p.items.some((i: any) => i.inventoryId === ghost.parentInventoryId));
+
+                if (targetProtocol) {
+                    const updatedItems = targetProtocol.items.map((i: any) => {
+                        if (i.inventoryId === ghost.parentInventoryId && i.accessories) {
+                            const newAccessories = i.accessories.map((acc: any) => {
+                                if (acc.name === ghost.returnedAccessoryName) {
+                                    const remaining = Math.max(0, acc.quantity - ghost.returnedAccessoryQty);
+                                    return { ...acc, quantity: remaining, mustReturn: remaining > 0 };
+                                }
+                                return acc;
+                            }).filter((acc: any) => acc.quantity > 0); // Usuń całkowicie jeśli oddano wszystkie
+                            return { ...i, accessories: newAccessories };
+                        }
+                        return i;
+                    });
+
+                    // Aktualizuj protokół wydania (Wykreśla osprzęt z listy kierownika)
+                    await setDoc(doc(db, "protocols", targetProtocol.docId), { items: updatedItems }, { merge: true });
+                }
+            }
+        } catch (error) {
+            console.error("Błąd podczas czyszczenia osprzętu z Wydania:", error);
+        }
+    };
 
     const handleReturnSubmit = async () => {
         if (!returnSiteId || returnCart.length === 0) return alert("Wybierz budowę i przedmioty do zwrotu!");
@@ -742,6 +786,7 @@ export default function ProtocolsHub() {
                 for (const acc of returnedAccs) {
                     finalReturnItems.push({
                         inventoryId: `ghost-${Date.now()}-${Math.random()}`, isNewManual: false, isGhostItem: true,
+                        parentInventoryId: i.dbId, returnedAccessoryName: acc.name, returnedAccessoryQty: acc.quantity || 1, // ZNACZNIKI DLA SPRZĄTACZA
                         name: `${acc.name} (od: ${i.name} ${i.inventoryNumber ? 'nr ' + i.inventoryNumber : ''})`,
                         type: "BULK", inventoryNumber: "ZWRÓCONY OSPRZĘT", unit: "szt.",
                         declaredQty: acc.quantity || 1, declaredStatus: "sprawne", accessories: []
@@ -901,6 +946,7 @@ export default function ProtocolsHub() {
                 for (const acc of returnedAccs) {
                     processedCart.push({
                         cartItemId: `ghost-${Date.now()}-${Math.random()}`, isManual: false, isGhostItem: true,
+                        parentInventoryId: item.dbId, returnedAccessoryName: acc.name, returnedAccessoryQty: acc.quantity || 1, // ZNACZNIKI DLA SPRZĄTACZA
                         name: `${acc.name} (od: ${item.name} ${item.inventoryNumber ? 'nr ' + item.inventoryNumber : ''})`,
                         type: "BULK", inventoryNumber: "ZWRÓCONY OSPRZĘT", unit: "szt.",
                         maxQty: 999999, declaredQty: acc.quantity || 1, receivedQty: acc.quantity || 1,
@@ -1185,6 +1231,12 @@ export default function ProtocolsHub() {
                     ...(photoURLs.length > 0 && { photos: photoURLs })
                 });
             });
+
+            // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił osprzęt z listy Kierownika
+            const ghostItems = processedCart.filter(i => i.isGhostItem);
+            if (ghostItems.length > 0) {
+                await clearReturnedAccessoriesFromIssue(paperReturnSiteId, ghostItems);
+            }
 
             alert("Papierowy protokół zwrotu został wprowadzony i zaakceptowany!");
             closeModal();
@@ -1559,6 +1611,12 @@ export default function ProtocolsHub() {
                     ...(photoURLs.length > 0 && { photos: photoURLs })
                 });
             });
+
+            // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił zaakceptowany osprzęt z listy Kierownika
+            const ghostItems = selectedProtocol.items.filter((i: any) => i.isGhostItem);
+            if (ghostItems.length > 0) {
+                await clearReturnedAccessoriesFromIssue(selectedProtocol.sourceId, ghostItems);
+            }
 
             alert("Zwrot został pomyślnie przyjęty!");
             setSelectedProtocol(null);
