@@ -38,6 +38,7 @@ interface InventoryItem {
     allocations: Record<string, number>;
     createdAt: string;
     lastOperationDate?: string;
+    isUsingTemplateImage?: boolean; // Pole określające czy kopiujemy grafikę z bazy
 }
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
@@ -55,7 +56,8 @@ const INITIAL_FORM_STATE: Partial<InventoryItem> = {
     purchaseDate: "",
     invoiceNumber: "",
     imageUrl: "",
-    additionalInfo: ""
+    additionalInfo: "",
+    isUsingTemplateImage: true
 };
 
 export default function InventoryPage() {
@@ -119,6 +121,94 @@ export default function InventoryPage() {
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
     const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
 
+    // Stany dla asystenta wklejania linków z sieci (bez API)
+    const [showGallerySelector, setShowGallerySelector] = useState(false);
+    const [pastedUrl, setPastedUrl] = useState("");
+    const [isFetchingUrl, setIsFetchingUrl] = useState(false);
+    const [searchActiveTab, setSearchActiveTab] = useState<"INTERNAL" | "WEB">("INTERNAL");
+
+    // Funkcja dekodująca Base64 bezpośrednio w przeglądarce (bez wysyłania na serwer)
+    const convertBase64ToBlob = (base64Data: string): Blob => {
+        const parts = base64Data.split(";base64,");
+        const contentType = parts[0].split(":")[1];
+        const raw = window.atob(parts[1]);
+        const rawLength = raw.length;
+        const uInt8Array = new Uint8Array(rawLength);
+
+        for (let i = 0; i < rawLength; ++i) {
+            uInt8Array[i] = raw.charCodeAt(i);
+        }
+
+        return new Blob([uInt8Array], { type: contentType });
+    };
+
+    // Pobiera zdjęcie z sieci, automatycznie obsługując Base64 lokalnie lub przez backend (omijamy 100% blokad CORS i błędu 431)
+    const handleFetchImageUrl = async (e: React.FormEvent) => {
+        e.preventDefault();
+        const urlToFetch = pastedUrl.trim();
+        if (!urlToFetch) return;
+        setIsFetchingUrl(true);
+        try {
+            // Bezpieczne przechwycenie Base64 - dekodujemy całkowicie OFFLINE
+            if (urlToFetch.startsWith("data:image")) {
+                const blob = convertBase64ToBlob(urlToFetch);
+                const file = new File([blob], `pasted_base64_${Date.now()}.jpg`, { type: blob.type || "image/jpeg" });
+
+                setImageFile(file);
+                setFormData({ ...formData, imageUrl: "", isUsingTemplateImage: false });
+                setPastedUrl("");
+                setShowGallerySelector(false);
+                alert("✅ Obraz Base64 został przetworzony lokalnie i przygotowany do zapisu!");
+                setIsFetchingUrl(false);
+                return;
+            }
+
+            // Tradycyjny link HTTP/HTTPS - przesyłamy przez nasz backend
+            const localApiUrl = `/api/fetch-image?url=${encodeURIComponent(urlToFetch)}`;
+            const response = await fetch(localApiUrl);
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error || "Wewnętrzny błąd serwera pobierania.");
+            }
+
+            const blob = await response.blob();
+            const file = new File([blob], `web_downloaded_${Date.now()}.jpg`, { type: blob.type || "image/jpeg" });
+
+            setImageFile(file);
+            setFormData({ ...formData, imageUrl: "", isUsingTemplateImage: false });
+            setPastedUrl("");
+            setShowGallerySelector(false);
+            alert("✅ Zdjęcie zostało pobrane i przygotowane do zapisu w Storage!");
+        } catch (error: any) {
+            console.error("Błąd pobierania zdjęcia:", error);
+            alert(`⚠️ Nie udało się pobrać zdjęcia: ${error.message || "Błąd sieci"}.\n\nSpróbuj kliknąć na obrazek w Google, aby otworzył się w większym podglądzie i skopiuj jego adres bezpośrednio, lub spróbuj innego zdjęcia.`);
+        } finally {
+            setIsFetchingUrl(false);
+        }
+    };
+
+    // Funkcja pobierająca wyłącznie sprawne, zapisane w Storage zdjęcia pasujące do nazwy/kategorii
+    const getGallerySuggestions = (): string[] => {
+        if (!formData.name && !formData.subcategory && !formData.category) return [];
+
+        const filtered = items.filter(item => {
+            if (!item.imageUrl) return false;
+
+            // FILTR: Pokazuj tylko zdjęcia, które zostały poprawnie zapisane w Twoim Firebase Storage.
+            // To automatycznie i natychmiast ukryje wszystkie stare, uszkodzone linki z Google!
+            if (!item.imageUrl.includes("firebasestorage")) return false;
+
+            const sameName = formData.name && item.name.toLowerCase().trim() === formData.name.toLowerCase().trim();
+            const sameSub = formData.subcategory && item.subcategory?.toLowerCase().trim() === formData.subcategory.toLowerCase().trim();
+            const sameCat = formData.category && item.category?.toLowerCase().trim() === formData.category.toLowerCase().trim();
+            return sameName || sameSub || sameCat;
+        });
+
+        // Zwracamy wyłącznie unikalne, sprawne adresy URL zdjęć
+        return Array.from(new Set(filtered.map(item => item.imageUrl)));
+    };
+
     const fetchItems = async () => {
         setLoading(true);
         const q = query(collection(db, "inventory"), orderBy("name", "asc"));
@@ -153,7 +243,13 @@ export default function InventoryPage() {
         setIsUploading(true);
         try {
             let finalImageUrl = formData.imageUrl || "";
-            if (imageFile) finalImageUrl = await uploadImage(imageFile);
+            let finalIsUsingTemplate = formData.isUsingTemplateImage ?? true;
+
+            // Jeśli wybrano nowy plik, przerywamy korzystanie z szablonu zdjęć
+            if (imageFile) {
+                finalImageUrl = await uploadImage(imageFile);
+                finalIsUsingTemplate = false;
+            }
 
             let finalInvNumber = formData.inventoryNumber || "";
             let generatedDocId = "";
@@ -191,6 +287,7 @@ export default function InventoryPage() {
                     category: finalCategory,
                     subcategory: finalSubcategory,
                     imageUrl: finalImageUrl,
+                    isUsingTemplateImage: finalIsUsingTemplate,
                     totalQuantity: qty,
                     availableQuantity,
                     allocations,
@@ -203,6 +300,7 @@ export default function InventoryPage() {
                     category: finalCategory,
                     subcategory: finalSubcategory,
                     imageUrl: finalImageUrl,
+                    isUsingTemplateImage: finalIsUsingTemplate,
                     totalQuantity: qty,
                     availableQuantity: qty,
                     allocations: {},
@@ -219,6 +317,7 @@ export default function InventoryPage() {
             setIsFormOpen(false);
             setEditingItem(null);
             setImageFile(null);
+            setShowGallerySelector(false);
             setFormData(INITIAL_FORM_STATE);
             fetchItems();
         } catch (error: any) {
@@ -843,7 +942,143 @@ export default function InventoryPage() {
                                 </div>
                             )}
 
-                            <div className="md:col-span-2"><label className="text-[10px] font-bold text-slate-400 uppercase">Wgraj zdjęcie (Plik)</label><input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files ? e.target.files[0] : null)} className="w-full p-2 border rounded-xl bg-slate-50 text-xs" /></div>
+                            {/* ROZBUDOWANY ASYSTENT ZDJĘĆ: PROPOZYCJE Z BAZY ORAZ FUNKCJA "KOPIUJ-WKLEJ Z GOOGLE" */}
+                            <div className="md:col-span-2 border-2 border-dashed border-slate-200 rounded-2xl p-4 bg-slate-50 space-y-4">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider">🖼️ Zdjęcie urządzenia</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowGallerySelector(!showGallerySelector)}
+                                        className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1"
+                                    >
+                                        🔎 Asystent zdjęć (Baza / Link z sieci)
+                                    </button>
+                                </div>
+
+                                {/* Aktywne wybrane zdjęcie */}
+                                <div className="flex items-center gap-4 bg-white p-3 rounded-xl border">
+                                    <div className="w-16 h-16 bg-slate-100 rounded-lg overflow-hidden border flex-shrink-0 flex items-center justify-center relative">
+                                        {imageFile ? (
+                                            <span className="text-[10px] text-center font-black text-green-600 p-1">Pobrany plik</span>
+                                        ) : formData.imageUrl ? (
+                                            <img src={formData.imageUrl} className="w-full h-full object-cover" alt="Podgląd" />
+                                        ) : (
+                                            <span className="text-lg text-slate-300">📷</span>
+                                        )}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-xs font-bold text-slate-800 truncate">
+                                            {imageFile ? `Przygotowano do zapisu: ${imageFile.name.substring(0, 20)}...` : (formData.imageUrl ? "Przypisane zdjęcie" : "Brak przypisanego zdjęcia")}
+                                        </p>
+                                        <p className="text-[10px] text-slate-400">
+                                            {formData.isUsingTemplateImage && !imageFile ? "✓ Powiązane z szablonem" : "⚠️ Unikalne zdjęcie dla tej sztuki (zostanie zapisane w Storage)"}
+                                        </p>
+                                    </div>
+                                    {(formData.imageUrl || imageFile) && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setImageFile(null);
+                                                setFormData({ ...formData, imageUrl: "", isUsingTemplateImage: true });
+                                            }}
+                                            className="text-xs font-bold text-red-500 hover:bg-red-50 px-2.5 py-1.5 rounded-lg border border-red-100 transition"
+                                        >
+                                            Wyczyść
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* OKNO ASYSTENTA (GALERIA Z BAZY + KOPIUJ/WKLEJ LINK) */}
+                                {showGallerySelector && (
+                                    <div className="bg-white p-4 rounded-xl border border-blue-100 space-y-4">
+                                        {/* Zakładki */}
+                                        <div className="flex bg-slate-100 p-1 rounded-lg text-xs font-bold">
+                                            <button
+                                                type="button"
+                                                onClick={() => setSearchActiveTab("INTERNAL")}
+                                                className={`flex-1 py-1.5 rounded-md transition ${searchActiveTab === "INTERNAL" ? "bg-white text-blue-600 shadow" : "text-slate-500"}`}
+                                            >
+                                                📂 Zdjęcia z Twojej Bazy ({getGallerySuggestions().length})
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setSearchActiveTab("WEB")}
+                                                className={`flex-1 py-1.5 rounded-md transition ${searchActiveTab === "WEB" ? "bg-white text-blue-600 shadow" : "text-slate-500"}`}
+                                            >
+                                                🔗 Wklej link z internetu
+                                            </button>
+                                        </div>
+
+                                        {/* Widok 1: Galeria wewnętrzna */}
+                                        {searchActiveTab === "INTERNAL" && (
+                                            <div className="space-y-2">
+                                                {getGallerySuggestions().length === 0 ? (
+                                                    <p className="text-xs text-slate-400 text-center py-4 italic">Brak podobnych maszyn z grafiką w Twojej bazie. Wpisz nazwę sprzętu lub przełącz na zakładkę "Wklej link".</p>
+                                                ) : (
+                                                    <div className="grid grid-cols-4 gap-2 max-h-36 overflow-y-auto p-1">
+                                                        {getGallerySuggestions().map((url, idx) => (
+                                                            <button
+                                                                key={idx}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setImageFile(null);
+                                                                    setFormData({ ...formData, imageUrl: url, isUsingTemplateImage: true });
+                                                                    setShowGallerySelector(false);
+                                                                }}
+                                                                className={`h-14 rounded-lg overflow-hidden border-2 transition hover:scale-105 ${formData.imageUrl === url && !imageFile ? "border-blue-600" : "border-slate-200"}`}
+                                                            >
+                                                                <img src={url} className="w-full h-full object-cover" alt="" />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Widok 2: Kopiuj-wklej link z sieci */}
+                                        {searchActiveTab === "WEB" && (
+                                            <div className="space-y-3">
+                                                <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-[10px] text-blue-800 leading-normal">
+                                                    💡 <b>Instrukcja:</b> Wyszukaj urządzenie w Google Grafika ➡️ Kliknij na nie prawym przyciskiem myszy ➡️ Wybierz <b>"Kopiuj adres obrazu"</b> ➡️ Wklej go w poniższe pole.
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Wklej skopiowany adres obrazu (link)..."
+                                                        value={pastedUrl}
+                                                        onChange={e => setPastedUrl(e.target.value)}
+                                                        className="flex-1 p-2 border rounded-lg text-xs outline-none focus:border-blue-500"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleFetchImageUrl}
+                                                        disabled={isFetchingUrl || !pastedUrl.trim()}
+                                                        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded-lg text-xs transition whitespace-nowrap"
+                                                    >
+                                                        {isFetchingUrl ? "Pobieranie..." : "Zastosuj"}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Tradycyjny uploader pliku */}
+                                <div>
+                                    <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Lub wgraj plik z dysku urządzenia:</label>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        onChange={(e) => {
+                                            if (e.target.files && e.target.files[0]) {
+                                                setImageFile(e.target.files[0]);
+                                                setFormData({ ...formData, isUsingTemplateImage: false });
+                                            }
+                                        }}
+                                        className="w-full p-2 border rounded-xl bg-white text-xs text-slate-500"
+                                    />
+                                </div>
+                            </div>
 
                             <div className="md:col-span-2">
                                 <label className="text-[10px] font-bold text-slate-400 uppercase">
@@ -1054,7 +1289,7 @@ export default function InventoryPage() {
             {/* MODAL: NADAWANIE NUMERU MAGAZYNOWEGO */}
             {isAssignNumberOpen && selectedItem && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-t-4 border-yellow-500">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-sm p-6 animate-fade-in border-t-4 border-yellow-500">
                         <div className="flex justify-between items-center mb-6">
                             <h2 className="text-lg font-black text-slate-800">🏷️ Nadaj numer magazynowy</h2>
                             <button onClick={() => setIsAssignNumberOpen(false)} className="text-2xl text-slate-400 hover:text-slate-800">&times;</button>
