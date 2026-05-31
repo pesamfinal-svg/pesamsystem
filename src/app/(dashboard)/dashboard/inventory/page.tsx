@@ -1,4 +1,3 @@
-// src/app/(dashboard)/inventory/page.tsx
 "use client";
 
 import React, { useState, useEffect, Fragment } from "react";
@@ -21,7 +20,7 @@ interface InventoryItem {
     id: string;
     name: string;
     type: "UNIQUE" | "BULK";
-    subType?: "MAIN_CAT" | "SUB_ITEM";
+    subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL";
     mainCategoryId?: string;
     inventoryNumber: string;
     category: string;
@@ -64,7 +63,7 @@ export default function InventoryPage() {
     const { user } = useAuth();
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(true);
-    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE"); // Trzy aktywne zakładki
 
     // FILTRY
     const [searchTerm, setSearchTerm] = useState("");
@@ -188,15 +187,14 @@ export default function InventoryPage() {
         }
     };
 
-    // Funkcja pobierająca wyłącznie sprawne, zapisane w Storage zdjęcia pasujące do nazwy/kategorii
+    // Funkcja pobierająca wyłącznie sprawne, zdjęcia pasujące do nazwy/kategorii
     const getGallerySuggestions = (): string[] => {
         if (!formData.name && !formData.subcategory && !formData.category) return [];
 
         const filtered = items.filter(item => {
             if (!item.imageUrl) return false;
 
-            // FILTR: Pokazuj tylko zdjęcia, które zostały poprawnie zapisane w Twoim Firebase Storage.
-            // To automatycznie i natychmiast ukryje wszystkie stare, uszkodzone linki z Google!
+            // FILTR: Pokazuj tylko zdjęcia z Firebase Storage.
             if (!item.imageUrl.includes("firebasestorage")) return false;
 
             const sameName = formData.name && item.name.toLowerCase().trim() === formData.name.toLowerCase().trim();
@@ -205,7 +203,6 @@ export default function InventoryPage() {
             return sameName || sameSub || sameCat;
         });
 
-        // Zwracamy wyłącznie unikalne, sprawne adresy URL zdjęć
         return Array.from(new Set(filtered.map(item => item.imageUrl)));
     };
 
@@ -225,7 +222,7 @@ export default function InventoryPage() {
         return await getDownloadURL(snapshot.ref);
     };
 
-    const generateBulkId = (name: string, type: "MAIN_CAT" | "SUB_ITEM", parentId: string) => {
+    const generateBulkId = (name: string, type: "MAIN_CAT" | "SUB_ITEM" | "MANUAL", parentId: string) => {
         if (type === "MAIN_CAT") {
             const prefix = name.split(" ").map(w => w.substring(0, 2)).join("").toLowerCase().substring(0, 4);
             const count = items.filter(i => i.subType === "MAIN_CAT" && i.inventoryNumber.startsWith(prefix)).length;
@@ -255,7 +252,7 @@ export default function InventoryPage() {
             let generatedDocId = "";
 
             if (formData.type === "BULK" && !finalInvNumber) {
-                finalInvNumber = generateBulkId(formData.name || "", formData.subType as "MAIN_CAT" | "SUB_ITEM", formData.mainCategoryId || "");
+                finalInvNumber = generateBulkId(formData.name || "", formData.subType as "MAIN_CAT" | "SUB_ITEM" | "MANUAL", formData.mainCategoryId || "");
                 generatedDocId = finalInvNumber;
             }
 
@@ -275,6 +272,13 @@ export default function InventoryPage() {
                 const parent = items.find(i => i.id === formData.mainCategoryId);
                 finalCategory = parent?.name || "Rusztowania i inne";
                 finalSubcategory = formData.name;
+            }
+
+            // Jeśli tworzymy luźny materiał (MANUAL), to nie ma on systemu nadrzędnego
+            if (formData.type === "BULK" && formData.subType === "MANUAL") {
+                finalCategory = "Materiały i osprzęt";
+                finalSubcategory = formData.category || "Drobnica";
+                finalInvNumber = finalInvNumber || "RĘCZNY";
             }
 
             const qty = formData.type === "UNIQUE" ? 1 : (formData.subType === "MAIN_CAT" ? 0 : Number(formData.totalQuantity));
@@ -420,7 +424,7 @@ export default function InventoryPage() {
                     } else {
                         newAvailable -= qtyNum;
                         newTotal -= qtyNum;
-                        if (newAvailable < 0) {
+                        if (newAvailable < 0 && data.subType !== "MANUAL") {
                             throw `⚠️ Błąd: Nie możesz odjąć ${qtyNum} szt., ponieważ na magazynie dostępnych jest obecnie tylko ${data.availableQuantity} szt.!`;
                         }
                         if (newTotal < 0) newTotal = 0;
@@ -616,7 +620,18 @@ export default function InventoryPage() {
     };
 
     const filteredItems = items.filter(item => {
-        if (item.type !== activeTab) return false;
+        // Filtrowanie pod kątem 3 oddzielnych zakładek:
+        if (activeTab === "UNIQUE") {
+            if (item.type !== "UNIQUE") return false;
+        } else if (activeTab === "BULK") {
+            // Zakładka Rusztowania: Tylko BULK, które nie są manualnymi ubytkami ani zaległym osprzętem
+            if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu") return false;
+        } else if (activeTab === "OTHER") {
+            // Zakładka Drobnica: Wszystkie BULK będące wpisami ręcznymi lub zaległym osprzętem
+            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT";
+            if (item.type !== "BULK" || !isLoose) return false;
+        }
+
         const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || item.inventoryNumber.toLowerCase().includes(searchTerm.toLowerCase());
         const matchesLoc = locFilter === "ALL" || item.currentLocation === locFilter;
         const matchesStatus = statusFilter === "ALL" || item.status === statusFilter;
@@ -648,78 +663,132 @@ export default function InventoryPage() {
         return 0;
     });
 
-    const uniqueLocations = Array.from(new Set(items.filter(i => i.type === activeTab).map(i => i.currentLocation))).sort();
+    const uniqueLocations = Array.from(new Set(items.filter(i => activeTab === "UNIQUE" ? i.type === "UNIQUE" : i.type === "BULK").map(i => i.currentLocation))).sort();
     const mainSystems = items.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
 
     // Dynamiczne pobieranie unikalnych słowników kategorii i podkategorii do comboboxów
     const existingCategories = Array.from(new Set(items.map(i => i.category).filter(Boolean))).sort();
     const existingSubcategories = Array.from(new Set(items.map(i => i.subcategory).filter(Boolean))).sort();
 
+    // 1. Renderowanie rusztowań (Systemów i elementów systemowych)
     const renderBulkGroups = () => {
         const mainCats = sortedFilteredItems.filter(i => i.subType === "MAIN_CAT");
-        const subs = sortedFilteredItems.filter(i => i.subType === "SUB_ITEM");
+        const subs = items.filter(i => i.subType === "SUB_ITEM");
 
-        return mainCats.map(main => (
-            <div key={main.id} className="mb-6 border rounded-2xl overflow-hidden shadow-sm bg-white animate-fade-in">
-                <div className="bg-slate-800 text-white p-4 flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                        <img src={main.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-lg border border-slate-600" alt="kat" />
-                        <div>
-                            <h2 className="text-lg font-black uppercase tracking-tight">{main.name}</h2>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">System / Kod: {main.inventoryNumber}</p>
+        return (
+            <div className="space-y-6 animate-fade-in">
+                {mainCats.map(main => (
+                    <div key={main.id} className="border rounded-2xl overflow-hidden shadow-sm bg-white border-slate-200">
+                        <div className="bg-slate-800 text-white p-4 flex items-center justify-between">
+                            <div className="flex items-center gap-4">
+                                <img src={main.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-lg border border-slate-600" alt="kat" />
+                                <div>
+                                    <h2 className="text-lg font-black uppercase tracking-tight">{main.name}</h2>
+                                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">System / Kod: {main.inventoryNumber}</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={() => { setEditingItem(main); setFormData({ ...main }); setIsFormOpen(true); }} className="text-xs bg-slate-700 text-white px-3 py-1 rounded hover:bg-slate-600 transition font-bold">Edytuj System</button>
+                                <button onClick={() => handleDelete(main)} className="text-xs bg-red-900 text-red-100 px-3 py-1 rounded hover:bg-red-800 transition font-bold">Usuń System</button>
+                            </div>
                         </div>
+                        <table className="w-full text-left">
+                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
+                                <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Element / Podkategoria</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
+                            </thead>
+                            <tbody className="text-sm">
+                                {subs.filter(s => s.mainCategoryId === main.id).map(sub => (
+                                    <tr key={sub.id} className="border-b last:border-0 hover:bg-slate-50 transition">
+                                        <td className="p-3"><img src={sub.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                        <td className="p-4 cursor-pointer" onClick={() => openItemCard(sub)}>
+                                            <p className="font-bold text-slate-700">{sub.name}</p>
+                                            <p className="text-[10px] text-slate-400">{sub.category} / {sub.subcategory}</p>
+                                        </td>
+                                        <td className="p-4 text-center font-mono text-xs text-blue-600 font-bold">{sub.inventoryNumber}</td>
+                                        <td className="p-4 text-center font-black">{sub.availableQuantity} / {sub.totalQuantity}</td>
+                                        <td className="p-4 text-right space-x-3 whitespace-nowrap">
+                                            <button
+                                                onClick={() => { setAdjustItem(sub); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
+                                                className="text-orange-600 hover:underline font-bold text-xs"
+                                            >
+                                                ⚙️ Korekta Stanu
+                                            </button>
+                                            <span className="text-slate-300">|</span>
+                                            <button onClick={() => { setEditingItem(sub); setFormData({ ...sub }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                            <span className="text-slate-300">|</span>
+                                            <button onClick={() => handleDelete(sub)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
                     </div>
-                    <div className="flex gap-2">
-                        <button onClick={() => { setEditingItem(main); setFormData({ ...main }); setIsFormOpen(true); }} className="text-xs bg-slate-700 text-white px-3 py-1 rounded hover:bg-slate-600 transition font-bold">Edytuj System</button>
-                        <button onClick={() => handleDelete(main)} className="text-xs bg-red-900 text-red-100 px-3 py-1 rounded hover:bg-red-800 transition font-bold">Usuń System</button>
+                ))}
+            </div>
+        );
+    };
+
+    // 2. NOWOŚĆ: Renderowanie Drobnicy / Osprzętu w dedykowanej tabeli (Trzecia zakładka)
+    const renderOtherItemsGroup = () => {
+        return (
+            <div className="border rounded-2xl overflow-hidden shadow-sm bg-white border-orange-200 animate-fade-in">
+                <div className="bg-orange-600 text-white p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                        <span className="text-2xl">📦</span>
+                        <div>
+                            <h2 className="text-lg font-black uppercase tracking-tight">Drobnica, Osprzęt i Materiały</h2>
+                            <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">Wpisy ręczne z palca, zaległy osprzęt oraz materiały pomocnicze</p>
+                        </div>
                     </div>
                 </div>
                 <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
-                        <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Element / Podkategoria</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
+                        <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Nazwa materiału</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
                     </thead>
                     <tbody className="text-sm">
-                        {subs.filter(s => s.mainCategoryId === main.id).map(sub => (
-                            <tr key={sub.id} className="border-b last:border-0 hover:bg-slate-50 transition">
-                                <td className="p-3"><img src={sub.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
-                                <td className="p-4 cursor-pointer" onClick={() => openItemCard(sub)}>
-                                    <p className="font-bold text-slate-700">{sub.name}</p>
-                                    <p className="text-[10px] text-slate-400">{sub.category} / {sub.subcategory}</p>
+                        {sortedFilteredItems.map(item => (
+                            <tr key={item.id} className="border-b last:border-0 hover:bg-slate-50 transition">
+                                <td className="p-3"><img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                <td className="p-4 cursor-pointer" onClick={() => openItemCard(item)}>
+                                    <p className="font-bold text-slate-700">{item.name}</p>
+                                    <p className="text-[10px] text-slate-400">{item.category || "Wpis ręczny"}</p>
                                 </td>
-                                <td className="p-4 text-center font-mono text-xs text-blue-600 font-bold">{sub.inventoryNumber}</td>
-                                <td className="p-4 text-center font-black">{sub.availableQuantity} / {sub.totalQuantity}</td>
+                                <td className="p-4 text-center font-mono text-xs text-orange-600 font-bold">{item.inventoryNumber}</td>
+                                <td className="p-4 text-center font-black">{item.availableQuantity} / {item.totalQuantity}</td>
                                 <td className="p-4 text-right space-x-3 whitespace-nowrap">
                                     <button
-                                        onClick={() => { setAdjustItem(sub); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
+                                        onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
                                         className="text-orange-600 hover:underline font-bold text-xs"
                                     >
                                         ⚙️ Korekta Stanu
                                     </button>
                                     <span className="text-slate-300">|</span>
-                                    <button onClick={() => { setEditingItem(sub); setFormData({ ...sub }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                    <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
                                     <span className="text-slate-300">|</span>
-                                    <button onClick={() => handleDelete(sub)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                    <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
                                 </td>
                             </tr>
                         ))}
                     </tbody>
                 </table>
             </div>
-        ));
+        );
     };
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto">
             <div className="flex justify-between items-center mb-8">
                 <h1 className="text-3xl font-bold text-slate-800 tracking-tighter">Katalog Sprzętu PESAM</h1>
-                <button onClick={() => { setEditingItem(null); setFormData(INITIAL_FORM_STATE); setIsFormOpen(true); }} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold shadow-lg transition hover:bg-blue-700">
+                <button onClick={() => { setEditingItem(null); setFormData(INITIAL_FORM_STATE); setIsFormOpen(true); }} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold shadow-lg hover:bg-blue-700">
                     + Dodaj Sprzęt
                 </button>
             </div>
 
+            {/* TRZY FILTRY ZAKŁADEK */}
             <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-2xl w-fit border shadow-inner">
                 <button onClick={() => setActiveTab("UNIQUE")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>NARZĘDZIA</button>
                 <button onClick={() => setActiveTab("BULK")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>RUSZTOWANIA</button>
+                <button onClick={() => setActiveTab("OTHER")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>DROBNICA / OSPRZĘT</button>
             </div>
 
             <div className="bg-white p-4 rounded-xl mb-6 shadow-sm border border-slate-200 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -745,24 +814,15 @@ export default function InventoryPage() {
                 activeTab === "UNIQUE" ? (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                         <table className="w-full text-left border-collapse">
-                            {/* DODANO: Klikalne, sortowalne kolumny tabeli z indykatorami kierunku */}
                             <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400 select-none">
                                 <tr>
                                     <th className="p-4">Zdjęcie</th>
-                                    <th onClick={() => handleSort("name")} className="p-4 cursor-pointer hover:bg-slate-100 transition">
-                                        Nazwa Urządzenia {sortField === "name" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
-                                    </th>
-                                    <th onClick={() => handleSort("inventoryNumber")} className="p-4 text-center cursor-pointer hover:bg-slate-100 transition">
-                                        Nr Mag. {sortField === "inventoryNumber" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
-                                    </th>
-                                    <th onClick={() => handleSort("status")} className="p-4 cursor-pointer hover:bg-slate-100 transition">
-                                        Status {sortField === "status" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
-                                    </th>
-                                    <th onClick={() => handleSort("currentLocation")} className="p-4 cursor-pointer hover:bg-slate-100 transition">
-                                        Lokalizacja {sortField === "currentLocation" ? (sortOrder === "asc" ? "▲" : "▼") : ""}
-                                    </th>
+                                    <th onClick={() => handleSort("name")} className="p-4 cursor-pointer hover:bg-slate-100 transition">Nazwa Urządzenia {sortField === "name" ? (sortOrder === "asc" ? "▲" : "▼") : ""}</th>
+                                    <th onClick={() => handleSort("inventoryNumber")} className="p-4 text-center cursor-pointer hover:bg-slate-100 transition">Nr Mag. {sortField === "inventoryNumber" ? (sortOrder === "asc" ? "▲" : "▼") : ""}</th>
+                                    <th onClick={() => handleSort("status")} className="p-4 cursor-pointer hover:bg-slate-100 transition">Status {sortField === "status" ? (sortOrder === "asc" ? "▲" : "▼") : ""}</th>
+                                    <th onClick={() => handleSort("currentLocation")} className="p-4 cursor-pointer hover:bg-slate-100 transition">Lokalizacja {sortField === "currentLocation" ? (sortOrder === "asc" ? "▲" : "▼") : ""}</th>
                                     <th className="p-4 text-center">Stan</th>
-                                    <th className="p-4 text-right">Akcje</th>
+                                    <th className="p-4 text-right">Acje</th>
                                 </tr>
                             </thead>
                             <tbody className="text-sm">
@@ -775,10 +835,7 @@ export default function InventoryPage() {
                                         </td>
                                         <td className="p-4 text-center font-mono font-bold text-blue-600">{item.inventoryNumber}</td>
                                         <td className="p-4">
-                                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase 
-                                                ${item.status === 'sprawne' ? 'bg-green-100 text-green-700' :
-                                                    item.status === 'uszkodzone' ? 'bg-red-100 text-red-700' :
-                                                        item.status === 'do przeglądu' ? 'bg-yellow-100 text-yellow-800' : 'bg-slate-100 text-slate-700'}`}>
+                                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${item.status === 'sprawne' ? 'bg-green-100 text-green-700' : item.status === 'uszkodzone' ? 'bg-red-100 text-red-700' : item.status === 'do przeglądu' ? 'bg-yellow-100 text-yellow-800' : 'bg-slate-100 text-slate-700'}`}>
                                                 {item.status}
                                             </span>
                                         </td>
@@ -787,15 +844,17 @@ export default function InventoryPage() {
                                         <td className="p-4 text-right space-x-3 whitespace-nowrap">
                                             <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
                                             <span className="text-slate-300">|</span>
-                                            <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline text-xs font-bold">Usuń</button>
+                                            <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
                                         </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
                     </div>
-                ) : (
+                ) : activeTab === "BULK" ? (
                     <div>{renderBulkGroups()}</div>
+                ) : (
+                    <div>{renderOtherItemsGroup()}</div>
                 )
             )}
 
@@ -825,7 +884,7 @@ export default function InventoryPage() {
                                     onClick={() => { setNewInvNumber(""); setIsAssignNumberOpen(true); }}
                                     className="bg-yellow-500 hover:bg-yellow-600 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow transition whitespace-nowrap"
                                 >
-                                    🏷️ Nadaj Numer Teraz
+                                    🏷️ Nadaj Numer Tymczasowo
                                 </button>
                             </div>
                         )}
@@ -925,6 +984,8 @@ export default function InventoryPage() {
                                 <div className="md:col-span-2 flex gap-4 p-4 bg-orange-50 border border-orange-100 rounded-xl mb-2 text-sm">
                                     <label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="subType" checked={formData.subType === "MAIN_CAT"} onChange={() => setFormData({ ...formData, subType: "MAIN_CAT" })} /><span className="font-bold text-orange-800">To jest System (np. PR firmy)</span></label>
                                     <label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="subType" checked={formData.subType === "SUB_ITEM"} onChange={() => setFormData({ ...formData, subType: "SUB_ITEM" })} /><span className="font-bold text-orange-800">To jest Element (np. Maszt)</span></label>
+                                    {/* DODANY TRZECI PRZEŁĄCZNIK DLA DROBNICY / OSPRZĘTU */}
+                                    <label className="flex items-center gap-2 cursor-pointer"><input type="radio" name="subType" checked={formData.subType === "MANUAL"} onChange={() => setFormData({ ...formData, subType: "MANUAL" })} /><span className="font-bold text-emerald-800">To jest Drobnica / Osprzęt (Luźny materiał)</span></label>
                                 </div>
                             )}
 
@@ -1203,6 +1264,19 @@ export default function InventoryPage() {
                                 </>
                             )}
 
+                            {formData.type === "BULK" && formData.subType === "MANUAL" && (
+                                <>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Grupa / Przeznaczenie</label>
+                                        <input value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value })} placeholder="np. Materiały eksploatacyjne" className="w-full p-2 border rounded-xl outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Stan początkowy (Dostępne)</label>
+                                        <input type="number" required value={formData.totalQuantity} onChange={e => setFormData({ ...formData, totalQuantity: Number(e.target.value) })} className="w-full p-2 border rounded-xl" />
+                                    </div>
+                                </>
+                            )}
+
                             {formData.subType !== "MAIN_CAT" && (
                                 <>
                                     <div className="md:col-span-2 mt-4 border-t pt-4"><h3 className="font-bold text-sm text-slate-800">Dane Finansowe & Info</h3></div>
@@ -1352,14 +1426,14 @@ export default function InventoryPage() {
                             <button
                                 type="button"
                                 onClick={() => { setAdjustType("PATH_A"); setAdjustQty(""); }}
-                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${adjustType === 'PATH_A' ? 'bg-white shadow text-orange-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${adjustType === 'PATH_A' ? 'bg-white shadow text-orange-600' : 'text-slate-400'}`}
                             >
                                 📦 Ścieżka A (Dostawa/Odpis)
                             </button>
                             <button
                                 type="button"
                                 onClick={() => { setAdjustType("PATH_B"); setAdjustQty(""); }}
-                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${adjustType === 'PATH_B' ? 'bg-white shadow text-orange-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${adjustType === 'PATH_B' ? 'bg-white shadow text-orange-600' : 'text-slate-400'}`}
                             >
                                 📋 Ścieżka B (Z Natury)
                             </button>
