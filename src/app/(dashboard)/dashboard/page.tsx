@@ -96,6 +96,7 @@ export default function DashboardPage() {
     const isWarehouse = user ? hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides) : false;
     const isAccountant = user ? hasPermission("workersAddToSite", user.rolePermissions, user.permissionOverrides) : false;
     const isManager = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
+    const canManageCloseouts = user ? hasPermission("manageProjectCloseouts", user.rolePermissions, user.permissionOverrides) : false;
 
     // 2. DYNAMICZNE POBIERANIE DANYCH DLA WYBRANEJ BUDOWY KIEROWNIKA
     useEffect(() => {
@@ -212,11 +213,12 @@ export default function DashboardPage() {
             {user && isWarehouse && (
                 <div className="space-y-4">
                     <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest pl-2">📦 Panel Magazynu Głównego</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                         <Link href="/dashboard/protocols" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                             <div>
                                 <p className="text-slate-400 text-xs font-bold uppercase">Oczekujące Zwroty (App)</p>
                                 <p className="text-4xl font-black text-purple-600 mt-2">{pendingProtocolsCount}</p>
+                                <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Weryfikacja i przyjęcie</p>
                             </div>
                             <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
                         </Link>
@@ -225,6 +227,7 @@ export default function DashboardPage() {
                             <div>
                                 <p className="text-slate-400 text-xs font-bold uppercase">Sprzęt w naprawie / serwisie</p>
                                 <p className="text-4xl font-black text-yellow-600 mt-2">{itemsInRepair.length}</p>
+                                <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Wymaga uwagi</p>
                             </div>
                             <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
                         </Link>
@@ -232,7 +235,19 @@ export default function DashboardPage() {
                         <div className="bg-white border p-6 rounded-2xl shadow-sm">
                             <p className="text-slate-400 text-xs font-bold uppercase">Aktywne projekty budowlane</p>
                             <p className="text-4xl font-black text-slate-800 mt-2">{activeSites.length}</p>
+                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Trwające budowy</p>
                         </div>
+
+                        {canManageCloseouts && (
+                            <Link href="/dashboard/closeouts" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                <div>
+                                    <p className="text-slate-400 text-xs font-bold uppercase">Rozliczanie Budów</p>
+                                    <p className="text-4xl font-black text-blue-600 mt-2">🏁</p>
+                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Audyt i zamknięcie</p>
+                                </div>
+                                <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                            </Link>
+                        )}
                     </div>
 
                     {/* ALERTY NISKIEGO STANU METRÓWEK/POZIOMIC */}

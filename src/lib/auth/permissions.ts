@@ -15,15 +15,17 @@ export const ALL_PERMISSIONS = {
     protocolsReturnApp: "Protokoły: Zwrot elektroniczny",
     protocolsReturnPaper: "Protokoły: Zwrot z papieru",
     acceptReturns: "Protokoły: Akceptacja zwrotów",
-    viewProtocolHistory: "Protokoły: Historia i zaawansowana wyszukiwarka", // <-- DODANO NOWE UPRAWNIENIE
-
+    viewProtocolHistory: "Protokoły: Historia i zaawansowana wyszukiwarka",
 
     viewSiteState: "Podgląd: Stany na budowach",
+    manageProjectCloseouts: "Zarządzanie: Rozliczanie i zamykanie budów", // <-- NOWE UPRAWNIENIE
+    approveProjectCloseouts: "Podpisywanie i akceptacja zamknięć budów (Kierownik / Dyrekcja)", // <-- NOWE UPRAWNIENIE
+
     viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
     viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
     manageClaims: "Sąd: Wydawanie wyroków i przypisywanie winnych (Dyrektor / Szef)",
-    manageClaimsFinal: "Sąd: Ostateczna akceptacja i zmiana wyroków (Szef)", // <-- DODAJ TO!
-    manageSettings: "Zarządzanie: Globalne ustawienia systemu (Sklep, Sąd CLS)", // <-- DODAJ TĘ LINIĘ!
+    manageClaimsFinal: "Sąd: Ostateczna akceptacja i zmiana wyroków (Szef)",
+    manageSettings: "Zarządzanie: Globalne ustawienia systemu (Sklep, Sąd CLS)",
     manageImport: "System: Import danych z arkusza",
 
     // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
@@ -35,11 +37,6 @@ export const ALL_PERMISSIONS = {
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;
 
-/**
- * Główna funkcja sprawdzająca uprawnienia (Serce systemu)
- * 1. Sprawdza "wyjątki" danego pracownika (permissionOverrides).
- * 2. Jeśli nie ma wyjątku, bierze domyślne uprawnienie z Roli.
- */
 export function hasPermission(
     permissionKey: PermissionKey,
     rolePermissions: Record<string, boolean> = {},

@@ -46,6 +46,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
+        { name: "Rozliczenia Projektów", path: "/dashboard/closeouts", icon: "🏁", requiredPermission: "manageProjectCloseouts" },
+        { name: "Zatwierdzanie Zamknięć", path: "/dashboard/closeout-approvals", icon: "✍️", requiredPermission: "approveProjectCloseouts" },
         { name: "Twoja Budowa", path: "/dashboard/my-site", icon: "🏢", requiredPermission: "viewSiteState" },
         { name: "Zarządzanie Pracownikami", path: "/dashboard/admin/users", icon: "👥", requiredPermission: "manageUsers" },
         { name: "Import Sprzętu", path: "/dashboard/admin/import", icon: "📊", requiredPermission: "manageImport" },
