@@ -117,7 +117,7 @@ export default function ProtocolsHub() {
     const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
     const [returnSiteId, setReturnSiteId] = useState("");
     const [returnCart, setReturnCart] = useState<ReturnCartItem[]>([]);
-    const [returnActiveTab, setReturnActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
+    const [returnActiveTab, setReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE");
     const [isReturnManualModalOpen, setIsReturnManualModalOpen] = useState(false);
 
     // Stany dla AKCEPTACJI ZWROTÓW
@@ -138,7 +138,7 @@ export default function ProtocolsHub() {
     // Stany dla Zdjęć i Dopisywania w Akceptacji
     const [returnPhotos, setReturnPhotos] = useState<File[]>([]);
     const [isAddFromSiteOpen, setIsAddFromSiteOpen] = useState(false);
-    const [acceptSiteTab, setAcceptSiteTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
+    const [acceptSiteTab, setAcceptSiteTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE");
     const [isAddManualToAcceptOpen, setIsAddManualToAcceptOpen] = useState(false);
     const [acceptReturnDocDate, setAcceptReturnDocDate] = useState(() => new Date().toISOString().split('T')[0]);
 
@@ -148,7 +148,7 @@ export default function ProtocolsHub() {
     const [paperDocReference, setPaperDocReference] = useState("");
     const [paperDocSource, setPaperDocSource] = useState<PaperDocSource>("KIEROWNIK");
     const [paperReturnCart, setPaperReturnCart] = useState<PaperReturnCartItem[]>([]);
-    const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL">("UNIQUE");
+    const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE");
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
     const [paperBulkPickModal, setPaperBulkPickModal] = useState<{ item: InventoryItem & { availableToReturn: number }; qty: number } | null>(null);
     const [investigationData, setInvestigationData] = useState<{
@@ -195,7 +195,7 @@ export default function ProtocolsHub() {
     // Filtry (Wydania)
     const [searchName, setSearchName] = useState("");
     const [searchInvNumber, setSearchInvNumber] = useState("");
-    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE");
 
     // Stany dla formularza osprzętu
     const [accessoryFormOpenFor, setAccessoryFormOpenFor] = useState<string | null>(null);
@@ -320,9 +320,15 @@ export default function ProtocolsHub() {
     // LOGIKA KOSZYKA WYDANIA
     // -------------------------------------------------------------------------
     const filteredInventory = inventory.filter(item => {
-        if (item.type !== activeTab) return false;
-        if (item.subType === "MAIN_CAT") return false;
-        if (item.subType === "MANUAL") return false;
+        if (activeTab === "UNIQUE") {
+            if (item.type !== "UNIQUE") return false;
+        } else if (activeTab === "BULK") {
+            if (item.type !== "BULK" || item.subType === "MAIN_CAT" || item.subType === "MANUAL") return false;
+        } else if (activeTab === "OTHER") {
+            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (!item.subType && item.type === "BULK");
+            if (item.type !== "BULK" || !isLoose) return false;
+        }
+
         const matchesName = item.name.toLowerCase().includes(searchName.toLowerCase());
         let matchesInvNum = true;
         if (searchInvNumber) matchesInvNum = (item.inventoryNumber || "").toLowerCase().includes(searchInvNumber.toLowerCase());
@@ -330,7 +336,9 @@ export default function ProtocolsHub() {
     });
 
     const addToCart = (item: InventoryItem) => {
-        if (item.availableQuantity <= 0) {
+        const isLooseMaterial = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || (!item.subType && item.type === "BULK");
+
+        if (item.availableQuantity <= 0 && !isLooseMaterial) {
             if (item.type === "UNIQUE") {
                 const confirmTransfer = window.confirm(
                     `⚠️ BEZPOŚREDNIE PRZENIESIENIE SPRZĘTU!\n\n` +
@@ -378,16 +386,28 @@ export default function ProtocolsHub() {
         if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) {
             return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
         }
+
+        const cleanName = normalizeString(manualName);
+        let foundExistingItem = selectedManualItem;
+
+        if (!foundExistingItem) {
+            foundExistingItem = inventory.find(i =>
+                (i.subType === "MANUAL" || (!i.subType && i.type === "BULK")) &&
+                normalizeString(i.name) === cleanName
+            ) || null;
+        }
+
         setCart(prev => [...prev, {
             cartItemId: Date.now().toString(),
             isManual: true,
-            dbId: selectedManualItem ? selectedManualItem.id : undefined, // Podpięcie ID z bazy!
-            inventoryNumber: selectedManualItem ? selectedManualItem.inventoryNumber : "RĘCZNY",
-            name: manualName.trim(),
+            dbId: foundExistingItem ? foundExistingItem.id : undefined,
+            inventoryNumber: foundExistingItem ? foundExistingItem.inventoryNumber : "RĘCZNY",
+            name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
             issueQty: Number(manualQty),
             unit: manualUnit,
             accessories: []
         }]);
+
         setIsManualModalOpen(false);
         setManualSuggestions([]);
         setSelectedManualItem(null);
@@ -579,10 +599,12 @@ export default function ProtocolsHub() {
 
                             // Przeniesienie bezpośrednie sprzętu UNIQUE:
                             // Jeśli sprzęt UNIQUE był na innej budowie (dostępność = 0), po przeniesieniu jego dostępność w magazynie nadal wynosi 0
+                            const isLooseMaterial = data.subType === "MANUAL" || data.category === "Zaległości osprzętu" || (!data.subType && data.type === "BULK");
+
                             if (data.type === "UNIQUE" && data.availableQuantity === 0) {
-                                newAvailable = 0;
-                            } else if (newAvailable < 0) {
-                                throw `Brak wystarczającej ilości dla: ${data.name}`;
+                                newAvailable = 0; // Przeniesienie
+                            } else if (newAvailable < 0 && !isLooseMaterial) {
+                                throw `Brak wystarczającej ilości dla: ${data.name}. Aby móc wydawać na minus, sprzęt musi znajdować się w zakładce "Drobnica / Osprzęt".`;
                             }
 
                             const currentAllocations = data.allocations || {};
@@ -730,10 +752,20 @@ export default function ProtocolsHub() {
 
     const confirmReturnManualAdd = () => {
         if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
+
+        const cleanName = normalizeString(manualName);
+        const foundExistingItem = inventory.find(i =>
+            (i.subType === "MANUAL" || (!i.subType && i.type === "BULK")) &&
+            normalizeString(i.name) === cleanName
+        ) || null;
+
         setReturnCart(prev => [...prev, {
-            dbId: `temp-manual-${Date.now()}`, isManual: true, name: manualName.trim(), type: "BULK",
-            inventoryNumber: "RĘCZNY ZWROT", unit: manualUnit, maxQty: 999999, returnQty: Number(manualQty),
-            declaredStatus: "sprawne", accessories: []
+            dbId: foundExistingItem ? foundExistingItem.id : `temp-manual-${Date.now()}`,
+            isManual: !foundExistingItem,
+            name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
+            type: "BULK",
+            inventoryNumber: foundExistingItem ? foundExistingItem.inventoryNumber : "RĘCZNY ZWROT",
+            unit: manualUnit, maxQty: 999999, returnQty: Number(manualQty), declaredStatus: "sprawne", accessories: []
         }]);
         setIsReturnManualModalOpen(false);
     };
@@ -825,12 +857,18 @@ export default function ProtocolsHub() {
             const availableToReturn = siteQty - lockedQty;
             return { ...i, availableToReturn };
         })
-        .filter(i => returnSiteId && i.availableToReturn > 0);
+        .filter(i => {
+            const isLoose = i.subType === "MANUAL" || i.category === "Zaległości osprzętu" || (!i.subType && i.type === "BULK");
+            return returnSiteId && (i.availableToReturn > 0 || isLoose); // Drobnica wymusza wyświetlenie nawet jeśli jest na minusie
+        });
 
     const filteredReturnInventory = inventoryOnSelectedSite.filter(item => {
         if (returnActiveTab === "UNIQUE") return item.type === "UNIQUE";
-        if (returnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL";
-        if (returnActiveTab === "MANUAL") return item.subType === "MANUAL";
+        if (returnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL" && item.category !== "Zaległości osprzętu";
+        if (returnActiveTab === "OTHER") {
+            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (!item.subType && item.type === "BULK");
+            return item.type === "BULK" && isLoose;
+        }
         return true;
     });
 
@@ -848,9 +886,10 @@ export default function ProtocolsHub() {
         if (paperReturnActiveTab === "UNIQUE") {
             if (item.type !== "UNIQUE") return false;
         } else if (paperReturnActiveTab === "BULK") {
-            if (item.type !== "BULK" || item.subType === "MANUAL") return false;
-        } else if (paperReturnActiveTab === "MANUAL") {
-            if (item.subType !== "MANUAL") return false;
+            if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu") return false;
+        } else if (paperReturnActiveTab === "OTHER") {
+            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (!item.subType && item.type === "BULK");
+            if (item.type !== "BULK" || !isLoose) return false;
         }
 
         const isSearching = paperSearchName.trim() !== "" || paperSearchInvNumber.trim() !== "";
@@ -865,12 +904,15 @@ export default function ProtocolsHub() {
         const siteQty = item.allocations?.[paperReturnSiteId] || 0;
         const lockedQty = lockedInPending[item.id] || 0;
         const availableToReturn = siteQty - lockedQty;
-        return availableToReturn > 0;
+
+        const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || (!item.subType && item.type === "BULK");
+        return availableToReturn > 0 || isLoose;
 
     }).map(item => {
         const siteQty = item.allocations?.[paperReturnSiteId] || 0;
         const lockedQty = lockedInPending[item.id] || 0;
-        return { ...item, availableToReturn: Math.max(0, siteQty - lockedQty) };
+        // Zabezpieczenie wizualne (żeby nie pisało, że max do zwrotu to -5 sztuk)
+        return { ...item, availableToReturn: Math.max(999999, siteQty - lockedQty) };
     });
 
     const addToPaperReturnCart = async (item: InventoryItem & { availableToReturn: number }) => {
@@ -1300,8 +1342,11 @@ export default function ProtocolsHub() {
     );
     const filteredAcceptAddInventory = inventoryOnSelectedProtocolSite.filter(item => {
         if (acceptSiteTab === "UNIQUE") return item.type === "UNIQUE";
-        if (acceptSiteTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL";
-        if (acceptSiteTab === "MANUAL") return item.subType === "MANUAL";
+        if (acceptSiteTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL" && item.category !== "Zaległości osprzętu";
+        if (acceptSiteTab === "OTHER") {
+            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (!item.subType && item.type === "BULK");
+            return item.type === "BULK" && isLoose;
+        }
         return true;
     });
 
@@ -2562,8 +2607,9 @@ export default function ProtocolsHub() {
                             <div className="w-[55%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-slate-50">
                                     <div className="flex gap-2 mb-4 bg-slate-200 p-1 rounded-xl w-fit">
-                                        <button onClick={() => setActiveTab("UNIQUE")} className={`px-6 py-2 rounded-lg text-sm font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500'}`}>NARZĘDZIA</button>
-                                        <button onClick={() => setActiveTab("BULK")} className={`px-6 py-2 rounded-lg text-sm font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-md' : 'text-slate-500'}`}>RUSZTOWANIA</button>
+                                        <button onClick={() => setActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-md' : 'text-slate-500'}`}>NARZĘDZIA</button>
+                                        <button onClick={() => setActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-md' : 'text-slate-500'}`}>RUSZTOWANIA</button>
+                                        <button onClick={() => setActiveTab("OTHER")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${activeTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-md' : 'text-slate-500'}`}>DROBNICA / OSPRZĘT</button>
                                     </div>
                                     <div className="flex gap-4">
                                         <div className="flex-1">
@@ -2576,11 +2622,12 @@ export default function ProtocolsHub() {
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
                                     {filteredInventory.map(item => {
-                                        const isAvailable = item.availableQuantity > 0;
+                                        const isLooseMaterial = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || (!item.subType && item.type === "BULK");
+                                        const isAvailable = item.availableQuantity > 0 || isLooseMaterial; // Drobnica traktowana jako zawsze dostępna
                                         const isBroken = item.status !== "sprawne";
                                         const isInCart = !!cart.find(i => i.dbId === item.id);
 
-                                        // Sprzęt jest zdatny do dodania jeśli: jest dostępny na magazynie LUB jest typu UNIQUE i nie jest uszkodzony
+                                        // Sprzęt jest zdatny do dodania jeśli: jest dostępny na magazynie LUB to luźny materiał LUB jest typu UNIQUE i nie jest uszkodzony
                                         const canAdd = isAvailable || (item.type === "UNIQUE" && !isBroken);
 
                                         return (
@@ -2590,8 +2637,8 @@ export default function ProtocolsHub() {
                                                 <div>
                                                     <p className="font-bold text-sm text-slate-800">{item.name}</p>
                                                     <p className="text-[11px] font-mono text-blue-600">Nr Mag: {item.inventoryNumber || "-"}</p>
-                                                    {!isAvailable && <p className="text-[10px] text-red-600 font-bold uppercase">📍 Poza magazynem: {item.currentLocation}</p>}
-                                                    {isAvailable && <p className="text-[10px] text-green-600 font-bold">Dostępne: {item.availableQuantity} {item.unit || "szt."}</p>}
+                                                    {!isAvailable && !isLooseMaterial && <p className="text-[10px] text-red-600 font-bold uppercase">📍 Poza magazynem: {item.currentLocation}</p>}
+                                                    {(isAvailable || isLooseMaterial) && <p className="text-[10px] text-green-600 font-bold">Dostępne: {item.availableQuantity} {item.unit || "szt."}</p>}
                                                 </div>
                                                 {isInCart ? (
                                                     <span className="text-[10px] bg-green-100 text-green-700 font-black px-2 py-1 rounded-lg uppercase">W koszyku</span>
@@ -2602,7 +2649,7 @@ export default function ProtocolsHub() {
                                                             ? 'bg-slate-100 hover:bg-green-600 hover:text-white text-green-600'
                                                             : 'bg-orange-50 hover:bg-orange-600 hover:text-white text-orange-600 border border-orange-200'
                                                             }`}
-                                                        title={!isAvailable ? "Przenieś bezpośrednio z innej budowy" : "Dodaj do koszyka"}
+                                                        title={!isAvailable && !isLooseMaterial ? "Przenieś bezpośrednio z innej budowy" : "Dodaj do koszyka"}
                                                     >
                                                         {isAvailable ? "+" : "🔄"}
                                                     </button>
@@ -2864,7 +2911,7 @@ export default function ProtocolsHub() {
                                     <div className="mt-4 flex gap-2 bg-blue-100/50 p-1 rounded-xl w-fit border border-blue-200">
                                         <button onClick={() => setReturnActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
                                         <button onClick={() => setReturnActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
-                                        <button onClick={() => setReturnActiveTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'MANUAL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}>INNE (WPIS RĘCZNY)</button>
+                                        <button onClick={() => setReturnActiveTab("OTHER")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>DROBNICA / OSPRZĘT</button>
                                     </div>
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
@@ -3059,7 +3106,7 @@ export default function ProtocolsHub() {
                                     <div className="flex gap-2 bg-orange-100/50 p-1 rounded-xl w-fit border border-orange-200 mb-3">
                                         <button onClick={() => setPaperReturnActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'UNIQUE' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
                                         <button onClick={() => setPaperReturnActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
-                                        <button onClick={() => setPaperReturnActiveTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'MANUAL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}>WPISY RĘCZNE</button>
+                                        <button onClick={() => setPaperReturnActiveTab("OTHER")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>DROBNICA / OSPRZĘT</button>
                                     </div>
 
                                     {/* WYSZUKIWARKA RATUNKOWA */}
@@ -3707,7 +3754,7 @@ export default function ProtocolsHub() {
                             <div className="flex gap-2 bg-purple-100/50 p-1 rounded-xl w-fit border border-purple-200">
                                 <button onClick={() => setAcceptSiteTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${acceptSiteTab === 'UNIQUE' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
                                 <button onClick={() => setAcceptSiteTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${acceptSiteTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
-                                <button onClick={() => setAcceptSiteTab("MANUAL")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${acceptSiteTab === 'MANUAL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}>WPISY RĘCZNE</button>
+                                <button onClick={() => setAcceptSiteTab("OTHER")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${acceptSiteTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>DROBNICA / OSPRZĘT</button>
                             </div>
                         </div>
                         <div className="p-4 overflow-y-auto flex-1 space-y-2 bg-slate-50">

@@ -189,7 +189,7 @@ export default function ProjectCloseoutsPage() {
 
             // WYŚLIJ PIERWSZE POWIADOMIENIE DO KIEROWNIKA
             try {
-                await fetch("/api/closeout-email", {
+                const response = await fetch("/api/closeout-email", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -202,11 +202,18 @@ export default function ProjectCloseoutsPage() {
                         detectiveList: suspiciousItems.map(i => ({ id: i.id, name: i.name, inventoryNumber: i.inventoryNumber, failureDescription: i.failureDescription }))
                     })
                 });
-            } catch (e) {
-                console.error("Mailing błąd, ale obieg w bazie zapisany:", e);
-            }
 
-            alert("✅ Obieg akceptacji został pomyślnie utworzony i przesłany do podpisu kierownika!");
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    console.error("Błąd API mailera:", result);
+                    alert(`⚠️ ROZLICZENIE ZAPISANE, ALE BŁĄD WYSYŁKI E-MAILA!\n\nPowód błędu serwera: ${result.error || "Nieznany błąd poczty"}`);
+                } else {
+                    alert("✅ Obieg akceptacji utworzony i e-mail z powiadomieniem wysłany do kierownika!");
+                }
+            } catch (e) {
+                console.error("Krytyczny błąd połączenia z API mailera:", e);
+                alert("⚠️ Rozliczenie zostało zapisane w bazie, ale wystąpił błąd komunikacji z serwerem poczty. Mail nie wyszedł.");
+            }
             setSelectedSite(null);
             fetchSitesAndUsers();
         } catch (error) {

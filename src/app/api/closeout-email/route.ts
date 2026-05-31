@@ -88,8 +88,10 @@ export async function POST(req: Request) {
         }
 
         if (type === "CLOSEOUT_INITIATED") {
+            // SCENARIUSZ 1: Magazynier zainicjował rozliczenie -> Mail do wybranego Kierownika
             subject = `⏳ [ROZLICZENIE BUDOWY] Audyt końcowy projektu · ${siteName}`;
-            recipients = isSandbox ? testEmails : [managerEmail];
+            // Zawsze wysyłamy do wybranego kierownika (ponieważ kontrolujesz przypisanie w UI i używasz konta testowego)
+            recipients = [managerEmail];
 
             htmlContent = `
                 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#f8fafc;padding:20px;border-radius:12px;border:1px solid #e2e8f0">
@@ -164,19 +166,28 @@ export async function POST(req: Request) {
 
         const finalRecipients = recipients.filter(Boolean);
 
-        if (finalRecipients.length > 0) {
-            await transporter.sendMail({
-                from: senderString,
-                to: finalRecipients.join(", "),
-                subject: subject,
-                html: htmlContent
-            });
+        // Zabezpieczenie przed brakiem adresatów
+        if (finalRecipients.length === 0) {
+            console.warn(`[Mailer] Próba wysyłki typu ${type}, ale lista odbiorców jest pusta!`);
+            return NextResponse.json({
+                success: false,
+                error: "Brak zdefiniowanych adresatów. Jeśli Tryb Sandbox jest włączony, upewnij się, że dodałeś maila testowego w ustawieniach!"
+            }, { status: 400 });
         }
 
+        // Fizyczna wysyłka
+        await transporter.sendMail({
+            from: senderString,
+            to: finalRecipients.join(", "),
+            subject: subject,
+            html: htmlContent
+        });
+
+        console.log(`[Mailer] Pomyślnie wysłano wiadomość do: ${finalRecipients.join(", ")}`);
         return NextResponse.json({ success: true, message: `Wysłano e-mail rozliczenia budowy` });
 
     } catch (error: any) {
-        console.error("Błąd wysyłki e-mail Closeout:", error);
+        console.error("Błąd krytyczny wysyłki e-mail Closeout:", error);
         return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 }
