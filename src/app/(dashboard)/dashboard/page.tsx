@@ -98,6 +98,12 @@ export default function DashboardPage() {
     const isManager = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
     const canManageCloseouts = user ? hasPermission("manageProjectCloseouts", user.rolePermissions, user.permissionOverrides) : false;
 
+    // Sprawdzamy czy użytkownik ma dostęp do przeglądania katalogu sprzętu
+    const canViewCatalog = user ? hasPermission("viewInventory", user.rolePermissions, user.permissionOverrides) : false;
+
+    // Sprawdzamy, czy użytkownik posiada JAKIEKOLWIEK uprawnienie do wyświetlenia sekcji operacyjnych (Magazyn, Biuro, Zarządzanie budową)
+    const hasAnyOperationalPermission = isWarehouse || isAccountant || isManager || canManageCloseouts;
+
     // 2. DYNAMICZNE POBIERANIE DANYCH DLA WYBRANEJ BUDOWY KIEROWNIKA
     useEffect(() => {
         const fetchSiteSpecificData = async () => {
@@ -183,7 +189,7 @@ export default function DashboardPage() {
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-fade-in">
-            {/* Witaj pracowniku */}
+            {/* Witaj pracowniku (Zawsze widoczne na górze) */}
             <div className="bg-white rounded-3xl p-6 border shadow-sm flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div>
                     <h1 className="text-3xl font-black text-slate-800 tracking-tight">Witaj, {user?.firstName || firebaseUser.email}! 👋</h1>
@@ -208,182 +214,214 @@ export default function DashboardPage() {
             )}
 
             {/* ========================================================================= */}
-            {/* 1. PANEL MAGAZYNU GŁÓWNEGO */}
+            {/* OPCJA A: UŻYTKOWNIK POSIADA UPRAWNIENIA OPERACYJNE (Magazyn, Biuro, Budowy) */}
             {/* ========================================================================= */}
-            {user && isWarehouse && (
-                <div className="space-y-4">
-                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest pl-2">📦 Panel Magazynu Głównego</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                        <Link href="/dashboard/protocols" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                            <div>
-                                <p className="text-slate-400 text-xs font-bold uppercase">Oczekujące Zwroty (App)</p>
-                                <p className="text-4xl font-black text-purple-600 mt-2">{pendingProtocolsCount}</p>
-                                <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Weryfikacja i przyjęcie</p>
-                            </div>
-                            <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                        </Link>
-
-                        <Link href="/dashboard/inventory" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                            <div>
-                                <p className="text-slate-400 text-xs font-bold uppercase">Sprzęt w naprawie / serwisie</p>
-                                <p className="text-4xl font-black text-yellow-600 mt-2">{itemsInRepair.length}</p>
-                                <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Wymaga uwagi</p>
-                            </div>
-                            <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                        </Link>
-
-                        <div className="bg-white border p-6 rounded-2xl shadow-sm">
-                            <p className="text-slate-400 text-xs font-bold uppercase">Aktywne projekty budowlane</p>
-                            <p className="text-4xl font-black text-slate-800 mt-2">{activeSites.length}</p>
-                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Trwające budowy</p>
-                        </div>
-
-                        {canManageCloseouts && (
-                            <Link href="/dashboard/closeouts" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                                <div>
-                                    <p className="text-slate-400 text-xs font-bold uppercase">Rozliczanie Budów</p>
-                                    <p className="text-4xl font-black text-blue-600 mt-2">🏁</p>
-                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Audyt i zamknięcie</p>
-                                </div>
-                                <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                            </Link>
-                        )}
-                    </div>
-
-                    {/* ALERTY NISKIEGO STANU METRÓWEK/POZIOMIC */}
-                    {lowStockAlerts.length > 0 && (
-                        <div className="bg-red-50 border border-red-200 rounded-2xl p-5 shadow-sm animate-fade-in">
-                            <h4 className="text-xs font-black text-red-800 uppercase tracking-wider mb-3">🚨 ALERTY MAGAZYNU: Kończy się drobny sprzęt!</h4>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {lowStockAlerts.map(i => (
-                                    <div key={i.id} className="bg-white border border-red-100 p-3 rounded-xl flex justify-between items-center shadow-sm">
-                                        <span className="font-bold text-slate-800 text-sm">{i.name}</span>
-                                        <span className="bg-red-100 text-red-700 text-xs font-black px-2.5 py-1 rounded-lg">Pozostało tylko: {i.availableQuantity} szt.</span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {/* ========================================================================= */}
-            {/* 2. PANEL FINANSOWO-ZAKUPOWY */}
-            {/* ========================================================================= */}
-            {user && isAccountant && (
-                <div className="space-y-4">
-                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest pl-2">💼 Panel Finansowo-Zakupowy (Biuro)</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div className="bg-slate-950 text-white p-6 rounded-3xl shadow-lg relative overflow-hidden border border-slate-800">
-                            <div className="relative z-10">
-                                <p className="text-blue-400 text-[10px] font-black uppercase tracking-wider">Wartość sprzętu pracującego w terenie</p>
-                                <p className="text-4xl font-black mt-2 font-mono">{totalFieldAssetsValue.toLocaleString("pl-PL")} zł</p>
-                                <p className="text-slate-400 text-xs mt-3">Sumaryczna wartość netto unikalnych narzędzi przypisanych aktualnie do budów.</p>
-                            </div>
-                            <div className="absolute right-[-5%] top-[-20%] text-[8rem] opacity-5 select-none pointer-events-none">📈</div>
-                        </div>
-
-                        <Link href="/dashboard/admin/workers/add-to-site" className="bg-blue-50 hover:bg-blue-100 border border-blue-200 p-6 rounded-3xl shadow-sm transition-all flex flex-col justify-center relative group">
-                            <p className="text-blue-800 font-black text-lg mb-1">🚚 Wprowadź zakup bezpośredni na budowę (WZ)</p>
-                            <p className="text-blue-600 text-xs">Zasil stan budowy omijając magazyn centralny bezpośrednio na podstawie faktury.</p>
-                            <span className="absolute right-6 text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                        </Link>
-                    </div>
-                </div>
-            )}
-
-            {/* ========================================================================= */}
-            {/* 3. DYNAMICZNY PANEL OPERACYJNY KIEROWNIKA BUDOWY */}
-            {/* ========================================================================= */}
-            {user && isManager && activeManagerSiteId && (
-                <div className="space-y-4">
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pl-2">
-                        <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">
-                            🏢 AKTYWNY PROJEKT: {managerSite?.name} {managerSite?.location ? `— ${managerSite.location}` : ""}
-                        </h3>
-
-                        {/* DROPDOWN DO ZMIANY BUDOWY - WIDOCZNY TYLKO JEŚLI MA PRZYPISANE > 1 BUDOWĘ */}
-                        {managerSites.length > 1 && (
-                            <div className="flex items-center gap-2">
-                                <span className="text-xs text-slate-500 font-bold">Zmień budowę:</span>
-                                <select
-                                    value={activeManagerSiteId}
-                                    onChange={e => setActiveManagerSiteId(e.target.value)}
-                                    className="p-2.5 bg-white border border-slate-300 rounded-xl font-bold text-blue-700 text-xs shadow-sm outline-none cursor-pointer transition hover:bg-slate-50"
-                                >
-                                    {managerSites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                </select>
-                            </div>
-                        )}
-                    </div>
-
-                    {statsLoading ? (
-                        <div className="p-10 text-center text-xs text-slate-400 animate-pulse">Przeliczanie statystyk dla wybranej budowy...</div>
-                    ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fade-in">
-                            {/* KAFELEK 1: Stan Magazynu Podręcznego */}
-                            <Link href="/dashboard/my-site?view=INVENTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                                <div>
-                                    <p className="text-slate-400 text-[10px] font-black uppercase">Magazyn Podręczny</p>
-                                    <p className="text-4xl font-black text-blue-600 mt-2">{itemsOnManagerSite.length}</p>
-                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Liczba pozycji na placu</p>
-                                </div>
-                                <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                            </Link>
-
-                            {/* KAFELEK 2: Wydania z Magazynu (Ostatnie 7 dni) */}
-                            <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                                <div>
-                                    <p className="text-slate-400 text-[10px] font-black uppercase">Wydania z Magazynu (7 dni)</p>
-                                    <p className="text-4xl font-black text-slate-800 mt-2">{managerRecentIssues.length}</p>
-                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Nowe protokoły wejściowe</p>
-                                </div>
-                                <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                            </Link>
-
-                            {/* KAFELEK 3: Zakupy Bezpośrednie od Księgowej (Ostatnie 7 dni) */}
-                            <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                                <div>
-                                    <p className="text-slate-400 text-[10px] font-black uppercase">Zakupy bezpośrednie (7 dni)</p>
-                                    <p className="text-4xl font-black text-orange-600 mt-2">{managerRecentDirectPurchases.length}</p>
-                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Faktury / WZ od księgowej</p>
-                                </div>
-                                <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                            </Link>
-
-                            {/* KAFELEK 4: Oczekujące zwroty do akceptacji */}
-                            <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
-                                <div>
-                                    <p className="text-slate-400 text-[10px] font-black uppercase">Wysłane Zwroty (Oczekujące)</p>
-                                    <p className="text-4xl font-black text-purple-600 mt-2">{managerPendingReturns.length}</p>
-                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Czeka na akceptację bazy</p>
-                                </div>
-                                <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
-                            </Link>
-                        </div>
-                    )}
-
-                    {/* RAPORT SĄDOWY (WIDOCZNY GLOBALNIE DLA USERA, NIEZALEŻNY OD WYBRANEJ BUDOWY) */}
-                    <div className="pt-2">
-                        {managerActiveClaimsCount > 0 ? (
-                            <Link href="/dashboard/claims" className="bg-red-50 hover:bg-red-100 border-2 border-red-200 rounded-3xl p-5 shadow-md flex items-center justify-between animate-pulse transition-all group">
-                                <div className="flex items-center gap-4">
-                                    <span className="text-3xl">⚖️</span>
+            {user && hasAnyOperationalPermission ? (
+                <div className="space-y-8">
+                    {/* 1. PANEL MAGAZYNU GŁÓWNEGO */}
+                    {isWarehouse && (
+                        <div className="space-y-4">
+                            <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest pl-2">📦 Panel Magazynu Głównego</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                                <Link href="/dashboard/protocols" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                                     <div>
-                                        <h4 className="text-sm font-black text-red-800 uppercase tracking-wider">Uwaga: Twoje aktywne postępowania szkodowe!</h4>
-                                        <p className="text-xs text-red-700 mt-0.5">Wewnętrzny Sąd PESAM prowadzi obecnie <b>{managerActiveClaimsCount} Twoich aktywnych spraw</b> dotyczących zniszczonego sprzętu.</p>
+                                        <p className="text-slate-400 text-xs font-bold uppercase">Oczekujące Zwroty (App)</p>
+                                        <p className="text-4xl font-black text-purple-600 mt-2">{pendingProtocolsCount}</p>
+                                        <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Weryfikacja i przyjęcie</p>
+                                    </div>
+                                    <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                </Link>
+
+                                <Link href="/dashboard/inventory" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                    <div>
+                                        <p className="text-slate-400 text-xs font-bold uppercase">Sprzęt w naprawie / serwisie</p>
+                                        <p className="text-4xl font-black text-yellow-600 mt-2">{itemsInRepair.length}</p>
+                                        <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Wymaga uwagi</p>
+                                    </div>
+                                    <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                </Link>
+
+                                <div className="bg-white border p-6 rounded-2xl shadow-sm">
+                                    <p className="text-slate-400 text-xs font-bold uppercase">Aktywne projekty budowlane</p>
+                                    <p className="text-4xl font-black text-slate-800 mt-2">{activeSites.length}</p>
+                                    <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Trwające budowy</p>
+                                </div>
+
+                                {canManageCloseouts && (
+                                    <Link href="/dashboard/closeouts" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                        <div>
+                                            <p className="text-slate-400 text-xs font-bold uppercase">Rozliczanie Budów</p>
+                                            <p className="text-4xl font-black text-blue-600 mt-2">🏁</p>
+                                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Audyt i zamknięcie</p>
+                                        </div>
+                                        <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                    </Link>
+                                )}
+                            </div>
+
+                            {/* ALERTY NISKIEGO STANU BHP/DROBNICY */}
+                            {lowStockAlerts.length > 0 && (
+                                <div className="bg-red-50 border border-red-200 rounded-2xl p-5 shadow-sm">
+                                    <h4 className="text-xs font-black text-red-800 uppercase tracking-wider mb-3">🚨 ALERTY MAGAZYNU: Kończy się drobny sprzęt!</h4>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {lowStockAlerts.map(i => (
+                                            <div key={i.id} className="bg-white border border-red-100 p-3 rounded-xl flex justify-between items-center shadow-sm">
+                                                <span className="font-bold text-slate-800 text-sm">{i.name}</span>
+                                                <span className="bg-red-100 text-red-700 text-xs font-black px-2.5 py-1 rounded-lg">Pozostało tylko: {i.availableQuantity} szt.</span>
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
-                                <span className="bg-red-600 text-white text-[10px] font-black px-4 py-2 rounded-xl shadow-md uppercase tracking-wider group-hover:scale-105 transition-transform">
-                                    Otwórz Sąd ➡️
-                                </span>
-                            </Link>
-                        ) : (
-                            <div className="bg-green-50 border border-green-200 rounded-3xl p-4 flex items-center gap-3 shadow-sm text-xs text-green-800 font-bold">
-                                <span className="text-lg">🛡️</span>
-                                <span>Brak aktywnych postępowań szkodowych na Twoim koncie. Dbasz o sprzęt – gratulacje!</span>
+                            )}
+                        </div>
+                    )}
+
+                    {/* 2. PANEL FINANSOWO-ZAKUPOWY */}
+                    {isAccountant && (
+                        <div className="space-y-4">
+                            <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest pl-2">💼 Panel Finansowo-Zakupowy (Biuro)</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="bg-slate-950 text-white p-6 rounded-3xl shadow-lg relative overflow-hidden border border-slate-800">
+                                    <div className="relative z-10">
+                                        <p className="text-blue-400 text-[10px] font-black uppercase tracking-wider">Wartość sprzętu pracującego w terenie</p>
+                                        <p className="text-4xl font-black mt-2 font-mono">{totalFieldAssetsValue.toLocaleString("pl-PL")} zł</p>
+                                        <p className="text-slate-400 text-xs mt-3">Sumaryczna wartość netto unikalnych narzędzi przypisanych aktualnie do budów.</p>
+                                    </div>
+                                    <div className="absolute right-[-5%] top-[-20%] text-[8rem] opacity-5 select-none pointer-events-none">📈</div>
+                                </div>
+
+                                <Link href="/dashboard/admin/workers/add-to-site" className="bg-blue-50 hover:bg-blue-100 border border-blue-200 p-6 rounded-3xl shadow-sm transition-all flex flex-col justify-center relative group">
+                                    <p className="text-blue-800 font-black text-lg mb-1">🚚 Wprowadź zakup bezpośredni na budowę (WZ)</p>
+                                    <p className="text-blue-600 text-xs">Zasil stan budowy omijając magazyn centralny bezpośrednio na podstawie faktury.</p>
+                                    <span className="absolute right-6 text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                </Link>
                             </div>
+                        </div>
+                    )}
+
+                    {/* 3. DYNAMICZNY PANEL OPERACYJNY KIEROWNIKA BUDOWY */}
+                    {isManager && activeManagerSiteId && (
+                        <div className="space-y-4">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pl-2">
+                                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">
+                                    🏢 AKTYWNY PROJEKT: {managerSite?.name} {managerSite?.location ? `— ${managerSite.location}` : ""}
+                                </h3>
+
+                                {managerSites.length > 1 && (
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs text-slate-500 font-bold">Zmień budowę:</span>
+                                        <select
+                                            value={activeManagerSiteId}
+                                            onChange={e => setActiveManagerSiteId(e.target.value)}
+                                            className="p-2.5 bg-white border border-slate-300 rounded-xl font-bold text-blue-700 text-xs shadow-sm outline-none cursor-pointer transition hover:bg-slate-50"
+                                        >
+                                            {managerSites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        </select>
+                                    </div>
+                                )}
+                            </div>
+
+                            {statsLoading ? (
+                                <div className="p-10 text-center text-xs text-slate-400 animate-pulse">Przeliczanie statystyk dla wybranej budowy...</div>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                                    <Link href="/dashboard/my-site?view=INVENTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                        <div>
+                                            <p className="text-slate-400 text-[10px] font-black uppercase">Magazyn Podręczny</p>
+                                            <p className="text-4xl font-black text-blue-600 mt-2">{itemsOnManagerSite.length}</p>
+                                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Liczba pozycji na placu</p>
+                                        </div>
+                                        <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                    </Link>
+
+                                    <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                        <div>
+                                            <p className="text-slate-400 text-[10px] font-black uppercase">Wydania z Magazynu (7 dni)</p>
+                                            <p className="text-4xl font-black text-slate-800 mt-2">{managerRecentIssues.length}</p>
+                                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Nowe protokoły wejściowe</p>
+                                        </div>
+                                        <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                    </Link>
+
+                                    <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                        <div>
+                                            <p className="text-slate-400 text-[10px] font-black uppercase">Zakupy bezpośrednie (7 dni)</p>
+                                            <p className="text-4xl font-black text-orange-600 mt-2">{managerRecentDirectPurchases.length}</p>
+                                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Faktury / WZ od księgowej</p>
+                                        </div>
+                                        <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                    </Link>
+
+                                    <Link href="/dashboard/my-site?view=HISTORY" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                        <div>
+                                            <p className="text-slate-400 text-[10px] font-black uppercase">Wysłane Zwroty (Oczekujące)</p>
+                                            <p className="text-4xl font-black text-purple-600 mt-2">{managerPendingReturns.length}</p>
+                                            <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Czeka na akceptację bazy</p>
+                                        </div>
+                                        <span className="text-xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                    </Link>
+                                </div>
+                            )}
+
+                            {/* RAPORT SĄDOWY KIEROWNIKA */}
+                            <div className="pt-2">
+                                {managerActiveClaimsCount > 0 ? (
+                                    <Link href="/dashboard/claims" className="bg-red-50 hover:bg-red-100 border-2 border-red-200 rounded-3xl p-5 shadow-md flex items-center justify-between animate-pulse transition-all group">
+                                        <div className="flex items-center gap-4">
+                                            <span className="text-3xl">⚖️</span>
+                                            <div>
+                                                <h4 className="text-sm font-black text-red-800 uppercase tracking-wider">Uwaga: Twoje aktywne postępowania szkodowe!</h4>
+                                                <p className="text-xs text-red-700 mt-0.5">Wewnętrzny Sąd PESAM prowadzi obecnie <b>{managerActiveClaimsCount} Twoich aktywnych spraw</b> dotyczących zniszczonego sprzętu.</p>
+                                            </div>
+                                        </div>
+                                        <span className="bg-red-600 text-white text-[10px] font-black px-4 py-2 rounded-xl shadow-md uppercase tracking-wider group-hover:scale-105 transition-transform">
+                                            Otwórz Sąd ➡️
+                                        </span>
+                                    </Link>
+                                ) : (
+                                    <div className="bg-green-50 border border-green-200 rounded-3xl p-4 flex items-center gap-3 shadow-sm text-xs text-green-800 font-bold">
+                                        <span className="text-lg">🛡️</span>
+                                        <span>Brak aktywnych postępowań szkodowych na Twoim koncie. Dbasz o sprzęt – gratulacje!</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            ) : (
+                /* ========================================================================= */
+                /* OPCJA B: UŻYTKOWNIK BEZ UPRAWNIEŃ OPERACYJNYCH (STAN POWITALNY / PROSTY) */
+                /* ========================================================================= */
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mt-4">
+                    {/* Przyjazna karta informacyjna */}
+                    <div className="bg-white border rounded-3xl p-8 shadow-sm flex flex-col justify-between">
+                        <div>
+                            <span className="text-4xl">🛡️</span>
+                            <h3 className="text-lg font-black text-slate-800 uppercase tracking-wide mt-4">Twój profil jest aktywny</h3>
+                            <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+                                Posiadasz podstawowe uprawnienia do systemu magazynowego PESAM. Możesz bezpiecznie przeglądać zasoby narzędziowe oraz asortyment firmy w interaktywnym Katalogu Sprzętu.
+                            </p>
+                        </div>
+                        {canViewCatalog && (
+                            <Link href="/dashboard/inventory" className="mt-8 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider py-4 px-6 rounded-2xl shadow-md hover:shadow-lg transition-all flex items-center justify-between group">
+                                <span>📦 Przejdź do Katalogu Sprzętu</span>
+                                <span className="group-hover:translate-x-1.5 transition-transform">➡️</span>
+                            </Link>
                         )}
+                    </div>
+
+                    {/* Karta wsparcia administratora */}
+                    <div className="bg-slate-50 border border-dashed border-slate-300 rounded-3xl p-8 flex flex-col justify-between">
+                        <div>
+                            <span className="text-4xl">⚙️</span>
+                            <h3 className="text-lg font-black text-slate-700 uppercase tracking-wide mt-4">Potrzebujesz więcej opcji?</h3>
+                            <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+                                Jeśli Twoje codzienne obowiązki wymagają wystawiania protokołów WZ, zgłaszania zwrotów maszyn, rozliczania zakupów lub zarządzania pracownikami fizycznymi – skontaktuj się z administratorem systemu w celu nadania odpowiednich ról i uprawnień.
+                            </p>
+                        </div>
+                        <div className="mt-8 pt-4 border-t border-slate-200/60 text-[11px] text-slate-400 font-semibold">
+                            System Zarządzania Magazynem PESAM
+                        </div>
                     </div>
                 </div>
             )}
