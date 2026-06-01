@@ -192,6 +192,13 @@ export default function ProtocolsHub() {
     const [cancelItemDestinations, setCancelItemDestinations] = useState<Record<string, string>>({}); // inventoryId -> docelowe sourceId lub "MAGAZYN"
     const [resolvedLastOpDates, setResolvedLastOpDates] = useState<Record<string, string>>({}); // Przechowuje sprawdzoną chronologię
 
+    // STANY DLA TRWAŁEGO USUWANIA PROTOKOŁÓW Z BAZY (KREATOR)
+    const [isHardDeleteModalOpen, setIsHardDeleteModalOpen] = useState(false);
+    const [hardDeleteProtocol, setHardDeleteProtocol] = useState<any | null>(null);
+    const [hardDeleteItemHistories, setHardDeleteItemHistories] = useState<Record<string, any[]>>({});
+    const [hardDeleteItemDestinations, setHardDeleteItemDestinations] = useState<Record<string, string>>({});
+    const [hardDeleteResolvedLastOpDates, setHardDeleteResolvedLastOpDates] = useState<Record<string, string>>({});
+
     // Filtry (Wydania)
     const [searchName, setSearchName] = useState("");
     const [searchInvNumber, setSearchInvNumber] = useState("");
@@ -244,22 +251,137 @@ export default function ProtocolsHub() {
         }
     };
 
-    const handleDeleteProtocol = async (protocol: any) => {
-        const confirmDelete = window.confirm(
-            `⚠️ CZY NA PEWNO CHCESZ USUNĄĆ PROTOKÓŁ Z BAZY DANYCH?\n\n` +
-            `Protokół: ${protocol.protocolId}\n` +
-            `Ta operacja jest nieodwracalna i trwale usunie dokument z bazy danych Firestore!`
-        );
-        if (!confirmDelete) return;
-
+    // --- NOWY SYSTEM TRWAŁEGO USUWANIA PROTOKOŁÓW (ODZYSKIWANIE STANÓW) ---
+    const initiateHardDelete = async (p: any) => {
+        const pDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
         setIsSubmitting(true);
+
         try {
-            await deleteDoc(doc(db, "protocols", protocol.dbId));
-            alert("Protokół został pomyślnie usunięty z bazy danych.");
+            const resolvedItems = p.items.map((item: any) => {
+                const dbItem = inventory.find(inv => inv.id === item.inventoryId);
+                return { ...item, type: dbItem ? dbItem.type : (item.type || "BULK") };
+            });
+            const resolvedProtocol = { ...p, items: resolvedItems };
+
+            const histories: Record<string, any[]> = {};
+            const defaultDestinations: Record<string, string> = {};
+            const lastOpDates: Record<string, string> = {};
+
+            for (const item of resolvedItems) {
+                if (item.isNewManual || item.type !== "UNIQUE" || !item.inventoryId) continue;
+
+                const localItem = inventory.find(i => i.id === item.inventoryId);
+                let lastOp: string = localItem?.lastOperationDate || "";
+
+                const historyRef = collection(db, `inventory/${item.inventoryId}/history`);
+                const q = query(historyRef, orderBy("documentDate", "desc"), limit(3));
+                const snap = await getDocs(q);
+                const historyDocs = snap.docs.map(doc => doc.data());
+                histories[item.inventoryId] = historyDocs;
+
+                if (!lastOp) {
+                    lastOp = historyDocs.length > 0 ? (historyDocs[0].documentDate || historyDocs[0].date?.split('T')[0] || "") : "";
+                }
+                lastOpDates[item.inventoryId] = lastOp;
+
+                if (resolvedProtocol.type === "WYDANIE") {
+                    defaultDestinations[item.inventoryId] = "MAGAZYN";
+                } else if (resolvedProtocol.type === "ZWROT") {
+                    defaultDestinations[item.inventoryId] = resolvedProtocol.sourceId;
+                }
+            }
+
+            setHardDeleteItemHistories(histories);
+            setHardDeleteItemDestinations(defaultDestinations);
+            setHardDeleteResolvedLastOpDates(lastOpDates);
+            setHardDeleteProtocol(resolvedProtocol);
+            setIsHardDeleteModalOpen(true);
+        } catch (error) {
+            alert("Błąd podczas analizy protokołu przed usunięciem: " + error);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const confirmHardDelete = async () => {
+        if (!hardDeleteProtocol) return;
+        setIsSubmitting(true);
+        const pDate = hardDeleteProtocol.documentDate || (hardDeleteProtocol.createdAt ? hardDeleteProtocol.createdAt.split("T")[0] : "");
+
+        try {
+            await runTransaction(db, async (transaction) => {
+                const protocolRef = doc(db, "protocols", hardDeleteProtocol.dbId);
+
+                const itemDocs: Record<string, any> = {};
+                for (const item of hardDeleteProtocol.items) {
+                    if (!item.inventoryId || item.isNewManual) continue;
+                    const itemRef = doc(db, "inventory", item.inventoryId);
+                    const itemDoc = await transaction.get(itemRef);
+                    itemDocs[item.inventoryId] = { ref: itemRef, doc: itemDoc };
+                }
+
+                for (const item of hardDeleteProtocol.items) {
+                    if (item.isNewManual || !item.inventoryId) continue;
+
+                    const { ref: itemRef, doc: itemDoc } = itemDocs[item.inventoryId];
+                    if (!itemDoc.exists()) continue;
+
+                    const itemData = itemDoc.data();
+                    const qty = item.receivedQty !== undefined ? item.receivedQty : (item.quantity !== undefined ? item.quantity : 1);
+
+                    if (itemData.type === "BULK") {
+                        if (hardDeleteProtocol.type === "WYDANIE") {
+                            const newAvailable = itemData.availableQuantity + qty;
+                            const newAllocations = { ...(itemData.allocations || {}) };
+                            const oldSiteQty = newAllocations[hardDeleteProtocol.destinationId] || 0;
+                            newAllocations[hardDeleteProtocol.destinationId] = Math.max(0, oldSiteQty - qty);
+                            transaction.update(itemRef, { availableQuantity: newAvailable, allocations: newAllocations });
+                        } else if (hardDeleteProtocol.type === "ZWROT") {
+                            const newAvailable = Math.max(0, itemData.availableQuantity - qty);
+                            const newAllocations = { ...(itemData.allocations || {}) };
+                            newAllocations[hardDeleteProtocol.sourceId] = (newAllocations[hardDeleteProtocol.sourceId] || 0) + qty;
+                            transaction.update(itemRef, { availableQuantity: newAvailable, allocations: newAllocations });
+                        }
+                    } else if (itemData.type === "UNIQUE") {
+                        const lastOpDate = itemData.lastOperationDate || hardDeleteResolvedLastOpDates[item.inventoryId] || "";
+                        const isNewerOrEqual = !lastOpDate || (pDate >= lastOpDate);
+                        const historyRef = doc(collection(db, `inventory/${item.inventoryId}/history`));
+
+                        if (isNewerOrEqual) {
+                            const selectedDestId = hardDeleteItemDestinations[item.inventoryId] || "MAGAZYN";
+                            const isGoingToWarehouse = selectedDestId === "MAGAZYN";
+                            const destSiteName = isGoingToWarehouse ? "MAGAZYN" : sites.find(s => s.id === selectedDestId)?.name || "Nieznana";
+
+                            transaction.update(itemRef, {
+                                currentLocation: destSiteName,
+                                availableQuantity: isGoingToWarehouse ? 1 : 0,
+                                allocations: isGoingToWarehouse ? {} : { [selectedDestId]: 1 }
+                            });
+
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status, user: `${user?.firstName} ${user?.lastName}`,
+                                description: `[USUNIĘCIE PROTOKOŁU] Trwale skasowano dokument ${hardDeleteProtocol.protocolId}. Sprzęt cofnięto fizycznie na: ${destSiteName}`
+                            });
+                        } else {
+                            transaction.set(historyRef, {
+                                date: new Date().toISOString(), documentDate: pDate, type: "WYCOFANIE", status: itemData.status, user: `${user?.firstName} ${user?.lastName}`,
+                                description: `[RETROSPEKTYWNE USUNIĘCIE PROTOKOŁU] Trwale skasowano dokument ${hardDeleteProtocol.protocolId}. Zmiana fizyczna zablokowana (nowsza historia).`
+                            });
+                        }
+                    }
+                }
+
+                transaction.delete(protocolRef);
+            });
+
+            alert("✅ Protokół i jego wpływ na stany zostały trwale usunięte z bazy danych.");
+            setIsHardDeleteModalOpen(false);
+            setHardDeleteProtocol(null);
             setExpandedProtocolId(null);
             fetchHistoryProtocols();
+            fetchData();
         } catch (error: any) {
-            alert("Błąd podczas usuwania protokołu: " + error);
+            alert("Błąd trwałego usuwania: " + error);
         } finally {
             setIsSubmitting(false);
         }
@@ -313,6 +435,8 @@ export default function ProtocolsHub() {
         setIsAddFromSiteOpen(false);
         setIsAddManualToAcceptOpen(false);
         setPaperBulkPickModal(null);
+        setIsHardDeleteModalOpen(false);
+        setHardDeleteProtocol(null);
 
         // --- NOWE: Czyszczenie autocomplete'a wpisu ręcznego ---
         setManualSuggestions([]);
@@ -2600,10 +2724,10 @@ export default function ProtocolsHub() {
                                                                         <button
                                                                             type="button"
                                                                             disabled={isSubmitting}
-                                                                            onClick={(e) => { e.stopPropagation(); handleDeleteProtocol(p); }}
-                                                                            className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                            onClick={(e) => { e.stopPropagation(); initiateHardDelete(p); }}
+                                                                            className="bg-red-700 hover:bg-red-800 text-white px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50 border border-red-900"
                                                                         >
-                                                                            🗑️ Usuń Protokół (Trwale)
+                                                                            🗑️ Usuń Protokół (Odzyskaj stany)
                                                                         </button>
                                                                     </div>
                                                                 </div>
@@ -4458,6 +4582,172 @@ export default function ProtocolsHub() {
                             <button onClick={() => { setIsCancelModalOpen(false); setCancelProtocol(null); }} className="px-6 py-2.5 text-slate-600 font-bold hover:bg-slate-100 rounded-xl transition">Przerwij i wróć</button>
                             <button onClick={confirmCancellation} disabled={isSubmitting} className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white font-black rounded-xl shadow-md disabled:bg-slate-400 transition flex items-center gap-2">
                                 {isSubmitting ? "Przetwarzanie..." : "Potwierdź Anulowanie"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: KREATOR TRWAŁEGO USUWANIA */}
+            {isHardDeleteModalOpen && hardDeleteProtocol && (
+                <div className="fixed inset-0 bg-black/80 z-[80] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl p-8 max-h-[90vh] overflow-y-auto animate-fade-in border-t-8 border-red-700">
+                        <div className="flex justify-between items-start mb-6 border-b pb-4">
+                            <div>
+                                <h2 className="text-2xl font-black text-red-700 flex items-center gap-2">
+                                    <span>⚠️</span> Trwałe Kasowanie i Odzyskiwanie Stanów
+                                </h2>
+                                <p className="text-xs text-slate-500 mt-1">
+                                    Kasujesz dokument: <span className="font-bold">{hardDeleteProtocol.protocolId}</span>
+                                    (Data operacji: {hardDeleteProtocol.documentDate || hardDeleteProtocol.createdAt?.split('T')[0]})
+                                </p>
+                            </div>
+                            <button onClick={() => { setIsHardDeleteModalOpen(false); setHardDeleteProtocol(null); }} className="text-3xl text-slate-400 hover:text-red-600 leading-none">&times;</button>
+                        </div>
+
+                        <div className="bg-red-50 text-red-900 text-xs p-4 rounded-xl border border-red-200 mb-6 flex gap-3 shadow-inner">
+                            <span className="text-2xl">🚨</span>
+                            <p className="font-medium">
+                                Ta operacja całkowicie wykasuje protokół z bazy. System spróbuje automatycznie cofnąć sprzęt do poprzednich lokalizacji i odzyskać ilości (BULK). <br />
+                                <strong className="font-black underline">Przejrzyj poniższe kroki przed ostatecznym zatwierdzeniem.</strong>
+                            </p>
+                        </div>
+
+                        <div className="space-y-6">
+                            {hardDeleteProtocol.items.map((item: any, idx: number) => {
+                                if (item.isNewManual || item.isGhostItem) return null;
+
+                                const localItem = inventory.find(i => i.id === item.inventoryId);
+                                if (!localItem) return (
+                                    <div key={idx} className="p-4 bg-slate-100 text-slate-500 rounded-xl text-xs">
+                                        Sprzęt: <b>{item.name}</b> został w międzyczasie usunięty z bazy. Przeliczanie dla tej pozycji zostanie pominięte.
+                                    </div>
+                                );
+
+                                // WIDOK DLA SPRZĘTU UNIQUE
+                                if (localItem.type === "UNIQUE") {
+                                    const pDate = hardDeleteProtocol.documentDate || hardDeleteProtocol.createdAt?.split('T')[0];
+                                    const lastOp = hardDeleteResolvedLastOpDates[item.inventoryId];
+                                    const isRetroactive = lastOp && pDate < lastOp;
+                                    const histories = hardDeleteItemHistories[item.inventoryId] || [];
+
+                                    return (
+                                        <div key={idx} className="p-5 border-2 border-slate-200 rounded-2xl bg-white space-y-4">
+                                            <div className="flex justify-between items-center border-b pb-2">
+                                                <div>
+                                                    <p className="font-black text-sm text-slate-800">{item.name}</p>
+                                                    <p className="text-[10px] font-mono text-slate-500">Narzędzie (UNIQUE) • Nr Mag: {item.inventoryNumber || "brak"}</p>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                <div className="space-y-3">
+                                                    {!isRetroactive ? (
+                                                        <div className="bg-orange-50 p-3 rounded-lg border border-orange-200">
+                                                            <label className="block text-[10px] font-black text-orange-800 uppercase mb-2">Gdzie ma trafić fizycznie po usunięciu z protokołu?</label>
+                                                            <select
+                                                                value={hardDeleteItemDestinations[item.inventoryId] || "MAGAZYN"}
+                                                                onChange={e => setHardDeleteItemDestinations(prev => ({ ...prev, [item.inventoryId]: e.target.value }))}
+                                                                className="w-full text-xs font-bold p-2 border border-orange-300 rounded outline-none"
+                                                            >
+                                                                <option value="MAGAZYN">Wraca na MAGAZYN GŁÓWNY</option>
+                                                                <optgroup label="Cofnij na wybraną budowę">
+                                                                    {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                                                </optgroup>
+                                                            </select>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-xs text-yellow-800 bg-yellow-50 p-3 rounded-lg border border-yellow-200 font-bold">
+                                                            ⚠️ Urządzenie ma już nowszą historię po dacie tego dokumentu. Zmiana jego fizycznej lokalizacji z tego poziomu jest zablokowana by uniknąć bałaganu. System zapisze tylko historię.
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                    <p className="text-[10px] font-black uppercase text-slate-400 mb-1 border-b pb-1">Ostatnia historia dla kontekstu:</p>
+                                                    <div className="space-y-1.5 max-h-24 overflow-y-auto pr-1 text-[10px]">
+                                                        {histories.length === 0 ? <p className="text-slate-400">Brak wpisów.</p> : histories.map((h, i) => (
+                                                            <div key={i} className="flex gap-2">
+                                                                <span className="font-bold text-slate-500 shrink-0">{h.documentDate || h.date?.split('T')[0]}</span>
+                                                                <span className="text-slate-700 leading-tight">{h.description}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                }
+
+                                // WIDOK DLA SPRZĘTU BULK
+                                if (localItem.type === "BULK") {
+                                    const qty = item.receivedQty !== undefined ? item.receivedQty : (item.quantity !== undefined ? item.quantity : 1);
+
+                                    let oldWh = localItem.availableQuantity;
+                                    let newWh = oldWh;
+
+                                    let siteId = hardDeleteProtocol.type === "WYDANIE" ? hardDeleteProtocol.destinationId : hardDeleteProtocol.sourceId;
+                                    let siteName = hardDeleteProtocol.type === "WYDANIE" ? hardDeleteProtocol.destinationName : hardDeleteProtocol.sourceName;
+
+                                    let oldSite = localItem.allocations?.[siteId] || 0;
+                                    let newSite = oldSite;
+
+                                    let arrowSign = "";
+
+                                    if (hardDeleteProtocol.type === "WYDANIE") {
+                                        newWh = oldWh + qty;
+                                        newSite = Math.max(0, oldSite - qty);
+                                        arrowSign = `Pobrane wydanie zostanie wycofane. Sprzęt wróci na magazyn, a zejdzie z budowy.`;
+                                    } else {
+                                        newWh = Math.max(0, oldWh - qty);
+                                        newSite = oldSite + qty;
+                                        arrowSign = `Zarejestrowany zwrot zostanie cofnięty. Zdejmie to ze stanu magazynu i znów dopisze jako dług budowy.`;
+                                    }
+
+                                    return (
+                                        <div key={idx} className="p-4 border-2 border-slate-200 rounded-2xl bg-slate-50 space-y-3">
+                                            <div className="flex justify-between items-center border-b pb-2">
+                                                <div>
+                                                    <p className="font-black text-sm text-slate-800">{item.name}</p>
+                                                    <p className="text-[10px] font-mono text-slate-500">Ilościowy (BULK) • Anulowana ilość: <b className="text-red-600">{qty} {item.unit}</b></p>
+                                                </div>
+                                                <div className="text-[9px] font-black uppercase bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                                                    Automatyczne Przeliczenie
+                                                </div>
+                                            </div>
+
+                                            <p className="text-xs font-bold text-slate-600">{arrowSign}</p>
+
+                                            <div className="grid grid-cols-2 gap-4 mt-2">
+                                                <div className="bg-white p-3 rounded-lg border border-slate-200 flex flex-col items-center justify-center text-center">
+                                                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-wider mb-1">Stan: Magazyn Główny</p>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm font-bold text-slate-400 line-through">{oldWh}</span>
+                                                        <span className="text-lg">➔</span>
+                                                        <span className="text-lg font-black text-blue-600">{newWh} {item.unit}</span>
+                                                    </div>
+                                                </div>
+                                                <div className="bg-white p-3 rounded-lg border border-slate-200 flex flex-col items-center justify-center text-center">
+                                                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-wider mb-1">Stan: {siteName}</p>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm font-bold text-slate-400 line-through">{oldSite}</span>
+                                                        <span className="text-lg">➔</span>
+                                                        <span className="text-lg font-black text-orange-600">{newSite} {item.unit}</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                }
+                                return null;
+                            })}
+                        </div>
+
+                        <div className="border-t border-slate-200 mt-8 pt-5 flex justify-end gap-3 bg-slate-50 -mx-8 -mb-8 p-6 rounded-b-3xl">
+                            <button onClick={() => { setIsHardDeleteModalOpen(false); setHardDeleteProtocol(null); }} className="px-6 py-3 text-slate-700 font-bold bg-white hover:bg-slate-100 border border-slate-300 rounded-xl transition shadow-sm">
+                                Przerwij
+                            </button>
+                            <button onClick={confirmHardDelete} disabled={isSubmitting} className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-black rounded-xl shadow-md disabled:bg-slate-400 transition flex items-center gap-2">
+                                {isSubmitting ? "Usuwanie z bazy..." : "Potwierdzam, Usuń Trwale"}
                             </button>
                         </div>
                     </div>
