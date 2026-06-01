@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useState, useEffect, Fragment } from "react";
-import { collection, getDocs, doc, setDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -241,6 +241,27 @@ export default function ProtocolsHub() {
             console.error("Błąd podczas pobierania historii protokołów:", error);
         } finally {
             setHistoryLoading(false);
+        }
+    };
+
+    const handleDeleteProtocol = async (protocol: any) => {
+        const confirmDelete = window.confirm(
+            `⚠️ CZY NA PEWNO CHCESZ USUNĄĆ PROTOKÓŁ Z BAZY DANYCH?\n\n` +
+            `Protokół: ${protocol.protocolId}\n` +
+            `Ta operacja jest nieodwracalna i trwale usunie dokument z bazy danych Firestore!`
+        );
+        if (!confirmDelete) return;
+
+        setIsSubmitting(true);
+        try {
+            await deleteDoc(doc(db, "protocols", protocol.dbId));
+            alert("Protokół został pomyślnie usunięty z bazy danych.");
+            setExpandedProtocolId(null);
+            fetchHistoryProtocols();
+        } catch (error: any) {
+            alert("Błąd podczas usuwania protokołu: " + error);
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -2555,27 +2576,36 @@ export default function ProtocolsHub() {
                                                                         </div>
                                                                     </div>
 
-                                                                    {/* OPCJA KOREKTY / ANULOWANIA PROTOKOŁU PRZEZ ADMINISTRATORA */}
-                                                                    {p.status !== "ANULOWANY" && p.type !== "KOREKTA" && (
-                                                                        <div className="border-t pt-3 flex justify-end gap-3">
-                                                                            <button
-                                                                                type="button"
-                                                                                disabled={isSubmitting}
-                                                                                onClick={(e) => { e.stopPropagation(); openCorrectionModal(p); }}
-                                                                                className="bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
-                                                                            >
-                                                                                ✏️ Wystaw Korektę (Popraw pozycje)
-                                                                            </button>
-                                                                            <button
-                                                                                type="button"
-                                                                                disabled={isSubmitting}
-                                                                                onClick={(e) => { e.stopPropagation(); handleCancelProtocol(p); }}
-                                                                                className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
-                                                                            >
-                                                                                🚫 Anuluj Protokół (Wycofaj stany)
-                                                                            </button>
-                                                                        </div>
-                                                                    )}
+                                                                    <div className="border-t pt-3 flex justify-end gap-3">
+                                                                        {p.status !== "ANULOWANY" && p.type !== "KOREKTA" && (
+                                                                            <>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    disabled={isSubmitting}
+                                                                                    onClick={(e) => { e.stopPropagation(); openCorrectionModal(p); }}
+                                                                                    className="bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                                >
+                                                                                    ✏️ Wystaw Korektę (Popraw pozycje)
+                                                                                </button>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    disabled={isSubmitting}
+                                                                                    onClick={(e) => { e.stopPropagation(); handleCancelProtocol(p); }}
+                                                                                    className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                                >
+                                                                                    🚫 Anuluj Protokół (Wycofaj stany)
+                                                                                </button>
+                                                                            </>
+                                                                        )}
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={isSubmitting}
+                                                                            onClick={(e) => { e.stopPropagation(); handleDeleteProtocol(p); }}
+                                                                            className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                        >
+                                                                            🗑️ Usuń Protokół (Trwale)
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
                                                             </td>
                                                         </tr>
@@ -2635,8 +2665,10 @@ export default function ProtocolsHub() {
                                                 ${isInCart ? 'bg-green-50 border-green-300' : isAvailable ? 'bg-white' : 'bg-slate-100 opacity-60'}
                                                 ${isBroken ? 'border-red-300 bg-red-50' : ''}`}>
                                                 <div>
-                                                    <p className="font-bold text-sm text-slate-800">{item.name}</p>
-                                                    <p className="text-[11px] font-mono text-blue-600">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                    <p className="font-bold text-sm text-slate-800">
+                                                        {item.name}
+                                                        {item.inventoryNumber && <span className="text-blue-600 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
+                                                    </p>
                                                     {!isAvailable && !isLooseMaterial && <p className="text-[10px] text-red-600 font-bold uppercase">📍 Poza magazynem: {item.currentLocation}</p>}
                                                     {(isAvailable || isLooseMaterial) && <p className="text-[10px] text-green-600 font-bold">Dostępne: {item.availableQuantity} {item.unit || "szt."}</p>}
                                                 </div>
@@ -2694,8 +2726,8 @@ export default function ProtocolsHub() {
                                                             <p className="font-bold text-sm text-slate-800">
                                                                 {cItem.name}
                                                                 {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Ręczny</span>}
+                                                                {!cItem.isManual && cItem.inventoryNumber && <span className="text-slate-500 font-mono ml-2 font-bold text-sm">Nr Mag: {cItem.inventoryNumber}</span>}
                                                             </p>
-                                                            {!cItem.isManual && <p className="text-[10px] text-slate-500 font-mono">Nr Mag: {cItem.inventoryNumber || "-"}</p>}
                                                         </div>
                                                         <div className="flex items-center gap-3">
                                                             {cItem.type === "BULK" || cItem.isManual ? (
@@ -2922,9 +2954,12 @@ export default function ProtocolsHub() {
                                     ) : filteredReturnInventory.map(item => (
                                         <div key={item.id} className="flex justify-between items-center p-3 border rounded-xl bg-white hover:border-blue-300 transition shadow-sm">
                                             <div>
-                                                <p className="font-bold text-sm text-slate-800">{item.name}</p>
+                                                <p className="font-bold text-sm text-slate-800">
+                                                    {item.name}
+                                                    {item.inventoryNumber && <span className="text-blue-600 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
+                                                </p>
                                                 <p className="text-[11px] font-mono text-slate-500">
-                                                    Nr Mag: {item.inventoryNumber || "-"} | Na budowie (Dostępne): <b className="text-blue-600">{item.availableToReturn}</b> {item.unit || "szt."}
+                                                    Na budowie (Dostępne): <b className="text-blue-600">{item.availableToReturn}</b> {item.unit || "szt."}
                                                 </p>
                                             </div>
                                             <button onClick={() => addToReturnCart(item)} className="bg-slate-100 hover:bg-blue-600 hover:text-white text-blue-600 w-10 h-10 rounded-lg font-black text-xl transition">+</button>
@@ -2964,8 +2999,8 @@ export default function ProtocolsHub() {
                                                             <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
                                                                 {cItem.name}
                                                                 {cItem.isManual && <span className="ml-2 text-[9px] bg-blue-200 text-blue-800 px-2 rounded uppercase border border-blue-300">Ręczny</span>}
+                                                                {!cItem.isManual && cItem.inventoryNumber && <span className={`text-slate-500 font-mono ml-2 font-bold ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber}</span>}
                                                             </p>
-                                                            {!cItem.isManual && <p className={`text-[10px] text-slate-500 font-mono mb-2 ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber || "-"}</p>}
                                                             {cItem.type === "UNIQUE" && cItem.isReturningMainItem !== false && (
                                                                 <select value={cItem.declaredStatus} onChange={(e) => setReturnCart(returnCart.map(i => i.dbId === cItem.dbId ? { ...i, declaredStatus: e.target.value } : i))} className="text-xs p-1 border rounded bg-white text-slate-700 outline-none">
                                                                     <option value="sprawne">✅ Sprawne</option>
@@ -3128,8 +3163,10 @@ export default function ProtocolsHub() {
                                             return (
                                                 <div key={item.id} className={`flex justify-between items-center p-3 border rounded-xl shadow-sm transition ${isFormallyOnSite ? 'bg-white hover:border-orange-300' : 'bg-red-50 border-red-200'}`}>
                                                     <div>
-                                                        <p className="font-bold text-sm text-slate-800">{item.name}</p>
-                                                        <p className="text-[11px] font-mono text-slate-500">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                        <p className="font-bold text-sm text-slate-800">
+                                                            {item.name}
+                                                            {item.inventoryNumber && <span className="text-orange-600 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
+                                                        </p>
                                                         {!isFormallyOnSite && <p className="text-[10px] text-red-600 font-bold uppercase mt-1">⚠️ Wg systemu na: {item.currentLocation}</p>}
                                                     </div>
                                                     <button onClick={() => addToPaperReturnCart({ ...item, availableToReturn: isFormallyOnSite ? item.availableToReturn : 1 })} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${isFormallyOnSite ? 'bg-orange-100 hover:bg-orange-500 text-orange-700 hover:text-white' : 'bg-red-500 text-white hover:bg-red-600 shadow'}`}>
@@ -3256,6 +3293,7 @@ export default function ProtocolsHub() {
                                                             <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
                                                                 {cItem.name}
                                                                 {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
+                                                                {!cItem.isManual && cItem.inventoryNumber && <span className={`text-slate-500 font-mono ml-2 font-bold text-sm ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber}</span>}
                                                             </p>
                                                             {!cItem.isManual && cItem.isReturningMainItem !== false && (
                                                                 <button
@@ -3267,7 +3305,7 @@ export default function ProtocolsHub() {
                                                                 </button>
                                                             )}
                                                         </div>
-                                                        {!cItem.isManual && <p className={`text-[10px] font-mono text-slate-500 mt-1 ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber || "-"} | Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
+                                                        {!cItem.isManual && <p className={`text-[10px] font-mono text-slate-500 mt-1 ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Max do zwrotu: {cItem.maxQty} {cItem.unit}</p>}
                                                     </div>
                                                     <button onClick={() => removePaperReturnItem(cItem.cartItemId)} className="text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-[10px] font-bold">&times; Usuń</button>
                                                 </div>
@@ -3506,6 +3544,7 @@ export default function ProtocolsHub() {
                                                                     <div className="flex items-center gap-3 flex-wrap">
                                                                         <p className="font-bold text-slate-800 pr-4">
                                                                             {item.name}
+                                                                            {!item.isNewManual && item.inventoryNumber && <span className="text-purple-700 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
                                                                             {item.isNewManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
                                                                             {item.isGhostItem && <span className="ml-2 text-[9px] bg-slate-200 text-slate-700 px-2 rounded uppercase border border-slate-300">Tylko Osprzęt</span>}
                                                                             {item.declaredQty === 0 && !item.isNewManual && !item.isGhostItem && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}

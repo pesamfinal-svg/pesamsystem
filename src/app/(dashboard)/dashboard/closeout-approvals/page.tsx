@@ -430,9 +430,11 @@ export default function CloseoutApprovalsPage() {
                                     )}
 
                                     {/* Opcja wysyłki próbnej/testowej */}
-                                    <button onClick={() => handleSendTestEmail(selectedCloseout)} disabled={isProcessing} className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold px-4 py-3 rounded-xl transition">
-                                        🧪 Testuj e-mail PDF
-                                    </button>
+                                    {isSandboxActive && (
+                                        <button onClick={() => handleSendTestEmail(selectedCloseout)} disabled={isProcessing} className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold px-4 py-3 rounded-xl transition">
+                                            🧪 Testuj e-mail PDF
+                                        </button>
+                                    )}
 
                                     {selectedCloseout.status === "OCZEKUJE_NA_KIEROWNIKA" && !canManageGlobally && (
                                         <button

@@ -88,6 +88,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     // Generujemy wyselekcjonowaną listę
     const visibleMenuItems = menuItems.filter(canViewMenuItem);
 
+    // Sprawdzamy czy dany element menu powinien być podświetlony
+    const isActive = (itemPath: string) => {
+        if (pathname === itemPath) return true;
+        if (itemPath !== "/dashboard" && pathname.startsWith(itemPath)) {
+            // Jeśli istnieje inny widoczny element z bardziej precyzyjną ścieżką, nie podświetlamy tego
+            return !visibleMenuItems.some(
+                (other) =>
+                    other.path !== itemPath &&
+                    other.path.startsWith(itemPath) &&
+                    pathname.startsWith(other.path)
+            );
+        }
+        return false;
+    };
+
     return (
         <div className="flex h-screen bg-slate-100">
             <aside className="w-64 bg-slate-900 text-white flex flex-col shadow-xl">
@@ -97,7 +112,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <nav className="flex-1 py-4 px-3 space-y-2 overflow-y-auto">
                     {visibleMenuItems.map((item) => (
                         <Link key={item.path} href={item.path}>
-                            <div className={`flex items-center gap-3 px-4 py-3 rounded-lg transition cursor-pointer ${pathname.startsWith(item.path) && item.path !== "/dashboard" || pathname === item.path
+                            <div className={`flex items-center gap-3 px-4 py-3 rounded-lg transition cursor-pointer ${isActive(item.path)
                                 ? "bg-blue-600 text-white"
                                 : "text-slate-300 hover:bg-slate-800 hover:text-white"
                                 }`}>

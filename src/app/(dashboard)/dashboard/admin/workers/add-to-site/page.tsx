@@ -306,8 +306,37 @@ export default function AddToSitePage() {
                                     onClick={() => { setItemType("UNIQUE"); setItemName(""); setSelectedSuggestionItem(null); }}
                                     className={`flex-1 py-3 rounded-lg font-bold text-xs transition ${itemType === 'UNIQUE' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}
                                 >
-                                    🔨 SPRZĘT UNIKALNY (UNIQUE - np. młotki, szlifierki)
+                                    ⚡ SPRZĘT Z NUMEREM INWENTARZOWYM (UNIQUE - np. elektronarzędzia, maszyny)
                                 </button>
+                            </div>
+
+                            {/* Informacja pomocnicza dla użytkownika */}
+                            <div className={`mt-3 p-4 rounded-xl border transition-all duration-300 ${
+                                itemType === "BULK" 
+                                    ? "bg-slate-50 border-slate-200 text-slate-600" 
+                                    : "bg-amber-50 border-amber-200 text-amber-900"
+                            }`}>
+                                {itemType === "BULK" ? (
+                                    <div className="flex items-start gap-3">
+                                        <span className="text-lg">ℹ️</span>
+                                        <div>
+                                            <p className="text-xs font-bold text-slate-800">Materiały i drobnica (BULK)</p>
+                                            <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                                                Przedmioty rozliczane wyłącznie ilościowo (np. metrówki, tarcze, taśmy, rękawice). Trafiają bezpośrednio na stan budowy i omijają magazyn główny. Nie wymagają nadawania indywidualnych numerów.
+                                            </p>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-start gap-3">
+                                        <span className="text-lg">⚠️</span>
+                                        <div>
+                                            <p className="text-xs font-bold text-amber-950">Sprzęt z numerem inwentarzowym (UNIQUE)</p>
+                                            <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
+                                                Przedmioty traktowane jednostkowo (np. wiertarki, szlifierki, niwelatory). Każda sztuka zostanie dodana do bazy z tymczasowym kodem i statusem <span className="font-bold underline">"do nadania numeru"</span>. Przy zwrocie sprzętu magazynier będzie musiał nadać mu stały numer inwentarzowy.
+                                            </p>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         </div>
 

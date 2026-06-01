@@ -826,28 +826,53 @@ export default function InventoryPage() {
                                 </tr>
                             </thead>
                             <tbody className="text-sm">
-                                {sortedFilteredItems.map(item => (
-                                    <tr key={item.id} className="border-b border-slate-100 hover:bg-slate-50 transition">
-                                        <td className="p-4"><img src={item.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-md border" /></td>
-                                        <td className="p-4 cursor-pointer font-bold text-slate-800" onClick={() => openItemCard(item)}>
-                                            {item.name}
-                                            <p className="text-[10px] text-slate-400 font-bold uppercase">{item.category} / {item.subcategory}</p>
-                                        </td>
-                                        <td className="p-4 text-center font-mono font-bold text-blue-600">{item.inventoryNumber}</td>
-                                        <td className="p-4">
-                                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${item.status === 'sprawne' ? 'bg-green-100 text-green-700' : item.status === 'uszkodzone' ? 'bg-red-100 text-red-700' : item.status === 'do przeglądu' ? 'bg-yellow-100 text-yellow-800' : 'bg-slate-100 text-slate-700'}`}>
-                                                {item.status}
-                                            </span>
-                                        </td>
-                                        <td className="p-4 text-slate-600">{item.currentLocation}</td>
-                                        <td className="p-4 text-center font-bold">{item.availableQuantity} / {item.totalQuantity}</td>
-                                        <td className="p-4 text-right space-x-3 whitespace-nowrap">
-                                            <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
-                                            <span className="text-slate-300">|</span>
-                                            <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
-                                        </td>
-                                    </tr>
-                                ))}
+                                {sortedFilteredItems.map(item => {
+                                    const isPendingNumber = item.status === "do nadania numeru" || item.inventoryNumber?.startsWith("DO_NADANIA");
+                                    return (
+                                        <tr 
+                                            key={item.id} 
+                                            className={`border-b border-slate-100 transition ${
+                                                isPendingNumber 
+                                                    ? "bg-red-50/70 hover:bg-red-100/80 border-l-4 border-l-red-500" 
+                                                    : "hover:bg-slate-50"
+                                            }`}
+                                        >
+                                            <td className="p-4"><img src={item.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-md border" /></td>
+                                            <td className="p-4 cursor-pointer font-bold text-slate-800" onClick={() => openItemCard(item)}>
+                                                <div className="flex items-center gap-2">
+                                                    {item.name}
+                                                    {isPendingNumber && (
+                                                        <span className="bg-red-600 text-white text-[9px] px-2 py-0.5 rounded-full font-black animate-pulse uppercase tracking-wider">
+                                                            ⚠️ DO NADANIA
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <p className="text-[10px] text-slate-400 font-bold uppercase">{item.category} / {item.subcategory}</p>
+                                            </td>
+                                            <td className={`p-4 text-center font-mono font-bold ${
+                                                isPendingNumber ? "text-red-600 animate-pulse font-black" : "text-blue-600"
+                                            }`}>{item.inventoryNumber}</td>
+                                            <td className="p-4">
+                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                                                    item.status === 'sprawne' ? 'bg-green-100 text-green-700' : 
+                                                    item.status === 'uszkodzone' ? 'bg-red-100 text-red-700' : 
+                                                    item.status === 'do przeglądu' ? 'bg-yellow-100 text-yellow-800' : 
+                                                    item.status === 'do nadania numeru' ? 'bg-red-600 text-white animate-pulse' :
+                                                    'bg-slate-100 text-slate-700'
+                                                }`}>
+                                                    {item.status}
+                                                </span>
+                                            </td>
+                                            <td className="p-4 text-slate-600">{item.currentLocation}</td>
+                                            <td className="p-4 text-center font-bold">{item.availableQuantity} / {item.totalQuantity}</td>
+                                            <td className="p-4 text-right space-x-3 whitespace-nowrap">
+                                                <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                                <span className="text-slate-300">|</span>
+                                                <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
