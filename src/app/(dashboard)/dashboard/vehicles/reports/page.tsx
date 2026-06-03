@@ -40,6 +40,7 @@ export default function FleetReportsHub() {
 
     // Stan strefy Canvas (prawa strona)
     const [activeWidget, setActiveWidget] = useState<CanvasWidget>({ type: "none", data: null });
+    const [dbCache, setDbCache] = useState<any>(null); // DODANO: Pamięć podręczna pobranych danych
     const chatEndRef = useRef<HTMLDivElement>(null);
 
     const canView = user ? hasPermission("viewVehicles", user.rolePermissions, user.permissionOverrides) : false;
@@ -94,8 +95,9 @@ export default function FleetReportsHub() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     question: userMsg,
-                    fleetData: fleetData, // Przekazujemy wiedzę
-                    currentHistory: chatHistory
+                    // fleetData zniknęło, nie wysyłamy całej bazy!
+                    currentHistory: chatHistory,
+                    cachedData: dbCache // DODANO: Wysyłamy pamięć z poprzedniego kroku
                 })
             });
 
@@ -105,6 +107,11 @@ export default function FleetReportsHub() {
 
             // Odpowiedź tekstowa na czacie
             setChatHistory(prev => [...prev, { role: "ai", text: data.message || "Oto wynik mojej analizy na ekranie obok." }]);
+
+            // DODANO: Zapisujemy nową pamięć z backendu (jeśli AI coś pobrało)
+            if (data.newCache && Object.keys(data.newCache).length > 0) {
+                setDbCache(data.newCache);
+            }
 
             // Jeśli AI zdecydowało się wygenerować akcję UI
             if (data.uiAction) {
