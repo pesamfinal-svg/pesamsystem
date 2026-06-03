@@ -52,6 +52,7 @@ export default function VehiclesHub() {
         mileage: 0, comments: "", location: "", repairType: "", category: "Inne"
     });
     const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]); // Tablica załączników (dowolna ilość)
+    const [invoiceFile, setInvoiceFile] = useState<File | null>(null); // Zostawiamy dla kompatybilności
     const [isAiParsing, setIsAiParsing] = useState(false);
 
     // --- STANY IMPORTERA CSV ---
@@ -64,7 +65,7 @@ export default function VehiclesHub() {
     const [bulkUploadProgress, setBulkUploadProgress] = useState("");
 
     // ==========================================
-    // LOGIKA POJAZDÓW
+    // LOGIKA BAZODANOWA (POBIERANIE)
     // ==========================================
     const fetchVehicles = async () => {
         setLoading(true);
@@ -131,9 +132,6 @@ export default function VehiclesHub() {
         setVehicleForm(vehicle); setIsEditing(true); setIsVehicleModalOpen(true);
     };
 
-    // ==========================================
-    // LOGIKA NAPRAW I HISTORII
-    // ==========================================
     const fetchRepairs = async (vehicleId: string) => {
         setIsRepairsLoading(true);
         try {
@@ -163,9 +161,10 @@ export default function VehiclesHub() {
     const closeHistoryModal = () => {
         setSelectedVehicle(null);
         setRepairs([]);
-        handleCancelEditRepair();
+        handleCancelEditRepair(); // Czyścimy też formularz z ewentualnej edycji
     };
 
+    // Włączenie trybu edycji dla wybranej naprawy
     const handleStartEditRepair = (repair: Repair) => {
         setIsEditingRepair(true);
         setEditingRepairId(repair.id);
@@ -184,6 +183,7 @@ export default function VehiclesHub() {
         setInvoiceFiles([]);
     };
 
+    // Wyłączenie trybu edycji (powrót do dodawania nowej naprawy)
     const handleCancelEditRepair = () => {
         setIsEditingRepair(false);
         setEditingRepairId(null);
@@ -193,8 +193,10 @@ export default function VehiclesHub() {
             comments: "", location: "", repairType: "", category: "Inne"
         });
         setInvoiceFiles([]);
+        setInvoiceFile(null);
     };
 
+    // Funkcja przechwytująca naciśnięcie Ctrl+V i dodająca zrzuty ekranu jako pliki
     const handleClipboardPaste = (e: React.ClipboardEvent) => {
         const items = e.clipboardData.items;
         for (let i = 0; i < items.length; i++) {
@@ -208,15 +210,13 @@ export default function VehiclesHub() {
         }
     };
 
-    // ==========================================
-    // ODCZYTYWANIE DANYCH Z WIELU FAKTUR/SCREENSHOTÓW PRZEZ AI (OCR)
-    // ==========================================
+    // Analiza 1, 2 lub 3 plików jednocześnie (KAS + Specyfikacja)
     const handleParseInvoiceWithAI = async () => {
-        if (invoiceFiles.length === 0) return alert("Najpierw wybierz plik lub wklej zrzut ekranu (Ctrl+V)!");
+        if (invoiceFiles.length === 0) return alert("Najpierw dodaj przynajmniej jeden plik (lub wklej zrzut ekranu)!");
         setIsAiParsing(true);
 
         try {
-            // Konwertujemy wszystkie załączone pliki/zrzuty ekranu na format Base64
+            // Konwertujemy pliki do formatu Base64
             const filePromises = invoiceFiles.map(async (file) => {
                 const base64: string = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
@@ -229,7 +229,7 @@ export default function VehiclesHub() {
 
             const processedFiles = await Promise.all(filePromises);
 
-            // Wysyłamy tablicę plików do backendu
+            // Wysyłamy tablicę plików do zsynchronizowanego API
             const response = await fetch('/api/parse-invoice', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -240,7 +240,7 @@ export default function VehiclesHub() {
 
             if (!response.ok) throw new Error(data.error || "Nieudana analiza plików przez AI");
 
-            // Wypełnianie pól formularza na podstawie analizy wszystkich przesłanych dokumentów
+            // Wypełnianie pól formularza
             setRepairForm(prev => ({
                 ...prev,
                 date: data.date || prev.date,
@@ -248,10 +248,11 @@ export default function VehiclesHub() {
                 accountingNumber: data.accountingNumber || prev.accountingNumber,
                 mileage: data.mileage || prev.mileage,
                 comments: data.comments || prev.comments,
-                repairType: data.repairType || prev.repairType
+                repairType: data.repairType || prev.repairType,
+                location: data.location || prev.location // AUTOMATYCZNY WARSZTAT
             }));
 
-            alert("✨ AI odczytało wszystkie załączone zrzuty ekranu/pliki i wypełniło formularz!");
+            alert("✨ AI przeanalizowało wszystkie dokumenty i uzupełniło formularz! Sprawdź dane przed zapisem.");
         } catch (error: any) {
             alert("Błąd analizy AI: " + error.message);
         } finally {
@@ -260,7 +261,7 @@ export default function VehiclesHub() {
     };
 
     // ==========================================
-    // BEZLIMITOWY ZAPIS NAPRAWY (Fuzja N-plików do jednego PDF)
+    // ZAPIS NAPRAWY (Wieloplikowa fuzja do jednego PDF)
     // ==========================================
     const handleSaveRepair = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -276,11 +277,11 @@ export default function VehiclesHub() {
                 let fileNameToUpload: string;
 
                 if (invoiceFiles.length === 1 && invoiceFiles[0].type === "application/pdf") {
-                    // Wyjątek: Jeśli wgrywamy tylko 1 plik i to jest już PDF -> nie ma potrzeby fuzji
+                    // 1 plik i to już PDF -> bez łączenia
                     fileToUpload = invoiceFiles[0];
                     fileNameToUpload = invoiceFiles[0].name;
                 } else {
-                    // Wiele plików (lub jedno zdjęcie/screenshot) -> robimy fuzję do formatu PDF
+                    // Wiele plików (lub jedno zdjęcie) -> fuzja do PDF
                     const filePromises = invoiceFiles.map(async (file) => {
                         const base64: string = await new Promise((resolve, reject) => {
                             const reader = new FileReader();
@@ -293,7 +294,6 @@ export default function VehiclesHub() {
 
                     const processedFiles = await Promise.all(filePromises);
 
-                    // Wysyłamy do serwera do złączenia w jeden PDF
                     const mergeResponse = await fetch('/api/merge-attachments', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -303,7 +303,6 @@ export default function VehiclesHub() {
                     const mergeData = await mergeResponse.json();
                     if (!mergeResponse.ok) throw new Error(mergeData.error || "Błąd łączenia plików");
 
-                    // Konwertujemy Base64 z powrotem na plik PDF (Blob)
                     const byteCharacters = atob(mergeData.pdfBase64);
                     const byteNumbers = new Array(byteCharacters.length);
                     for (let i = 0; i < byteCharacters.length; i++) {
@@ -314,7 +313,6 @@ export default function VehiclesHub() {
                     fileNameToUpload = `Polaczone_Dokumenty_${Date.now()}.pdf`;
                 }
 
-                // Wgrywamy jeden gotowy plik PDF do Storage
                 const fileRef = ref(storage, `vehicles/invoices/${Date.now()}_${fileNameToUpload}`);
                 await uploadBytes(fileRef, fileToUpload);
                 finalInvoiceUrl = await getDownloadURL(fileRef);
