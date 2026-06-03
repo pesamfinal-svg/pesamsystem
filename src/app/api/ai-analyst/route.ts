@@ -1,8 +1,13 @@
 // src/app/api/ai-analyst/route.ts
 import { NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
-import { db } from "@/lib/firebase/config";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import * as admin from 'firebase-admin';
+
+// Inicjalizacja Admin SDK (wymagana po stronie serwera)
+if (!admin.apps.length) {
+    admin.initializeApp(); // Automatycznie autoryzuje się w Firebase App Hosting
+}
+const adminDb = admin.firestore();
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -16,7 +21,7 @@ export const maxDuration = 60;
 // 1. BEZPOŚREDNIE FUNKCJE BAZODANOWE (Wywoływane przez serwer na żądanie AI)
 // =========================================================================
 async function dbGetVehiclesList() {
-    const snap = await getDocs(collection(db, "vehicles"));
+    const snap = await adminDb.collection("vehicles").get();
     return snap.docs.map(doc => {
         const data = doc.data();
         return {
@@ -29,12 +34,14 @@ async function dbGetVehiclesList() {
 }
 
 async function dbGetRepairs(vehicleId?: string) {
-    let q = query(collection(db, "repairs"));
+    let queryRef: any = adminDb.collection("repairs");
+
     if (vehicleId) {
-        q = query(collection(db, "repairs"), where("vehicleId", "==", vehicleId));
+        queryRef = queryRef.where("vehicleId", "==", vehicleId);
     }
-    const snap = await getDocs(q);
-    return snap.docs.map(doc => {
+
+    const snap = await queryRef.get();
+    return snap.docs.map((doc: any) => {
         const data = doc.data();
 
         let rawCost = data.cost;
