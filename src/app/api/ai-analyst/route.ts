@@ -54,18 +54,32 @@ async function dbGetVehiclesList() {
 }
 
 async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
-    let queryRef: any = adminDb.collection("repairs");
+    let allDocs: any[] = [];
 
     if (vehicleId) {
-        queryRef = queryRef.where("vehicleId", "==", vehicleId);
+        // Pobieranie dla jednego konkretnego auta
+        const snap = await adminDb.collection("repairs").where("vehicleId", "==", vehicleId).get();
+        allDocs = snap.docs;
     } else if (vehicleIds && Array.isArray(vehicleIds) && vehicleIds.length > 0) {
-        // Limit do 10 ze względu na ograniczenia operatora 'in' w Firestore
-        const limitedIds = vehicleIds.slice(0, 10);
-        queryRef = queryRef.where("vehicleId", "in", limitedIds);
+        // Ominięcie limitów Firestore: Dzielenie zapytań na paczki po max 30 aut
+        const chunks = [];
+        for (let i = 0; i < vehicleIds.length; i += 30) {
+            chunks.push(vehicleIds.slice(i, i + 30));
+        }
+
+        // Równoległe pobranie wszystkich paczek
+        const snapPromises = chunks.map(chunk => adminDb.collection("repairs").where("vehicleId", "in", chunk).get());
+        const snaps = await Promise.all(snapPromises);
+
+        // Spłaszczenie wyników do jednej tablicy
+        allDocs = snaps.flatMap(snap => snap.docs);
+    } else {
+        // Pobranie wszystkich napraw, jeśli AI w ogóle nie nałoży filtrów
+        const snap = await adminDb.collection("repairs").get();
+        allDocs = snap.docs;
     }
 
-    const snap = await queryRef.get();
-    return snap.docs.map((doc: any) => {
+    return allDocs.map((doc: any) => {
         const data = doc.data();
 
         let rawCost = data.cost;
@@ -94,6 +108,11 @@ async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
 const GET_VEHICLES_TOOL = {
     name: "fetchVehiclesFromDB",
     description: "Pobiera listę pojazdów z bazy danych Firestore.",
+    parameters: { type: Type.OBJECT, properties: {} }
+};
+const DELEGATE_ANALYSIS_TOOL = {
+    name: "delegateToDataAnalyst",
+    description: "Wywołaj to narzędzie ZAWSZE, gdy użytkownik prosi o zestawienie, historię napraw, statystyki, koszty, tabele lub wykresy i wiesz już, dla jakiego pojazdu to zrobić. Uruchomi to Głównego Analityka.",
     parameters: { type: Type.OBJECT, properties: {} }
 };
 
@@ -190,71 +209,62 @@ export async function POST(req: Request) {
         // ==========================================
         logs.push("Uruchomiono Agenta Recepcjonistę (Gemini 3.5 Flash)");
 
+        let isRequestingAnalysis = false; // Domyślnie zakładamy luźną rozmowę
+
         let routerResponse = await generateContentWithRetry({
             model: 'gemini-3.5-flash',
             contents: [
                 { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] }
             ],
             config: {
-                systemInstruction: "Jesteś asystentem Floty PESAM. Odpowiadaj naturalnie. Jeśli użytkownik pyta o flotę (np. o naprawy, koszty, konkretną markę), a Ty jeszcze nie pobrałeś listy pojazdów, ZAWSZE najpierw wywołaj narzędzie 'fetchVehiclesFromDB', aby sprawdzić do czego masz wgląd. Gdy znasz pojazdy, dopytaj użytkownika o szczegóły (np. konkretne auto). Gdy zapytanie jest precyzyjne, poinformuj krótko, że przekazujesz sprawę do analizy kosztów i zakończ wypowiedź.",
-                temperature: 0.3,
-                tools: [{ functionDeclarations: [GET_VEHICLES_TOOL] }]
+                systemInstruction: "Jesteś asystentem Floty PESAM. Odpowiadaj naturalnie. 1) Jeśli pytania dotyczą floty, ZAWSZE najpierw wywołaj 'fetchVehiclesFromDB'. 2) Jeśli wiesz, jakiego auta/aut dotyczy rozmowa, a użytkownik prosi o wyciągnięcie danych (historia, koszty, naprawy, tabele), MUSISZ wywołać narzędzie 'delegateToDataAnalyst'. Wtedy dopisz krótką wiadomość: 'Przekazuję do analityka...'",
+                temperature: 0.1,
+                tools: [{ functionDeclarations: [GET_VEHICLES_TOOL, DELEGATE_ANALYSIS_TOOL] }]
             }
         });
 
-        if (routerResponse.functionCalls?.some((call: any) => call.name === "fetchVehiclesFromDB")) {
-            const call = routerResponse.functionCalls.find((c: any) => c.name === "fetchVehiclesFromDB")!;
+        let calls = routerResponse.functionCalls || [];
 
-            logs.push("Flash: Wykryto potrzebę sprawdzenia bazy. Wywołano pobieranie listy pojazdów z Firestore...");
+        // Jeśli Flash użył przycisku od razu
+        if (calls.some((c: any) => c.name === "delegateToDataAnalyst")) {
+            isRequestingAnalysis = true;
+        }
+
+        // Jeśli Flash najpierw sprawdza bazę aut
+        if (calls.some((c: any) => c.name === "fetchVehiclesFromDB")) {
+            const call = calls.find((c: any) => c.name === "fetchVehiclesFromDB")!;
+            logs.push("Flash: Sprawdzam bazę pojazdów Firestore...");
             const vehiclesList = await dbGetVehiclesList();
-            logs.push(`Flash: Pomyślnie zaimportowano ${vehiclesList.length} pojazdów z bazy.`);
 
             const callAny = call as any;
             const partAny = (routerResponse.candidates?.[0]?.content?.parts?.[0]) as any;
+            const flashSig = callAny.thoughtSignature || partAny?.thoughtSignature || "skip_thought_signature_validator";
 
-            const flashSig = callAny.thoughtSignature ||
-                partAny?.thoughtSignature ||
-                "skip_thought_signature_validator";
-
+            // Drugie pytanie do Flasha po otrzymaniu listy aut
             routerResponse = await generateContentWithRetry({
                 model: 'gemini-3.5-flash',
                 contents: [
                     { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] },
-                    {
-                        role: 'model',
-                        parts: [{
-                            functionCall: { name: call.name, args: call.args },
-                            thoughtSignature: flashSig
-                        }]
-                    },
-                    {
-                        role: 'user',
-                        parts: [{
-                            functionResponse: {
-                                name: "fetchVehiclesFromDB",
-                                response: { vehicles: vehiclesList }
-                            }
-                        }]
-                    }
+                    { role: 'model', parts: [{ functionCall: { name: call.name, args: call.args }, thoughtSignature: flashSig }] },
+                    { role: 'user', parts: [{ functionResponse: { name: "fetchVehiclesFromDB", response: { vehicles: vehiclesList } } }] }
                 ],
                 config: {
-                    systemInstruction: "Znasz już lista pojazdów z bazy. Użyj tych danych, by mądrze dopytać użytkownika, o co dokładnie mu chodzi, podając przykłady aut z listy (np. FORD TRANSIT RDE 90WP). Nigdy nie zmyślaj aut, których nie ma na tej liście.",
-                    temperature: 0.1
+                    systemInstruction: "Znasz już auta. Jeśli zapytanie wskazuje na chęć uzyskania konkretnych danych/historii z bazy napraw, UŻYJ narzędzia 'delegateToDataAnalyst'. Jeśli brakuje Ci danych (np. nie wiesz, który to Opel), dopytaj użytkownika tekstowo.",
+                    temperature: 0.1,
+                    tools: [{ functionDeclarations: [DELEGATE_ANALYSIS_TOOL] }]
                 }
             });
+
+            calls = routerResponse.functionCalls || [];
+            // Jeśli Flash po poznaniu aut nacisnął przycisk
+            if (calls.some((c: any) => c.name === "delegateToDataAnalyst")) {
+                isRequestingAnalysis = true;
+            }
         }
 
-        const isRequestingAnalysis = question.toLowerCase().includes("koszt") ||
-            question.toLowerCase().includes("wykres") ||
-            question.toLowerCase().includes("analiz") ||
-            question.toLowerCase().includes("zrób") ||
-            question.toLowerCase().includes("tabel") ||
-            question.toLowerCase().includes("pokaż") ||
-            question.toLowerCase().includes("szczegół") ||
-            currentHistory.length > 2;
-
+        // Zabezpieczenie: Jeśli Flash zdecydował, że nie deleguje sprawy, zwracamy jego tekst i kończymy.
         if (!isRequestingAnalysis) {
-            logs.push("Recepcjonista zakończył pracę. Brak zapytania analitycznego - wysłano odpowiedź tekstową.");
+            logs.push("Recepcjonista uznał, że to tylko rozmowa lub doprecyzowanie. Nie uruchamia Głównego Analityka.");
             return NextResponse.json({
                 message: routerResponse.text || "W czym mogę pomóc?",
                 uiAction: null,
@@ -268,8 +278,8 @@ export async function POST(req: Request) {
         logs.push("Przekazano sprawę do Głównego Analityka (Gemini 3.1 Pro)");
 
         const cacheString = cachedData && Object.keys(cachedData).length > 0
-            ? `Oto dane pobrane z bazy w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich, zamiast odpytywać bazę ponownie.`
-            : `Nie masz jeszcze pobranych żadnych danych z bazy. Jeśli potrzebujesz aut lub napraw, użyj odpowiednich narzędzi (fetchVehiclesFromDB, fetchRepairsFromDB).`;
+            ? `W pamięci podręcznej (Cache) posiadasz dane pobrane w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich TYLKO wtedy, gdy pasują do aktualnego zapytania. Jeśli użytkownik pyta o inne auto lub w Cache nie ma wystarczających danych, MUSISZ zignorować ten Cache i użyć narzędzi ('fetchVehiclesFromDB', 'fetchRepairsFromDB'), aby pobrać z bazy nowe rekordy!`
+            : `Nie masz jeszcze pobranych żadnych danych z bazy. Aby przeanalizować flotę, wywołaj niezbędne narzędzia (fetchVehiclesFromDB, fetchRepairsFromDB).`;
 
         if (cachedData && Object.keys(cachedData).length > 0) {
             logs.push("Analityk: Wykryto dane w lokalnej pamięci podręcznej (Cache). Pominięto ponowne zapytania do bazy Firestore.");

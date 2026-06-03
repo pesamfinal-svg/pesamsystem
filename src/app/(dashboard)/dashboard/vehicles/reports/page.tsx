@@ -50,7 +50,13 @@ export default function FleetReportsHub() {
         if (isThinking) {
             setThinkingStep(0);
             interval = setInterval(() => {
-                setThinkingStep(prev => (prev + 1) % thinkingMessages.length);
+                setThinkingStep(prev => {
+                    // Zatrzymanie rotacji na ostatnim, głównym statusie (nie wraca do 'Inicjalizacji')
+                    if (prev < thinkingMessages.length - 1) {
+                        return prev + 1;
+                    }
+                    return prev;
+                });
             }, 3000); // Zmiana komunikatu co 3 sekundy
         } else {
             clearInterval(interval);
@@ -150,6 +156,26 @@ export default function FleetReportsHub() {
     };
 
     const renderCanvas = () => {
+        // --- NOWOŚĆ: PEŁNOEKRANOWY EKRAN ŁADOWANIA PRACY AI NA CANVASIE ---
+        if (isThinking) {
+            return (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-50/90 backdrop-blur-sm rounded-3xl space-y-5 animate-fade-in z-20">
+                    <div className="relative flex items-center justify-center">
+                        {/* Kręcący się pierścień z robotem */}
+                        <div className="w-20 h-20 border-4 border-blue-100 rounded-full"></div>
+                        <div className="absolute w-20 h-20 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                        <span className="absolute text-3xl">🤖</span>
+                    </div>
+                    <div className="text-center space-y-2 px-6">
+                        <p className="font-black text-slate-700 text-base">Trwa analiza danych floty PESAM...</p>
+                        <p className="text-xs text-blue-600 font-bold animate-pulse tracking-wide uppercase">
+                            {thinkingMessages[thinkingStep]}
+                        </p>
+                    </div>
+                </div>
+            );
+        }
+
         if (activeWidget.type === "none") {
             return (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-300 space-y-4">
