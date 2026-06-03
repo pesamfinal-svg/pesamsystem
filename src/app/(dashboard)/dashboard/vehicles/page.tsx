@@ -6,7 +6,7 @@ import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "fire
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
-import Link from "next/link"; // Dodany import dla przycisku Raportów
+import Link from "next/link";
 
 // --- INTERFEJSY ---
 interface Vehicle {
@@ -19,7 +19,7 @@ interface Repair {
     id: string; vehicleId: string; date: string; cost: number; accountingNumber: string;
     mileage: number; comments: string; location: string; repairType: string;
     category: string; invoiceUrl?: string; legacyId?: string;
-    partsList?: string[]; // Tablica części pod wyszukiwarkę (Nowe!)
+    partsList?: string[];
 }
 
 export default function VehiclesHub() {
@@ -55,6 +55,7 @@ export default function VehiclesHub() {
         partsList: []
     });
     const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]); // Tablica załączników (dowolna ilość)
+    const [invoiceFile, setInvoiceFile] = useState<File | null>(null); // Trzymamy dla kompatybilności
     const [isAiParsing, setIsAiParsing] = useState(false);
     const [showAiSuccessBanner, setShowAiSuccessBanner] = useState(false); // Baner zamiast alertu
 
@@ -66,6 +67,12 @@ export default function VehiclesHub() {
     // --- STANY MASOWEGO IMPORTERA SKANÓW ---
     const [isBulkUploading, setIsBulkUploading] = useState(false);
     const [bulkUploadProgress, setBulkUploadProgress] = useState("");
+
+    // --- STANY MASOWEGO AUTOMATU UZUPEŁNIANIA AI ---
+    const [isProcessingEnrich, setIsProcessingEnrich] = useState(false);
+    const [enrichIndex, setEnrichIndex] = useState(0);
+    const [enrichTotal, setEnrichTotal] = useState(0);
+    const [enrichLogs, setEnrichLogs] = useState<string[]>([]);
 
     // ==========================================
     // LOGIKA BAZODANOWA (POBIERANIE)
@@ -367,7 +374,7 @@ export default function VehiclesHub() {
     };
 
     const handleDeleteRepair = async (repairId: string) => {
-        if (!confirm("⚠️ Czy na pewno chcesz trwale usunąć ten wpis o naprawie i skasować powiązany z nim plik PDF z chmury?")) return;
+        if (!confirm("⚠️ Czy na pewno chcesz trwale usunąć ten wpis o naprawie?")) return;
         setIsSubmitting(true);
         try {
             const repairRef = doc(db, "repairs", repairId);
@@ -377,7 +384,6 @@ export default function VehiclesHub() {
                 const repairData = repairSnap.data();
                 const invoiceUrl = repairData.invoiceUrl;
 
-                // Jeśli w bazie istnieje link do pliku w Firebase Storage - usuwamy plik fizycznie z dysku chmury
                 if (invoiceUrl && invoiceUrl.includes("firebasestorage.googleapis.com")) {
                     const storage = getStorage();
                     const fileRef = ref(storage, invoiceUrl);
@@ -385,7 +391,6 @@ export default function VehiclesHub() {
                 }
             }
 
-            // Dopiero po usunięciu pliku z dysku, usuwamy dokument z bazy danych
             await deleteDoc(repairRef);
 
             alert("Wpis naprawy oraz powiązany skan PDF zostały trwale usunięte z systemu.");
@@ -584,6 +589,89 @@ export default function VehiclesHub() {
         } finally {
             setIsSubmitting(false);
         }
+    };
+
+    // =========================================================================
+    // NOWE: MASOWY AUTOMAT UZUPEŁNIANIA DANYCH AI BEZPOŚREDNIO W IMPORTERZE
+    // =========================================================================
+    const handleStartEnrichment = async () => {
+        setIsProcessingEnrich(true);
+        setEnrichLogs(["[START] Skanowanie bazy danych..."]);
+
+        try {
+            // Skanujemy bazę w poszukiwaniu zaimportowanych napraw ze starym ID i wgranym skanem
+            const q = query(collection(db, "repairs"), where("legacyId", "!=", ""));
+            const snap = await getDocs(q);
+
+            const allRepairs = snap.docs.map(d => ({ id: d.id, ...d.data() })) as Repair[];
+
+            // Kwalifikują się te naprawy, które posiadają wgrany skan oraz mają pustą tablicę części (partsList)
+            const targets = allRepairs.filter(r => r.invoiceUrl && (!r.partsList || r.partsList.length === 0));
+
+            setEnrichTotal(targets.length);
+
+            if (targets.length === 0) {
+                addEnrichLog("✓ Wszystkie zaimportowane naprawy mają już wyodrębnione części i opisy! Brak pracy.");
+                setIsProcessingEnrich(false);
+                return;
+            }
+
+            addEnrichLog(`Znaleziono ${targets.length} napraw wymagających analizy i uzupełnienia.`);
+
+            for (let i = 0; i < targets.length; i++) {
+                const repair = targets[i];
+                setEnrichIndex(i + 1);
+                addEnrichLog(`⚙️ [${i + 1}/${targets.length}] Pobieranie i analiza faktury o starym ID: ${repair.legacyId}...`);
+
+                try {
+                    // Pobieramy plik z Firebase Storage
+                    const fileRes = await fetch(repair.invoiceUrl!);
+                    const blob = await fileRes.blob();
+
+                    const base64: string = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.readAsDataURL(blob);
+                        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                        reader.onerror = error => reject(error);
+                    });
+
+                    // Wywołujemy nasze wspólne, zsynchronizowane API
+                    const response = await fetch('/api/parse-invoice', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ files: [{ fileBase64: base64, mimeType: blob.type }] })
+                    });
+
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error || "Błąd API Gemini");
+
+                    // Aktualizujemy wpis w bazie (uaktualniamy opis, typ usterki i partsList, pomijając koszty/przebieg)
+                    await setDoc(doc(db, "repairs", repair.id), {
+                        comments: data.comments || repair.comments, // Nadpisujemy opisem z AI
+                        repairType: data.repairType || repair.repairType, // Poprawiamy typ usterki przez AI
+                        partsList: data.partsList || [] // Zapisujemy części pod wyszukiwarkę
+                    }, { merge: true });
+
+                    const partsFound = data.partsList && data.partsList.length > 0 ? data.partsList.join(", ") : "brak";
+                    addEnrichLog(`✅ [SUKCES] Typ: ${data.repairType} | Wykryte części: [${partsFound}]`);
+
+                    // Bezpieczna pauza 3 sekundy, aby nie przekroczyć limitów API Cloud i Vertex AI
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                } catch (err: any) {
+                    addEnrichLog(`❌ [BŁĄD] Naprawa o starym ID ${repair.legacyId}: ${err.message}`);
+                }
+            }
+
+            addEnrichLog("🎉 [ZAKOŃCZONO] Wszystkie naprawy zostały pomyślnie uaktualnione przez AI!");
+        } catch (err: any) {
+            addEnrichLog("❌ Błąd krytyczny skanowania bazy: " + err.message);
+        } finally {
+            setIsProcessingEnrich(false);
+        }
+    };
+
+    const addEnrichLog = (msg: string) => {
+        setEnrichLogs(prev => [msg, ...prev]);
     };
 
     if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie modułu floty...</div>;
@@ -1125,6 +1213,50 @@ export default function VehiclesHub() {
                                         onChange={handleBulkUploadInvoices}
                                         className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer"
                                     />
+                                )}
+                            </div>
+
+                            {/* KROK 4: MASOWY AUTOMAT UZUPEŁNIANIA DANYCH AI (MIGRACJA) */}
+                            <div className="p-4 bg-purple-50 border border-purple-200 rounded-xl mt-4 space-y-3">
+                                <div className="flex justify-between items-center">
+                                    <div>
+                                        <label className="block text-xs font-black text-purple-800 uppercase">4. Inteligentne Uzupełnianie Bazy przez AI</label>
+                                        <p className="text-[10px] text-purple-600 font-bold">Zaktualizuj opisy prac, części oraz poprawny typ usterki na podstawie wgranych wcześniej skanów faktur PDF.</p>
+                                    </div>
+                                    {!isProcessingEnrich && (
+                                        <button
+                                            type="button"
+                                            onClick={handleStartEnrichment}
+                                            className="bg-purple-600 hover:bg-purple-700 text-white font-black text-[10px] uppercase tracking-wider px-4 py-2.5 rounded-lg shadow-sm transition"
+                                        >
+                                            Uruchom Automat AI
+                                        </button>
+                                    )}
+                                </div>
+
+                                {isProcessingEnrich && (
+                                    <div className="space-y-1 animate-pulse">
+                                        <div className="flex justify-between text-[10px] font-bold text-purple-800">
+                                            <span>Trwa analiza faktur przez Gemini 3...</span>
+                                            <span>{enrichIndex} / {enrichTotal}</span>
+                                        </div>
+                                        <div className="w-full bg-purple-100 h-2 rounded-full overflow-hidden">
+                                            <div
+                                                className="bg-purple-600 h-full transition-all duration-300 rounded-full"
+                                                style={{ width: `${enrichTotal > 0 ? (enrichIndex / enrichTotal) * 100 : 0}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {enrichLogs.length > 0 && (
+                                    <div className="bg-slate-900 text-slate-200 p-3 rounded-xl font-mono text-[10px] h-32 overflow-y-auto space-y-1 shadow-inner border border-slate-800">
+                                        {enrichLogs.map((log, idx) => (
+                                            <div key={idx} className={log.includes("❌") ? "text-red-400" : log.includes("✅") ? "text-emerald-400" : ""}>
+                                                {log}
+                                            </div>
+                                        ))}
+                                    </div>
                                 )}
                             </div>
 
