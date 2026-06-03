@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, where } from "firebase/firestore";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { collection, getDocs, getDoc, doc, setDoc, deleteDoc, query, orderBy, where } from "firebase/firestore";
+import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
+import Link from "next/link"; // Dodany import dla przycisku Raportów
 
 // --- INTERFEJSY ---
 interface Vehicle {
@@ -366,13 +367,33 @@ export default function VehiclesHub() {
     };
 
     const handleDeleteRepair = async (repairId: string) => {
-        if (!confirm("⚠️ Czy na pewno chcesz trwale usunąć ten wpis o naprawie?")) return;
+        if (!confirm("⚠️ Czy na pewno chcesz trwale usunąć ten wpis o naprawie i skasować powiązany z nim plik PDF z chmury?")) return;
+        setIsSubmitting(true);
         try {
-            await deleteDoc(doc(db, "repairs", repairId));
-            alert("Naprawa usunięta.");
+            const repairRef = doc(db, "repairs", repairId);
+            const repairSnap = await getDoc(repairRef);
+
+            if (repairSnap.exists()) {
+                const repairData = repairSnap.data();
+                const invoiceUrl = repairData.invoiceUrl;
+
+                // Jeśli w bazie istnieje link do pliku w Firebase Storage - usuwamy plik fizycznie z dysku chmury
+                if (invoiceUrl && invoiceUrl.includes("firebasestorage.googleapis.com")) {
+                    const storage = getStorage();
+                    const fileRef = ref(storage, invoiceUrl);
+                    await deleteObject(fileRef); // Usuwanie z chmury Storage
+                }
+            }
+
+            // Dopiero po usunięciu pliku z dysku, usuwamy dokument z bazy danych
+            await deleteDoc(repairRef);
+
+            alert("Wpis naprawy oraz powiązany skan PDF zostały trwale usunięte z systemu.");
             if (selectedVehicle) fetchRepairs(selectedVehicle.id);
         } catch (error: any) {
-            alert("Błąd usuwania naprawy: " + error.message);
+            alert("Błąd podczas usuwania: " + error.message);
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -580,6 +601,9 @@ export default function VehiclesHub() {
                         value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
                         className="p-3 bg-white border border-slate-200 rounded-xl shadow-sm outline-none focus:border-blue-500 font-medium w-full md:w-64"
                     />
+                    <Link href="/dashboard/vehicles/reports" className="bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 px-5 py-3 rounded-xl font-bold transition flex items-center gap-1.5 shadow-sm">
+                        📊 Raporty Floty
+                    </Link>
                     {canManage && (
                         <>
                             <button onClick={() => setIsImportModalOpen(true)} className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-5 py-3 rounded-xl font-bold transition">
