@@ -25,10 +25,7 @@ export async function POST(req: Request) {
                 const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
                 copiedPages.forEach((page) => mergedPdf.addPage(page));
             } else if (file.mimeType.startsWith('image/')) {
-                // Obsługa zdjęć i screenshotów: tworzymy nową stronę A4 i osadzamy obraz
-                const page = mergedPdf.addPage();
-                const { width, height } = page.getSize();
-
+                // Generujemy osadzenie obrazu w pamięci
                 let embeddedImage;
                 if (file.mimeType === 'image/png') {
                     embeddedImage = await mergedPdf.embedPng(fileBytes);
@@ -36,18 +33,18 @@ export async function POST(req: Request) {
                     embeddedImage = await mergedPdf.embedJpg(fileBytes);
                 }
 
-                // Automatyczne dopasowanie proporcji obrazu do strony A4
-                const imageDims = embeddedImage.scaleToFit(width - 40, height - 40);
+                // Odczytujemy naturalne, oryginalne wymiary obrazu (szerokość i wysokość)
+                const { width, height } = embeddedImage.scale(1);
 
-                // Centrowanie obrazu na stronie
-                const x = (width - imageDims.width) / 2;
-                const y = (height - imageDims.height) / 2;
+                // Tworzymy stronę o DOKŁADNIE takich samych wymiarach jak nasz obrazek/zrzut
+                const page = mergedPdf.addPage([width, height]);
 
+                // Rysujemy obraz na całej stronie (pokrycie 100% bez marginesów i bez białych pasów)
                 page.drawImage(embeddedImage, {
-                    x,
-                    y,
-                    width: imageDims.width,
-                    height: imageDims.height,
+                    x: 0,
+                    y: 0,
+                    width: width,
+                    height: height,
                 });
             }
         }
