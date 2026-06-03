@@ -163,7 +163,54 @@ export default function FleetReportsHub() {
             );
         }
 
-        // Tutaj w przyszłości można dodać renderWidget.type === "table" itp.
+        // --- NOWE: RENDEROWANIE TABELI ---
+        if (activeWidget.type === "table" && activeWidget.data) {
+            return (
+                <div className="h-full flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-hidden">
+                    <div className="absolute top-4 right-4 text-xs bg-green-50 text-green-600 font-black px-3 py-1 rounded-full border border-green-100">Tabela Danych AI</div>
+                    <h3 className="font-black text-slate-700 text-lg mb-4">{activeWidget.data.title}</h3>
+                    <div className="flex-1 overflow-auto rounded-xl border border-slate-200">
+                        <table className="w-full text-left text-sm">
+                            <thead className="bg-slate-50 sticky top-0">
+                                <tr>
+                                    {activeWidget.data.columns.map((col: string, i: number) => (
+                                        <th key={i} className="p-3 font-bold text-slate-600 border-b">{col}</th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {activeWidget.data.rows.map((row: any[], i: number) => (
+                                    <tr key={i} className="border-b hover:bg-slate-50 transition">
+                                        {row.map((cell: any, j: number) => (
+                                            <td key={j} className="p-3 text-slate-600">{cell}</td>
+                                        ))}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- NOWE: RENDEROWANIE KART STATYSTYK (KPI) ---
+        if (activeWidget.type === "kpi" && activeWidget.data) {
+            return (
+                <div className="h-full flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-y-auto">
+                    <div className="absolute top-4 right-4 text-xs bg-purple-50 text-purple-600 font-black px-3 py-1 rounded-full border border-purple-100">Podsumowanie AI</div>
+                    <h3 className="font-black text-slate-700 text-lg mb-6">{activeWidget.data.title}</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {activeWidget.data.metrics.map((metric: any, i: number) => (
+                            <div key={i} className="bg-slate-50 border border-slate-100 p-5 rounded-2xl flex flex-col justify-center">
+                                <span className="text-sm font-bold text-slate-400 uppercase tracking-wider">{metric.label}</span>
+                                <span className="text-3xl font-black text-slate-800 mt-1">{metric.value}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
         return null;
     };
 
