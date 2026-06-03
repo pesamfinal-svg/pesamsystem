@@ -18,6 +18,7 @@ interface Repair {
     id: string; vehicleId: string; date: string; cost: number; accountingNumber: string;
     mileage: number; comments: string; location: string; repairType: string;
     category: string; invoiceUrl?: string; legacyId?: string;
+    partsList?: string[]; // Tablica części pod wyszukiwarkę (Nowe!)
 }
 
 export default function VehiclesHub() {
@@ -49,11 +50,12 @@ export default function VehiclesHub() {
 
     const [repairForm, setRepairForm] = useState<Partial<Repair>>({
         date: new Date().toISOString().split("T")[0], cost: 0, accountingNumber: "",
-        mileage: 0, comments: "", location: "", repairType: "", category: "Inne"
+        mileage: 0, comments: "", location: "", repairType: "", category: "Inne",
+        partsList: []
     });
     const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]); // Tablica załączników (dowolna ilość)
-    const [invoiceFile, setInvoiceFile] = useState<File | null>(null); // Zostawiamy dla kompatybilności
     const [isAiParsing, setIsAiParsing] = useState(false);
+    const [showAiSuccessBanner, setShowAiSuccessBanner] = useState(false); // Baner zamiast alertu
 
     // --- STANY IMPORTERA CSV ---
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -152,7 +154,8 @@ export default function VehiclesHub() {
         setRepairForm({
             date: new Date().toISOString().split("T")[0],
             cost: 0, accountingNumber: "", mileage: vehicle.initialMileage,
-            comments: "", location: "", repairType: "", category: "Inne"
+            comments: "", location: "", repairType: "", category: "Inne",
+            partsList: []
         });
         setInvoiceFiles([]);
         fetchRepairs(vehicle.id);
@@ -161,7 +164,7 @@ export default function VehiclesHub() {
     const closeHistoryModal = () => {
         setSelectedVehicle(null);
         setRepairs([]);
-        handleCancelEditRepair(); // Czyścimy też formularz z ewentualnej edycji
+        handleCancelEditRepair();
     };
 
     // Włączenie trybu edycji dla wybranej naprawy
@@ -178,9 +181,11 @@ export default function VehiclesHub() {
             repairType: repair.repairType,
             category: repair.category,
             invoiceUrl: repair.invoiceUrl,
-            legacyId: repair.legacyId
+            legacyId: repair.legacyId,
+            partsList: repair.partsList || []
         });
         setInvoiceFiles([]);
+        setShowAiSuccessBanner(false);
     };
 
     // Wyłączenie trybu edycji (powrót do dodawania nowej naprawy)
@@ -190,13 +195,13 @@ export default function VehiclesHub() {
         setRepairForm({
             date: new Date().toISOString().split("T")[0],
             cost: 0, accountingNumber: "", mileage: selectedVehicle ? selectedVehicle.initialMileage : 0,
-            comments: "", location: "", repairType: "", category: "Inne"
+            comments: "", location: "", repairType: "", category: "Inne",
+            partsList: []
         });
         setInvoiceFiles([]);
-        setInvoiceFile(null);
+        setShowAiSuccessBanner(false);
     };
 
-    // Funkcja przechwytująca naciśnięcie Ctrl+V i dodająca zrzuty ekranu jako pliki
     const handleClipboardPaste = (e: React.ClipboardEvent) => {
         const items = e.clipboardData.items;
         for (let i = 0; i < items.length; i++) {
@@ -214,9 +219,10 @@ export default function VehiclesHub() {
     const handleParseInvoiceWithAI = async () => {
         if (invoiceFiles.length === 0) return alert("Najpierw dodaj przynajmniej jeden plik (lub wklej zrzut ekranu)!");
         setIsAiParsing(true);
+        setShowAiSuccessBanner(false);
 
         try {
-            // Konwertujemy pliki do formatu Base64
+            // Konwertujemy wszystkie pliki z tablicy invoiceFiles na format Base64
             const filePromises = invoiceFiles.map(async (file) => {
                 const base64: string = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
@@ -249,10 +255,12 @@ export default function VehiclesHub() {
                 mileage: data.mileage || prev.mileage,
                 comments: data.comments || prev.comments,
                 repairType: data.repairType || prev.repairType,
-                location: data.location || prev.location // AUTOMATYCZNY WARSZTAT
+                location: data.location || prev.location, // AUTOMATYCZNY WARSZTAT
+                partsList: data.partsList || [] // POBRANA LISTA CZĘŚCI
             }));
 
-            alert("✨ AI przeanalizowało wszystkie dokumenty i uzupełniło formularz! Sprawdź dane przed zapisem.");
+            // Zamiast wyskakującego alertu, odpalamy ładny baner powiadomienia na górze
+            setShowAiSuccessBanner(true);
         } catch (error: any) {
             alert("Błąd analizy AI: " + error.message);
         } finally {
@@ -261,7 +269,7 @@ export default function VehiclesHub() {
     };
 
     // ==========================================
-    // ZAPIS NAPRAWY (Wieloplikowa fuzja do jednego PDF)
+    // BEZLIMITOWY ZAPIS NAPRAWY (Fuzja N-plików do jednego PDF)
     // ==========================================
     const handleSaveRepair = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -281,7 +289,7 @@ export default function VehiclesHub() {
                     fileToUpload = invoiceFiles[0];
                     fileNameToUpload = invoiceFiles[0].name;
                 } else {
-                    // Wiele plików (lub jedno zdjęcie) -> fuzja do PDF
+                    // Wiele plików -> fuzja do PDF
                     const filePromises = invoiceFiles.map(async (file) => {
                         const base64: string = await new Promise((resolve, reject) => {
                             const reader = new FileReader();
@@ -336,6 +344,7 @@ export default function VehiclesHub() {
                 repairType: repairForm.repairType,
                 category: repairForm.category || "Inne",
                 invoiceUrl: finalInvoiceUrl,
+                partsList: repairForm.partsList || [], // ZAPIS CZĘŚCI DO BAZY
                 ...(repairForm.legacyId && { legacyId: repairForm.legacyId })
             }, { merge: true });
 
@@ -709,6 +718,17 @@ export default function VehiclesHub() {
                                                     {repair.comments || <i className="text-slate-400">Brak opisu</i>}
                                                 </div>
 
+                                                {/* --- LISTA CZĘŚCI (TAGI) W HISTORII LEWEGO PANELU --- */}
+                                                {repair.partsList && repair.partsList.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1.5 mb-3">
+                                                        {repair.partsList.map((part, index) => (
+                                                            <span key={index} className="bg-slate-100 border border-slate-200 text-slate-600 font-semibold px-2 py-0.5 rounded-full text-[10px] flex items-center gap-1">
+                                                                ⚙️ {part}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+
                                                 <div className="flex flex-col gap-2">
                                                     <div className="flex justify-between items-center">
                                                         <div className="text-xs text-slate-500 font-semibold flex items-center gap-1">
@@ -761,8 +781,17 @@ export default function VehiclesHub() {
                             {/* PRAWA STRONA: Formularz nowej naprawy / Edycji */}
                             <div
                                 onPaste={handleClipboardPaste}
-                                className="w-1/3 flex flex-col bg-white"
+                                className="w-1/3 flex flex-col bg-white relative"
                             >
+                                {/* ASYSTENT ŁADOWANIA AI (OVERLAY) */}
+                                {isAiParsing && (
+                                    <div className="absolute inset-0 bg-white/90 backdrop-blur-sm z-50 flex flex-col items-center justify-center p-6 text-center animate-fade-in">
+                                        <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+                                        <h4 className="text-sm font-black text-indigo-900 uppercase tracking-wider">Sztuczna Inteligencja czyta fakturę...</h4>
+                                        <p className="text-xs text-indigo-600 mt-1 max-w-[200px]">Trwa wyciąganie danych OCR i mapowanie formularza. Proszę czekać.</p>
+                                    </div>
+                                )}
+
                                 <div className={`p-4 border-b flex justify-between items-center ${isEditingRepair ? 'bg-orange-50' : 'bg-purple-50'}`}>
                                     <span className={`text-xs font-black uppercase tracking-wider ${isEditingRepair ? 'text-orange-800' : 'text-purple-800'}`}>
                                         {isEditingRepair ? "✏️ Edytuj Wpis Serwisowy" : "➕ Zarejestruj Naprawę"}
@@ -773,7 +802,18 @@ export default function VehiclesHub() {
                                         </button>
                                     )}
                                 </div>
-                                <div className="flex-1 overflow-y-auto p-6">
+                                <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                                    {/* FIOLETOWY BANER SUKCESU AI */}
+                                    {showAiSuccessBanner && (
+                                        <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 text-xs text-indigo-950 font-bold flex items-start gap-3 shadow-sm animate-fade-in">
+                                            <span className="text-lg">✨</span>
+                                            <div>
+                                                <p className="text-indigo-900 font-black uppercase text-[10px]">Sukces odczytu AI!</p>
+                                                <p className="font-medium text-indigo-700 mt-0.5 leading-relaxed">Dane z załączników zostały automatycznie wczytane. Zweryfikuj ich poprawność przed kliknięciem Zapisz.</p>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     <form id="newRepairForm" onSubmit={handleSaveRepair} className="space-y-4">
                                         <div>
                                             <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Data naprawy / FV</label>
@@ -782,11 +822,25 @@ export default function VehiclesHub() {
                                         <div className="grid grid-cols-2 gap-3">
                                             <div>
                                                 <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Stan Licznika (km)</label>
-                                                <input type="number" required min="0" value={repairForm.mileage || ""} onChange={e => setRepairForm({ ...repairForm, mileage: Number(e.target.value) })} className="w-full p-2.5 bg-slate-50 border rounded-lg font-bold outline-none focus:border-purple-500" />
+                                                <input
+                                                    type="number"
+                                                    required
+                                                    min="0"
+                                                    value={repairForm.mileage !== undefined && repairForm.mileage !== null ? repairForm.mileage : ""}
+                                                    onChange={e => setRepairForm({ ...repairForm, mileage: e.target.value === "" ? 0 : Number(e.target.value) })}
+                                                    className="w-full p-2.5 bg-slate-50 border rounded-lg font-bold outline-none focus:border-purple-500"
+                                                />
                                             </div>
                                             <div>
                                                 <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Koszt Netto (PLN)</label>
-                                                <input type="number" step="0.01" required value={repairForm.cost || ""} onChange={e => setRepairForm({ ...repairForm, cost: Number(e.target.value) })} className="w-full p-2.5 bg-red-50 text-red-700 border border-red-200 rounded-lg font-black outline-none focus:border-red-500" />
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    required
+                                                    value={repairForm.cost !== undefined && repairForm.cost !== null ? repairForm.cost : ""}
+                                                    onChange={e => setRepairForm({ ...repairForm, cost: e.target.value === "" ? 0 : Number(e.target.value) })}
+                                                    className="w-full p-2.5 bg-red-50 text-red-700 border border-red-200 rounded-lg font-black outline-none focus:border-red-500"
+                                                />
                                             </div>
                                         </div>
                                         <div className="grid grid-cols-2 gap-3">
@@ -816,7 +870,25 @@ export default function VehiclesHub() {
                                             <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Uwagi / Zakres prac</label>
                                             <textarea rows={3} placeholder="Co dokładnie zostało zrobione..." value={repairForm.comments || ""} onChange={e => setRepairForm({ ...repairForm, comments: e.target.value })} className="w-full p-2.5 bg-slate-50 border rounded-lg font-medium outline-none focus:border-purple-500 resize-none"></textarea>
                                         </div>
-                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 focus-within:border-purple-300 transition-colors">
+
+                                        {/* PODGLĄD CZĘŚCI WYKRYTYCH PRZEZ AI W FORMULARZU */}
+                                        {repairForm.partsList && repairForm.partsList.length > 0 && (
+                                            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                                                <label className="block text-[9px] font-black text-slate-500 uppercase mb-2">⚙️ Wykryte części i usługi ({repairForm.partsList.length})</label>
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {repairForm.partsList.map((part, index) => (
+                                                        <span key={index} className="bg-white border text-[10px] font-bold text-slate-600 px-2 py-0.5 rounded-full shadow-sm">
+                                                            {part}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div
+                                            onPaste={handleClipboardPaste}
+                                            className="bg-slate-50 p-4 rounded-2xl border border-slate-200 focus-within:border-purple-300 transition-colors"
+                                        >
                                             <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Załączniki (Skany / Zdjęcia)</label>
                                             <p className="text-[10px] text-slate-400 mb-3">Wybierz pliki z dysku lub **kliknij tu i wklej zrzut ekranu (Ctrl+V)**.</p>
 

@@ -2,7 +2,6 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 
-// Inicjalizacja klienta Google Gen AI (Vertex AI na GCP)
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
@@ -13,7 +12,6 @@ export const maxDuration = 60;
 
 export async function POST(req: Request) {
     try {
-        // Czytamy przesłaną tablicę "files" z frontendu
         const { files } = await req.json();
 
         if (!files || !Array.isArray(files) || files.length === 0) {
@@ -22,11 +20,11 @@ export async function POST(req: Request) {
 
         const systemInstruction = `
             Jesteś precyzyjnym systemem OCR i analizy dokumentów finansowo-serwisowych. 
-            Twoim zadaniem jest przeanalizowanie przesłanych dokumentów (faktura, specyfikacja naprawy z warsztatu) i wyciągnięcie z nich danych.
+            Twoim zadaniem jest przeanalizowanie przesłanych dokumentów i wyciągnięcie z nich danych.
             Musisz bezwzględnie dopasować odnalezione wartości do kluczy zdefiniowanych w schemacie odpowiedzi (responseSchema).
             
             Ważna instrukcja dla kwot:
-            Jeśli na fakturze kwota netto zawiera przecinek (np. "981,53"), przekonwertuj ją na poprawną liczbę zmiennoprzecinkową z kropką: 981.53. Nie toleruj pomyłek graficznych typu mylenie 9 z 8. Czytaj znaki z najwyższą uwagą.
+            Jeśli na fakturze kwota netto zawiera przecinek (np. "981,53"), przekonwertuj ją na poprawną liczbę zmiennoprzecinkową z kropką: 981.53.
         `;
 
         const prompt = "Odczytaj dane z dokumentów i zwróć je w formacie zgodnym ze schematem JSON.";
@@ -38,9 +36,8 @@ export async function POST(req: Request) {
             }
         }));
 
-        // Wywołanie modelu przy użyciu oficjalnego SDK Google Gen AI ze sztywną strukturą
         const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-3-flash-preview', // Używamy Twojego najnowszego wybranego modelu
             contents: [
                 {
                     role: 'user',
@@ -52,7 +49,7 @@ export async function POST(req: Request) {
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.1, // Blokuje halucynacje i błędny odczyt cyfr
+                temperature: 0.1,
                 responseMimeType: "application/json",
 
                 responseSchema: {
@@ -76,7 +73,7 @@ export async function POST(req: Request) {
                         },
                         location: {
                             type: "STRING",
-                            description: "Nazwa warsztatu / sprzedawcy (np. 'F.H.U.T. BACATRANS Jacek Bieszczad' lub 'MASTER CAR')."
+                            description: "Nazwa wystawcy faktury / warsztatu (szukaj w sekcji Sprzedawca, np. 'F.H.U.T. BACATRANS Jacek Bieszczad' lub 'MASTER CAR')."
                         },
                         comments: {
                             type: "STRING",
@@ -85,9 +82,15 @@ export async function POST(req: Request) {
                         repairType: {
                             type: "STRING",
                             description: "Wybierz JEDNĄ wartość: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna."
+                        },
+                        // NOWA TABLICA CZĘŚCI I USŁUG POD WYSZUKIWARKĘ
+                        partsList: {
+                            type: "ARRAY",
+                            items: { type: "STRING" },
+                            description: "Lista wszystkich wymienionych części, materiałów i wykonanych usług/robocizny odczytanych z pozycji faktury (np. ['FILTR KABINY', 'filtr oleju', 'USŁUGA SERWISOWA', 'geometria kół', 'żarówka H7'])."
                         }
                     },
-                    required: ["date", "cost", "accountingNumber", "mileage", "location", "comments", "repairType"]
+                    required: ["date", "cost", "accountingNumber", "mileage", "location", "comments", "repairType", "partsList"]
                 }
             }
         });
