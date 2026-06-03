@@ -303,23 +303,37 @@ export default function FleetReportsHub() {
                         <div ref={chatEndRef} />
                     </div>
 
-                    {/* DZIENNIK ZDARZEŃ AI (LOGS PANEL) */}
+                    {/* PLAN PRACY I ANALIZY AI */}
                     {executionLogs.length > 0 && (
-                        <div className="border-t border-slate-150 bg-slate-900 text-slate-300 p-3 text-[11px] font-mono max-h-[150px] overflow-y-auto">
-                            <div className="flex justify-between items-center text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-2 border-b border-slate-800 pb-1">
-                                <span>⚙️ Dziennik Pracy Agentów AI</span>
-                                <button onClick={() => setShowLogs(!showLogs)} className="hover:text-white">
-                                    {showLogs ? "[Ukryj]" : "[Pokaż]"}
+                        <div className="border-t border-slate-200 bg-slate-50 p-4 max-h-[220px] overflow-y-auto">
+                            <div className="flex justify-between items-center mb-3">
+                                <span className="text-xs font-black text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                                    🧠 Tok rozumowania i plan pracy AI
+                                </span>
+                                <button
+                                    onClick={() => setShowLogs(!showLogs)}
+                                    className="text-[10px] font-bold text-blue-600 hover:text-blue-800 uppercase"
+                                >
+                                    {showLogs ? "Zwiń" : "Rozwiń"}
                                 </button>
                             </div>
                             {showLogs && (
-                                <div className="space-y-1">
-                                    {executionLogs.map((log, i) => (
-                                        <div key={i} className="flex gap-1.5">
-                                            <span className="text-green-500">✔</span>
-                                            <span>{log}</span>
-                                        </div>
-                                    ))}
+                                <div className="space-y-2.5 text-xs text-slate-600">
+                                    {executionLogs.map((log, i) => {
+                                        const isPlan = log.startsWith("Plan AI:");
+                                        return (
+                                            <div key={i} className={`p-2.5 rounded-xl border ${isPlan ? 'bg-blue-50/60 border-blue-100 text-slate-700 font-medium' : 'bg-white border-slate-100'}`}>
+                                                <div className="flex gap-2">
+                                                    <span className={isPlan ? "text-blue-600" : "text-emerald-600"}>
+                                                        {isPlan ? "📋" : "⚙"}
+                                                    </span>
+                                                    <span className="leading-relaxed">
+                                                        {isPlan ? log.replace("Plan AI:", "").trim() : log}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>

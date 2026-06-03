@@ -48,7 +48,8 @@ async function dbGetVehiclesList() {
             id: doc.id,
             brand: data.brand || "Nieznany",
             model: data.model || "Nieznany",
-            registration: data.registration || "Brak tablic"
+            registration: data.registration || "Brak tablic",
+            initialMileage: data.initialMileage || 0 // DODANO: Przebieg początkowy pojazdu
         };
     });
 }
@@ -91,7 +92,8 @@ async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
             date: data.date || "Brak daty",
             category: data.category || data.repairType || "Inna",
             comments: data.comments || "",
-            location: data.location || "Nieznany warsztat"
+            location: data.location || "Nieznany warsztat",
+            mileage: data.mileage || 0 // DODANO: Przebieg pojazdu podczas naprawy
         };
     });
 }
@@ -357,7 +359,7 @@ export async function POST(req: Request) {
                 }]
             });
 
-            // Kolejne zapytanie do Gemini Z PEŁNĄ HISTORIĄ contents
+            // Odsłanie wyników bazy do AI
             analystResponse = await generateContentWithRetry({
                 model: 'gemini-3.1-pro-preview',
                 contents: analystContents,
@@ -370,6 +372,11 @@ export async function POST(req: Request) {
                     ]
                 }
             });
+
+            // Przechwycenie tekstu objaśniającego plan działania i kroki pośrednie AI
+            if (analystResponse.text) {
+                logs.push(`Plan AI: ${analystResponse.text}`);
+            }
         }
 
         // Sprawdzenie, czy Gemini uruchomiło kod w piaskownicy Pythona
