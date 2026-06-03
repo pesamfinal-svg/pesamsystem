@@ -7,13 +7,13 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
-    location: 'global' // Upewnij się, że lokalizacja zgadza się z wdrożeniami (np. global lub europe-west4)
+    location: 'global'
 });
 
 export const maxDuration = 60;
 
 // =========================================================================
-// 1. BEZPOŚREDNIE FUNKCJE BAZODANOWE (Wywoływane przez serwer)
+// 1. BEZPOŚREDNIE FUNKCJE BAZODANOWE (Wywoływane przez serwer na żądanie AI)
 // =========================================================================
 async function dbGetVehiclesList() {
     const snap = await getDocs(collection(db, "vehicles"));
@@ -37,7 +37,6 @@ async function dbGetRepairs(vehicleId?: string) {
     return snap.docs.map(doc => {
         const data = doc.data();
 
-        // Bezpieczne parsowanie ceny (obsługuje liczby, stringi oraz puste wartości)
         let rawCost = data.cost;
         let parsedCost = 0;
         if (typeof rawCost === 'number') {
@@ -48,10 +47,9 @@ async function dbGetRepairs(vehicleId?: string) {
 
         return {
             id: doc.id,
-            vehicleId: data.vehicleId || null, // Jeśli stary wpis nie ma przypisanego auta, nie wywali błędu
+            vehicleId: data.vehicleId || null,
             cost: parsedCost,
             date: data.date || "Brak daty",
-            // Dostosowano do Twoich pól z bazy: 'category' oraz 'location'
             category: data.category || data.repairType || "Inna",
             comments: data.comments || "",
             location: data.location || "Nieznany warsztat"
@@ -64,7 +62,7 @@ async function dbGetRepairs(vehicleId?: string) {
 // =========================================================================
 const GET_VEHICLES_TOOL = {
     name: "fetchVehiclesFromDB",
-    description: "Pobiera listę pojazdów z bazy danych Firestore (zwraca id, markę, model, rejestrację).",
+    description: "Pobiera listę pojazdów z bazy danych Firestore.",
     parameters: { type: Type.OBJECT, properties: {} }
 };
 
@@ -81,7 +79,7 @@ const GET_REPAIRS_TOOL = {
 
 const RENDER_CHART_TOOL = {
     name: "renderChartWidget",
-    description: "Generuje interaktywny wykres. Używaj do porównań i udziałów procentowych.",
+    description: "Generuje interaktywny wykres.",
     parameters: {
         type: Type.OBJECT,
         properties: {
@@ -102,15 +100,14 @@ const RENDER_TABLE_TOOL = {
         type: Type.OBJECT,
         properties: {
             title: { type: Type.STRING, description: "Tytuł tabeli (np. 'Najdroższe naprawy')." },
-            columns: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Nazwy kolumn (np. ['Pojazd', 'Koszt'])." },
+            columns: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Nazwy kolumn." },
             rows: {
                 type: Type.ARRAY,
                 description: "Wiersze tabeli (tablica w tablicy).",
-                // DODANO: Poniższe pole items naprawia błąd INVALID_ARGUMENT dla Google API
                 items: {
                     type: Type.ARRAY,
                     items: { type: Type.STRING },
-                    description: "Pojedynczy wiersz zawierający komórki z tekstem."
+                    description: "Pojedynczy wiersz tabeli."
                 }
             }
         },
@@ -124,15 +121,15 @@ const RENDER_KPI_TOOL = {
     parameters: {
         type: Type.OBJECT,
         properties: {
-            title: { type: Type.STRING, description: "Tytuł podsumowania (np. 'Ogólne statystyki')." },
+            title: { type: Type.STRING, description: "Tytuł podsumowania." },
             metrics: {
                 type: Type.ARRAY,
                 description: "Obiekty z metrykami.",
                 items: {
                     type: Type.OBJECT,
                     properties: {
-                        label: { type: Type.STRING, description: "Krótki opis liczby (np. 'Łączny koszt')." },
-                        value: { type: Type.STRING, description: "Wartość (np. '14 500 PLN')." }
+                        label: { type: Type.STRING, description: "Krótki opis liczby." },
+                        value: { type: Type.STRING, description: "Wartość." }
                     },
                     required: ["label", "value"]
                 }
@@ -152,7 +149,7 @@ export async function POST(req: Request) {
         const historyText = currentHistory.map((msg: any) => `${msg.role === 'user' ? 'Użytkownik' : 'AI'}: ${msg.text}`).join('\n');
 
         // ==========================================
-        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash) 
+        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash) - W PEŁNI DYNAMICZNY ODPOWIEDZIALNY ZA DOSTĘP
         // ==========================================
         let routerResponse = await ai.models.generateContent({
             model: 'gemini-3.5-flash',
@@ -160,23 +157,36 @@ export async function POST(req: Request) {
                 { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] }
             ],
             config: {
-                systemInstruction: "Jesteś asystentem Floty PESAM. Odpowiadaj naturalnie. Jeśli użytkownik pyta o flotę, a w historii rozmowy nie ma jeszcze listy pojazdów z bazy, ZAWSZE wywołaj narzędzie 'fetchVehiclesFromDB'. Gdy znasz pojazdy, dopytaj użytkownika o szczegóły (np. konkretne auto). Gdy padnie konkretne zapytanie analityczne (koszty, wykresy, uściślenie), poinformuj, że przekazujesz sprawę do Głównego Analityka i zakończ wypowiedź.",
+                systemInstruction: "Jesteś asystentem Floty PESAM. Odpowiadaj naturalnie. Jeśli użytkownik pyta o flotę (np. o naprawy, koszty, konkretną markę), a Ty jeszcze nie pobrałeś listy pojazdów, ZAWSZE najpierw wywołaj narzędzie 'fetchVehiclesFromDB', aby sprawdzić do czego masz wgląd. Gdy znasz pojazdy, dopytaj użytkownika o szczegóły (np. konkretne auto). Gdy zapytanie jest precyzyjne, poinformuj krótko, że przekazujesz sprawę do analizy kosztów i zakończ wypowiedź.",
                 temperature: 0.3,
                 tools: [{ functionDeclarations: [GET_VEHICLES_TOOL] }]
             }
         });
 
-        // Jeśli Flash użyje narzędzia do pobrania aut
-        // Jeśli Flash użyje narzędzia do pobrania aut
+        // Obsługa wywołania narzędzia przez Flasha (z poprawną sygnaturą myślenia!)
         if (routerResponse.functionCalls?.some(call => call.name === "fetchVehiclesFromDB")) {
+            const call = routerResponse.functionCalls.find(c => c.name === "fetchVehiclesFromDB")!;
             const vehiclesList = await dbGetVehiclesList();
+
+            // Pobranie sygnatury myślenia lub podstawienie bypassu (chroni przed błędem 400) - Rzutowanie na any ucisza błąd TypeScript
+            const callAny = call as any;
+            const partAny = (routerResponse.candidates?.[0]?.content?.parts?.[0]) as any;
+
+            const flashSig = callAny.thoughtSignature ||
+                partAny?.thoughtSignature ||
+                "skip_thought_signature_validator";
 
             routerResponse = await ai.models.generateContent({
                 model: 'gemini-3.5-flash',
                 contents: [
-                    { role: 'user', parts: [{ text: `Użytkownik pisze: "${question}"` }] },
-                    { role: 'model', parts: [{ functionCall: { name: "fetchVehiclesFromDB", args: {} } }] },
-                    // Techniczne przekazanie wyniku funkcji - Gemini traktuje to jako twarde fakty bazodanowe
+                    { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] },
+                    {
+                        role: 'model',
+                        parts: [{
+                            functionCall: { name: call.name, args: call.args },
+                            thoughtSignature: flashSig // <--- Przekazanie sygnatury myślenia
+                        }]
+                    },
                     {
                         role: 'user',
                         parts: [{
@@ -188,13 +198,13 @@ export async function POST(req: Request) {
                     }
                 ],
                 config: {
-                    systemInstruction: "Jesteś asystentem Floty PESAM. Masz przed sobą RZECZYWISTE dane z bazy Firestore. Twoim jedynym zadaniem jest dopytać, o które auto chodzi. Musisz użyć TYLKO I WYŁĄCZNIE pojazdów, które faktycznie istnieją w przesłanej liście (np. FORD TRANSIT o rejestracji RDE 90WP). Pod rygorem błędu zabrania się wymyślania jakichkolwiek przykładowych modeli (Focus, Mondeo) lub rejestracji (KR 12345, WI 98765), których nie ma w przesłanej bazie.",
-                    temperature: 0.1 // Obniżamy temperaturę, by wykluczyć kreatywność
+                    systemInstruction: "Znasz już listę pojazdów z bazy. Użyj tych danych, by mądrze dopytać użytkownika, o co dokładnie mu chodzi, podając przykłady aut z listy (np. FORD TRANSIT RDE 90WP). Nigdy nie zmyślaj aut, których nie ma na tej liście.",
+                    temperature: 0.1
                 }
             });
         }
 
-        // Router decyduje: pogaduszki, czy ciężka analiza?
+        // Router decyduje, czy przechodzimy do ciężkiej analizy na model Pro
         const isRequestingAnalysis = question.toLowerCase().includes("koszt") ||
             question.toLowerCase().includes("wykres") ||
             question.toLowerCase().includes("analiz") ||
@@ -211,10 +221,8 @@ export async function POST(req: Request) {
         }
 
         // ==========================================
-        // ETAP 2: AGENT 2 (Analityk Pro 3.1)
+        // ETAP 2: AGENT 2 (Analityk Pro 3.1) - DYNAMICZNE ODRĘBNE NARZĘDZIA
         // ==========================================
-
-        // Zarządzanie pamięcią podręczną
         const cacheString = cachedData && Object.keys(cachedData).length > 0
             ? `Oto dane pobrane z bazy w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich, zamiast odpytywać bazę ponownie (chyba że użytkownik prosi o zupełnie inne pojazdy).`
             : `Nie masz jeszcze pobranych żadnych danych z bazy. Jeśli potrzebujesz aut lub napraw, użyj odpowiednich narzędzi (fetchVehiclesFromDB, fetchRepairsFromDB).`;
@@ -250,7 +258,6 @@ export async function POST(req: Request) {
 
             let resultData: any = {};
 
-            // Obsługa narzędzi bazodanowych
             if (call.name === "fetchVehiclesFromDB") {
                 resultData = await dbGetVehiclesList();
                 currentSessionCache.vehicles = resultData;
@@ -259,17 +266,30 @@ export async function POST(req: Request) {
                 resultData = await dbGetRepairs(args.vehicleId);
                 currentSessionCache.repairs = resultData;
             }
-            // Przerwanie pętli, jeśli AI generuje już komponent UI
             else if (call.name === "renderChartWidget" || call.name === "renderTableWidget" || call.name === "renderKpiWidget") {
                 break;
             }
 
-            // Odsłanie wyników bazy do AI (aby AI kontynuowało analizę)
+            // Bezpieczne pobranie oryginalnej sygnatury myślenia lub podstawienie bypassu - Rzutowanie na any ucisza błąd TypeScript
+            const callAny = call as any;
+            const partAny = (analystResponse.candidates?.[0]?.content?.parts?.[0]) as any;
+
+            const originalSig = callAny.thoughtSignature ||
+                partAny?.thoughtSignature ||
+                "skip_thought_signature_validator";
+
+            // Odsłanie wyników bazy do AI
             analystResponse = await ai.models.generateContent({
                 model: 'gemini-3.1-pro-preview',
                 contents: [
                     { role: 'user', parts: [{ text: analystPrompt }] },
-                    { role: 'model', parts: [{ functionCall: call }] },
+                    {
+                        role: 'model',
+                        parts: [{
+                            functionCall: { name: call.name, args: call.args },
+                            thoughtSignature: originalSig // Przekazanie sygnatury w historii
+                        }]
+                    },
                     { role: 'user', parts: [{ text: `Wynik z bazy danych dla ${call.name}: ${JSON.stringify(resultData)}` }] }
                 ],
                 config: {
