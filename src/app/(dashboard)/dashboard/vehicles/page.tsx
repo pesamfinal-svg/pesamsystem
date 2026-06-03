@@ -51,52 +51,8 @@ export default function VehiclesHub() {
         date: new Date().toISOString().split("T")[0], cost: 0, accountingNumber: "",
         mileage: 0, comments: "", location: "", repairType: "", category: "Inne"
     });
-    const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
+    const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]); // Tablica załączników (dowolna ilość)
     const [isAiParsing, setIsAiParsing] = useState(false);
-    // ==========================================
-    // NOWE: ODCZYTYWANIE DANYCH Z FAKTURY PRZEZ AI (OCR)
-    // ==========================================
-    const handleParseInvoiceWithAI = async () => {
-        if (!invoiceFile) return alert("Najpierw wybierz plik z fakturą!");
-        setIsAiParsing(true);
-
-        try {
-            // Zamiana pliku na Base64 (wymagane przez API Gemini)
-            const base64: string = await new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.readAsDataURL(invoiceFile);
-                reader.onload = () => resolve((reader.result as string).split(',')[1]);
-                reader.onerror = error => reject(error);
-            });
-
-            const response = await fetch('/api/parse-invoice', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fileBase64: base64, mimeType: invoiceFile.type })
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) throw new Error(data.error || "Nieudana analiza AI");
-
-            // Wypełnianie formularza danymi z AI
-            setRepairForm(prev => ({
-                ...prev,
-                date: data.date || prev.date,
-                cost: data.cost || prev.cost,
-                accountingNumber: data.accountingNumber || prev.accountingNumber,
-                mileage: data.mileage || prev.mileage,
-                comments: data.comments || prev.comments,
-                repairType: data.repairType || prev.repairType
-            }));
-
-            alert("✨ AI odczytało fakturę i wypełniło formularz! Sprawdź poprawność danych przed zapisem.");
-        } catch (error: any) {
-            alert("Błąd analizy AI: " + error.message);
-        } finally {
-            setIsAiParsing(false);
-        }
-    };
 
     // --- STANY IMPORTERA CSV ---
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -108,7 +64,7 @@ export default function VehiclesHub() {
     const [bulkUploadProgress, setBulkUploadProgress] = useState("");
 
     // ==========================================
-    // LOGIKA BAZODANOWA (POBIERANIE)
+    // LOGIKA POJAZDÓW
     // ==========================================
     const fetchVehicles = async () => {
         setLoading(true);
@@ -175,6 +131,9 @@ export default function VehiclesHub() {
         setVehicleForm(vehicle); setIsEditing(true); setIsVehicleModalOpen(true);
     };
 
+    // ==========================================
+    // LOGIKA NAPRAW I HISTORII
+    // ==========================================
     const fetchRepairs = async (vehicleId: string) => {
         setIsRepairsLoading(true);
         try {
@@ -197,17 +156,16 @@ export default function VehiclesHub() {
             cost: 0, accountingNumber: "", mileage: vehicle.initialMileage,
             comments: "", location: "", repairType: "", category: "Inne"
         });
-        setInvoiceFile(null);
+        setInvoiceFiles([]);
         fetchRepairs(vehicle.id);
     };
 
     const closeHistoryModal = () => {
         setSelectedVehicle(null);
         setRepairs([]);
-        handleCancelEditRepair(); // Czyścimy też formularz z ewentualnej edycji
+        handleCancelEditRepair();
     };
 
-    // Włączenie trybu edycji dla wybranej naprawy
     const handleStartEditRepair = (repair: Repair) => {
         setIsEditingRepair(true);
         setEditingRepairId(repair.id);
@@ -223,9 +181,9 @@ export default function VehiclesHub() {
             invoiceUrl: repair.invoiceUrl,
             legacyId: repair.legacyId
         });
+        setInvoiceFiles([]);
     };
 
-    // Wyłączenie trybu edycji (powrót do dodawania nowej naprawy)
     const handleCancelEditRepair = () => {
         setIsEditingRepair(false);
         setEditingRepairId(null);
@@ -234,10 +192,69 @@ export default function VehiclesHub() {
             cost: 0, accountingNumber: "", mileage: selectedVehicle ? selectedVehicle.initialMileage : 0,
             comments: "", location: "", repairType: "", category: "Inne"
         });
-        setInvoiceFile(null);
+        setInvoiceFiles([]);
     };
+
+    const handleClipboardPaste = (e: React.ClipboardEvent) => {
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf("image") !== -1) {
+                const blob = items[i].getAsFile();
+                if (blob) {
+                    const pastedFile = new File([blob], `Screenshot_${new Date().toISOString().replace(/[:.]/g, "-")}.png`, { type: blob.type });
+                    setInvoiceFiles(prev => [...prev, pastedFile]);
+                }
+            }
+        }
+    };
+
+    const handleParseInvoiceWithAI = async () => {
+        if (invoiceFiles.length === 0) return alert("Najpierw dodaj przynajmniej jeden plik (lub wklej zrzut ekranu)!");
+        setIsAiParsing(true);
+
+        try {
+            const filePromises = invoiceFiles.map(async (file) => {
+                const base64: string = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.readAsDataURL(file);
+                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                    reader.onerror = error => reject(error);
+                });
+                return { fileBase64: base64, mimeType: file.type };
+            });
+
+            const processedFiles = await Promise.all(filePromises);
+
+            const response = await fetch('/api/parse-invoice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: processedFiles })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) throw new Error(data.error || "Nieudana analiza plików");
+
+            setRepairForm(prev => ({
+                ...prev,
+                date: data.date || prev.date,
+                cost: data.cost || prev.cost,
+                accountingNumber: data.accountingNumber || prev.accountingNumber,
+                mileage: data.mileage || prev.mileage,
+                comments: data.comments || prev.comments,
+                repairType: data.repairType || prev.repairType
+            }));
+
+            alert("✨ AI przeanalizowało wszystkie dokumenty i wypełniło formularz! Sprawdź dane przed zapisem.");
+        } catch (error: any) {
+            alert("Błąd analizy AI: " + error.message);
+        } finally {
+            setIsAiParsing(false);
+        }
+    };
+
     // ==========================================
-    // LOGIKA ZAPISU NOWEJ NAPRAWY
+    // BEZLIMITOWY ZAPIS NAPRAWY (Fuzja N-plików do jednego PDF)
     // ==========================================
     const handleSaveRepair = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -246,17 +263,57 @@ export default function VehiclesHub() {
 
         try {
             const storage = getStorage();
-            // Zachowujemy stary url faktury, chyba że wgrywamy nowy plik
             let finalInvoiceUrl = repairForm.invoiceUrl || "";
 
-            // 1. Wgrywanie nowego pliku do Firebase Storage (Jeśli został wybrany)
-            if (invoiceFile) {
-                const fileRef = ref(storage, `vehicles/invoices/${Date.now()}_${invoiceFile.name}`);
-                await uploadBytes(fileRef, invoiceFile);
+            if (invoiceFiles.length > 0) {
+                let fileToUpload: Blob;
+                let fileNameToUpload: string;
+
+                if (invoiceFiles.length === 1 && invoiceFiles[0].type === "application/pdf") {
+                    // Wyjątek: Jeśli wgrywamy tylko 1 plik i to jest już PDF -> nie ma potrzeby fuzji
+                    fileToUpload = invoiceFiles[0];
+                    fileNameToUpload = invoiceFiles[0].name;
+                } else {
+                    // Wiele plików (lub jedno zdjęcie/screenshot) -> robimy fuzję do formatu PDF
+                    const filePromises = invoiceFiles.map(async (file) => {
+                        const base64: string = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.readAsDataURL(file);
+                            reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                            reader.onerror = error => reject(error);
+                        });
+                        return { fileBase64: base64, mimeType: file.type };
+                    });
+
+                    const processedFiles = await Promise.all(filePromises);
+
+                    // Wysyłamy do serwera do złączenia w jeden PDF
+                    const mergeResponse = await fetch('/api/merge-attachments', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ files: processedFiles })
+                    });
+
+                    const mergeData = await mergeResponse.json();
+                    if (!mergeResponse.ok) throw new Error(mergeData.error || "Błąd łączenia plików");
+
+                    // Konwertujemy Base64 z powrotem na plik PDF (Blob)
+                    const byteCharacters = atob(mergeData.pdfBase64);
+                    const byteNumbers = new Array(byteCharacters.length);
+                    for (let i = 0; i < byteCharacters.length; i++) {
+                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                    }
+                    const byteArray = new Uint8Array(byteNumbers);
+                    fileToUpload = new Blob([byteArray], { type: 'application/pdf' });
+                    fileNameToUpload = `Polaczone_Dokumenty_${Date.now()}.pdf`;
+                }
+
+                // Wgrywamy jeden gotowy plik PDF do Storage
+                const fileRef = ref(storage, `vehicles/invoices/${Date.now()}_${fileNameToUpload}`);
+                await uploadBytes(fileRef, fileToUpload);
                 finalInvoiceUrl = await getDownloadURL(fileRef);
             }
 
-            // Określamy czy tworzymy nowy dokument, czy edytujemy stary
             let repairRef;
             if (isEditingRepair && editingRepairId) {
                 repairRef = doc(db, "repairs", editingRepairId);
@@ -264,7 +321,6 @@ export default function VehiclesHub() {
                 repairRef = doc(collection(db, "repairs"));
             }
 
-            // 2. Zapisywanie danych do Firestore
             await setDoc(repairRef, {
                 vehicleId: selectedVehicle.id,
                 date: repairForm.date,
@@ -275,16 +331,14 @@ export default function VehiclesHub() {
                 location: repairForm.location,
                 repairType: repairForm.repairType,
                 category: repairForm.category || "Inne",
-                ...(finalInvoiceUrl && { invoiceUrl: finalInvoiceUrl }),
+                invoiceUrl: finalInvoiceUrl,
                 ...(repairForm.legacyId && { legacyId: repairForm.legacyId })
             }, { merge: true });
 
             alert(isEditingRepair ? "Wpis naprawy został pomyślnie zaktualizowany." : "Naprawa została pomyślnie zapisana w systemie!");
 
-            // Czyszczenie formularza i wyłączenie trybu edycji
             handleCancelEditRepair();
 
-            // Jeśli to było DODAWANIE -> Zamykamy modal. Jeśli EDYCJA -> zostajemy w modalu i odświeżamy historię
             if (!isEditingRepair) {
                 closeHistoryModal();
                 fetchVehicles();
@@ -309,19 +363,14 @@ export default function VehiclesHub() {
         }
     };
 
-    // ==========================================
-    // NOWE: WGRYWANIE ZALEGŁYCH SKANÓW (MIGRACJA)
-    // ==========================================
     const handleUploadLegacyInvoice = async (repairDocId: string, legacyId: string, file: File) => {
         setIsSubmitting(true);
         try {
             const storage = getStorage();
-            // Przesyłamy plik do chmury
             const fileRef = ref(storage, `vehicles/invoices/legacy_Naprawa_${legacyId}_${file.name}`);
             await uploadBytes(fileRef, file);
             const downloadUrl = await getDownloadURL(fileRef);
 
-            // Aktualizujemy dokument naprawy w bazie Firestore o link do faktury
             await setDoc(doc(db, "repairs", repairDocId), { invoiceUrl: downloadUrl }, { merge: true });
 
             alert(`Skan faktury dla starego wpisu Naprawa_${legacyId} został pomyślnie wgrany i podpięty!`);
@@ -332,15 +381,13 @@ export default function VehiclesHub() {
             setIsSubmitting(false);
         }
     };
-    // ==========================================
-    // AUTOMAT: MASOWE WGRYWANIE ZALEGŁYCH SKANÓW (100+ PLIKÓW NA RAZ)
-    // ==========================================
+
     const handleBulkUploadInvoices = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = e.target.files;
         if (!files || files.length === 0) return;
 
         if (!confirm(`Wybrano ${files.length} plików.\nCzy chcesz rozpocząć masowe wgrywanie? System dopasuje pliki "Naprawa_X.pdf" do odpowiednich wpisów w bazie.\n\nPROSZĘ NIE ZAMYKAĆ ZAKŁADKI W TRAKCIE PROCESU!`)) {
-            e.target.value = ""; // Reset inputu
+            e.target.value = "";
             return;
         }
 
@@ -354,7 +401,6 @@ export default function VehiclesHub() {
             const file = files[i];
             setBulkUploadProgress(`Wgrywanie: ${i + 1} z ${files.length} (${file.name})...`);
 
-            // Wyciągamy stary numer z nazwy, np. "Naprawa_124.pdf" -> "124"
             const match = file.name.match(/Naprawa_(\d+)/i);
             if (!match) {
                 console.warn(`Plik ${file.name} pominięty - nie pasuje do schematu "Naprawa_X"`);
@@ -364,7 +410,6 @@ export default function VehiclesHub() {
             const legacyId = match[1];
 
             try {
-                // Szukamy w bazie naprawy z tym starym ID
                 const q = query(collection(db, "repairs"), where("legacyId", "==", legacyId));
                 const snap = await getDocs(q);
 
@@ -373,12 +418,10 @@ export default function VehiclesHub() {
                     continue;
                 }
 
-                // Wgrywamy plik do Firebase Storage
                 const fileRef = ref(storage, `vehicles/invoices/legacy_${file.name}`);
                 await uploadBytes(fileRef, file);
                 const downloadUrl = await getDownloadURL(fileRef);
 
-                // Przypisujemy link do odnalezionej naprawy
                 for (const docSnap of snap.docs) {
                     await setDoc(doc(db, "repairs", docSnap.id), { invoiceUrl: downloadUrl }, { merge: true });
                 }
@@ -391,19 +434,16 @@ export default function VehiclesHub() {
 
         setIsBulkUploading(false);
         setBulkUploadProgress("");
-        e.target.value = ""; // Reset
+        e.target.value = "";
         alert(`✅ Masowy import skanów zakończony!\n\nPodpięto poprawnie: ${successCount} plików.\nNie znaleziono naprawy w bazie dla: ${notFoundCount} plików.`);
 
         if (selectedVehicle) fetchRepairs(selectedVehicle.id);
     };
-    // ==========================================
-    // NOWE: OBSŁUGA IMPORTERA Z PLIKÓW EXCEL (CSV)
-    // ==========================================
+
     const handleImportCSV = async () => {
         if (!vehiclesCsv.trim()) return alert("Wklej przynajmniej dane pojazdów!");
         setIsSubmitting(true);
 
-        // Inteligentny parser obsługujący Entery (znaki nowej linii) wewnątrz cudzysłowów
         const parseCSV = (text: string, delimiter: string): string[][] => {
             const lines: string[][] = [];
             let row: string[] = [""];
@@ -437,13 +477,11 @@ export default function VehiclesHub() {
         };
 
         try {
-            // 1. Parsowanie i Import Pojazdów
             const vDelimiter = vehiclesCsv.includes(';') ? ';' : ',';
             const vehicleRows = parseCSV(vehiclesCsv, vDelimiter);
 
-            const idMap: Record<string, string> = {}; // Przechowuje stare_id -> nowe_firestore_id
+            const idMap: Record<string, string> = {};
 
-            // Zaczynamy od i = 1, aby pominąć nagłówek
             for (let i = 1; i < vehicleRows.length; i++) {
                 const cols = vehicleRows[i].map(c => c.trim());
                 if (cols.length < 5 || !cols[0]) continue;
@@ -465,15 +503,13 @@ export default function VehiclesHub() {
                     brand, model, year, registration, summerTires, winterTires, currentTires, inspectionDate, dateAdded, initialMileage
                 });
 
-                idMap[oldId] = vehicleRef.id; // Zapamiętujemy wygenerowane ID
+                idMap[oldId] = vehicleRef.id;
             }
 
-            // 2. Parsowanie i Import Napraw
             if (repairsCsv.trim()) {
                 const rDelimiter = repairsCsv.includes(';') ? ';' : ',';
                 const repairRows = parseCSV(repairsCsv, rDelimiter);
 
-                // Zaczynamy od i = 1, aby pominąć nagłówek
                 for (let i = 1; i < repairRows.length; i++) {
                     const cols = repairRows[i].map(c => c.trim());
                     if (cols.length < 3 || !cols[0]) continue;
@@ -481,7 +517,7 @@ export default function VehiclesHub() {
                     const legacyId = cols[0];
                     const oldVehicleId = cols[1];
                     const dateRaw = cols[2];
-                    const date = dateRaw ? dateRaw.split(" ")[0] : ""; // Oczyszczenie "2024-09-24 02:00:00" -> "2024-09-24"
+                    const date = dateRaw ? dateRaw.split(" ")[0] : "";
                     const cost = parseFloat(cols[3]?.replace(',', '.')) || 0;
                     const accountingNumber = cols[4] || "";
                     const mileage = Number(cols[5]) || 0;
@@ -719,7 +755,10 @@ export default function VehiclesHub() {
                             </div>
 
                             {/* PRAWA STRONA: Formularz nowej naprawy / Edycji */}
-                            <div className="w-1/3 flex flex-col bg-white">
+                            <div
+                                onPaste={handleClipboardPaste}
+                                className="w-1/3 flex flex-col bg-white"
+                            >
                                 <div className={`p-4 border-b flex justify-between items-center ${isEditingRepair ? 'bg-orange-50' : 'bg-purple-50'}`}>
                                     <span className={`text-xs font-black uppercase tracking-wider ${isEditingRepair ? 'text-orange-800' : 'text-purple-800'}`}>
                                         {isEditingRepair ? "✏️ Edytuj Wpis Serwisowy" : "➕ Zarejestruj Naprawę"}
@@ -773,26 +812,50 @@ export default function VehiclesHub() {
                                             <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Uwagi / Zakres prac</label>
                                             <textarea rows={3} placeholder="Co dokładnie zostało zrobione..." value={repairForm.comments || ""} onChange={e => setRepairForm({ ...repairForm, comments: e.target.value })} className="w-full p-2.5 bg-slate-50 border rounded-lg font-medium outline-none focus:border-purple-500 resize-none"></textarea>
                                         </div>
-                                        <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-                                            <label className="block text-[10px] font-black text-slate-500 uppercase mb-2">Skan Faktury (PDF / Zdjęcie)</label>
+                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 focus-within:border-purple-300 transition-colors">
+                                            <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Załączniki (Skany / Zdjęcia)</label>
+                                            <p className="text-[10px] text-slate-400 mb-3">Wybierz pliki z dysku lub **kliknij tu i wklej zrzut ekranu (Ctrl+V)**.</p>
+
                                             <input
-                                                type="file" accept=".pdf,.jpg,.jpeg,.png"
-                                                onChange={e => setInvoiceFile(e.target.files ? e.target.files[0] : null)}
+                                                type="file" multiple accept=".pdf,.jpg,.jpeg,.png"
+                                                onChange={e => {
+                                                    if (e.target.files) {
+                                                        setInvoiceFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                                                    }
+                                                }}
                                                 className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200 cursor-pointer mb-3"
                                             />
 
-                                            {/* PRZYCISK MAGII AI (Pojawia się tylko gdy wybrano plik) */}
-                                            {invoiceFile && (
+                                            {/* LISTA PODGLĄDU ZAŁĄCZONYCH PLIKÓW / SCREENSHOTÓW */}
+                                            {invoiceFiles.length > 0 && (
+                                                <div className="space-y-1.5 mb-3">
+                                                    {invoiceFiles.map((file, index) => (
+                                                        <div key={index} className="flex justify-between items-center bg-white p-2 rounded-lg border text-xs shadow-sm">
+                                                            <span className="truncate pr-2 font-semibold text-slate-700">📄 {file.name}</span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setInvoiceFiles(prev => prev.filter((_, i) => i !== index))}
+                                                                className="text-red-500 font-bold hover:text-red-700 px-1"
+                                                            >
+                                                                &times;
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {/* PRZYCISK ANALIZY AI */}
+                                            {invoiceFiles.length > 0 && (
                                                 <button
                                                     type="button"
                                                     onClick={handleParseInvoiceWithAI}
                                                     disabled={isAiParsing}
-                                                    className="w-full bg-indigo-100 hover:bg-indigo-200 text-indigo-800 border border-indigo-300 font-bold py-2 rounded-lg text-xs flex items-center justify-center gap-2 transition shadow-sm disabled:opacity-50"
+                                                    className="w-full bg-indigo-100 hover:bg-indigo-200 text-indigo-800 border border-indigo-300 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-2 transition shadow-sm disabled:opacity-50"
                                                 >
                                                     {isAiParsing ? (
-                                                        <span className="animate-pulse">🤖 Przeszukiwanie dokumentu (OCR)...</span>
+                                                        <span className="animate-pulse">🤖 Czytanie z {invoiceFiles.length} plików...</span>
                                                     ) : (
-                                                        <span>✨ Odczytaj dane z faktury (AI)</span>
+                                                        <span>✨ Odczytaj dane z faktur (AI)</span>
                                                     )}
                                                 </button>
                                             )}
