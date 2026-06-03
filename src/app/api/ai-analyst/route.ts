@@ -57,24 +57,18 @@ async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
     let allDocs: any[] = [];
 
     if (vehicleId) {
-        // Pobieranie dla jednego konkretnego auta
         const snap = await adminDb.collection("repairs").where("vehicleId", "==", vehicleId).get();
         allDocs = snap.docs;
     } else if (vehicleIds && Array.isArray(vehicleIds) && vehicleIds.length > 0) {
-        // Ominięcie limitów Firestore: Dzielenie zapytań na paczki po max 30 aut
         const chunks = [];
         for (let i = 0; i < vehicleIds.length; i += 30) {
             chunks.push(vehicleIds.slice(i, i + 30));
         }
 
-        // Równoległe pobranie wszystkich paczek
         const snapPromises = chunks.map(chunk => adminDb.collection("repairs").where("vehicleId", "in", chunk).get());
         const snaps = await Promise.all(snapPromises);
-
-        // Spłaszczenie wyników do jednej tablicy
         allDocs = snaps.flatMap(snap => snap.docs);
     } else {
-        // Pobranie wszystkich napraw, jeśli AI w ogóle nie nałoży filtrów
         const snap = await adminDb.collection("repairs").get();
         allDocs = snap.docs;
     }
@@ -108,11 +102,6 @@ async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
 const GET_VEHICLES_TOOL = {
     name: "fetchVehiclesFromDB",
     description: "Pobiera listę pojazdów z bazy danych Firestore.",
-    parameters: { type: Type.OBJECT, properties: {} }
-};
-const DELEGATE_ANALYSIS_TOOL = {
-    name: "delegateToDataAnalyst",
-    description: "Wywołaj to narzędzie ZAWSZE, gdy użytkownik prosi o zestawienie, historię napraw, statystyki, koszty, tabele lub wykresy i wiesz już, dla jakiego pojazdu to zrobić. Uruchomi to Głównego Analityka.",
     parameters: { type: Type.OBJECT, properties: {} }
 };
 
@@ -194,11 +183,17 @@ const RENDER_KPI_TOOL = {
     }
 };
 
+const DELEGATE_ANALYSIS_TOOL = {
+    name: "delegateToDataAnalyst",
+    description: "Wywołaj to narzędzie ZAWSZE, gdy użytkownik prosi o zestawienie, historię napraw, statystyki, koszty, tabele lub wykresy i wiesz już, dla jakiego pojazdu to zrobić. Uruchomi to Głównego Analityka.",
+    parameters: { type: Type.OBJECT, properties: {} }
+};
+
 // =========================================================================
 // 3. GŁÓWNY ROUTE POST
 // =========================================================================
 export async function POST(req: Request) {
-    const logs: string[] = []; // Inicjalizacja tablicy zdarzeń
+    const logs: string[] = [];
     try {
         const { question, currentHistory, cachedData } = await req.json();
 
@@ -209,7 +204,7 @@ export async function POST(req: Request) {
         // ==========================================
         logs.push("Uruchomiono Agenta Recepcjonistę (Gemini 3.5 Flash)");
 
-        let isRequestingAnalysis = false; // Domyślnie zakładamy luźną rozmowę
+        let isRequestingAnalysis = false;
 
         let routerResponse = await generateContentWithRetry({
             model: 'gemini-3.5-flash',
@@ -225,12 +220,10 @@ export async function POST(req: Request) {
 
         let calls = routerResponse.functionCalls || [];
 
-        // Jeśli Flash użył przycisku od razu
         if (calls.some((c: any) => c.name === "delegateToDataAnalyst")) {
             isRequestingAnalysis = true;
         }
 
-        // Jeśli Flash najpierw sprawdza bazę aut
         if (calls.some((c: any) => c.name === "fetchVehiclesFromDB")) {
             const call = calls.find((c: any) => c.name === "fetchVehiclesFromDB")!;
             logs.push("Flash: Sprawdzam bazę pojazdów Firestore...");
@@ -240,7 +233,6 @@ export async function POST(req: Request) {
             const partAny = (routerResponse.candidates?.[0]?.content?.parts?.[0]) as any;
             const flashSig = callAny.thoughtSignature || partAny?.thoughtSignature || "skip_thought_signature_validator";
 
-            // Drugie pytanie do Flasha po otrzymaniu listy aut
             routerResponse = await generateContentWithRetry({
                 model: 'gemini-3.5-flash',
                 contents: [
@@ -256,13 +248,12 @@ export async function POST(req: Request) {
             });
 
             calls = routerResponse.functionCalls || [];
-            // Jeśli Flash po poznaniu aut nacisnął przycisk
             if (calls.some((c: any) => c.name === "delegateToDataAnalyst")) {
                 isRequestingAnalysis = true;
             }
         }
 
-        // Zabezpieczenie: Jeśli Flash zdecydował, że nie deleguje sprawy, zwracamy jego tekst i kończymy.
+        // Jeśli to tylko zwykłe uściślanie / pogaduszki
         if (!isRequestingAnalysis) {
             logs.push("Recepcjonista uznał, że to tylko rozmowa lub doprecyzowanie. Nie uruchamia Głównego Analityka.");
             return NextResponse.json({
@@ -282,7 +273,7 @@ export async function POST(req: Request) {
             : `Nie masz jeszcze pobranych żadnych danych z bazy. Aby przeanalizować flotę, wywołaj niezbędne narzędzia (fetchVehiclesFromDB, fetchRepairsFromDB).`;
 
         if (cachedData && Object.keys(cachedData).length > 0) {
-            logs.push("Analityk: Wykryto dane w lokalnej pamięci podręcznej (Cache). Pominięto ponowne zapytania do bazy Firestore.");
+            logs.push("Analityk: Przeskanowano lokalną pamięć podręczną (Cache)...");
         }
 
         const analystPrompt = `
@@ -293,9 +284,14 @@ export async function POST(req: Request) {
             ${cacheString}
         `;
 
+        // INICJALIZACJA HISTORII CZATU DLA ANALITYKA PRO (contents)
+        const analystContents: any[] = [
+            { role: 'user', parts: [{ text: analystPrompt }] }
+        ];
+
         let analystResponse = await generateContentWithRetry({
             model: 'gemini-3.1-pro-preview',
-            contents: [{ role: 'user', parts: [{ text: analystPrompt }] }],
+            contents: analystContents,
             config: {
                 systemInstruction: "Jesteś PESAM AI Data Analyst. Najpierw upewnij się, że masz potrzebne dane (z cache lub pobierając z bazy). Do obliczania średnich, sum, podatków i skomplikowanej matematyki ZAWSZE pisz kod w języku Python (zostanie automatycznie wykonany). Na koniec zdecyduj i użyj jednego z narzędzi wizualnych: 'renderChartWidget' (dla wykresów), 'renderTableWidget' (dla list/rankingów) lub 'renderKpiWidget' (dla kilku kluczowych liczb/podsumowań).",
                 temperature: 0.0,
@@ -314,18 +310,21 @@ export async function POST(req: Request) {
             executionLimit--;
 
             let resultData: any = {};
+            let responsePayload: any = {};
 
             if (call.name === "fetchVehiclesFromDB") {
                 logs.push("Analityk Pro: Pobieram listę pojazdów z bazy danych...");
                 resultData = await dbGetVehiclesList();
                 currentSessionCache.vehicles = resultData;
+                responsePayload = { vehicles: resultData };
                 logs.push(`Analityk Pro: Zaimportowano ${resultData.length} pojazdów.`);
             } else if (call.name === "fetchRepairsFromDB") {
                 const args = call.args as { vehicleId?: string; vehicleIds?: string[] };
-                logs.push(`Analityk Pro: Pobieram wpisy serwisowe z bazy Firestore...`);
+                logs.push(`Analityk Pro: Wykryto zapytanie o naprawy. Pobieram dane z Firestore...`);
                 resultData = await dbGetRepairs(args.vehicleId, args.vehicleIds);
                 currentSessionCache.repairs = resultData;
-                logs.push(`Analityk Pro: Pobrano ${resultData.length} wpisów serwisowych dla wybranej grupy aut.`);
+                responsePayload = { repairs: resultData };
+                logs.push(`Analityk Pro: Pobrano ${resultData.length} wpisów serwisowych.`);
             }
             else if (call.name === "renderChartWidget" || call.name === "renderTableWidget" || call.name === "renderKpiWidget") {
                 break;
@@ -338,19 +337,30 @@ export async function POST(req: Request) {
                 partAny?.thoughtSignature ||
                 "skip_thought_signature_validator";
 
+            // AKUMULACJA: Dodajemy ruch modelu z wywołaniem funkcji do historii
+            analystContents.push({
+                role: 'model',
+                parts: [{
+                    functionCall: { name: call.name, args: call.args },
+                    thoughtSignature: originalSig
+                }]
+            });
+
+            // AKUMULACJA: Dodajemy naszą odpowiedź z danymi z Firestore do historii
+            analystContents.push({
+                role: 'user',
+                parts: [{
+                    functionResponse: {
+                        name: call.name,
+                        response: responsePayload
+                    }
+                }]
+            });
+
+            // Kolejne zapytanie do Gemini Z PEŁNĄ HISTORIĄ contents
             analystResponse = await generateContentWithRetry({
                 model: 'gemini-3.1-pro-preview',
-                contents: [
-                    { role: 'user', parts: [{ text: analystPrompt }] },
-                    {
-                        role: 'model',
-                        parts: [{
-                            functionCall: { name: call.name, args: call.args },
-                            thoughtSignature: originalSig
-                        }]
-                    },
-                    { role: 'user', parts: [{ text: `Wynik z bazy danych dla ${call.name}: ${JSON.stringify(resultData)}` }] }
-                ],
+                contents: analystContents,
                 config: {
                     systemInstruction: "Przeanalizuj otrzymane z bazy rekordy. Wykorzystaj Pythona do obliczeń matematycznych. Gdy będziesz gotowy, wygeneruj odpowiedni widget wizualny (Wykres, Tabelę lub KPI) za pomocą dostępnych narzędzi renderujących.",
                     temperature: 0.0,
@@ -414,7 +424,7 @@ export async function POST(req: Request) {
             message: textMessage,
             uiAction: uiAction,
             newCache: currentSessionCache,
-            logs // Przesłanie tablicy logów na frontend
+            logs
         }, { status: 200 });
 
     } catch (error: any) {
