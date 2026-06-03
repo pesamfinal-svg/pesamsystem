@@ -34,6 +34,30 @@ export default function FleetReportsHub() {
         { role: "ai", text: "Cześć! Jestem Twoim Asystentem Analitycznym. Aby rozpocząć analizę floty, wpisz swoje pytanie poniżej (np. 'podaj naprawy forda transita')." }
     ]);
 
+    // Dynamiczne statusy na czas oczekiwania na analizę
+    const [thinkingStep, setThinkingStep] = useState(0);
+    const thinkingMessages = [
+        "Inicjalizacja rundy analitycznej...",
+        "Sprawdzanie dostępności pojazdów w bazie danych...",
+        "Filtrowanie rekordów dla wybranej grupy aut...",
+        "Pobieranie kosztów i wpisów serwisowych z Firestore...",
+        "Uruchamianie piaskownicy Pythona i przetwarzanie matematyczne...",
+        "Generowanie parametrów do wizualizacji danych..."
+    ];
+
+    useEffect(() => {
+        let interval: any;
+        if (isThinking) {
+            setThinkingStep(0);
+            interval = setInterval(() => {
+                setThinkingStep(prev => (prev + 1) % thinkingMessages.length);
+            }, 3000); // Zmiana komunikatu co 3 sekundy
+        } else {
+            clearInterval(interval);
+        }
+        return () => clearInterval(interval);
+    }, [isThinking]);
+
     // --- FUNKCJONALNOŚĆ HISTORII WIDGETÓW ---
     const [widgetHistory, setWidgetHistory] = useState<CanvasWidget[]>([]);
     const [currentWidgetIndex, setCurrentWidgetIndex] = useState<number>(-1);
@@ -61,7 +85,13 @@ export default function FleetReportsHub() {
         setPrompt("");
         setChatHistory(prev => [...prev, { role: "user", text: userMsg }]);
         setIsThinking(true);
-        setExecutionLogs([]); // Resetowanie logów przy nowym pytaniu
+
+        // Zamiast ukrywać czarny panel, od razu pokazujemy statusy startowe na czas myślenia AI
+        setExecutionLogs([
+            "Inicjalizacja kolejnej rundy pytań...",
+            "Przesyłanie historii rozmowy do modeli Gemini...",
+            "Wywoływanie procesów analitycznych na serwerze..."
+        ]);
 
         try {
             const res = await fetch("/api/ai-analyst", {
@@ -122,7 +152,7 @@ export default function FleetReportsHub() {
     const renderCanvas = () => {
         if (activeWidget.type === "none") {
             return (
-                <div className="h-full flex flex-col items-center justify-center text-slate-300 space-y-4">
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-300 space-y-4">
                     <span className="text-6xl">📊</span>
                     <p className="font-bold text-slate-400">Dynamiczny Canvas oczekuje na instrukcje</p>
                     <p className="text-xs text-center px-10">Zadaj pytanie Asystentowi obok, a wykresy i tabele wygenerują się w tym miejscu automatycznie.</p>
@@ -144,7 +174,7 @@ export default function FleetReportsHub() {
             const options = { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: activeWidget.data.title } } };
 
             return (
-                <div className="h-full flex flex-col items-center justify-center bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative">
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
                     <div className="w-full h-[90%] flex items-center justify-center">
                         {activeWidget.data.chartType === 'bar' && <Bar data={chartData} options={options} />}
                         {activeWidget.data.chartType === 'pie' && <Pie data={chartData} options={options} />}
@@ -156,7 +186,7 @@ export default function FleetReportsHub() {
 
         if (activeWidget.type === "table" && activeWidget.data) {
             return (
-                <div className="h-full flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-hidden">
+                <div className="absolute inset-0 flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 overflow-hidden">
                     <h3 className="font-black text-slate-700 text-lg mb-4">{activeWidget.data.title}</h3>
                     <div className="flex-1 overflow-auto rounded-xl border border-slate-200">
                         <table className="w-full text-left text-sm">
@@ -184,7 +214,7 @@ export default function FleetReportsHub() {
 
         if (activeWidget.type === "kpi" && activeWidget.data) {
             return (
-                <div className="h-full flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-y-auto">
+                <div className="absolute inset-0 flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 overflow-y-auto">
                     <h3 className="font-black text-slate-700 text-lg mb-6">{activeWidget.data.title}</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {activeWidget.data.metrics.map((metric: any, i: number) => (
@@ -238,8 +268,9 @@ export default function FleetReportsHub() {
                         ))}
                         {isThinking && (
                             <div className="flex justify-start">
-                                <div className="bg-slate-100 text-slate-500 p-3 rounded-2xl rounded-bl-none border border-slate-200 text-sm flex gap-2 items-center">
-                                    <span className="animate-bounce">●</span><span className="animate-bounce delay-75">●</span><span className="animate-bounce delay-150">●</span> Pisze kod i analizuje dane...
+                                <div className="bg-slate-100 text-slate-500 p-3 rounded-2xl rounded-bl-none border border-slate-200 text-xs flex gap-2 items-center">
+                                    <span className="animate-spin text-blue-600 font-bold">⚙</span>
+                                    <span>{thinkingMessages[thinkingStep]}</span>
                                 </div>
                             </div>
                         )}

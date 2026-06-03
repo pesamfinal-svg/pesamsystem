@@ -53,11 +53,15 @@ async function dbGetVehiclesList() {
     });
 }
 
-async function dbGetRepairs(vehicleId?: string) {
+async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
     let queryRef: any = adminDb.collection("repairs");
 
     if (vehicleId) {
         queryRef = queryRef.where("vehicleId", "==", vehicleId);
+    } else if (vehicleIds && Array.isArray(vehicleIds) && vehicleIds.length > 0) {
+        // Limit do 10 ze względu na ograniczenia operatora 'in' w Firestore
+        const limitedIds = vehicleIds.slice(0, 10);
+        queryRef = queryRef.where("vehicleId", "in", limitedIds);
     }
 
     const snap = await queryRef.get();
@@ -95,11 +99,16 @@ const GET_VEHICLES_TOOL = {
 
 const GET_REPAIRS_TOOL = {
     name: "fetchRepairsFromDB",
-    description: "Pobiera listę napraw i kosztów z bazy danych Firestore. Możesz opcjonalnie podać 'vehicleId'.",
+    description: "Pobiera listę napraw i kosztów z bazy danych Firestore. Możesz podać jedno 'vehicleId' lub tablicę 'vehicleIds' dla grupy pojazdów.",
     parameters: {
         type: Type.OBJECT,
         properties: {
-            vehicleId: { type: Type.STRING, description: "ID konkretnego pojazdu (opcjonalnie)." }
+            vehicleId: { type: Type.STRING, description: "ID konkretnego pojazdu (opcjonalnie)." },
+            vehicleIds: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "Tablica ID pojazdów (opcjonalnie, np. gdy filtrujesz grupę aut danej marki)."
+            }
         }
     }
 };
@@ -302,11 +311,11 @@ export async function POST(req: Request) {
                 currentSessionCache.vehicles = resultData;
                 logs.push(`Analityk Pro: Zaimportowano ${resultData.length} pojazdów.`);
             } else if (call.name === "fetchRepairsFromDB") {
-                const args = call.args as { vehicleId?: string };
-                logs.push(`Analityk Pro: Pobieram wpisy serwisowe z bazy Firestore${args.vehicleId ? ` dla ID pojazdu: ${args.vehicleId}` : ""}...`);
-                resultData = await dbGetRepairs(args.vehicleId);
+                const args = call.args as { vehicleId?: string; vehicleIds?: string[] };
+                logs.push(`Analityk Pro: Pobieram wpisy serwisowe z bazy Firestore...`);
+                resultData = await dbGetRepairs(args.vehicleId, args.vehicleIds);
                 currentSessionCache.repairs = resultData;
-                logs.push(`Analityk Pro: Zaimportowano ${resultData.length} wpisów serwisowych.`);
+                logs.push(`Analityk Pro: Pobrano ${resultData.length} wpisów serwisowych dla wybranej grupy aut.`);
             }
             else if (call.name === "renderChartWidget" || call.name === "renderTableWidget" || call.name === "renderKpiWidget") {
                 break;
