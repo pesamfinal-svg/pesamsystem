@@ -1,13 +1,8 @@
 // src/app/api/ai-analyst/route.ts
 import { NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
+import { db } from "@/lib/firebase/config";
 import * as admin from 'firebase-admin';
-
-// Inicjalizacja Admin SDK (wymagana po stronie serwera)
-if (!admin.apps.length) {
-    admin.initializeApp(); // Automatycznie autoryzuje się w Firebase App Hosting
-}
-const adminDb = admin.firestore();
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -15,10 +10,38 @@ const ai = new GoogleGenAI({
     location: 'global'
 });
 
-export const maxDuration = 60;
+export const maxDuration = 60; // Next.js pozwala na pracę serwera do 60s, co jest idealne przy ponownych próbach
+
+// Inicjalizacja Admin SDK (wymagana po stronie serwera)
+if (!admin.apps.length) {
+    admin.initializeApp();
+}
+const adminDb = admin.firestore();
 
 // =========================================================================
-// 1. BEZPOŚREDNIE FUNKCJE BAZODANOWE (Wywoływane przez serwer na żądanie AI)
+// FUNKCJA POMOCNICZA: AUTOMATYCZNA SAMONAPRAWA DLA LIMITÓW 429 (BACKOFF)
+// =========================================================================
+async function generateContentWithRetry(params: any, retries = 3, delay = 1000): Promise<any> {
+    try {
+        return await ai.models.generateContent(params);
+    } catch (error: any) {
+        const isRateLimit = error.message?.includes("429") ||
+            error.message?.includes("RESOURCE_EXHAUSTED") ||
+            error.status === 429 ||
+            error.code === 429;
+
+        if (isRateLimit && retries > 0) {
+            console.warn(`[AI Analyst] Napotkano przeciążenie chmury Google (429/Resource Exhausted). Ponowna próba za ${delay}ms... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            // Rekurencyjna ponowna próba z podwojonym czasem oczekiwania (wykładnicze opóźnienie)
+            return generateContentWithRetry(params, retries - 1, delay * 2);
+        }
+        throw error; // Jeśli to nie był błąd 429 lub skończyły się próby, rzucamy błąd dalej
+    }
+}
+
+// =========================================================================
+// BEZPOŚREDNIE FUNKCJE BAZODANOWE (Wywoływane przez serwer)
 // =========================================================================
 async function dbGetVehiclesList() {
     const snap = await adminDb.collection("vehicles").get();
@@ -65,7 +88,7 @@ async function dbGetRepairs(vehicleId?: string) {
 }
 
 // =========================================================================
-// 2. DEFINICJE NARZĘDZI DLA MODELI AI (FUNCTION CALLING)
+// DEFINICJE NARZĘDZI DLA MODELI AI (FUNCTION CALLING)
 // =========================================================================
 const GET_VEHICLES_TOOL = {
     name: "fetchVehiclesFromDB",
@@ -156,9 +179,9 @@ export async function POST(req: Request) {
         const historyText = currentHistory.map((msg: any) => `${msg.role === 'user' ? 'Użytkownik' : 'AI'}: ${msg.text}`).join('\n');
 
         // ==========================================
-        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash) - W PEŁNI DYNAMICZNY ODPOWIEDZIALNY ZA DOSTĘP
+        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash) - ODPORNY NA LIMIT 429
         // ==========================================
-        let routerResponse = await ai.models.generateContent({
+        let routerResponse = await generateContentWithRetry({
             model: 'gemini-3.5-flash',
             contents: [
                 { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] }
@@ -170,12 +193,11 @@ export async function POST(req: Request) {
             }
         });
 
-        // Obsługa wywołania narzędzia przez Flasha (z poprawną sygnaturą myślenia!)
-        if (routerResponse.functionCalls?.some(call => call.name === "fetchVehiclesFromDB")) {
-            const call = routerResponse.functionCalls.find(c => c.name === "fetchVehiclesFromDB")!;
+        // Obsługa wywołania narzędzia przez Flasha (z zabezpieczeniem sygnatury) - jawne typowanie : any rozwiązuje błąd noImplicitAny
+        if (routerResponse.functionCalls?.some((call: any) => call.name === "fetchVehiclesFromDB")) {
+            const call = routerResponse.functionCalls.find((c: any) => c.name === "fetchVehiclesFromDB")!;
             const vehiclesList = await dbGetVehiclesList();
 
-            // Pobranie sygnatury myślenia lub podstawienie bypassu (chroni przed błędem 400) - Rzutowanie na any ucisza błąd TypeScript
             const callAny = call as any;
             const partAny = (routerResponse.candidates?.[0]?.content?.parts?.[0]) as any;
 
@@ -183,7 +205,7 @@ export async function POST(req: Request) {
                 partAny?.thoughtSignature ||
                 "skip_thought_signature_validator";
 
-            routerResponse = await ai.models.generateContent({
+            routerResponse = await generateContentWithRetry({
                 model: 'gemini-3.5-flash',
                 contents: [
                     { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] },
@@ -191,7 +213,7 @@ export async function POST(req: Request) {
                         role: 'model',
                         parts: [{
                             functionCall: { name: call.name, args: call.args },
-                            thoughtSignature: flashSig // <--- Przekazanie sygnatury myślenia
+                            thoughtSignature: flashSig
                         }]
                     },
                     {
@@ -205,7 +227,7 @@ export async function POST(req: Request) {
                     }
                 ],
                 config: {
-                    systemInstruction: "Znasz już listę pojazdów z bazy. Użyj tych danych, by mądrze dopytać użytkownika, o co dokładnie mu chodzi, podając przykłady aut z listy (np. FORD TRANSIT RDE 90WP). Nigdy nie zmyślaj aut, których nie ma na tej liście.",
+                    systemInstruction: "Znasz już lista pojazdów z bazy. Użyj tych danych, by mądrze dopytać użytkownika, o co dokładnie mu chodzi, podając przykłady aut z listy (np. FORD TRANSIT RDE 90WP). Nigdy nie zmyślaj aut, których nie ma na tej liście.",
                     temperature: 0.1
                 }
             });
@@ -228,7 +250,7 @@ export async function POST(req: Request) {
         }
 
         // ==========================================
-        // ETAP 2: AGENT 2 (Analityk Pro 3.1) - DYNAMICZNE ODRĘBNE NARZĘDZIA
+        // ETAP 2: AGENT 2 (Analityk Pro 3.1) - ODPORNY NA LIMIT 429
         // ==========================================
         const cacheString = cachedData && Object.keys(cachedData).length > 0
             ? `Oto dane pobrane z bazy w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich, zamiast odpytywać bazę ponownie (chyba że użytkownik prosi o zupełnie inne pojazdy).`
@@ -242,7 +264,7 @@ export async function POST(req: Request) {
             ${cacheString}
         `;
 
-        let analystResponse = await ai.models.generateContent({
+        let analystResponse = await generateContentWithRetry({
             model: 'gemini-3.1-pro-preview',
             contents: [{ role: 'user', parts: [{ text: analystPrompt }] }],
             config: {
@@ -277,7 +299,6 @@ export async function POST(req: Request) {
                 break;
             }
 
-            // Bezpieczne pobranie oryginalnej sygnatury myślenia lub podstawienie bypassu - Rzutowanie na any ucisza błąd TypeScript
             const callAny = call as any;
             const partAny = (analystResponse.candidates?.[0]?.content?.parts?.[0]) as any;
 
@@ -285,8 +306,8 @@ export async function POST(req: Request) {
                 partAny?.thoughtSignature ||
                 "skip_thought_signature_validator";
 
-            // Odsłanie wyników bazy do AI
-            analystResponse = await ai.models.generateContent({
+            // Odsłanie wyników bazy do AI (zabezpieczone mechanizmem retry/backoff!)
+            analystResponse = await generateContentWithRetry({
                 model: 'gemini-3.1-pro-preview',
                 contents: [
                     { role: 'user', parts: [{ text: analystPrompt }] },
@@ -294,7 +315,7 @@ export async function POST(req: Request) {
                         role: 'model',
                         parts: [{
                             functionCall: { name: call.name, args: call.args },
-                            thoughtSignature: originalSig // Przekazanie sygnatury w historii
+                            thoughtSignature: originalSig
                         }]
                     },
                     { role: 'user', parts: [{ text: `Wynik z bazy danych dla ${call.name}: ${JSON.stringify(resultData)}` }] }
