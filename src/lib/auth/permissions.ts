@@ -27,6 +27,8 @@ export const ALL_PERMISSIONS = {
     manageClaimsFinal: "Sąd: Ostateczna akceptacja i zmiana wyroków (Szef)",
     manageSettings: "Zarządzanie: Globalne ustawienia systemu (Sklep, Sąd CLS)",
     manageImport: "System: Import danych z arkusza",
+    viewVehicles: "Flota: Podgląd bazy pojazdów i historii napraw",
+    manageVehicles: "Flota: Zarządzanie (dodawanie/edycja pojazdów i napraw)",
 
     // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",

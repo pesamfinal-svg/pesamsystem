@@ -45,6 +45,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         },
 
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
+        { name: "Flota (Pojazdy)", path: "/dashboard/vehicles", icon: "🚚", requiredPermission: ["viewVehicles", "manageVehicles"] },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
         { name: "Rozliczenia Projektów", path: "/dashboard/closeouts", icon: "🏁", requiredPermission: "manageProjectCloseouts" },
         { name: "Zatwierdzanie Zamknięć", path: "/dashboard/closeout-approvals", icon: "✍️", requiredPermission: "approveProjectCloseouts" },
