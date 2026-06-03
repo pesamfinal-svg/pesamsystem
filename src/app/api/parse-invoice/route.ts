@@ -2,7 +2,7 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 
-// Inicjalizacja Twojego oficjalnego klienta Google Gen AI (Vertex AI na GCP)
+// Inicjalizacja klienta Google Gen AI (Vertex AI na GCP)
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
@@ -11,64 +11,83 @@ const ai = new GoogleGenAI({
 
 export async function POST(req: Request) {
     try {
-        const { fileBase64, mimeType } = await req.json();
+        const { files } = await req.json();
 
-        if (!fileBase64 || !mimeType) {
-            return NextResponse.json({ error: "Brak pliku do analizy" }, { status: 400 });
+        if (!files || !Array.isArray(files) || files.length === 0) {
+            return NextResponse.json({ error: "Brak plików do analizy" }, { status: 400 });
         }
 
-        // Prompt instruujący model, jak ma zinterpretować strukturę faktury
+        const apiKey = process.env.GEMINI_API_KEY || "AIzaSyDPxqAYExThwmrye-o0sEOvqDs4MzgkSDk";
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
         const systemInstruction = `
-            Jesteś profesjonalnym systemem księgowym. Twoim jedynym zadaniem jest odczytanie danych z załączonego dokumentu (faktura, paragon, zlecenie serwisowe) i zwrócenie ich w czystym formacie JSON.
+            Jesteś profesjonalnym systemem księgowym. Przeanalizuj załączone dokumenty (może być ich kilka na raz, np. oficjalna faktura KAS oraz specyfikacja naprawy z warsztatu).
             
-            Kluczowe wytyczne:
-            1. Znajdź sumaryczną kwotę NETTO całej faktury (często opisaną jako 'Suma Netto', 'Wartość netto', 'Razem Netto').
-            2. Wyciągnij numer faktury, datę (sformatuj jako YYYY-MM-DD).
-            3. Wyciągnij przebieg/stan licznika w kilometrach (często dopisany w uwagach lub pozycjach jako np. "stan licznika: 125000 km"). Jeśli brak, zwróć 0.
-            4. Krótko streść zakres prac (np. "Wymiana filtrów, oleju, klocków hamulcowych").
-            5. Dopasuj typ usterki wybierając jedną z opcji: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna.
+            Twoim zadaniem jest połączyć informacje z tych dokumentów i wygenerować jeden spójny obiekt JSON:
+            1. Znajdź ostateczną sumaryczną kwotę NETTO całej usługi (najczęściej na fakturze KAS).
+            2. Wyciągnij numer faktury i datę (format YYYY-MM-DD).
+            3. Wyciągnij przebieg/stan licznika (najczęściej na specyfikacji warsztatowej). Jeśli brak, zwróć 0.
+            4. Przeczytaj specyfikację naprawy z warsztatu i krótko streść zakres prac (np. "Wymiana oleju, klocków hamulcowych tył, naprawa alternatora").
+            5. Wybierz JEDNĄ pasującą kategorię usterki: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna.
+            
+            Zwróć TYLKO I WYŁĄCZNIE obiekt JSON (bez znaczników markdown, bez słowa "json" na początku).
+            Struktura JSON:
+            {
+                "date": "YYYY-MM-DD",
+                "cost": 0.00,
+                "accountingNumber": "",
+                "mileage": 0,
+                "comments": "",
+                "repairType": "Mechaniczna"
+            }
         `;
 
-        const prompt = "Przeanalizuj ten dokument i wyciągnij dane do faktury zgodnie z instrukcją systemową.";
+        const prompt = "Przeanalizuj załączone dokumenty, skompiluj dane i wyciągnij ostateczny wynik w formacie JSON.";
 
-        // Wywołanie modelu przy użyciu oficjalnego SDK Google Gen AI
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash', // Model z serii 2.5 o doskonałych zdolnościach wizualnych i OCR
+        // Mapujemy wszystkie przesłane pliki (niezależnie od tego, czy to 1 czy 3)
+        const inlineFilesParts = files.map((file: any) => ({
+            inlineData: {
+                mimeType: file.mimeType,
+                data: file.fileBase64
+            }
+        }));
+
+        const payload = {
             contents: [
                 {
-                    role: 'user',
                     parts: [
                         { text: prompt },
-                        {
-                            inlineData: {
-                                mimeType: mimeType,
-                                data: fileBase64
-                            }
-                        }
+                        ...inlineFilesParts
                     ]
                 }
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.1, // Bardzo niska temperatura dla maksymalnej precyzji matematycznej
-                responseMimeType: "application/json" // Wymuszenie zwrotu struktury JSON
+                temperature: 0.1,
+                responseMimeType: "application/json"
             }
+        };
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
         });
 
-        if (response.text) {
-            let aiText = response.text.trim();
+        const data = await response.json();
 
-            // Oczyszczanie na wypadek, gdyby model dodał markdown
+        if (data.candidates && data.candidates.length > 0) {
+            let aiText = data.candidates[0].content.parts[0].text;
             aiText = aiText.replace(/```json/g, '').replace(/```/g, '').trim();
 
             const parsedJson = JSON.parse(aiText);
             return NextResponse.json(parsedJson, { status: 200 });
         } else {
-            throw new Error("Pusta odpowiedź z API Gemini");
+            throw new Error("AI nie wygenerowało poprawnej odpowiedzi");
         }
 
     } catch (error: any) {
-        console.error("Błąd analizy faktury przez Google Gen AI (Vertex):", error);
-        return NextResponse.json({ error: error.message || "Błąd wewnętrzny serwera" }, { status: 500 });
+        console.error("Błąd podczas analizy plików przez Google Gen AI:", error);
+        return NextResponse.json({ error: error.message || "Błąd wewnętrzny" }, { status: 500 });
     }
 }

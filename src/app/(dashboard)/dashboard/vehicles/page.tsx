@@ -208,11 +208,15 @@ export default function VehiclesHub() {
         }
     };
 
+    // ==========================================
+    // ODCZYTYWANIE DANYCH Z WIELU FAKTUR/SCREENSHOTÓW PRZEZ AI (OCR)
+    // ==========================================
     const handleParseInvoiceWithAI = async () => {
-        if (invoiceFiles.length === 0) return alert("Najpierw dodaj przynajmniej jeden plik (lub wklej zrzut ekranu)!");
+        if (invoiceFiles.length === 0) return alert("Najpierw wybierz plik lub wklej zrzut ekranu (Ctrl+V)!");
         setIsAiParsing(true);
 
         try {
+            // Konwertujemy wszystkie załączone pliki/zrzuty ekranu na format Base64
             const filePromises = invoiceFiles.map(async (file) => {
                 const base64: string = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
@@ -225,6 +229,7 @@ export default function VehiclesHub() {
 
             const processedFiles = await Promise.all(filePromises);
 
+            // Wysyłamy tablicę plików do backendu
             const response = await fetch('/api/parse-invoice', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -233,8 +238,9 @@ export default function VehiclesHub() {
 
             const data = await response.json();
 
-            if (!response.ok) throw new Error(data.error || "Nieudana analiza plików");
+            if (!response.ok) throw new Error(data.error || "Nieudana analiza plików przez AI");
 
+            // Wypełnianie pól formularza na podstawie analizy wszystkich przesłanych dokumentów
             setRepairForm(prev => ({
                 ...prev,
                 date: data.date || prev.date,
@@ -245,7 +251,7 @@ export default function VehiclesHub() {
                 repairType: data.repairType || prev.repairType
             }));
 
-            alert("✨ AI przeanalizowało wszystkie dokumenty i wypełniło formularz! Sprawdź dane przed zapisem.");
+            alert("✨ AI odczytało wszystkie załączone zrzuty ekranu/pliki i wypełniło formularz!");
         } catch (error: any) {
             alert("Błąd analizy AI: " + error.message);
         } finally {
