@@ -5,10 +5,7 @@ import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
-import { collection, getDocs } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
 
-// Komponenty Chart.js (zostaną użyte, gdy AI wywoła wykres)
 import {
     Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend, ArcElement, PointElement, LineElement
 } from 'chart.js';
@@ -23,58 +20,34 @@ interface ChatMessage {
 
 interface CanvasWidget {
     type: "none" | "chart" | "table" | "kpi";
-    data: any; // Tu wpadnie JSON wygenerowany przez AI
+    data: any;
 }
 
 export default function FleetReportsHub() {
     const { user } = useAuth();
-    const [loadingData, setLoadingData] = useState(true);
-    const [fleetData, setFleetData] = useState<any>(null); // Zanonimizowana paczka dla AI
+    const [loadingData, setLoadingData] = useState(false);
 
     // Stany komunikacji z AI
     const [prompt, setPrompt] = useState("");
     const [isThinking, setIsThinking] = useState(false);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-        { role: "ai", text: "Cześć! Jestem Twoim Asystentem Analitycznym. Pobieram właśnie najświeższe dane o flocie... O co chcesz mnie zapytać?" }
+        { role: "ai", text: "Cześć! Jestem Twoim Asystentem Analitycznym. Aby rozpocząć analizę floty, wpisz swoje pytanie poniżej (np. 'podaj naprawy forda transita')." }
     ]);
 
-    // Stan strefy Canvas (prawa strona)
+    // --- FUNKCJONALNOŚĆ HISTORII WIDGETÓW ---
+    const [widgetHistory, setWidgetHistory] = useState<CanvasWidget[]>([]);
+    const [currentWidgetIndex, setCurrentWidgetIndex] = useState<number>(-1);
     const [activeWidget, setActiveWidget] = useState<CanvasWidget>({ type: "none", data: null });
-    const [dbCache, setDbCache] = useState<any>(null); // DODANO: Pamięć podręczna pobranych danych
+
+    // --- FUNKCJONALNOŚĆ LOGÓW AI ---
+    const [executionLogs, setExecutionLogs] = useState<string[]>([]);
+    const [showLogs, setShowLogs] = useState(true);
+
+    const [dbCache, setDbCache] = useState<any>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
 
     const canView = user ? hasPermission("viewVehicles", user.rolePermissions, user.permissionOverrides) : false;
 
-    // Pobieranie danych do kontekstu AI (w tle)
-    useEffect(() => {
-        const fetchFleetData = async () => {
-            try {
-                const vehiclesSnap = await getDocs(collection(db, "vehicles"));
-                const repairsSnap = await getDocs(collection(db, "repairs"));
-
-                const vehicles = vehiclesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                const repairs = repairsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-                // Minimalizujemy wielkość danych (odrzucamy długie nulle, niepotrzebne obiekty)
-                setFleetData({
-                    vehiclesCount: vehicles.length,
-                    repairsCount: repairs.length,
-                    vehicles: vehicles,
-                    repairs: repairs
-                });
-
-                setChatHistory([{ role: "ai", text: `Dane załadowane! Widzę w systemie ${vehicles.length} pojazdów i ${repairs.length} wpisów serwisowych. W czym mogę pomóc? (np. "Narysuj mi wykres słupkowy z kosztami napraw według marki")` }]);
-            } catch (error) {
-                console.error("Błąd pobierania danych floty:", error);
-            } finally {
-                setLoadingData(false);
-            }
-        };
-
-        if (canView) fetchFleetData();
-    }, [canView]);
-
-    // Automatyczne scrollowanie czatu
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [chatHistory, isThinking]);
@@ -82,12 +55,13 @@ export default function FleetReportsHub() {
     if (!canView) return <div className="p-10 text-center text-red-500 font-bold">Brak uprawnień do raportów.</div>;
 
     const handleAskAI = async () => {
-        if (!prompt.trim() || !fleetData) return;
+        if (!prompt.trim()) return;
 
         const userMsg = prompt.trim();
         setPrompt("");
         setChatHistory(prev => [...prev, { role: "user", text: userMsg }]);
         setIsThinking(true);
+        setExecutionLogs([]); // Resetowanie logów przy nowym pytaniu
 
         try {
             const res = await fetch("/api/ai-analyst", {
@@ -95,9 +69,8 @@ export default function FleetReportsHub() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     question: userMsg,
-                    // fleetData zniknęło, nie wysyłamy całej bazy!
                     currentHistory: chatHistory,
-                    cachedData: dbCache // DODANO: Wysyłamy pamięć z poprzedniego kroku
+                    cachedData: dbCache
                 })
             });
 
@@ -105,28 +78,47 @@ export default function FleetReportsHub() {
 
             if (data.error) throw new Error(data.error);
 
-            // Odpowiedź tekstowa na czacie
-            setChatHistory(prev => [...prev, { role: "ai", text: data.message || "Oto wynik mojej analizy na ekranie obok." }]);
+            // Aktualizacja czatu
+            setChatHistory(prev => [...prev, { role: "ai", text: data.message || "Oto wynik analizy na panelu." }]);
 
-            // DODANO: Zapisujemy nową pamięć z backendu (jeśli AI coś pobrało)
+            // Odebranie i zapisanie logów zdarzeń z serwera
+            if (data.logs && Array.isArray(data.logs)) {
+                setExecutionLogs(data.logs);
+            }
+
             if (data.newCache && Object.keys(data.newCache).length > 0) {
                 setDbCache(data.newCache);
             }
 
-            // Jeśli AI zdecydowało się wygenerować akcję UI
+            // Obsługa generowania i historii widgetu
             if (data.uiAction) {
-                setActiveWidget({ type: data.uiAction.type, data: data.uiAction.payload });
+                const newWidget: CanvasWidget = { type: data.uiAction.type, data: data.uiAction.payload };
+
+                // Dodajemy nowy widget do historii i ustawiamy go jako aktywny
+                setWidgetHistory(prev => {
+                    const updated = [...prev, newWidget];
+                    setCurrentWidgetIndex(updated.length - 1);
+                    return updated;
+                });
+                setActiveWidget(newWidget);
             }
 
         } catch (error: any) {
             console.error(error);
-            setChatHistory(prev => [...prev, { role: "ai", text: "Przepraszam, napotkałem techniczny problem podczas analizy danych: " + error.message }]);
+            setChatHistory(prev => [...prev, { role: "ai", text: "Napotkałem problem podczas analizy danych: " + error.message }]);
         } finally {
             setIsThinking(false);
         }
     };
 
-    // --- FUNKCJA RENDERUJĄCA CANVAS (Krok 3 i 4 z planu) ---
+    // Obsługa cofania/przechodzenia w historii widgetów
+    const navigateHistory = (index: number) => {
+        if (index >= 0 && index < widgetHistory.length) {
+            setCurrentWidgetIndex(index);
+            setActiveWidget(widgetHistory[index]);
+        }
+    };
+
     const renderCanvas = () => {
         if (activeWidget.type === "none") {
             return (
@@ -153,8 +145,7 @@ export default function FleetReportsHub() {
 
             return (
                 <div className="h-full flex flex-col items-center justify-center bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative">
-                    <div className="absolute top-4 right-4 text-xs bg-blue-50 text-blue-600 font-black px-3 py-1 rounded-full border border-blue-100">Zasilane przez AI</div>
-                    <div className="w-full h-[80%] flex items-center justify-center">
+                    <div className="w-full h-[90%] flex items-center justify-center">
                         {activeWidget.data.chartType === 'bar' && <Bar data={chartData} options={options} />}
                         {activeWidget.data.chartType === 'pie' && <Pie data={chartData} options={options} />}
                         {activeWidget.data.chartType === 'line' && <Line data={chartData} options={options} />}
@@ -163,11 +154,9 @@ export default function FleetReportsHub() {
             );
         }
 
-        // --- NOWE: RENDEROWANIE TABELI ---
         if (activeWidget.type === "table" && activeWidget.data) {
             return (
                 <div className="h-full flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-hidden">
-                    <div className="absolute top-4 right-4 text-xs bg-green-50 text-green-600 font-black px-3 py-1 rounded-full border border-green-100">Tabela Danych AI</div>
                     <h3 className="font-black text-slate-700 text-lg mb-4">{activeWidget.data.title}</h3>
                     <div className="flex-1 overflow-auto rounded-xl border border-slate-200">
                         <table className="w-full text-left text-sm">
@@ -193,11 +182,9 @@ export default function FleetReportsHub() {
             );
         }
 
-        // --- NOWE: RENDEROWANIE KART STATYSTYK (KPI) ---
         if (activeWidget.type === "kpi" && activeWidget.data) {
             return (
                 <div className="h-full flex flex-col bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-y-auto">
-                    <div className="absolute top-4 right-4 text-xs bg-purple-50 text-purple-600 font-black px-3 py-1 rounded-full border border-purple-100">Podsumowanie AI</div>
                     <h3 className="font-black text-slate-700 text-lg mb-6">{activeWidget.data.title}</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {activeWidget.data.metrics.map((metric: any, i: number) => (
@@ -259,6 +246,28 @@ export default function FleetReportsHub() {
                         <div ref={chatEndRef} />
                     </div>
 
+                    {/* DZIENNIK ZDARZEŃ AI (LOGS PANEL) */}
+                    {executionLogs.length > 0 && (
+                        <div className="border-t border-slate-150 bg-slate-900 text-slate-300 p-3 text-[11px] font-mono max-h-[150px] overflow-y-auto">
+                            <div className="flex justify-between items-center text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-2 border-b border-slate-800 pb-1">
+                                <span>⚙️ Dziennik Pracy Agentów AI</span>
+                                <button onClick={() => setShowLogs(!showLogs)} className="hover:text-white">
+                                    {showLogs ? "[Ukryj]" : "[Pokaż]"}
+                                </button>
+                            </div>
+                            {showLogs && (
+                                <div className="space-y-1">
+                                    {executionLogs.map((log, i) => (
+                                        <div key={i} className="flex gap-1.5">
+                                            <span className="text-green-500">✔</span>
+                                            <span>{log}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {/* Input czatu */}
                     <div className="p-4 bg-white border-t border-slate-100">
                         <div className="relative">
@@ -267,13 +276,13 @@ export default function FleetReportsHub() {
                                 value={prompt}
                                 onChange={e => setPrompt(e.target.value)}
                                 onKeyDown={e => e.key === 'Enter' && handleAskAI()}
-                                placeholder={loadingData ? "Pobieram dane floty..." : "np. Zrób wykres kosztów wg aut..."}
-                                disabled={loadingData || isThinking}
+                                placeholder="np. Zrób wykres kosztów..."
+                                disabled={isThinking}
                                 className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 pl-4 pr-12 text-sm outline-none focus:border-blue-500 focus:bg-white transition"
                             />
                             <button
                                 onClick={handleAskAI}
-                                disabled={loadingData || isThinking || !prompt.trim()}
+                                disabled={isThinking || !prompt.trim()}
                                 className="absolute right-2 top-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white p-1.5 rounded-xl transition-colors"
                             >
                                 ⬆️
@@ -282,10 +291,37 @@ export default function FleetReportsHub() {
                     </div>
                 </div>
 
-                {/* PRAWA STRONA: DYNAMIC CANVAS */}
-                <div className="w-full lg:w-2/3 bg-slate-50 border border-slate-200 border-dashed rounded-3xl p-2 relative overflow-hidden flex flex-col">
-                    <div className="absolute top-4 left-6 text-xs font-black text-slate-400 uppercase tracking-widest z-10">Strefa Wizualizacji (Canvas)</div>
-                    <div className="flex-1 w-full mt-6">
+                {/* PRAWA STRONA: DYNAMIC CANVAS Z HISTORIĄ NAWIGACJI */}
+                <div className="w-full lg:w-2/3 bg-slate-50 border border-slate-200 border-dashed rounded-3xl p-4 relative overflow-hidden flex flex-col">
+
+                    {/* PASEK NAWIGACJI WSTECZ/W PRZÓD DLA WIDGETÓW */}
+                    <div className="flex justify-between items-center mb-4 z-10">
+                        <div className="text-xs font-black text-slate-400 uppercase tracking-widest">Strefa Wizualizacji (Canvas)</div>
+
+                        {widgetHistory.length > 1 && (
+                            <div className="flex items-center gap-3 bg-white px-3 py-1.5 rounded-2xl border shadow-sm">
+                                <button
+                                    onClick={() => navigateHistory(currentWidgetIndex - 1)}
+                                    disabled={currentWidgetIndex <= 0}
+                                    className="text-xs font-bold text-blue-600 disabled:text-slate-300 hover:text-blue-800 transition"
+                                >
+                                    ◀ Wstecz
+                                </button>
+                                <span className="text-[11px] font-bold text-slate-500">
+                                    Widok {currentWidgetIndex + 1} z {widgetHistory.length}
+                                </span>
+                                <button
+                                    onClick={() => navigateHistory(currentWidgetIndex + 1)}
+                                    disabled={currentWidgetIndex >= widgetHistory.length - 1}
+                                    className="text-xs font-bold text-blue-600 disabled:text-slate-300 hover:text-blue-800 transition"
+                                >
+                                    Dalej ▶
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="flex-1 w-full relative">
                         {renderCanvas()}
                     </div>
                 </div>

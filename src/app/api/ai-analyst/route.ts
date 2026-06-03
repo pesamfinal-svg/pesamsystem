@@ -10,9 +10,8 @@ const ai = new GoogleGenAI({
     location: 'global'
 });
 
-export const maxDuration = 60; // Next.js pozwala na pracę serwera do 60s, co jest idealne przy ponownych próbach
+export const maxDuration = 60;
 
-// Inicjalizacja Admin SDK (wymagana po stronie serwera)
 if (!admin.apps.length) {
     admin.initializeApp();
 }
@@ -31,12 +30,10 @@ async function generateContentWithRetry(params: any, retries = 3, delay = 1000):
             error.code === 429;
 
         if (isRateLimit && retries > 0) {
-            console.warn(`[AI Analyst] Napotkano przeciążenie chmury Google (429/Resource Exhausted). Ponowna próba za ${delay}ms... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
-            // Rekurencyjna ponowna próba z podwojonym czasem oczekiwania (wykładnicze opóźnienie)
             return generateContentWithRetry(params, retries - 1, delay * 2);
         }
-        throw error; // Jeśli to nie był błąd 429 lub skończyły się próby, rzucamy błąd dalej
+        throw error;
     }
 }
 
@@ -173,14 +170,17 @@ const RENDER_KPI_TOOL = {
 // 3. GŁÓWNY ROUTE POST
 // =========================================================================
 export async function POST(req: Request) {
+    const logs: string[] = []; // Inicjalizacja tablicy zdarzeń
     try {
         const { question, currentHistory, cachedData } = await req.json();
 
         const historyText = currentHistory.map((msg: any) => `${msg.role === 'user' ? 'Użytkownik' : 'AI'}: ${msg.text}`).join('\n');
 
         // ==========================================
-        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash) - ODPORNY NA LIMIT 429
+        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash)
         // ==========================================
+        logs.push("Uruchomiono Agenta Recepcjonistę (Gemini 3.5 Flash)");
+
         let routerResponse = await generateContentWithRetry({
             model: 'gemini-3.5-flash',
             contents: [
@@ -193,10 +193,12 @@ export async function POST(req: Request) {
             }
         });
 
-        // Obsługa wywołania narzędzia przez Flasha (z zabezpieczeniem sygnatury) - jawne typowanie : any rozwiązuje błąd noImplicitAny
         if (routerResponse.functionCalls?.some((call: any) => call.name === "fetchVehiclesFromDB")) {
             const call = routerResponse.functionCalls.find((c: any) => c.name === "fetchVehiclesFromDB")!;
+
+            logs.push("Flash: Wykryto potrzebę sprawdzenia bazy. Wywołano pobieranie listy pojazdów z Firestore...");
             const vehiclesList = await dbGetVehiclesList();
+            logs.push(`Flash: Pomyślnie zaimportowano ${vehiclesList.length} pojazdów z bazy.`);
 
             const callAny = call as any;
             const partAny = (routerResponse.candidates?.[0]?.content?.parts?.[0]) as any;
@@ -233,28 +235,36 @@ export async function POST(req: Request) {
             });
         }
 
-        // Router decyduje, czy przechodzimy do ciężkiej analizy na model Pro
         const isRequestingAnalysis = question.toLowerCase().includes("koszt") ||
             question.toLowerCase().includes("wykres") ||
             question.toLowerCase().includes("analiz") ||
             question.toLowerCase().includes("zrób") ||
             question.toLowerCase().includes("tabel") ||
             question.toLowerCase().includes("pokaż") ||
+            question.toLowerCase().includes("szczegół") ||
             currentHistory.length > 2;
 
         if (!isRequestingAnalysis) {
+            logs.push("Recepcjonista zakończył pracę. Brak zapytania analitycznego - wysłano odpowiedź tekstową.");
             return NextResponse.json({
                 message: routerResponse.text || "W czym mogę pomóc?",
-                uiAction: null
+                uiAction: null,
+                logs
             }, { status: 200 });
         }
 
         // ==========================================
-        // ETAP 2: AGENT 2 (Analityk Pro 3.1) - ODPORNY NA LIMIT 429
+        // ETAP 2: AGENT 2 (Analityk Pro 3.1)
         // ==========================================
+        logs.push("Przekazano sprawę do Głównego Analityka (Gemini 3.1 Pro)");
+
         const cacheString = cachedData && Object.keys(cachedData).length > 0
-            ? `Oto dane pobrane z bazy w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich, zamiast odpytywać bazę ponownie (chyba że użytkownik prosi o zupełnie inne pojazdy).`
+            ? `Oto dane pobrane z bazy w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich, zamiast odpytywać bazę ponownie.`
             : `Nie masz jeszcze pobranych żadnych danych z bazy. Jeśli potrzebujesz aut lub napraw, użyj odpowiednich narzędzi (fetchVehiclesFromDB, fetchRepairsFromDB).`;
+
+        if (cachedData && Object.keys(cachedData).length > 0) {
+            logs.push("Analityk: Wykryto dane w lokalnej pamięci podręcznej (Cache). Pominięto ponowne zapytania do bazy Firestore.");
+        }
 
         const analystPrompt = `
             Użytkownik prosi o: "${question}"
@@ -277,7 +287,6 @@ export async function POST(req: Request) {
             }
         });
 
-        // PĘTLA OBSŁUGI NARZĘDZI (Baza Danych & Generowanie Interfejsu)
         let executionLimit = 3;
         let currentSessionCache = cachedData || {};
 
@@ -288,12 +297,16 @@ export async function POST(req: Request) {
             let resultData: any = {};
 
             if (call.name === "fetchVehiclesFromDB") {
+                logs.push("Analityk Pro: Pobieram listę pojazdów z bazy danych...");
                 resultData = await dbGetVehiclesList();
                 currentSessionCache.vehicles = resultData;
+                logs.push(`Analityk Pro: Zaimportowano ${resultData.length} pojazdów.`);
             } else if (call.name === "fetchRepairsFromDB") {
                 const args = call.args as { vehicleId?: string };
+                logs.push(`Analityk Pro: Pobieram wpisy serwisowe z bazy Firestore${args.vehicleId ? ` dla ID pojazdu: ${args.vehicleId}` : ""}...`);
                 resultData = await dbGetRepairs(args.vehicleId);
                 currentSessionCache.repairs = resultData;
+                logs.push(`Analityk Pro: Zaimportowano ${resultData.length} wpisów serwisowych.`);
             }
             else if (call.name === "renderChartWidget" || call.name === "renderTableWidget" || call.name === "renderKpiWidget") {
                 break;
@@ -306,7 +319,6 @@ export async function POST(req: Request) {
                 partAny?.thoughtSignature ||
                 "skip_thought_signature_validator";
 
-            // Odsłanie wyników bazy do AI (zabezpieczone mechanizmem retry/backoff!)
             analystResponse = await generateContentWithRetry({
                 model: 'gemini-3.1-pro-preview',
                 contents: [
@@ -331,6 +343,13 @@ export async function POST(req: Request) {
             });
         }
 
+        // Sprawdzenie, czy Gemini uruchomiło kod w piaskownicy Pythona
+        const candidateParts = analystResponse.candidates?.[0]?.content?.parts || [];
+        const ranPython = candidateParts.some((part: any) => part.executableCode || part.codeExecutionResult);
+        if (ranPython) {
+            logs.push("Analityk Pro: Uruchomiono Piaskownicę Pythona (Google Sandbox). Dokonano precyzyjnych obliczeń matematycznych.");
+        }
+
         // ==========================================
         // ETAP 3: Przechwycenie wygenerowanego UI
         // ==========================================
@@ -349,6 +368,7 @@ export async function POST(req: Request) {
                         colors: args.labels?.map(() => `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')}`)
                     }
                 };
+                logs.push(`Analityk Pro: Wygenerowano żądanie renderowania wykresu: "${args.title}"`);
                 textMessage = `Sporządziłem wykres: "${args.title}". Wynik znajdziesz na panelu obok.`;
             }
             else if (call.name === "renderTableWidget" && call.args) {
@@ -357,6 +377,7 @@ export async function POST(req: Request) {
                     type: "table",
                     payload: args
                 };
+                logs.push(`Analityk Pro: Wygenerowano żądanie renderowania tabeli: "${args.title}"`);
                 textMessage = `Wygenerowałem szczegółową tabelę: "${args.title}". Spójrz na panel wizualizacji.`;
             }
             else if (call.name === "renderKpiWidget" && call.args) {
@@ -365,6 +386,7 @@ export async function POST(req: Request) {
                     type: "kpi",
                     payload: args
                 };
+                logs.push(`Analityk Pro: Wygenerowano żądanie renderowania kafelków statystycznych: "${args.title}"`);
                 textMessage = `Oto najważniejsze wskaźniki liczbowe dotyczące Twojego zapytania. Spójrz na kafelki podsumowujące.`;
             }
         }
@@ -372,11 +394,13 @@ export async function POST(req: Request) {
         return NextResponse.json({
             message: textMessage,
             uiAction: uiAction,
-            newCache: currentSessionCache
+            newCache: currentSessionCache,
+            logs // Przesłanie tablicy logów na frontend
         }, { status: 200 });
 
     } catch (error: any) {
         console.error("Błąd AI:", error);
-        return NextResponse.json({ error: error.message || "Błąd analityki AI" }, { status: 500 });
+        logs.push(`KRYTYCZNY BŁĄD PROCESU: ${error.message || "Nieznany błąd"}`);
+        return NextResponse.json({ error: error.message || "Błąd analityki AI", logs }, { status: 500 });
     }
 }
