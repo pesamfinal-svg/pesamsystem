@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
     collection, getDocs, query, orderBy,
-    doc, setDoc, getDoc, deleteDoc,
+    doc, setDoc, getDoc, deleteDoc, where,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -200,6 +200,20 @@ export default function ShopPage() {
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [sites, setSites] = useState<Site[]>([]);
     const [loading, setLoading] = useState(true);
+
+    // Stany dla zamówień głosowych i Kreatora AI (Wizard)
+    const [voiceOrders, setVoiceOrders] = useState<any[]>([]);
+    const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+    const [isParsingVoice, setIsParsingVoice] = useState<string | null>(null);
+
+    // Dane aktywnego kreatora dla materiałów zakupowych (PURCHASE)
+    const [wizardItems, setWizardItems] = useState<any[]>([]);
+    const [wizardStep, setWizardStep] = useState<number>(-1); // -1 = zamknięty kreator
+    const [wizardSelections, setWizardSelections] = useState<Record<number, string>>({});
+    const [activeVoiceOrderId, setActiveVoiceOrderId] = useState<string | null>(null);
+
+    // Notatki referencyjne o sprzęcie z magazynu (WAREHOUSE)
+    const [warehouseNotes, setWarehouseNotes] = useState<string[]>([]);
 
     // Filtrowanie katalogu
     const [searchTerm, setSearchTerm] = useState("");
@@ -411,6 +425,119 @@ export default function ShopPage() {
         setIsManualModalOpen(false);
     };
 
+    // Pobieranie oczekujących notatek głosowych dla wybranej budowy
+    const openVoiceModal = async () => {
+        if (!selectedSiteId) return alert("Najpierw wybierz budowę, aby pobrać przypisane do niej notatki!");
+        setIsVoiceModalOpen(true);
+        try {
+            const q = query(
+                collection(db, "voiceOrders"),
+                where("siteId", "==", selectedSiteId),
+                where("status", "==", "PENDING")
+            );
+            const snap = await getDocs(q);
+            setVoiceOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        } catch (err) {
+            console.error("Błąd pobierania notatek głosowych:", err);
+        }
+    };
+
+    // Przetwarzanie wybranej notatki przez AI
+    const handleProcessVoiceOrder = async (orderId: string, audioUrl: string) => {
+        setIsParsingVoice(orderId);
+        try {
+            const res = await fetch("/api/parse-audio", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ audioUrl })
+            });
+            const data = await res.json();
+
+            if (!res.ok) throw new Error(data.error || "Błąd przetwarzania pliku audio przez AI");
+
+            if (data.items && data.items.length > 0) {
+                // 1. Sprzęt magazynowy (WAREHOUSE) -> trafia do żółtego paska u góry katalogu
+                const whItems = data.items
+                    .filter((i: any) => i.type === "WAREHOUSE")
+                    .map((i: any) => `${i.quantity}x ${i.roughName}`);
+
+                // 2. Materiały budowlane (PURCHASE) -> trafiają do kreatora (wizard)
+                const purItems = data.items.filter((i: any) => i.type === "PURCHASE");
+
+                setWarehouseNotes(whItems);
+                setWizardItems(purItems);
+                setWizardSelections({});
+                setActiveVoiceOrderId(orderId);
+                setIsVoiceModalOpen(false); // Zamykamy listę notatek
+
+                if (purItems.length > 0) {
+                    setWizardStep(0); // Otwieramy krok 1 kreatora dla materiałów
+                } else {
+                    // Jeśli były tylko rzeczy z magazynu, od razu oznaczamy jako przetworzone
+                    if (orderId) {
+                        await setDoc(doc(db, "voiceOrders", orderId), { status: "PROCESSED" }, { merge: true });
+                    }
+                    alert(`📋 Sprzęt z magazynu został wczytany: ${whItems.join(", ")}.\nInstrukcja wyświetla się w żółtej ramce na górze katalogu.`);
+                }
+            } else {
+                alert("AI nie wykryło żadnych konkretnych pozycji w nagraniu.");
+            }
+        } catch (err: any) {
+            alert("Błąd analizy AI: " + err.message);
+        } finally {
+            setIsParsingVoice(null);
+        }
+    };
+
+    // Zapisanie dookreślonych w kreatorze materiałów do koszyka
+    const handleFinishWizard = async () => {
+        const materialsToAppend: string[] = [];
+
+        for (let i = 0; i < wizardItems.length; i++) {
+            const item = wizardItems[i];
+            const selection = wizardSelections[i];
+            if (selection) {
+                materialsToAppend.push(`${item.quantity}x ${selection} (j.m. ${item.unit})`);
+            }
+        }
+
+        if (materialsToAppend.length > 0) {
+            const formattedLines = materialsToAppend.join("\n");
+            const existingManual = cart.find(item => item.isManual);
+            let newCart: CartItem[];
+
+            if (existingManual) {
+                const mergedText = [existingManual.name, formattedLines].filter(Boolean).join("\n");
+                newCart = cart.map(item =>
+                    item.cartId === existingManual.cartId ? { ...item, name: mergedText } : item
+                );
+            } else {
+                newCart = [...cart, {
+                    cartId: crypto.randomUUID(),
+                    isManual: true,
+                    name: formattedLines,
+                    quantity: 1
+                }];
+            }
+
+            setCart(newCart);
+            saveDraft(newCart, selectedSiteId, orderNotes);
+        }
+
+        if (activeVoiceOrderId) {
+            try {
+                await setDoc(doc(db, "voiceOrders", activeVoiceOrderId), { status: "PROCESSED" }, { merge: true });
+            } catch (err) {
+                console.error("Błąd aktualizacji statusu notatki:", err);
+            }
+        }
+
+        alert("🎉 Materiały budowlane zostały pomyślnie doprecyzowane i dodane do koszyka!");
+        setWizardStep(-1);
+        setWizardItems([]);
+        setActiveVoiceOrderId(null);
+    };
+
     // ── Wysyłka zamówienia ────────────────────────────────────────────────────
 
     const handleSubmitOrder = async () => {
@@ -583,6 +710,29 @@ export default function ShopPage() {
 
             {/* ── Katalog ── */}
             <div className="flex-1 overflow-y-auto pr-2 pb-10">
+                {/* Żółta ramka referencyjna dla narzędzi z nagrania głosowego */}
+                {warehouseNotes.length > 0 && (
+                    <div className="mb-4 p-4 bg-yellow-50 border-2 border-dashed border-yellow-300 rounded-2xl flex items-start gap-3 shadow-sm animate-fade-in relative">
+                        <span className="text-2xl mt-0.5">📋</span>
+                        <div className="flex-1 pr-10">
+                            <h4 className="font-black text-yellow-800 text-xs uppercase tracking-wider">Kierownik zgłosił zapotrzebowanie na sprzęt z magazynu:</h4>
+                            <div className="flex flex-wrap gap-2 mt-2">
+                                {warehouseNotes.map((note, idx) => (
+                                    <span key={idx} className="bg-white border border-yellow-300 text-yellow-900 font-bold px-2.5 py-1 rounded-lg text-xs shadow-sm">
+                                        🛠️ {note}
+                                    </span>
+                                ))}
+                            </div>
+                            <p className="text-[10px] text-yellow-600 mt-2 font-medium">Wyszukaj powyższy sprzęt w katalogu poniżej i dodaj do koszyka odpowiednie, sprawne egzemplarze.</p>
+                        </div>
+                        <button
+                            onClick={() => setWarehouseNotes([])}
+                            className="absolute right-3 top-3 text-yellow-600 hover:text-red-500 font-bold text-lg leading-none"
+                            title="Ukryj notatki"
+                        >&times;</button>
+                    </div>
+                )}
+
                 {loading ? (
                     <div className="text-center p-10 text-slate-400 font-bold uppercase text-xs">Ładowanie asortymentu...</div>
                 ) : (
@@ -767,12 +917,20 @@ export default function ShopPage() {
                         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
                             <div className="flex justify-between items-center border-b border-slate-200 pb-2 mb-4">
                                 <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Twoje przedmioty</span>
-                                <button
-                                    onClick={openManualModal}
-                                    className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
-                                >
-                                    + WPIS RĘCZNY
-                                </button>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={openVoiceModal}
+                                        className="text-[10px] font-black text-purple-600 bg-purple-100 border border-purple-200 px-3 py-1.5 rounded-lg hover:bg-purple-200 transition-all shadow-sm"
+                                    >
+                                        🎙️ WCZYTAJ GŁOS
+                                    </button>
+                                    <button
+                                        onClick={openManualModal}
+                                        className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
+                                    >
+                                        + WPIS RĘCZNY
+                                    </button>
+                                </div>
                             </div>
 
                             {cart.length === 0 ? (
@@ -870,6 +1028,175 @@ export default function ShopPage() {
                                     ⚠️ Wybierz budowę przed wysłaniem
                                 </p>
                             )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Modal pobierania zamówień głosowych ── */}
+            {isVoiceModalOpen && (
+                <div className="fixed inset-0 bg-black/60 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in border-t-4 border-purple-600 flex flex-col max-h-[80vh]">
+                        <div className="p-5 bg-purple-50 border-b border-purple-100 flex justify-between items-center">
+                            <div>
+                                <h3 className="font-black text-purple-800 uppercase tracking-tight text-lg">🎙️ Notatki głosowe z budowy</h3>
+                                <p className="text-xs text-purple-600 mt-0.5">Wybierz nagranie i pozwól AI wyciągnąć zapotrzebowanie.</p>
+                            </div>
+                            <button onClick={() => setIsVoiceModalOpen(false)} className="text-2xl text-slate-400 hover:text-red-500 w-10 h-10 flex items-center justify-center rounded-full hover:bg-red-50 transition leading-none">&times;</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
+                            {voiceOrders.length === 0 ? (
+                                <p className="text-center py-12 text-sm text-slate-400 italic">Brak nowych, nieprzetworzonych notatek dla wybranej budowy.</p>
+                            ) : (
+                                voiceOrders.map(vo => (
+                                    <div key={vo.id} className="bg-white border p-4 rounded-2xl shadow-sm flex flex-col gap-3 relative overflow-hidden">
+                                        {isParsingVoice === vo.id && (
+                                            <div className="absolute inset-0 bg-white/90 backdrop-blur-sm flex flex-col items-center justify-center text-center z-10 animate-fade-in">
+                                                <div className="w-8 h-8 border-3 border-purple-600 border-t-transparent rounded-full animate-spin mb-2"></div>
+                                                <span className="text-[11px] font-black text-purple-800 uppercase tracking-wider">AI analizuje nagranie...</span>
+                                            </div>
+                                        )}
+                                        <div className="flex justify-between items-start">
+                                            <div>
+                                                <p className="text-xs font-black text-slate-800 uppercase">Nagranie: {vo.id}</p>
+                                                <p className="text-[10px] text-slate-400 mt-0.5">Nagrał: <b>{vo.userName}</b> · {new Date(vo.createdAt).toLocaleString()}</p>
+                                            </div>
+                                            <span className="bg-purple-100 text-purple-700 text-[9px] font-black px-2 py-0.5 rounded border border-purple-200 uppercase">Głosowe</span>
+                                        </div>
+                                        <audio src={vo.audioUrl} controls className="w-full h-10 outline-none" />
+                                        <button
+                                            onClick={() => handleProcessVoiceOrder(vo.id, vo.audioUrl)}
+                                            className="w-full py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl text-xs uppercase tracking-widest transition shadow-sm"
+                                        >
+                                            🤖 Procesuj notatkę przez AI
+                                        </button>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                        <div className="p-4 border-t border-slate-200 bg-white flex justify-end">
+                            <button onClick={() => setIsVoiceModalOpen(false)} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl text-xs transition">
+                                Zamknij
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── KREATOR AI (WIZARD DLA MATERIAŁÓW ZAKUPOWYCH) ── */}
+            {wizardStep >= 0 && wizardItems.length > 0 && (
+                <div className="fixed inset-0 bg-black/70 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-xl overflow-hidden animate-fade-in border-t-4 border-blue-600 flex flex-col max-h-[85vh]">
+
+                        <div className="bg-slate-50 border-b p-5 flex justify-between items-center">
+                            <div>
+                                <span className="text-[10px] font-black text-blue-600 uppercase tracking-widest bg-blue-50 border border-blue-200 px-2 py-1 rounded">
+                                    Materiał {wizardStep + 1} z {wizardItems.length}
+                                </span>
+                                <h3 className="font-black text-slate-800 text-lg mt-2 uppercase">Doprecyzowanie zakupu materiałów</h3>
+                            </div>
+                            <span className="text-sm font-bold text-slate-400">
+                                {Math.round(((wizardStep + 1) / wizardItems.length) * 100)}%
+                            </span>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-slate-50/50">
+                            {(() => {
+                                const currentItem = wizardItems[wizardStep];
+                                return (
+                                    <div className="space-y-4">
+                                        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                                            <span className="text-[9px] font-black text-slate-400 uppercase">Kierownik powiedział:</span>
+                                            <p className="text-xl font-black text-slate-800 mt-1 uppercase">
+                                                👉 "{currentItem.roughName}"
+                                            </p>
+                                            <div className="flex items-center gap-2 mt-2">
+                                                <span className="bg-slate-100 text-slate-600 text-[10px] font-bold px-2 py-0.5 rounded border">
+                                                    Ilość: {currentItem.quantity} {currentItem.unit}
+                                                </span>
+                                                <span className="text-[10px] font-black px-2 py-0.5 rounded border uppercase bg-orange-50 text-orange-700 border-orange-200">
+                                                    🛒 Zakup Zewnętrzny
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-3">
+                                            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider">Wybierz dokładną specyfikację rynkową (Sugestia AI)</label>
+                                            <div className="space-y-2">
+                                                {currentItem.suggestions?.map((suggestion: string, idx: number) => (
+                                                    <label
+                                                        key={idx}
+                                                        className={`flex items-start gap-3 p-3.5 rounded-xl border bg-white cursor-pointer hover:border-orange-400 transition-all ${wizardSelections[wizardStep] === suggestion ? "border-orange-500 bg-orange-50/30 ring-2 ring-orange-500/10" : "border-slate-200"
+                                                            }`}
+                                                    >
+                                                        <input
+                                                            type="radio"
+                                                            name={`wizard-step-${wizardStep}`}
+                                                            value={suggestion}
+                                                            checked={wizardSelections[wizardStep] === suggestion}
+                                                            onChange={() => setWizardSelections(prev => ({ ...prev, [wizardStep]: suggestion }))}
+                                                            className="mt-0.5 text-orange-600 focus:ring-orange-500"
+                                                        />
+                                                        <span className="text-xs font-semibold text-slate-700 leading-snug">{suggestion}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                            <div className="pt-2">
+                                                <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Lub wpisz własną nazwę ręcznie:</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="Wpisz niestandardowe parametry..."
+                                                    value={wizardSelections[wizardStep] || ""}
+                                                    onChange={e => setWizardSelections(prev => ({ ...prev, [wizardStep]: e.target.value }))}
+                                                    className="w-full p-3 border rounded-xl text-xs bg-white outline-none focus:border-orange-500 font-medium"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                        </div>
+
+                        <div className="p-4 border-t bg-white flex justify-between items-center">
+                            <button
+                                onClick={() => setWizardStep(prev => Math.max(0, prev - 1))}
+                                disabled={wizardStep === 0}
+                                className="px-5 py-3 bg-slate-100 text-slate-500 font-bold rounded-xl text-xs hover:bg-slate-200 transition disabled:opacity-40"
+                            >
+                                ◀ Wstecz
+                            </button>
+
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => {
+                                        if (confirm("Czy na pewno chcesz anulować kreatora?")) {
+                                            setWizardStep(-1);
+                                            setWizardItems([]);
+                                        }
+                                    }}
+                                    className="px-5 py-3 bg-red-50 text-red-600 font-bold rounded-xl text-xs hover:bg-red-100 transition"
+                                >
+                                    Anuluj
+                                </button>
+
+                                {wizardStep < wizardItems.length - 1 ? (
+                                    <button
+                                        onClick={() => setWizardStep(prev => prev + 1)}
+                                        disabled={!wizardSelections[wizardStep]}
+                                        className="px-6 py-3 bg-blue-600 text-white font-black rounded-xl text-xs hover:bg-blue-700 shadow-md transition disabled:opacity-40"
+                                    >
+                                        Dalej ▶
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={handleFinishWizard}
+                                        disabled={!wizardSelections[wizardStep]}
+                                        className="px-8 py-3 bg-green-600 text-white font-black rounded-xl text-xs hover:bg-green-700 shadow-md transition disabled:opacity-40"
+                                    >
+                                        ZAKOŃCZ I IMPORTUJ ({wizardItems.length} poz.)
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
