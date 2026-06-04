@@ -8,6 +8,7 @@ import {
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
+import { getStorage, ref, deleteObject } from "firebase/storage";
 
 // ─── TYPY ────────────────────────────────────────────────────────────────────
 
@@ -453,11 +454,23 @@ export default function ShopPage() {
         }
     };
 
-    // Ręczne usuwanie notatki głosowej z bazy Firestore
+    // Ręczne usuwanie notatki głosowej z bazy Firestore i chmury Storage
     const handleDeleteVoiceOrder = async (orderId: string) => {
         if (!confirm("⚠️ Czy na pewno chcesz trwale usunąć to nagranie z bazy danych? Tej operacji nie można cofnąć.")) return;
+        const storage = getStorage();
         try {
+            // 1. Usuń plik dźwiękowy (.mp3) ze Storage
+            if (user) {
+                try {
+                    const audioRef = ref(storage, `voice_orders/${user.uid}/${orderId}.mp3`);
+                    await deleteObject(audioRef);
+                } catch (storageErr) {
+                    console.warn("Plik audio nie istniał w Storage lub błąd uprawnień:", storageErr);
+                }
+            }
+            // 2. Usuń dokument z Firestore
             await deleteDoc(doc(db, "voiceOrders", orderId));
+
             setVoiceOrders(prev => prev.filter(vo => vo.id !== orderId));
             alert("Nagranie zostało pomyślnie skasowane.");
         } catch (err) {
@@ -572,12 +585,23 @@ export default function ShopPage() {
             saveDraft(newCart, selectedSiteId, orderNotes);
         }
 
-        // AUTOMATYCZNE BEZPIECZNE CZYSZCZENIE BAZY FIRESTORE PO POMYŚLNYM ZAPISIE
-        if (activeVoiceOrderIds.length > 0) {
+        // AUTOMATYCZNE BEZPIECZNE CZYSZCZENIE FIRESTORE I STORAGE PO POMYŚLNYM ZAPISIE
+        if (activeVoiceOrderIds.length > 0 && user) {
+            const storage = getStorage();
             try {
-                await Promise.all(activeVoiceOrderIds.map(id => deleteDoc(doc(db, "voiceOrders", id))));
+                await Promise.all(activeVoiceOrderIds.map(async (id) => {
+                    // 1. Spróbuj usunąć fizyczny plik .mp3 z Storage
+                    try {
+                        const audioRef = ref(storage, `voice_orders/${user.uid}/${id}.mp3`);
+                        await deleteObject(audioRef);
+                    } catch (storageErr) {
+                        console.error(`Błąd usuwania pliku audio ${id} z Storage:`, storageErr);
+                    }
+                    // 2. Usuń dokument tekstowy z Firestore
+                    await deleteDoc(doc(db, "voiceOrders", id));
+                }));
             } catch (err) {
-                console.error("Błąd usuwania przetworzonych notatek z bazy:", err);
+                console.error("Błąd czyszczenia przetworzonych notatek z bazy:", err);
             }
         }
 

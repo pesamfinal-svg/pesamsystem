@@ -129,7 +129,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <div className="p-4 border-t border-slate-800 bg-slate-950/40 space-y-2 flex-shrink-0">
                     <button
                         onClick={() => {
-                            alert("Aby zainstalować aplikację na telefonie:\n\n📱 Android: Kliknij trzy kropki w Chrome -> 'Dodaj do ekranu głównego'.\n🍏 iOS (Safari): Kliknij 'Udostępnij' -> 'Do ekranu początkowego'.");
+                            alert("Aby zainstalować CZYSTĄ aplikację dyktafonu na telefonie:\n\n1. Wejdź na telefonie na adres:\n👉 pesam-magazyn--pesam-system-81165.europe-west4.hosted.app/voice-order\n\n2. Zaloguj się.\n\n3. Zainstaluj na ekranie głównym:\n📱 Android: Kliknij trzy kropki -> 'Dodaj do ekranu głównego'.\n🍏 iOS (Safari): Kliknij 'Udostępnij' -> 'Do ekranu początkowego'.\n\nOtrzymasz czystą, pełnoekranową aplikację bez zbędnych zakładek!");
                         }}
                         className="w-full py-2.5 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/20 rounded-lg text-[10px] font-black transition uppercase tracking-wider"
                     >
