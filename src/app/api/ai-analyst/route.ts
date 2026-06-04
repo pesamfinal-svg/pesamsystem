@@ -45,14 +45,24 @@ PESAM Fleet – Schemat Firestore:
 
 KOLEKCJA vehicles (pojazdy):
   id, brand(string), model(string), registration(string), initialMileage(number/km)
-  Przykładowe marki: Iveco, Ford, Renault, Opel, Skoda, Mercedes
-  Przykładowe modele: Daily, Transit, Trafic, Vivaro, Superb
 
 KOLEKCJA repairs (naprawy):
   vehicleId(FK→vehicles.id), date(YYYY-MM-DD), cost(number/PLN netto),
   category(string), mileage(number/km), comments(string),
   location(string/nazwa warsztatu), partsList(string[])
-  Kategorie: Mechaniczna|Elektryczna|Zawieszenie|Silnik|Wulkanizacja|Lakiernicza|Eksploatacyjna|Inne
+  Dozwolone Kategorie: 
+  - Mechaniczna
+  - Silnik
+  - Układ hamulcowy
+  - Zawieszenie i Układ kierowniczy
+  - Elektryczna i Elektronika
+  - Klimatyzacja
+  - Opony i Wulkanizacja
+  - Akumulatory
+  - Eksploatacyjna (Oleje / Filtry / Płyny)
+  - Blacharsko-Lakiernicza
+  - Przeglądy i Badania
+  - Inne
 
 WAŻNE: pole kosztu = "cost", pole kategorii = "category"
 `;

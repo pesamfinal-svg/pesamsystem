@@ -613,7 +613,7 @@ export default function VehiclesHub() {
             const snap = await getDocs(q);
 
             const allRepairs = snap.docs.map(d => ({ id: d.id, ...d.data() })) as Repair[];
-            const targets = allRepairs.filter(r => r.invoiceUrl && (!r.partsList || r.partsList.length === 0));
+            const targets = allRepairs.filter(r => !!r.invoiceUrl);
 
             setEnrichTotal(targets.length);
 
@@ -975,13 +975,18 @@ export default function VehiclesHub() {
                                             <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Typ Usterki (Kategoria)</label>
                                             <select required value={repairForm.category} onChange={e => setRepairForm({ ...repairForm, category: e.target.value })} className="w-full p-2.5 bg-slate-50 border rounded-lg font-bold outline-none focus:border-purple-500">
                                                 <option value="" disabled>Wybierz typ naprawy...</option>
-                                                <option value="Mechaniczna">Mechaniczna</option>
-                                                <option value="Elektryczna">Elektryczna</option>
-                                                <option value="Zawieszenie">Zawieszenie</option>
-                                                <option value="Silnik">Silnik</option>
-                                                <option value="Wulkanizacja">Wulkanizacja</option>
-                                                <option value="Lakiernicza">Lakiernicza</option>
-                                                <option value="Eksploatacyjna">Eksploatacyjna (Oleje/Filtry)</option>
+                                                <option value="Mechaniczna">Mechaniczna (Skrzynia, Sprzęgło, Ogólne)</option>
+                                                <option value="Silnik">Silnik (Rozrząd, Wydech, Turbina, DPF)</option>
+                                                <option value="Układ hamulcowy">Układ hamulcowy (Klocki, Tarcze, Płyn)</option>
+                                                <option value="Zawieszenie i Układ kierowniczy">Zawieszenie i Układ kierowniczy (Amortyzatory, Zbieżność)</option>
+                                                <option value="Elektryczna i Elektronika">Elektryczna i Elektronika (Czujniki, Diagnostyka, Wiązki)</option>
+                                                <option value="Klimatyzacja">Klimatyzacja (Serwis, Nabijanie, Kompresor)</option>
+                                                <option value="Opony i Wulkanizacja">Opony i Wulkanizacja (Zakup, Wymiana, Wyważanie)</option>
+                                                <option value="Akumulatory">Akumulatory (Zakup, Alternator, Rozruch)</option>
+                                                <option value="Eksploatacyjna (Oleje / Filtry / Płyny)">Eksploatacyjna (Oleje / Filtry / Płyny)</option>
+                                                <option value="Blacharsko-Lakiernicza">Blacharsko-Lakiernicza (Blacharka, Szyby, Lakierowanie)</option>
+                                                <option value="Przeglądy i Badania">Przeglądy i Badania (Rejestracyjne, Tachograf)</option>
+                                                <option value="Inne">Inne (Wycieraczki, Towar, Płyn spryskiwaczy)</option>
                                             </select>
                                         </div>
                                         <div>

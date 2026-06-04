@@ -18,17 +18,24 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: "Brak plików do analizy" }, { status: 400 });
         }
 
-        // TUTAJ JEST KLUCZ DO SUKCESU: Mocna instrukcja warunkowa dla AI
         const systemInstruction = `
             Jesteś precyzyjnym systemem OCR i analizy dokumentów finansowo-serwisowych. 
             Twoim zadaniem jest przeanalizowanie przesłanych faktur i wyciągnięcie z nich danych.
             
             ZASADY KATEGORYZACJI (BARDZO WAŻNE):
-            Musisz wybrać JEDNĄ kategorię. Nie patrz na kolejność pozycji na fakturze! 
-            Oszacuj wartościowo, która grupa napraw wygenerowała najwyższy koszt netto i na tej podstawie nadaj kategorię.
-            - Przykład: Jeśli wymiana oleju/filtrów kosztuje 300 zł, a wymiana tarcz/klocków 1200 zł -> wybierz "Mechaniczna".
-            - Kategorię "Eksploatacyjna" wybieraj TYLKO wtedy, gdy koszty filtrów, oleju i płynów stanowią zdecydowaną większość kwoty na fakturze.
-            - Klocki i tarcze hamulcowe to ZAWSZE kategoria "Mechaniczna".
+            Musisz przypisać dokładnie JEDNĄ kategorię z poniższej listy. Przeanalizuj całą fakturę i oszacuj, która grupa napraw wygenerowała NAJWIĘKSZY koszt netto:
+            - "Mechaniczna" (ogólne usterki mechaniczne, skrzynia, sprzęgło)
+            - "Silnik" (rozrząd, turbina, wtryski, wydech, głowica, filtry DPF/FAP)
+            - "Układ hamulcowy" (klocki, tarcze, zaciski, płyn) -> Zawsze wybieraj to zamiast 'Mechaniczna', jeśli hamulce to główny koszt!
+            - "Zawieszenie i Układ kierowniczy" (amortyzatory, wahacze, zbieżność, drążki, sprężyny)
+            - "Elektryczna i Elektronika" (diagnostyka komputerowa, sondy, czujniki, żarówki, wiązki)
+            - "Klimatyzacja" (nabijanie czynnika, szczelność, kompresor klimatyzacji) -> Uwaga: jeśli na fakturze jest wymiana oleju, filtr kabinowy i serwis klimy, a klima była najdroższa - wybierz 'Klimatyzacja'.
+            - "Opony i Wulkanizacja" (zakup opon, felg, przekładka, wyważanie) -> Zawsze wybieraj to dla opon!
+            - "Akumulatory" (zakup akumulatora, alternator, rozrusznik)
+            - "Eksploatacyjna (Oleje / Filtry / Płyny)" (standardowa wymiana oleju silnikowego, filtrów i płynów eksploatacyjnych)
+            - "Blacharsko-Lakiernicza" (lakierowanie, naprawy blacharskie, wymiana szyby czołowej/bocznych)
+            - "Przeglądy i Badania" (badania techniczne na stacji kontroli, legalizacje tacho)
+            - "Inne" (pióra wycieraczek, kosmetyki, płyn do spryskiwaczy, holowanie, drobne akcesoria)
 
             INSTRUKCJA FORMATOWANIA:
             - Kwoty: Jeśli kwota zawiera przecinek (np. "981,53"), przekonwertuj ją na kropkę: 981.53.
@@ -89,7 +96,7 @@ export async function POST(req: Request) {
                         },
                         category: {
                             type: "STRING",
-                            description: "Wybierz dokładnie JEDNĄ wartość z listy: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna, Inne."
+                            description: "Wybierz dokładnie JEDNĄ wartość z listy: Mechaniczna, Silnik, Układ hamulcowy, Zawieszenie i Układ kierowniczy, Elektryczna i Elektronika, Klimatyzacja, Opony i Wulkanizacja, Akumulatory, Eksploatacyjna (Oleje / Filtry / Płyny), Blacharsko-Lakiernicza, Przeglądy i Badania, Inne."
                         },
                         partsList: {
                             type: "ARRAY",
