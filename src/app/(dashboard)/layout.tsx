@@ -124,6 +124,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         </Link>
                     ))}
                 </nav>
+
+                {/* Dolna sekcja menu bocznego z przyciskiem PWA */}
+                <div className="p-4 border-t border-slate-800 bg-slate-950/40 space-y-2 flex-shrink-0">
+                    <button
+                        onClick={() => {
+                            alert("Aby zainstalować aplikację na telefonie:\n\n📱 Android: Kliknij trzy kropki w Chrome -> 'Dodaj do ekranu głównego'.\n🍏 iOS (Safari): Kliknij 'Udostępnij' -> 'Do ekranu początkowego'.");
+                        }}
+                        className="w-full py-2.5 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/20 rounded-lg text-[10px] font-black transition uppercase tracking-wider"
+                    >
+                        📲 Zainstaluj na telefonie
+                    </button>
+                </div>
             </aside>
 
             <div className="flex-1 flex flex-col overflow-hidden">
