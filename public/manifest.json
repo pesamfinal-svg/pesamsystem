@@ -1,0 +1,17 @@
+{
+    "name": "PESAM Fleet Voice",
+    "short_name": "PESAM Voice",
+    "description": "Dyktafon zamówień offline dla systemu PESAM",
+    "start_url": "/voice-order",
+    "display": "standalone",
+    "background_color": "#0f172a",
+    "theme_color": "#0f172a",
+    "orientation": "portrait",
+    "icons": [
+        {
+            "src": "/favicon.ico",
+            "sizes": "64x64 32x32 24x24 16x16",
+            "type": "image/x-icon"
+        }
+    ]
+}
