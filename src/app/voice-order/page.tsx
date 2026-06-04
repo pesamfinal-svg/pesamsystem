@@ -91,6 +91,28 @@ export default function MobileVoiceOrderPage() {
         setOfflineList(list);
     };
 
+    // Funkcja do ręcznego wymuszenia pobrania plików offline (czyszczenie starego cache i reload)
+    const handleDownloadOffline = async () => {
+        if (confirm("Pobrać najnowszą wersję aplikacji do trybu offline? Nastąpi przeładowanie strony.")) {
+            try {
+                // Usuwamy zepsute pliki z pamięci przeglądarki
+                if ('caches' in window) {
+                    const keys = await caches.keys();
+                    for (const key of keys) {
+                        if (key.includes('pesam-voice-offline')) {
+                            await caches.delete(key);
+                        }
+                    }
+                }
+                // Twarde przeładowanie - Service Worker automatycznie przechwyci i zapisze świeże pliki!
+                window.location.reload();
+            } catch (err) {
+                console.error("Błąd czyszczenia cache:", err);
+                window.location.reload();
+            }
+        }
+    };
+
     const startRecording = async () => {
         if (!selectedSiteId) return alert("Najpierw wybierz budowę!");
         audioChunksRef.current = [];
@@ -198,17 +220,26 @@ export default function MobileVoiceOrderPage() {
                     <span className="text-xl">🎙️</span>
                     <span className="font-black text-sm tracking-widest text-blue-400 uppercase">PESAM VOICE</span>
                 </div>
-                <button
-                    onClick={() => {
-                        if (confirm("Czy chcesz się wylogować?")) {
-                            localStorage.removeItem("pesam_logged_in"); // Czyścimy flagę, aby móc się wylogować
-                            signOut();
-                        }
-                    }}
-                    className="text-[10px] font-black text-red-400 border border-red-500/20 px-3 py-1.5 rounded-lg bg-red-500/5 hover:bg-red-500/10"
-                >
-                    WYLOGUJ
-                </button>
+                <div className="flex gap-2">
+                    <button
+                        onClick={handleDownloadOffline}
+                        className="text-[10px] font-black text-green-400 border border-green-500/20 px-3 py-1.5 rounded-lg bg-green-500/5 hover:bg-green-500/10 shadow-sm"
+                        title="Zapisz do pracy bez internetu"
+                    >
+                        ⬇️ POBIERZ OFFLINE
+                    </button>
+                    <button
+                        onClick={() => {
+                            if (confirm("Czy chcesz się wylogować?")) {
+                                localStorage.removeItem("pesam_logged_in");
+                                signOut();
+                            }
+                        }}
+                        className="text-[10px] font-black text-red-400 border border-red-500/20 px-3 py-1.5 rounded-lg bg-red-500/5 hover:bg-red-500/10"
+                    >
+                        WYLOGUJ
+                    </button>
+                </div>
             </div>
 
             {/* Wybór budowy */}
