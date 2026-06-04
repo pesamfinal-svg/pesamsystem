@@ -253,9 +253,9 @@ export async function POST(req: Request) {
 
         logs.push(`[Init] Pytanie: "${question}"`);
 
-        // Historia: ostatnie 4 wiadomości
+        // 🚀 Zwiększamy pamięć do 12 wiadomości wstecz, aby AI nie zapominało o jakim aucie mowa
         const historyText = (currentHistory || [])
-            .slice(-4)
+            .slice(-12)
             .map(m => `${m.role === 'user' ? 'Użytkownik' : 'AI'}: ${m.text}`)
             .join('\n');
 

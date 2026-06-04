@@ -105,7 +105,14 @@ export default function FleetReportsHub() {
 
         const userMsg = prompt.trim();
         setPrompt("");
-        setChatHistory(prev => [...prev, { role: "user", text: userMsg }]);
+
+        // 🚀 Omijamy asynchroniczność Reacta budując świeżą historię przed wysłaniem requestu
+        const updatedHistory: ChatMessage[] = [
+            ...chatHistory,
+            { role: "user", text: userMsg }
+        ];
+
+        setChatHistory(updatedHistory);
         setIsThinking(true);
         setExecutionLogs(["Wysyłam zapytanie do systemu analitycznego..."]);
 
@@ -115,8 +122,7 @@ export default function FleetReportsHub() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     question: userMsg,
-                    currentHistory: chatHistory,
-                    // v5.0: vehicles i repairs NIE są tutaj — serwer pobiera sam z Firestore
+                    currentHistory: updatedHistory, // 🚀 Wysyłamy kompletną historię wraz z nowym pytaniem
                 })
             });
 
@@ -342,8 +348,8 @@ export default function FleetReportsHub() {
                         {chatHistory.map((msg, i) => (
                             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                 <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.role === 'user'
-                                        ? 'bg-blue-600 text-white rounded-br-none'
-                                        : 'bg-slate-100 text-slate-700 rounded-bl-none border border-slate-200'
+                                    ? 'bg-blue-600 text-white rounded-br-none'
+                                    : 'bg-slate-100 text-slate-700 rounded-bl-none border border-slate-200'
                                     }`}>
                                     {msg.text}
                                 </div>
