@@ -55,8 +55,10 @@ export default function LoginPage() {
                 }
             }
 
-            // Jeśli nie wymaga zmiany hasła, puszczamy dalej
-            router.push("/dashboard");
+            // Jeśli nie wymaga zmiany hasła, puszczamy dalej (obsługa powrotu do dyktafonu)
+            const params = new URLSearchParams(window.location.search);
+            const redirectParam = params.get("redirect");
+            router.push(redirectParam || "/dashboard");
         } catch (err: any) {
             console.error("Błąd podczas logowania:", err);
             alert("Błąd logowania: " + (err.message || "Nieznany błąd"));
@@ -89,7 +91,9 @@ export default function LoginPage() {
                 });
 
                 alert("Hasło zostało zmienione poprawnie!");
-                router.push("/dashboard");
+                const params = new URLSearchParams(window.location.search);
+                const redirectParam = params.get("redirect");
+                router.push(redirectParam || "/dashboard");
             }
         } catch (err: any) {
             console.error("Błąd podczas zmiany hasła:", err);

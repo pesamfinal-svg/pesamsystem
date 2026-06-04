@@ -49,7 +49,7 @@ export default function MobileVoiceOrderPage() {
         const isLocalLoggedIn = localStorage.getItem("pesam_logged_in") === "true";
 
         if (!loading && !user && !isLocalLoggedIn) {
-            router.push("/login");
+            router.push("/login?redirect=/voice-order"); // <-- Przekazujemy cel powrotny!
         }
     }, [user, loading, router]);
 
