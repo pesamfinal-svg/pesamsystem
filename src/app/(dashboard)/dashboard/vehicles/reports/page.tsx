@@ -211,17 +211,28 @@ export default function FleetReportsHub() {
         }
 
         if (activeWidget.type === "chart" && activeWidget.data) {
+            const COLORS = [
+                '#3b82f6', '#ef4444', '#10b981', '#f59e0b',
+                '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'
+            ];
             const chartData = {
                 labels: activeWidget.data.labels,
-                datasets: [{
-                    label: activeWidget.data.datasetLabel || 'Wartość',
-                    data: activeWidget.data.values,
-                    backgroundColor: activeWidget.data.colors || [
-                        '#3b82f6', '#ef4444', '#10b981', '#f59e0b',
-                        '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'
-                    ],
-                    borderWidth: 1,
-                }]
+                datasets: activeWidget.data.datasets?.length
+                    ? activeWidget.data.datasets.map((ds: any, i: number) => ({
+                        label: ds.label,
+                        data: ds.values,
+                        backgroundColor: COLORS[i % COLORS.length],
+                        borderColor: COLORS[i % COLORS.length],
+                        borderWidth: 2,
+                        fill: false,
+                        tension: 0.3,
+                    }))
+                    : [{
+                        label: activeWidget.data.datasetLabel || 'Wartość',
+                        data: activeWidget.data.values,
+                        backgroundColor: activeWidget.data.colors || COLORS,
+                        borderWidth: 1,
+                    }]
             };
             const options = {
                 responsive: true,

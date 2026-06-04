@@ -105,9 +105,18 @@ const QUERY_PLAN_SCHEMA = {
         vehicleFilters: {
             type: Type.OBJECT,
             properties: {
-                brand: { type: Type.STRING, description: 'Marka pojazdu, np. "Iveco", "Ford". Puste jeśli nie wspomniana.' },
-                model: { type: Type.STRING, description: 'Model pojazdu, np. "Daily", "Transit". Puste jeśli nie wspomniany.' },
-                registration: { type: Type.STRING, description: 'Nr rejestracyjny, np. "RDE HF31". Puste jeśli nie wspomniany.' },
+                brand: { type: Type.STRING, description: 'Marka pierwszego pojazdu, np. "Iveco", "Ford". Puste jeśli nie wspomniana.' },
+                model: { type: Type.STRING, description: 'Model pierwszego pojazdu, np. "Daily", "Transit". Puste jeśli nie wspomniany.' },
+                registration: { type: Type.STRING, description: 'Nr rejestracyjny pierwszego pojazdu, np. "RDE HF31". Puste jeśli nie wspomniany.' },
+            }
+        },
+        vehicleFilters2: {
+            type: Type.OBJECT,
+            description: 'Drugi pojazd — wypełnij TYLKO gdy pytanie dotyczy porównania dwóch konkretnych pojazdów/modeli. W pozostałych przypadkach zostaw puste.',
+            properties: {
+                brand: { type: Type.STRING, description: 'Marka drugiego pojazdu przy porównaniu. Puste jeśli nie dotyczy.' },
+                model: { type: Type.STRING, description: 'Model drugiego pojazdu przy porównaniu. Puste jeśli nie dotyczy.' },
+                registration: { type: Type.STRING, description: 'Nr rejestracyjny drugiego pojazdu przy porównaniu. Puste jeśli nie dotyczy.' },
             }
         },
         needsRepairs: { type: Type.BOOLEAN },
@@ -130,14 +139,14 @@ const QUERY_PLAN_SCHEMA = {
         },
         repairsLimit: {
             type: Type.NUMBER,
-            description: 'Limit pobieranych napraw. Przy konkretnym aucie: 200. Przy ogólnym zapytaniu floty: 500. Przy zapytaniu rok+auto: 100.'
+            description: 'Limit pobieranych napraw. Przy konkretnym aucie: 200. Przy ogólnym zapytaniu floty: 500. Przy zapytaniu rok+auto: 100. Przy porównaniu dwóch aut: 200.'
         },
         reasoning: {
             type: Type.STRING,
             description: 'Jedno zdanie uzasadnienia: co filtrujesz i dlaczego.'
         }
     },
-    required: ['needsVehicles', 'vehicleFilters', 'needsRepairs', 'repairFilters', 'repairFields', 'repairsLimit', 'reasoning']
+    required: ['needsVehicles', 'vehicleFilters', 'vehicleFilters2', 'needsRepairs', 'repairFilters', 'repairFields', 'repairsLimit', 'reasoning']
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,14 +158,25 @@ const TOOL_RENDER_CHART = {
     parameters: {
         type: Type.OBJECT,
         properties: {
-            aiMessage: { type: Type.STRING, description: 'CZYSTE, naturalne zdanie do czatu podsumowujące wykres (np. "Najdroższym pojazdem jest Iveco. Szczegóły na wykresie."). BEZ KODU PYTHON i stdout!' },
+            aiMessage: { type: Type.STRING, description: 'CZYSTE, naturalne zdanie do czatu podsumowujące wykres. BEZ KODU PYTHON i stdout!' },
             chartType: { type: Type.STRING, description: '"bar" | "pie" | "line"' },
             title: { type: Type.STRING },
-            datasetLabel: { type: Type.STRING, description: 'np. "Koszt PLN"' },
+            datasetLabel: { type: Type.STRING, description: 'Dla pojedynczego datasetu, np. "Koszt PLN". Puste gdy używasz datasets.' },
             labels: { type: Type.ARRAY, items: { type: Type.STRING } },
-            values: { type: Type.ARRAY, items: { type: Type.NUMBER } }
+            values: { type: Type.ARRAY, items: { type: Type.NUMBER }, description: 'Dla pojedynczego datasetu. Puste gdy używasz datasets.' },
+            datasets: {
+                type: Type.ARRAY,
+                description: 'Użyj ZAMIAST values gdy wykres ma wiele serii (np. 5 pojazdów na wykresie liniowym). Każdy element to osobna linia/seria.',
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        label: { type: Type.STRING, description: 'Nazwa serii, np. "Iveco Daily RDE HF31"' },
+                        values: { type: Type.ARRAY, items: { type: Type.NUMBER } }
+                    }
+                }
+            }
         },
-        required: ['aiMessage', 'chartType', 'title', 'datasetLabel', 'labels', 'values']
+        required: ['aiMessage', 'chartType', 'title', 'labels']
     }
 };
 

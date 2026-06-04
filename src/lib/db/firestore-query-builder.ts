@@ -33,6 +33,11 @@ export interface FirestoreQueryPlan {
         model?: string;
         registration?: string;
     };
+    vehicleFilters2?: {
+        brand?: string;
+        model?: string;
+        registration?: string;
+    };
     needsRepairs: boolean;
     repairFilters: {
         dateFrom?: string;
@@ -150,32 +155,49 @@ export async function executeQueryPlan(plan: FirestoreQueryPlan): Promise<QueryR
 
     // ── 1. Pobierz pojazdy ───────────────────────────────────────────────────
     if (plan.needsVehicles) {
-        let vehicleQuery: Query<DocumentData> = db.collection('vehicles');
+        const fetchVehicles = async (filters: FirestoreQueryPlan['vehicleFilters']): Promise<Vehicle[]> => {
+            let vehicleQuery: Query<DocumentData> = db.collection('vehicles');
 
-        // Jedyne co możemy filtrować w Firestore bez JS = dokładny nr rejestracyjny
-        if (plan.vehicleFilters.registration) {
-            vehicleQuery = vehicleQuery.where('registration', '==', plan.vehicleFilters.registration);
+            if (filters.registration) {
+                vehicleQuery = vehicleQuery.where('registration', '==', filters.registration);
+            }
+
+            const snap = await vehicleQuery.get();
+            const all: Vehicle[] = snap.docs.map(d => ({
+                id: d.id,
+                brand: d.data().brand || '',
+                model: d.data().model || '',
+                registration: d.data().registration || '',
+                initialMileage: d.data().initialMileage || 0,
+            }));
+
+            return all.filter(v => {
+                const brandOk = !filters.brand ||
+                    v.brand.toLowerCase().includes(filters.brand.toLowerCase());
+                const modelOk = !filters.model ||
+                    v.model.toLowerCase().includes(filters.model.toLowerCase());
+                return brandOk && modelOk;
+            });
+        };
+
+        // Pobierz pierwszy zestaw pojazdów
+        const vehicles1 = await fetchVehicles(plan.vehicleFilters);
+
+        // Pobierz drugi zestaw jeśli jest vehicleFilters2 (porównanie dwóch pojazdów)
+        const vehicles2 = plan.vehicleFilters2?.brand || plan.vehicleFilters2?.model || plan.vehicleFilters2?.registration
+            ? await fetchVehicles(plan.vehicleFilters2)
+            : [];
+
+        // Scal i deduplikuj po id
+        const seen = new Set<string>();
+        for (const v of [...vehicles1, ...vehicles2]) {
+            if (!seen.has(v.id)) {
+                seen.add(v.id);
+                vehicles.push(v);
+            }
         }
 
-        const snap = await vehicleQuery.get();
-        const all: Vehicle[] = snap.docs.map(d => ({
-            id: d.id,
-            brand: d.data().brand || '',
-            model: d.data().model || '',
-            registration: d.data().registration || '',
-            initialMileage: d.data().initialMileage || 0,
-        }));
-
-        // Brand i model: filtrujemy JS-owo (case-insensitive, Firestore nie ma ILIKE)
-        vehicles = all.filter(v => {
-            const brandOk = !plan.vehicleFilters.brand ||
-                v.brand.toLowerCase().includes(plan.vehicleFilters.brand.toLowerCase());
-            const modelOk = !plan.vehicleFilters.model ||
-                v.model.toLowerCase().includes(plan.vehicleFilters.model.toLowerCase());
-            return brandOk && modelOk;
-        });
-
-        summaryParts.push(`pojazdy: ${vehicles.length}`);
+        summaryParts.push(`pojazdy: ${vehicles.length} (v1: ${vehicles1.length}, v2: ${vehicles2.length})`);
     }
 
     // ── 2. Pobierz naprawy ───────────────────────────────────────────────────
