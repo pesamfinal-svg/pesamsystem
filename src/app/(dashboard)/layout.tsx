@@ -35,6 +35,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const menuItems: MenuItem[] = [
         { name: "Pulpit", path: "/dashboard", icon: "📊" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
+        { name: "Zamówienia Głosowe", path: "/dashboard/voice-order", icon: "🎙️", requiredPermission: "voiceOrdering" },
 
         // ZMIANA: Widoczne, jeśli ma JAKIEKOLWIEK uprawnienie do protokołów
         {

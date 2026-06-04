@@ -9,6 +9,7 @@ export const ALL_PERMISSIONS = {
     viewInventory: "Katalog: Przeglądanie sprzętu",
     manageInventory: "Katalog: Dodawanie i edycja sprzętu",
     createOrder: "Sklep: Składanie zamówień na budowę",
+    voiceOrdering: "Sklep: Zamawianie głosowe (Offline/Budowa)", // <-- NOWE UPRAWNIENIE
     manageOrders: "Magazyn: Realizacja zamówień",
 
     protocolsIssue: "Protokoły: Wydania z magazynu",
