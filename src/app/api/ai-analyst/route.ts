@@ -334,16 +334,24 @@ Zbuduj plan zapytania do Firestore który pobierze TYLKO dane niezbędne do odpo
 3. Jeśli użytkownik pyta o zestawienie, koszty lub naprawy całej floty (lub wielu aut), ustaw needsVehicles = true oraz needsRepairs = true (Matematyk potrzebuje listy aut, by przypisać czytelne nazwy marek do vehicleId).
 4. Jeśli pytanie brzmi "jakie pojazdy/Iveco posiadamy", ustaw needsVehicles = true, ale needsRepairs = false (bo nie pytamy o naprawy, tylko o stan floty).
 
-Zasady szczegółowego filtrowania:
-- Jeśli pytanie zawiera nazwę marki (Iveco, Ford, Renault, Opel, Skoda...) → ustaw vehicleFilters.brand
-- Jeśli pytanie zawiera model (Daily, Transit, Trafic...) → ustaw vehicleFilters.model
-- Jeśli pytanie zawiera numer rejestracyjny → ustaw vehicleFilters.registration
-- Jeśli pytanie zawiera rok (np. "w 2024", "za 2023") → ustaw dateFrom i dateTo
-- Jeśli pytanie zawiera "tego roku" → dateFrom = bieżący rok 01-01
+🛠️ OGRANICZENIA INDEKSÓW FIRESTORE (KRYTYCZNE): 🛠️
+Możesz filtrować (where) z JEDNOCZESNYM sortowaniem po dacie (orderBy date) TYLKO w tych bezpiecznych kombinacjach:
+- TYLKO po pojeździe ('vehicleIds')
+- TYLKO po kategorii ('category')
+- Po pojeździe ('vehicleIds') ORAZ po kategorii ('category')
+- Po dacie ('dateFrom' i 'dateTo')
+
+ZASADA BEZPIECZEŃSTWA (PRZESUNIĘCIE LOGIKI DO PYTHONA):
+Jeśli użytkownik prosi o skomplikowane filtrowanie, które przekracza powyższe zasady (np. szukanie konkretnego słowa w 'comments', szukanie 'wymiany oleju' w 'partsList', filtrowanie po konkretnych kosztach lub jednoczesne filtrowanie po roku, aucie i kategorii), ZIGNORUJ TE ZŁOŻONE FILTRY w 'repairFilters'. 
+Zamiast tego pobierz szerszy zestaw danych (np. ustaw tylko 'vehicleIds' dla danego auta, lub 'dateFrom/To' dla danego roku) i przekaż je dalej. Agent 2 (Matematyk) napisze kod w Pythonie, który precyzyjnie odfiltruje resztę danych z pamięci (np. znajdzie konkretne części w JSON).
+
+Zasady szczegółowego filtrowania (Pamiętaj o bezpiecznych kombinacjach!):
+- Jeśli pytanie zawiera nazwę marki (Iveco, Ford...) → ustaw vehicleFilters.brand
+- Jeśli pytanie zawiera model (Daily, Transit...) → ustaw vehicleFilters.model
+- Jeśli pytanie zawiera rok (np. "w 2024") → ustaw dateFrom i dateTo
 - Jeśli pytanie zawiera kategorię naprawy → ustaw repairFilters.category
 - repairFields.needsMileage = true tylko jeśli pytanie dotyczy przebiegu lub km
 - repairFields.needsComments = true tylko jeśli pytanie pyta o szczegóły/opisy prac
-- repairFields.needsLocation = true tylko jeśli pytanie pyta o warsztat/miejsce
 - repairFields.needsPartsList = true tylko jeśli pytanie pyta o części
 - repairsLimit: konkretne auto → 200, rok+flota → 300, ogólna flota → 500
 `;

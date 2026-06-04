@@ -18,13 +18,21 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: "Brak plików do analizy" }, { status: 400 });
         }
 
+        // TUTAJ JEST KLUCZ DO SUKCESU: Mocna instrukcja warunkowa dla AI
         const systemInstruction = `
             Jesteś precyzyjnym systemem OCR i analizy dokumentów finansowo-serwisowych. 
-            Twoim zadaniem jest przeanalizowanie przesłanych dokumentów i wyciągnięcie z nich danych.
-            Musisz bezwzględnie dopasować odnalezione wartości do kluczy zdefiniowanych w schemacie odpowiedzi (responseSchema).
+            Twoim zadaniem jest przeanalizowanie przesłanych faktur i wyciągnięcie z nich danych.
             
-            Ważna instrukcja dla kwot:
-            Jeśli na fakturze kwota netto zawiera przecinek (np. "981,53"), przekonwertuj ją na poprawną liczbę zmiennoprzecinkową z kropką: 981.53.
+            ZASADY KATEGORYZACJI (BARDZO WAŻNE):
+            Musisz wybrać JEDNĄ kategorię. Nie patrz na kolejność pozycji na fakturze! 
+            Oszacuj wartościowo, która grupa napraw wygenerowała najwyższy koszt netto i na tej podstawie nadaj kategorię.
+            - Przykład: Jeśli wymiana oleju/filtrów kosztuje 300 zł, a wymiana tarcz/klocków 1200 zł -> wybierz "Mechaniczna".
+            - Kategorię "Eksploatacyjna" wybieraj TYLKO wtedy, gdy koszty filtrów, oleju i płynów stanowią zdecydowaną większość kwoty na fakturze.
+            - Klocki i tarcze hamulcowe to ZAWSZE kategoria "Mechaniczna".
+
+            INSTRUKCJA FORMATOWANIA:
+            - Kwoty: Jeśli kwota zawiera przecinek (np. "981,53"), przekonwertuj ją na kropkę: 981.53.
+            - Części: Usuwaj kody kreskowe i dziwne ciągi znaków (np. "140221:1146"). Zostawiaj same czytelne nazwy.
         `;
 
         const prompt = "Odczytaj dane z dokumentów i zwróć je w formacie zgodnym ze schematem JSON.";
@@ -49,7 +57,7 @@ export async function POST(req: Request) {
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.1,
+                temperature: 0.1, // Niska temperatura = bardziej analityczne myślenie
                 responseMimeType: "application/json",
 
                 responseSchema: {
@@ -61,7 +69,7 @@ export async function POST(req: Request) {
                         },
                         cost: {
                             type: "NUMBER",
-                            description: "Wartość netto całej faktury (Suma netto). Przekonwertuj polski przecinek na kropkę, np. dla '981,53' zwróć 981.53."
+                            description: "Wartość netto całej faktury (Suma netto). Przekonwertuj polski przecinek na kropkę."
                         },
                         accountingNumber: {
                             type: "STRING",
@@ -73,26 +81,24 @@ export async function POST(req: Request) {
                         },
                         location: {
                             type: "STRING",
-                            description: "Nazwa wystawcy faktury / warsztatu (szukaj w sekcji Sprzedawca, np. 'F.H.U.T. BACATRANS Jacek Bieszczad' lub 'MASTER CAR')."
+                            description: "Nazwa wystawcy faktury / warsztatu."
                         },
                         comments: {
                             type: "STRING",
-                            description: "Krótkie streszczenie wykonanych prac ze specyfikacji."
+                            description: "Wygeneruj jedno krótkie, logiczne zdanie podsumowujące naprawę (np. 'Wymiana tarcz i klocków hamulcowych przód, serwis olejowy')."
                         },
-                        // ZMIANA Z repairType na category!
                         category: {
                             type: "STRING",
-                            description: "Wybierz JEDNĄ wartość: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna."
+                            description: "Wybierz dokładnie JEDNĄ wartość z listy: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna, Inne."
                         },
                         partsList: {
                             type: "ARRAY",
                             items: { type: "STRING" },
-                            description: "Lista wszystkich wymienionych części, materiałów i wykonanych usług/robocizny odczytanych z pozycji faktury (np. ['FILTR KABINY', 'filtr oleju', 'USŁUGA SERWISOWA', 'geometria kół', 'żarówka H7'])."
+                            description: "Lista wszystkich wymienionych części, materiałów i wykonanych usług odczytanych z pozycji faktury."
                         },
-                        // NOWE POLE DLA BEZPIECZEŃSTWA
                         registrationNumber: {
                             type: "STRING",
-                            description: "Numer rejestracyjny pojazdu lub numer VIN odczytany z faktury (szukaj w uwagach lub nazwie pojazdu). Jeśli brak, zwróć puste."
+                            description: "Numer rejestracyjny pojazdu lub VIN odczytany z faktury. Jeśli brak, zwróć puste string."
                         }
                     },
                     required: ["date", "cost", "accountingNumber", "mileage", "location", "comments", "category", "partsList"]
