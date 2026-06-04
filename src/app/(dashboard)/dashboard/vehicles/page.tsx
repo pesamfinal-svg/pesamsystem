@@ -18,11 +18,11 @@ interface Vehicle {
 interface Repair {
     id: string; vehicleId: string; date: string; cost: number; accountingNumber: string;
     mileage: number; comments: string; location: string;
-    repairType?: string; // Zostawione opcjonalnie dla starych wpisów
-    category: string;    // NOWE GŁÓWNE POLE ZAMIAST repairType
+    repairType?: string;
+    category: string;
     invoiceUrl?: string; legacyId?: string;
     partsList?: string[];
-    registrationNumberFromInvoice?: string; // Pole z weryfikacji AI
+    registrationNumberFromInvoice?: string;
 }
 
 export default function VehiclesHub() {
@@ -48,7 +48,6 @@ export default function VehiclesHub() {
     const [repairs, setRepairs] = useState<Repair[]>([]);
     const [isRepairsLoading, setIsRepairsLoading] = useState(false);
 
-    // Stany edycji konkretnej naprawy
     const [isEditingRepair, setIsEditingRepair] = useState(false);
     const [editingRepairId, setEditingRepairId] = useState<string | null>(null);
 
@@ -112,7 +111,8 @@ export default function VehiclesHub() {
                 registration: vehicleForm.registration, summerTires: vehicleForm.summerTires,
                 winterTires: vehicleForm.winterTires, currentTires: vehicleForm.currentTires,
                 inspectionDate: vehicleForm.inspectionDate, dateAdded: vehicleForm.dateAdded,
-                initialMileage: Number(vehicleForm.initialMileage)
+                initialMileage: Number(vehicleForm.initialMileage),
+                updatedAt: new Date().toISOString() // 🔄 DODANO: updatedAt dla Dexie Sync
             }, { merge: true });
 
             alert(isEditing ? "Pojazd zaktualizowany." : "Pojazd dodany.");
@@ -187,7 +187,7 @@ export default function VehiclesHub() {
             mileage: repair.mileage,
             comments: repair.comments,
             location: repair.location,
-            category: repair.category || repair.repairType || "", // Kompatybilność wsteczna
+            category: repair.category || repair.repairType || "",
             invoiceUrl: repair.invoiceUrl,
             legacyId: repair.legacyId,
             partsList: repair.partsList || []
@@ -260,7 +260,7 @@ export default function VehiclesHub() {
                 accountingNumber: data.accountingNumber || prev.accountingNumber,
                 mileage: data.mileage || prev.mileage,
                 comments: data.comments || prev.comments,
-                category: data.category || prev.category, // Używamy CATEGORY z API
+                category: data.category || prev.category,
                 location: data.location || prev.location,
                 partsList: data.partsList || []
             }));
@@ -344,9 +344,10 @@ export default function VehiclesHub() {
                 mileage: Number(repairForm.mileage),
                 comments: repairForm.comments,
                 location: repairForm.location,
-                category: repairForm.category || "Inne", // Zapisujemy jako category
+                category: repairForm.category || "Inne",
                 invoiceUrl: finalInvoiceUrl,
                 partsList: repairForm.partsList || [],
+                updatedAt: new Date().toISOString(), // 🔄 DODANO: updatedAt dla Dexie Sync
                 ...(repairForm.legacyId && { legacyId: repairForm.legacyId })
             }, { merge: true });
 
@@ -403,7 +404,10 @@ export default function VehiclesHub() {
             await uploadBytes(fileRef, file);
             const downloadUrl = await getDownloadURL(fileRef);
 
-            await setDoc(doc(db, "repairs", repairDocId), { invoiceUrl: downloadUrl }, { merge: true });
+            await setDoc(doc(db, "repairs", repairDocId), {
+                invoiceUrl: downloadUrl,
+                updatedAt: new Date().toISOString() // 🔄 DODANO: updatedAt dla Dexie Sync
+            }, { merge: true });
 
             alert(`Skan faktury dla starego wpisu Naprawa_${legacyId} został pomyślnie wgrany i podpięty!`);
             if (selectedVehicle) fetchRepairs(selectedVehicle.id);
@@ -455,7 +459,10 @@ export default function VehiclesHub() {
                 const downloadUrl = await getDownloadURL(fileRef);
 
                 for (const docSnap of snap.docs) {
-                    await setDoc(doc(db, "repairs", docSnap.id), { invoiceUrl: downloadUrl }, { merge: true });
+                    await setDoc(doc(db, "repairs", docSnap.id), {
+                        invoiceUrl: downloadUrl,
+                        updatedAt: new Date().toISOString() // 🔄 DODANO: updatedAt dla Dexie Sync
+                    }, { merge: true });
                 }
 
                 successCount++;
@@ -509,7 +516,7 @@ export default function VehiclesHub() {
         };
 
         try {
-            const storage = getStorage(); // Inicjalizacja Storage do szukania starych PDFów
+            const storage = getStorage();
             const vDelimiter = vehiclesCsv.includes(';') ? ';' : ',';
             const vehicleRows = parseCSV(vehiclesCsv, vDelimiter);
 
@@ -534,13 +541,14 @@ export default function VehiclesHub() {
 
                 const vehicleRef = doc(collection(db, "vehicles"));
                 await setDoc(vehicleRef, {
-                    brand, model, year, registration, summerTires, winterTires, currentTires, inspectionDate, dateAdded, initialMileage
+                    brand, model, year, registration, summerTires, winterTires, currentTires, inspectionDate, dateAdded, initialMileage,
+                    updatedAt: new Date().toISOString() // 🔄 DODANO: updatedAt dla Dexie Sync
                 });
 
                 idMap[oldId] = vehicleRef.id;
             }
 
-            // 2. IMPORT NAPRAW + AUTOMATYCZNE LINKOWANIE PDF ZE STORAGE
+            // 2. IMPORT NAPRAW
             if (repairsCsv.trim()) {
                 const rDelimiter = repairsCsv.includes(';') ? ';' : ',';
                 const repairRows = parseCSV(repairsCsv, rDelimiter);
@@ -562,25 +570,21 @@ export default function VehiclesHub() {
 
                     const newVehicleId = idMap[oldVehicleId];
                     if (!newVehicleId) {
-                        console.warn(`Pominięto naprawę stary_id:${legacyId} - brak dopasowania pojazdu dla id:${oldVehicleId}`);
                         continue;
                     }
 
-                    // --- MAGIA: SZUKAMY PLIKU W CHMURZE ---
                     let invoiceUrl = "";
                     try {
-                        // Tworzymy referencję do pliku tak jak był zapisywany (np. legacy_Naprawa_100.pdf)
                         const fileRef = ref(storage, `vehicles/invoices/legacy_Naprawa_${legacyId}.pdf`);
                         invoiceUrl = await getDownloadURL(fileRef);
-                    } catch (err) {
-                        // Jeśli pliku nie ma, nic się nie dzieje, invoiceUrl zostaje puste
-                    }
+                    } catch (err) { }
 
                     const repairRef = doc(collection(db, "repairs"));
                     await setDoc(repairRef, {
                         vehicleId: newVehicleId,
                         date, cost, accountingNumber, mileage, comments, location, category, legacyId,
-                        ...(invoiceUrl && { invoiceUrl }) // Jeśli znaleźliśmy PDF, dodajemy link!
+                        ...(invoiceUrl && { invoiceUrl }),
+                        updatedAt: new Date().toISOString() // 🔄 DODANO: updatedAt dla Dexie Sync
                     });
                 }
             }
@@ -646,13 +650,13 @@ export default function VehiclesHub() {
                     const data = await response.json();
                     if (!response.ok) throw new Error(data.error || "Błąd API Gemini");
 
-                    // 🔴 AKTUALIZACJA: Używamy category i zapisujemy nr rejestracyjny
                     await setDoc(doc(db, "repairs", repair.id), {
                         comments: data.comments || repair.comments,
                         category: data.category || repair.category || repair.repairType || "Inne",
                         partsList: data.partsList || [],
-                        registrationNumberFromInvoice: data.registrationNumber || "", // Weryfikacja
-                        hasAiData: true
+                        registrationNumberFromInvoice: data.registrationNumber || "",
+                        hasAiData: true,
+                        updatedAt: new Date().toISOString() // 🔄 DODANO: updatedAt dla Dexie Sync
                     }, { merge: true });
 
                     const partsFound = data.partsList && data.partsList.length > 0 ? data.partsList.join(", ") : "brak";

@@ -1,9 +1,23 @@
 // src/app/api/ai-analyst/route.ts
+// =============================================================================
+// PESAM Fleet Analytics — Multi-Agent AI System v3.0 (Dexie-first)
+//
+// NOWA ARCHITEKTURA:
+// Dane NIE są już pobierane z Firestore po stronie serwera.
+// Frontend czyta z lokalnej IndexedDB (Dexie), filtruje i wysyła
+// tylko relevantne rekordy do tego API.
+//
+// Agenci:
+//   Agent 1: Dyspozytor — ocenia intencję, ekstrahuje parametry
+//   Agent 2: Matematyk  — obliczenia w piaskownicy Python
+//   Agent 3: Prezenter  — dobiera widget UI (wykres/tabela/KPI)
+// =============================================================================
 import { NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
-import { db } from "@/lib/firebase/config";
-import * as admin from 'firebase-admin';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INICJALIZACJA
+// ─────────────────────────────────────────────────────────────────────────────
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
@@ -12,431 +26,417 @@ const ai = new GoogleGenAI({
 
 export const maxDuration = 60;
 
-if (!admin.apps.length) {
-    admin.initializeApp();
+// ─────────────────────────────────────────────────────────────────────────────
+// TYPY
+// ─────────────────────────────────────────────────────────────────────────────
+interface Vehicle {
+    id: string;
+    brand: string;
+    model: string;
+    registration: string;
+    initialMileage: number;
 }
-const adminDb = admin.firestore();
 
-// =========================================================================
-// FUNKCJA POMOCNICZA: AUTOMATYCZNA SAMONAPRAWA DLA LIMITÓW 429 (BACKOFF)
-// =========================================================================
-async function generateContentWithRetry(params: any, retries = 3, delay = 1000): Promise<any> {
+interface Repair {
+    vehicleId: string;
+    cost: number;
+    date: string;
+    category: string;
+    mileage?: number;
+    comments?: string;
+    location?: string;
+    partsList?: string[];
+}
+
+interface RequestBody {
+    question: string;
+    currentHistory: Array<{ role: string; text: string }>;
+    // Dane przychodzą z przeglądarki (IndexedDB) — już przefiltrowane przez frontend
+    vehicles: Vehicle[];
+    repairs: Repair[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. SCHEMAT BAZY — wiedza wspólna agentów
+// ─────────────────────────────────────────────────────────────────────────────
+const DB_SCHEMA = `
+PESAM Fleet – Schemat danych:
+
+vehicles (pojazdy):
+  - id (string): Unikalny ID
+  - brand (string): Marka np. "Ford", "Renault", "Iveco", "Opel"
+  - model (string): Model np. "Transit", "Trafic", "Daily 35C15"
+  - registration (string): Nr rejestracyjny np. "RDE HF31"
+  - initialMileage (number): Początkowy stan licznika km
+
+repairs (naprawy):
+  - vehicleId (string): FK do vehicles.id
+  - date (string): YYYY-MM-DD
+  - cost (number): Koszt netto PLN (float) — ZAWSZE "cost", nigdy "price"
+  - category (string): "Mechaniczna"|"Elektryczna"|"Zawieszenie"|"Silnik"|"Wulkanizacja"|"Lakiernicza"|"Eksploatacyjna"|"Inne"
+  - mileage (number): Stan licznika km
+  - comments (string): Opis prac
+  - location (string): Nazwa warsztatu
+  - partsList (string[]): Lista części
+
+WAŻNE: Pole kosztu = "cost". Pole kategorii = "category". Nigdy inne nazwy.
+`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. RETRY
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateContent(params: any, retries = 3, delay = 1000): Promise<any> {
     try {
         return await ai.models.generateContent(params);
     } catch (error: any) {
-        const isRateLimit = error.message?.includes("429") ||
-            error.message?.includes("RESOURCE_EXHAUSTED") ||
-            error.status === 429 ||
-            error.code === 429;
+        const isRateLimit =
+            error?.message?.includes('429') ||
+            error?.message?.includes('RESOURCE_EXHAUSTED') ||
+            error?.status === 429;
 
         if (isRateLimit && retries > 0) {
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return generateContentWithRetry(params, retries - 1, delay * 2);
+            await new Promise(res => setTimeout(res, delay));
+            return generateContent(params, retries - 1, delay * 2);
         }
         throw error;
     }
 }
 
-// =========================================================================
-// BEZPOŚREDNIE FUNKCJE BAZODANOWE (Wywoływane przez serwer)
-// =========================================================================
-async function dbGetVehiclesList() {
-    const snap = await adminDb.collection("vehicles").get();
-    return snap.docs.map(doc => {
-        const data = doc.data();
-        return {
-            id: doc.id,
-            brand: data.brand || "Nieznany",
-            model: data.model || "Nieznany",
-            registration: data.registration || "Brak tablic",
-            initialMileage: data.initialMileage || 0 // DODANO: Przebieg początkowy pojazdu
-        };
-    });
-}
-
-async function dbGetRepairs(vehicleId?: string, vehicleIds?: string[]) {
-    let allDocs: any[] = [];
-
-    if (vehicleId) {
-        const snap = await adminDb.collection("repairs").where("vehicleId", "==", vehicleId).get();
-        allDocs = snap.docs;
-    } else if (vehicleIds && Array.isArray(vehicleIds) && vehicleIds.length > 0) {
-        const chunks = [];
-        for (let i = 0; i < vehicleIds.length; i += 30) {
-            chunks.push(vehicleIds.slice(i, i + 30));
-        }
-
-        const snapPromises = chunks.map(chunk => adminDb.collection("repairs").where("vehicleId", "in", chunk).get());
-        const snaps = await Promise.all(snapPromises);
-        allDocs = snaps.flatMap(snap => snap.docs);
-    } else {
-        const snap = await adminDb.collection("repairs").get();
-        allDocs = snap.docs;
-    }
-
-    return allDocs.map((doc: any) => {
-        const data = doc.data();
-
-        let rawCost = data.cost;
-        let parsedCost = 0;
-        if (typeof rawCost === 'number') {
-            parsedCost = rawCost;
-        } else if (typeof rawCost === 'string') {
-            parsedCost = parseFloat(rawCost.replace(/[^0-9.]/g, '')) || 0;
-        }
-
-        return {
-            id: doc.id,
-            vehicleId: data.vehicleId || null,
-            cost: parsedCost,
-            date: data.date || "Brak daty",
-            category: data.category || data.repairType || "Inna",
-            comments: data.comments || "",
-            location: data.location || "Nieznany warsztat",
-            mileage: data.mileage || 0 // DODANO: Przebieg pojazdu podczas naprawy
-        };
-    });
-}
-
-// =========================================================================
-// DEFINICJE NARZĘDZI DLA MODELI AI (FUNCTION CALLING)
-// =========================================================================
-const GET_VEHICLES_TOOL = {
-    name: "fetchVehiclesFromDB",
-    description: "Pobiera listę pojazdów z bazy danych Firestore.",
-    parameters: { type: Type.OBJECT, properties: {} }
-};
-
-const GET_REPAIRS_TOOL = {
-    name: "fetchRepairsFromDB",
-    description: "Pobiera listę napraw i kosztów z bazy danych Firestore. Możesz podać jedno 'vehicleId' lub tablicę 'vehicleIds' dla grupy pojazdów.",
-    parameters: {
-        type: Type.OBJECT,
-        properties: {
-            vehicleId: { type: Type.STRING, description: "ID konkretnego pojazdu (opcjonalnie)." },
-            vehicleIds: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: "Tablica ID pojazdów (opcjonalnie, np. gdy filtrujesz grupę aut danej marki)."
-            }
-        }
-    }
-};
-
-const RENDER_CHART_TOOL = {
-    name: "renderChartWidget",
-    description: "Generuje interaktywny wykres.",
-    parameters: {
-        type: Type.OBJECT,
-        properties: {
-            chartType: { type: Type.STRING, description: "Typ: 'bar', 'pie', 'line'." },
-            title: { type: Type.STRING, description: "Tytuł wykresu." },
-            datasetLabel: { type: Type.STRING, description: "Opis danych, np. Koszt PLN." },
-            labels: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Etykiety osi X." },
-            values: { type: Type.ARRAY, items: { type: Type.NUMBER }, description: "Wartości osi Y." }
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. SCHEMATY AGENTÓW
+// ─────────────────────────────────────────────────────────────────────────────
+const DISPATCHER_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        isDataAnalysis: {
+            type: Type.BOOLEAN,
+            description: 'true = zapytanie analityczne, false = zwykła rozmowa/powitanie'
         },
-        required: ["chartType", "title", "labels", "values", "datasetLabel"]
-    }
+        conversationalReply: {
+            type: Type.STRING,
+            description: 'Odpowiedź gdy isDataAnalysis=false'
+        }
+    },
+    required: ['isDataAnalysis']
 };
 
-const RENDER_TABLE_TOOL = {
-    name: "renderTableWidget",
-    description: "Generuje tabelę danych. Użyj, gdy użytkownik prosi o 'listę', 'ranking', 'zestawienie'.",
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. NARZĘDZIA UI (dla Agenta Prezentera)
+// ─────────────────────────────────────────────────────────────────────────────
+const TOOL_RENDER_CHART = {
+    name: 'renderChartWidget',
+    description: 'Wykres słupkowy, kołowy lub liniowy. Użyj dla danych porównawczych, kategorialnych lub czasowych.',
     parameters: {
         type: Type.OBJECT,
         properties: {
-            title: { type: Type.STRING, description: "Tytuł tabeli (np. 'Najdroższe naprawy')." },
-            columns: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Nazwy kolumn." },
+            chartType: { type: Type.STRING, description: '"bar" | "pie" | "line"' },
+            title: { type: Type.STRING },
+            datasetLabel: { type: Type.STRING, description: 'np. "Koszt PLN"' },
+            labels: { type: Type.ARRAY, items: { type: Type.STRING } },
+            values: { type: Type.ARRAY, items: { type: Type.NUMBER } }
+        },
+        required: ['chartType', 'title', 'datasetLabel', 'labels', 'values']
+    }
+};
+
+const TOOL_RENDER_TABLE = {
+    name: 'renderTableWidget',
+    description: 'Tabela danych. Użyj dla list, rankingów, szczegółowych wpisów (min. 3 wiersze).',
+    parameters: {
+        type: Type.OBJECT,
+        properties: {
+            title: { type: Type.STRING },
+            columns: { type: Type.ARRAY, items: { type: Type.STRING } },
             rows: {
                 type: Type.ARRAY,
-                description: "Wiersze tabeli (tablica w tablicy).",
-                items: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: "Pojedynczy wiersz tabeli."
-                }
+                items: { type: Type.ARRAY, items: { type: Type.STRING } }
             }
         },
-        required: ["title", "columns", "rows"]
+        required: ['title', 'columns', 'rows']
     }
 };
 
-const RENDER_KPI_TOOL = {
-    name: "renderKpiWidget",
-    description: "Generuje kafelki statystyczne (Kluczowe Wskaźniki). Użyj do pojedynczych liczb, np. sum, średnich.",
+const TOOL_RENDER_KPI = {
+    name: 'renderKpiWidget',
+    description: 'Kafelki KPI. Użyj dla 1-4 kluczowych liczb: suma, średnia, max.',
     parameters: {
         type: Type.OBJECT,
         properties: {
-            title: { type: Type.STRING, description: "Tytuł podsumowania." },
+            title: { type: Type.STRING },
             metrics: {
                 type: Type.ARRAY,
-                description: "Obiekty z metrykami.",
                 items: {
                     type: Type.OBJECT,
                     properties: {
-                        label: { type: Type.STRING, description: "Krótki opis liczby." },
-                        value: { type: Type.STRING, description: "Wartość." }
+                        label: { type: Type.STRING },
+                        value: { type: Type.STRING }
                     },
-                    required: ["label", "value"]
+                    required: ['label', 'value']
                 }
             }
         },
-        required: ["title", "metrics"]
+        required: ['title', 'metrics']
     }
 };
 
-const DELEGATE_ANALYSIS_TOOL = {
-    name: "delegateToDataAnalyst",
-    description: "Wywołaj to narzędzie ZAWSZE, gdy użytkownik prosi o zestawienie, historię napraw, statystyki, koszty, tabele lub wykresy i wiesz już, dla jakiego pojazdu to zrobić. Uruchomi to Głównego Analityka.",
-    parameters: { type: Type.OBJECT, properties: {} }
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. PRZYCINANIE DANYCH
+// Usuwa zbędne pola tekstowe jeśli pytanie ich nie dotyczy.
+// Zapobiega przekroczeniu limitu tokenów przy dużych flotach.
+// ─────────────────────────────────────────────────────────────────────────────
+function pruneForAnalysis(
+    vehicles: Vehicle[],
+    repairs: Repair[],
+    question: string
+): { vehicles: object[]; repairs: object[] } {
+    const q = question.toLowerCase();
 
-// =========================================================================
-// 3. GŁÓWNY ROUTE POST
-// =========================================================================
+    const needsComments = /komentarz|opis|uwag|część|części|parts|wymieni|podzespół/.test(q);
+    const needsLocation = /warsztat|miejsce|gdzie|lokalizac|serwis/.test(q);
+    const needsPartsList = /lista części|parts list|wymienione/.test(q);
+
+    const prunedVehicles = vehicles.map(v => ({
+        id: v.id,
+        brand: v.brand,
+        model: v.model,
+        // PRO-TIP 1: registration zawsze widoczny dla Matematyka.
+        // Waży kilkanaście bajtów, ale daje Pythonowi ludzki identyfikator
+        // zamiast surowego ID — "Ford RDE HF31" zamiast "v-8f92a1".
+        registration: v.registration,
+        initialMileage: v.initialMileage
+    }));
+
+    const prunedRepairs = repairs.map(r => ({
+        vehicleId: r.vehicleId,
+        cost: r.cost,
+        date: r.date,
+        category: r.category,
+        mileage: r.mileage,
+        ...(needsComments && { comments: r.comments }),
+        ...(needsLocation && { location: r.location }),
+        ...(needsPartsList && { partsList: r.partsList })
+    }));
+
+    return { vehicles: prunedVehicles, repairs: prunedRepairs };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. GŁÓWNY HANDLER
+// ─────────────────────────────────────────────────────────────────────────────
 export async function POST(req: Request) {
     const logs: string[] = [];
+
     try {
-        const { question, currentHistory, cachedData } = await req.json();
+        const body: RequestBody = await req.json();
+        const { question, currentHistory, vehicles, repairs } = body;
 
-        const historyText = currentHistory.map((msg: any) => `${msg.role === 'user' ? 'Użytkownik' : 'AI'}: ${msg.text}`).join('\n');
-
-        // ==========================================
-        // ETAP 1: AGENT 1 (Recepcjonista 3.5-flash)
-        // ==========================================
-        logs.push("Uruchomiono Agenta Recepcjonistę (Gemini 3.5 Flash)");
-
-        let isRequestingAnalysis = false;
-
-        let routerResponse = await generateContentWithRetry({
-            model: 'gemini-3.5-flash',
-            contents: [
-                { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] }
-            ],
-            config: {
-                systemInstruction: "Jesteś asystentem Floty PESAM. Odpowiadaj naturalnie. 1) Jeśli pytania dotyczą floty, ZAWSZE najpierw wywołaj 'fetchVehiclesFromDB'. 2) Jeśli wiesz, jakiego auta/aut dotyczy rozmowa, a użytkownik prosi o wyciągnięcie danych (historia, koszty, naprawy, tabele), MUSISZ wywołać narzędzie 'delegateToDataAnalyst'. Wtedy dopisz krótką wiadomość: 'Przekazuję do analityka...'",
-                temperature: 0.1,
-                tools: [{ functionDeclarations: [GET_VEHICLES_TOOL, DELEGATE_ANALYSIS_TOOL] }]
-            }
-        });
-
-        let calls = routerResponse.functionCalls || [];
-
-        if (calls.some((c: any) => c.name === "delegateToDataAnalyst")) {
-            isRequestingAnalysis = true;
+        // Walidacja — frontend powinien zawsze wysyłać te tablice
+        if (!Array.isArray(vehicles) || !Array.isArray(repairs)) {
+            return NextResponse.json(
+                { error: 'Brak danych: vehicles i repairs muszą być tablicami.' },
+                { status: 400 }
+            );
         }
 
-        if (calls.some((c: any) => c.name === "fetchVehiclesFromDB")) {
-            const call = calls.find((c: any) => c.name === "fetchVehiclesFromDB")!;
-            logs.push("Flash: Sprawdzam bazę pojazdów Firestore...");
-            const vehiclesList = await dbGetVehiclesList();
+        logs.push(`[Init] Odebrano: ${vehicles.length} pojazdów, ${repairs.length} napraw z IndexedDB`);
 
-            const callAny = call as any;
-            const partAny = (routerResponse.candidates?.[0]?.content?.parts?.[0]) as any;
-            const flashSig = callAny.thoughtSignature || partAny?.thoughtSignature || "skip_thought_signature_validator";
-
-            routerResponse = await generateContentWithRetry({
-                model: 'gemini-3.5-flash',
-                contents: [
-                    { role: 'user', parts: [{ text: `Oto nasza rozmowa:\n${historyText}\n\nUżytkownik pisze: "${question}"` }] },
-                    { role: 'model', parts: [{ functionCall: { name: call.name, args: call.args }, thoughtSignature: flashSig }] },
-                    { role: 'user', parts: [{ functionResponse: { name: "fetchVehiclesFromDB", response: { vehicles: vehiclesList } } }] }
-                ],
-                config: {
-                    systemInstruction: "Znasz już auta. Jeśli zapytanie wskazuje na chęć uzyskania konkretnych danych/historii z bazy napraw, UŻYJ narzędzia 'delegateToDataAnalyst'. Jeśli brakuje Ci danych (np. nie wiesz, który to Opel), dopytaj użytkownika tekstowo.",
-                    temperature: 0.1,
-                    tools: [{ functionDeclarations: [DELEGATE_ANALYSIS_TOOL] }]
-                }
-            });
-
-            calls = routerResponse.functionCalls || [];
-            if (calls.some((c: any) => c.name === "delegateToDataAnalyst")) {
-                isRequestingAnalysis = true;
-            }
-        }
-
-        // Jeśli to tylko zwykłe uściślanie / pogaduszki
-        if (!isRequestingAnalysis) {
-            logs.push("Recepcjonista uznał, że to tylko rozmowa lub doprecyzowanie. Nie uruchamia Głównego Analityka.");
+        // PRO-TIP 2: Guard przed zbyt dużym payloadem (limit Vercel ~4.5 MB).
+        // Przy 2000+ naprawach model i tak nie przetworzyłby tego sensownie.
+        if (repairs.length > 2000) {
             return NextResponse.json({
-                message: routerResponse.text || "W czym mogę pomóc?",
+                message: `⚠️ Zapytanie obejmuje zbyt wiele rekordów (${repairs.length} napraw). Proszę zawęzić analizę — podaj konkretną markę, pojazd lub ramy czasowe (np. "koszty Forda w 2024").`,
                 uiAction: null,
                 logs
             }, { status: 200 });
         }
 
-        // ==========================================
-        // ETAP 2: AGENT 2 (Analityk Pro 3.1)
-        // ==========================================
-        logs.push("Przekazano sprawę do Głównego Analityka (Gemini 3.1 Pro)");
+        // Skrócona historia — max 10 ostatnich wiadomości
+        const historyText = (currentHistory || [])
+            .slice(-10)
+            .map(m => `${m.role === 'user' ? 'Użytkownik' : 'AI'}: ${m.text}`)
+            .join('\n');
 
-        const cacheString = cachedData && Object.keys(cachedData).length > 0
-            ? `W pamięci podręcznej (Cache) posiadasz dane pobrane w poprzednim kroku: ${JSON.stringify(cachedData)}. Użyj ich TYLKO wtedy, gdy pasują do aktualnego zapytania. Jeśli użytkownik pyta o inne auto lub w Cache nie ma wystarczających danych, MUSISZ zignorować ten Cache i użyć narzędzi ('fetchVehiclesFromDB', 'fetchRepairsFromDB'), aby pobrać z bazy nowe rekordy!`
-            : `Nie masz jeszcze pobranych żadnych danych z bazy. Aby przeanalizować flotę, wywołaj niezbędne narzędzia (fetchVehiclesFromDB, fetchRepairsFromDB).`;
+        // =====================================================================
+        // AGENT 1: DYSPOZYTOR
+        // Ocenia intencję — analityczna czy rozmowa?
+        // =====================================================================
+        logs.push('[Agent 1] Dyspozytor uruchomiony (gemini-2.5-flash-lite)');
 
-        if (cachedData && Object.keys(cachedData).length > 0) {
-            logs.push("Analityk: Przeskanowano lokalną pamięć podręczną (Cache)...");
-        }
-
-        const analystPrompt = `
-            Użytkownik prosi o: "${question}"
-            Kontekst rozmowy:
-            ${historyText}
-            
-            ${cacheString}
-        `;
-
-        // INICJALIZACJA HISTORII CZATU DLA ANALITYKA PRO (contents)
-        const analystContents: any[] = [
-            { role: 'user', parts: [{ text: analystPrompt }] }
-        ];
-
-        let analystResponse = await generateContentWithRetry({
-            model: 'gemini-3.1-pro-preview',
-            contents: analystContents,
+        const dispatcherRes = await generateContent({
+            model: 'gemini-2.5-flash-lite',
+            contents: [{
+                role: 'user',
+                parts: [{ text: `Historia:\n${historyText}\n\nZapytanie: "${question}"` }]
+            }],
             config: {
-                systemInstruction: "Jesteś PESAM AI Data Analyst. Najpierw upewnij się, że masz potrzebne dane (z cache lub pobierając z bazy). Do obliczania średnich, sum, podatków i skomplikowanej matematyki ZAWSZE pisz kod w języku Python (zostanie automatycznie wykonany). Na koniec zdecyduj i użyj jednego z narzędzi wizualnych: 'renderChartWidget' (dla wykresów), 'renderTableWidget' (dla list/rankingów) lub 'renderKpiWidget' (dla kilku kluczowych liczb/podsumowań).",
-                temperature: 0.0,
-                tools: [
-                    { functionDeclarations: [GET_VEHICLES_TOOL, GET_REPAIRS_TOOL, RENDER_CHART_TOOL, RENDER_TABLE_TOOL, RENDER_KPI_TOOL] },
-                    { codeExecution: {} }
-                ]
+                systemInstruction: `Jesteś Dyspozytorem floty PESAM. Oceń czy zapytanie wymaga analizy danych flotowych (isDataAnalysis=true) czy to zwykła rozmowa/powitanie (isDataAnalysis=false). Jeśli to rozmowa, napisz krótką przyjazną odpowiedź po polsku w conversationalReply.`,
+                temperature: 0.1,
+                responseMimeType: 'application/json',
+                responseSchema: DISPATCHER_SCHEMA
             }
         });
 
-        let executionLimit = 3;
-        let currentSessionCache = cachedData || {};
+        const dispatcherRaw = (dispatcherRes.text || '{}')
+            .replace(/```json|```/g, '')
+            .trim();
+        const dispatcher = JSON.parse(dispatcherRaw);
 
-        while (analystResponse.functionCalls && analystResponse.functionCalls.length > 0 && executionLimit > 0) {
-            const call = analystResponse.functionCalls[0];
-            executionLimit--;
-
-            let resultData: any = {};
-            let responsePayload: any = {};
-
-            if (call.name === "fetchVehiclesFromDB") {
-                logs.push("Analityk Pro: Pobieram listę pojazdów z bazy danych...");
-                resultData = await dbGetVehiclesList();
-                currentSessionCache.vehicles = resultData;
-                responsePayload = { vehicles: resultData };
-                logs.push(`Analityk Pro: Zaimportowano ${resultData.length} pojazdów.`);
-            } else if (call.name === "fetchRepairsFromDB") {
-                const args = call.args as { vehicleId?: string; vehicleIds?: string[] };
-                logs.push(`Analityk Pro: Wykryto zapytanie o naprawy. Pobieram dane z Firestore...`);
-                resultData = await dbGetRepairs(args.vehicleId, args.vehicleIds);
-                currentSessionCache.repairs = resultData;
-                responsePayload = { repairs: resultData };
-                logs.push(`Analityk Pro: Pobrano ${resultData.length} wpisów serwisowych.`);
-            }
-            else if (call.name === "renderChartWidget" || call.name === "renderTableWidget" || call.name === "renderKpiWidget") {
-                break;
-            }
-
-            const callAny = call as any;
-            const partAny = (analystResponse.candidates?.[0]?.content?.parts?.[0]) as any;
-
-            const originalSig = callAny.thoughtSignature ||
-                partAny?.thoughtSignature ||
-                "skip_thought_signature_validator";
-
-            // AKUMULACJA: Dodajemy ruch modelu z wywołaniem funkcji do historii
-            analystContents.push({
-                role: 'model',
-                parts: [{
-                    functionCall: { name: call.name, args: call.args },
-                    thoughtSignature: originalSig
-                }]
+        if (!dispatcher.isDataAnalysis) {
+            logs.push('[Agent 1] Wykryto rozmowę — odpowiedź bezpośrednia');
+            return NextResponse.json({
+                message: dispatcher.conversationalReply || 'W czym mogę pomóc?',
+                uiAction: null,
+                logs
             });
-
-            // AKUMULACJA: Dodajemy naszą odpowiedź z danymi z Firestore do historii
-            analystContents.push({
-                role: 'user',
-                parts: [{
-                    functionResponse: {
-                        name: call.name,
-                        response: responsePayload
-                    }
-                }]
-            });
-
-            // Odsłanie wyników bazy do AI
-            analystResponse = await generateContentWithRetry({
-                model: 'gemini-3.1-pro-preview',
-                contents: analystContents,
-                config: {
-                    systemInstruction: "Przeanalizuj otrzymane z bazy rekordy. Wykorzystaj Pythona do obliczeń matematycznych. Gdy będziesz gotowy, wygeneruj odpowiedni widget wizualny (Wykres, Tabelę lub KPI) za pomocą dostępnych narzędzi renderujących.",
-                    temperature: 0.0,
-                    tools: [
-                        { functionDeclarations: [GET_VEHICLES_TOOL, GET_REPAIRS_TOOL, RENDER_CHART_TOOL, RENDER_TABLE_TOOL, RENDER_KPI_TOOL] },
-                        { codeExecution: {} }
-                    ]
-                }
-            });
-
-            // Przechwycenie tekstu objaśniającego plan działania i kroki pośrednie AI
-            if (analystResponse.text) {
-                logs.push(`Plan AI: ${analystResponse.text}`);
-            }
         }
 
-        // Sprawdzenie, czy Gemini uruchomiło kod w piaskownicy Pythona
-        const candidateParts = analystResponse.candidates?.[0]?.content?.parts || [];
-        const ranPython = candidateParts.some((part: any) => part.executableCode || part.codeExecutionResult);
-        if (ranPython) {
-            logs.push("Analityk Pro: Uruchomiono Piaskownicę Pythona (Google Sandbox). Dokonano precyzyjnych obliczeń matematycznych.");
-        }
+        logs.push('[Agent 1] Wykryto zapytanie analityczne');
 
-        // ==========================================
-        // ETAP 3: Przechwycenie wygenerowanego UI
-        // ==========================================
-        let textMessage = analystResponse.text || "Zakończyłem analizę.";
+        // =====================================================================
+        // PRZYGOTOWANIE DANYCH
+        // Przytnij zbędne pola tekstowe zależnie od treści pytania
+        // =====================================================================
+        const pruned = pruneForAnalysis(vehicles, repairs, question);
+        logs.push(`[Data] Przycinanie: ${pruned.vehicles.length} pojazdów, ${pruned.repairs.length} napraw → gotowe dla Matematyka`);
+
+        // =====================================================================
+        // AGENT 2: MATEMATYK (Python Sandbox)
+        // Otrzymuje czyste dane — wykonuje obliczenia
+        // =====================================================================
+        logs.push('[Agent 2] Matematyk uruchomiony (gemini-2.5-pro + Python Sandbox)');
+
+        const mathPrompt = `
+${DB_SCHEMA}
+
+Pytanie użytkownika: "${question}"
+
+Dane do analizy:
+vehicles = ${JSON.stringify(pruned.vehicles)}
+repairs = ${JSON.stringify(pruned.repairs)}
+
+ZADANIE:
+1. Napisz kod Python który załaduje powyższe dane bezpośrednio (skopiuj JSON do kodu)
+2. Wykonaj obliczenia: sumy, średnie, grupowania, rankingi, trendy — zgodnie z pytaniem
+3. Wypisz wyniki na stdout z czytelnymi etykietami
+4. Podsumuj wyniki w 2-4 zdaniach po polsku (tylko liczby i fakty)
+
+ZASADY:
+- Używaj tylko: json, collections, statistics, datetime (bez zewnętrznych bibliotek)
+- NIE rysuj wykresów ani tabel tekstowych — od tego jest kolejny agent
+- Jeśli danych brak lub puste tablice — napisz to wprost
+`;
+
+        const mathRes = await generateContent({
+            model: 'gemini-3.1-pro-preview',
+            contents: [{ role: 'user', parts: [{ text: mathPrompt }] }],
+            config: {
+                systemInstruction: `Jesteś precyzyjnym Matematykiem Floty PESAM. Twoja jedyna rola to obliczenia numeryczne w Pythonie na dostarczonych danych JSON. Zero wizualizacji, zero formatowania markdown — tylko suche wyniki.`,
+                temperature: 0.0,
+                tools: [{ codeExecution: {} }]
+            }
+        });
+
+        const mathResults = mathRes.text || 'Brak wyników obliczeń.';
+
+        const pythonExecuted = mathRes.candidates?.[0]?.content?.parts
+            ?.some((p: any) => p.executableCode || p.codeExecutionResult) ?? false;
+
+        logs.push(pythonExecuted
+            ? '[Agent 2] ✓ Obliczenia Python wykonane'
+            : '[Agent 2] ⚠ Python nie uruchomiony (dane puste lub pytanie proste)'
+        );
+
+        // =====================================================================
+        // AGENT 3: PREZENTER (dobór widgetu UI)
+        // Otrzymuje TYLKO wyniki Matematyka — zero surowych danych
+        // =====================================================================
+        logs.push('[Agent 3] Prezenter uruchomiony (gemini-2.5-flash)');
+
+        const presenterPrompt = `
+Pytanie użytkownika: "${question}"
+
+Wyniki obliczeń Matematyka Floty:
+${mathResults}
+
+ZADANIE: Wybierz DOKŁADNIE JEDNO narzędzie i wypełnij je gotowymi danymi:
+
+Kryteria wyboru:
+- renderKpiWidget    → 1-4 kluczowe liczby (suma kosztów, średnia, maksimum)
+- renderChartWidget  → dane porównawcze lub czasowe (koszty wg kategorii, trend miesięczny, ranking pojazdów)
+- renderTableWidget  → lista lub ranking z wieloma kolumnami (historia napraw, zestawienie pojazdów)
+
+Wskazówki:
+• Koszty w czasie → "line" chart
+• Podział na kategorie → "pie" lub "bar" chart
+• Porównanie pojazdów → "bar" chart
+• Jedna liczba sumaryczna → kpi
+• Szczegółowa lista → table
+
+Użyj polskich etykiet. Liczby PLN formatuj z separatorem tysięcy.
+`;
+
+        const presenterRes = await generateContent({
+            model: 'gemini-3.5-flash',
+            contents: [{ role: 'user', parts: [{ text: presenterPrompt }] }],
+            config: {
+                systemInstruction: `Jesteś Architektem UI PESAM. Wybierz JEDNO narzędzie wizualne i wypełnij je danymi od Matematyka. Nie analizuj danych — tylko prezentuj gotowe wyniki.`,
+                temperature: 0.0,
+                tools: [{ functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }]
+            }
+        });
+
+        // =====================================================================
+        // PARSOWANIE ODPOWIEDZI PREZENTERA
+        // =====================================================================
+        let textMessage = mathResults;
         let uiAction = null;
 
-        if (analystResponse.functionCalls && analystResponse.functionCalls.length > 0) {
-            const call = analystResponse.functionCalls[0];
+        if (presenterRes.functionCalls?.length) {
+            const call = presenterRes.functionCalls[0];
+            const args = call.args as any;
 
-            if (call.name === "renderChartWidget" && call.args) {
-                const args = call.args as any;
-                uiAction = {
-                    type: "chart",
-                    payload: {
-                        ...args,
-                        colors: args.labels?.map(() => `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')}`)
-                    }
-                };
-                logs.push(`Analityk Pro: Wygenerowano żądanie renderowania wykresu: "${args.title}"`);
-                textMessage = `Sporządziłem wykres: "${args.title}". Wynik znajdziesz na panelu obok.`;
+            switch (call.name) {
+                case 'renderChartWidget':
+                    uiAction = { type: 'chart', payload: args };
+                    textMessage += '\n\n[Wykres wygenerowany na panelu wizualizacji]';
+                    logs.push(`[Agent 3] ✓ Wykres: "${args.title}" (${args.chartType})`);
+                    break;
+
+                case 'renderTableWidget':
+                    uiAction = { type: 'table', payload: args };
+                    textMessage += '\n\n[Tabela wygenerowana na panelu wizualizacji]';
+                    logs.push(`[Agent 3] ✓ Tabela: "${args.title}" (${args.rows?.length || 0} wierszy)`);
+                    break;
+
+                case 'renderKpiWidget':
+                    uiAction = { type: 'kpi', payload: args };
+                    textMessage += '\n\n[Kafelki KPI wygenerowane na panelu wizualizacji]';
+                    logs.push(`[Agent 3] ✓ KPI: "${args.title}" (${args.metrics?.length || 0} wskaźników)`);
+                    break;
+
+                default:
+                    logs.push(`[Agent 3] ⚠ Nieznane narzędzie: ${call.name}`);
             }
-            else if (call.name === "renderTableWidget" && call.args) {
-                const args = call.args as any;
-                uiAction = {
-                    type: "table",
-                    payload: args
-                };
-                logs.push(`Analityk Pro: Wygenerowano żądanie renderowania tabeli: "${args.title}"`);
-                textMessage = `Wygenerowałem szczegółową tabelę: "${args.title}". Spójrz na panel wizualizacji.`;
-            }
-            else if (call.name === "renderKpiWidget" && call.args) {
-                const args = call.args as any;
-                uiAction = {
-                    type: "kpi",
-                    payload: args
-                };
-                logs.push(`Analityk Pro: Wygenerowano żądanie renderowania kafelków statystycznych: "${args.title}"`);
-                textMessage = `Oto najważniejsze wskaźniki liczbowe dotyczące Twojego zapytania. Spójrz na kafelki podsumowujące.`;
-            }
+        } else {
+            logs.push('[Agent 3] ⚠ Brak narzędzia — odpowiedź tekstowa');
         }
 
+        // =====================================================================
+        // ODPOWIEDŹ
+        // Nie zwracamy już newCache — IndexedDB zarządza danymi lokalnie
+        // =====================================================================
         return NextResponse.json({
             message: textMessage,
-            uiAction: uiAction,
-            newCache: currentSessionCache,
+            uiAction,
             logs
         }, { status: 200 });
 
     } catch (error: any) {
-        console.error("Błąd AI:", error);
-        logs.push(`KRYTYCZNY BŁĄD PROCESU: ${error.message || "Nieznany błąd"}`);
-        return NextResponse.json({ error: error.message || "Błąd analityki AI", logs }, { status: 500 });
+        console.error('[PESAM AI Error]', error);
+        logs.push(`[BŁĄD KRYTYCZNY] ${error?.message || 'Nieznany błąd'}`);
+        return NextResponse.json(
+            { error: error?.message || 'Błąd systemu analitycznego', logs },
+            { status: 500 }
+        );
     }
 }

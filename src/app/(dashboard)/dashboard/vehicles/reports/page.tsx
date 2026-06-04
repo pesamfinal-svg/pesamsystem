@@ -1,10 +1,15 @@
-// src/app/(dashboard)/vehicles/reports/page.tsx
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
+
+// --- IMPORTY BAZY DANYCH I SYNCHRONIZACJI ---
+import { localGetAllVehicles, localGetAllRepairs } from "@/lib/db/pesam-db";
+import { usePesamSync } from "@/lib/db/use-pesam-sync";
+import { collection, getDocs, writeBatch } from "firebase/firestore";
+import { db } from "@/lib/firebase/config";
 
 import {
     Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend, ArcElement, PointElement, LineElement
@@ -25,24 +30,25 @@ interface CanvasWidget {
 
 export default function FleetReportsHub() {
     const { user } = useAuth();
-    const [loadingData, setLoadingData] = useState(false);
+
+    // --- HOOK SYNCHRONIZACJI (Pobiera nowe dane w tle) ---
+    const { isSyncing, syncStatus } = usePesamSync();
 
     // Stany komunikacji z AI
     const [prompt, setPrompt] = useState("");
     const [isThinking, setIsThinking] = useState(false);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
-        { role: "ai", text: "Cześć! Jestem Twoim Asystentem Analitycznym. Aby rozpocząć analizę floty, wpisz swoje pytanie poniżej (np. 'podaj naprawy forda transita')." }
+        { role: "ai", text: "Cześć! Jestem Twoim Asystentem Analitycznym. Dane flotowe są zsynchronizowane lokalnie. O co chcesz zapytać?" }
     ]);
 
-    // Dynamiczne statusy na czas oczekiwania na analizę
     const [thinkingStep, setThinkingStep] = useState(0);
     const thinkingMessages = [
         "Inicjalizacja rundy analitycznej...",
-        "Sprawdzanie dostępności pojazdów w bazie danych...",
-        "Filtrowanie rekordów dla wybranej grupy aut...",
-        "Pobieranie kosztów i wpisów serwisowych z Firestore...",
-        "Uruchamianie piaskownicy Pythona i przetwarzanie matematyczne...",
-        "Generowanie parametrów do wizualizacji danych..."
+        "Analiza struktury zapytań i intencji...",
+        "Przycinanie i optymalizacja paczki danych...",
+        "Uruchamianie piaskownicy Pythona (Code Execution)...",
+        "Wykonywanie obliczeń matematycznych...",
+        "Generowanie parametrów do wizualizacji na Canvasie..."
     ];
 
     useEffect(() => {
@@ -51,13 +57,10 @@ export default function FleetReportsHub() {
             setThinkingStep(0);
             interval = setInterval(() => {
                 setThinkingStep(prev => {
-                    // Zatrzymanie rotacji na ostatnim, głównym statusie (nie wraca do 'Inicjalizacji')
-                    if (prev < thinkingMessages.length - 1) {
-                        return prev + 1;
-                    }
+                    if (prev < thinkingMessages.length - 1) return prev + 1;
                     return prev;
                 });
-            }, 3000); // Zmiana komunikatu co 3 sekundy
+            }, 2500);
         } else {
             clearInterval(interval);
         }
@@ -72,8 +75,6 @@ export default function FleetReportsHub() {
     // --- FUNKCJONALNOŚĆ LOGÓW AI ---
     const [executionLogs, setExecutionLogs] = useState<string[]>([]);
     const [showLogs, setShowLogs] = useState(true);
-
-    const [dbCache, setDbCache] = useState<any>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
 
     const canView = user ? hasPermission("viewVehicles", user.rolePermissions, user.permissionOverrides) : false;
@@ -82,8 +83,58 @@ export default function FleetReportsHub() {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [chatHistory, isThinking]);
 
-    if (!canView) return <div className="p-10 text-center text-red-500 font-bold">Brak uprawnień do raportów.</div>;
 
+    // =========================================================================
+    // JEDNORAZOWY SKRYPT MIGRACYJNY (DO USUNIĘCIA PO UŻYCIU)
+    // =========================================================================
+    const handleMigrateUpdatedAt = async () => {
+        if (!confirm("⚠️ Migracja: Doda pole updatedAt do wszystkich starych napraw i pojazdów w Firestore. Kontynuować?")) return;
+
+        try {
+            // 1. Migracja Napraw
+            let snap = await getDocs(collection(db, "repairs"));
+            let batch = writeBatch(db);
+            let count = 0, batchCount = 0;
+
+            for (const docSnap of snap.docs) {
+                const data = docSnap.data();
+                if (data.updatedAt) continue;
+
+                const updatedAt = data.date ? `${data.date}T00:00:00.000Z` : "2020-01-01T00:00:00.000Z";
+                batch.update(docSnap.ref, { updatedAt });
+                count++; batchCount++;
+
+                if (batchCount === 499) { await batch.commit(); batchCount = 0; batch = writeBatch(db); }
+            }
+            if (batchCount > 0) await batch.commit();
+
+            // 2. Migracja Pojazdów
+            snap = await getDocs(collection(db, "vehicles"));
+            batch = writeBatch(db);
+            let vCount = 0; batchCount = 0;
+
+            for (const docSnap of snap.docs) {
+                const data = docSnap.data();
+                if (data.updatedAt) continue;
+
+                const updatedAt = data.dateAdded ? `${data.dateAdded}T00:00:00.000Z` : "2020-01-01T00:00:00.000Z";
+                batch.update(docSnap.ref, { updatedAt });
+                vCount++; batchCount++;
+
+                if (batchCount === 499) { await batch.commit(); batchCount = 0; batch = writeBatch(db); }
+            }
+            if (batchCount > 0) await batch.commit();
+
+            alert(`✅ Migracja zakończona! Zaktualizowano ${count} napraw i ${vCount} pojazdów.`);
+        } catch (err: any) {
+            alert("Błąd migracji: " + err.message);
+        }
+    };
+
+
+    // =========================================================================
+    // GŁÓWNA FUNKCJA WYSYŁAJĄCA ZAPYTANIE DO AI
+    // =========================================================================
     const handleAskAI = async () => {
         if (!prompt.trim()) return;
 
@@ -92,45 +143,39 @@ export default function FleetReportsHub() {
         setChatHistory(prev => [...prev, { role: "user", text: userMsg }]);
         setIsThinking(true);
 
-        // Zamiast ukrywać czarny panel, od razu pokazujemy statusy startowe na czas myślenia AI
         setExecutionLogs([
             "Inicjalizacja kolejnej rundy pytań...",
-            "Przesyłanie historii rozmowy do modeli Gemini...",
-            "Wywoływanie procesów analitycznych na serwerze..."
+            "Pobieranie aktualnych danych z lokalnej bazy IndexedDB..."
         ]);
 
         try {
+            // 1. ZAMIAST FIRESTORE: Szybki odczyt z lokalnego dysku przeglądarki (IndexedDB)
+            const vehicles = await localGetAllVehicles();
+            const repairs = await localGetAllRepairs();
+
+            // 2. Wysłanie danych do serwera analitycznego (API)
             const res = await fetch("/api/ai-analyst", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     question: userMsg,
                     currentHistory: chatHistory,
-                    cachedData: dbCache
+                    vehicles: vehicles, // 🚀 Wrzucamy dane lokalne do API
+                    repairs: repairs    // 🚀 Wrzucamy dane lokalne do API
                 })
             });
 
             const data = await res.json();
-
             if (data.error) throw new Error(data.error);
 
-            // Aktualizacja czatu
             setChatHistory(prev => [...prev, { role: "ai", text: data.message || "Oto wynik analizy na panelu." }]);
 
-            // Odebranie i zapisanie logów zdarzeń z serwera
             if (data.logs && Array.isArray(data.logs)) {
                 setExecutionLogs(data.logs);
             }
 
-            if (data.newCache && Object.keys(data.newCache).length > 0) {
-                setDbCache(data.newCache);
-            }
-
-            // Obsługa generowania i historii widgetu
             if (data.uiAction) {
                 const newWidget: CanvasWidget = { type: data.uiAction.type, data: data.uiAction.payload };
-
-                // Dodajemy nowy widget do historii i ustawiamy go jako aktywny
                 setWidgetHistory(prev => {
                     const updated = [...prev, newWidget];
                     setCurrentWidgetIndex(updated.length - 1);
@@ -141,13 +186,12 @@ export default function FleetReportsHub() {
 
         } catch (error: any) {
             console.error(error);
-            setChatHistory(prev => [...prev, { role: "ai", text: "Napotkałem problem podczas analizy danych: " + error.message }]);
+            setChatHistory(prev => [...prev, { role: "ai", text: "Napotkałem problem podczas analizy: " + error.message }]);
         } finally {
             setIsThinking(false);
         }
     };
 
-    // Obsługa cofania/przechodzenia w historii widgetów
     const navigateHistory = (index: number) => {
         if (index >= 0 && index < widgetHistory.length) {
             setCurrentWidgetIndex(index);
@@ -155,13 +199,13 @@ export default function FleetReportsHub() {
         }
     };
 
+    if (!canView) return <div className="p-10 text-center text-red-500 font-bold">Brak uprawnień do raportów.</div>;
+
     const renderCanvas = () => {
-        // --- NOWOŚĆ: PEŁNOEKRANOWY EKRAN ŁADOWANIA PRACY AI NA CANVASIE ---
         if (isThinking) {
             return (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-50/90 backdrop-blur-sm rounded-3xl space-y-5 animate-fade-in z-20">
                     <div className="relative flex items-center justify-center">
-                        {/* Kręcący się pierścień z robotem */}
                         <div className="w-20 h-20 border-4 border-blue-100 rounded-full"></div>
                         <div className="absolute w-20 h-20 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
                         <span className="absolute text-3xl">🤖</span>
@@ -259,6 +303,7 @@ export default function FleetReportsHub() {
 
     return (
         <div className="p-6 md:p-10 max-w-[1600px] mx-auto h-[calc(100vh-60px)] flex flex-col animate-fade-in space-y-4">
+
             {/* Nagłówek */}
             <div className="flex justify-between items-center pb-2">
                 <div>
@@ -266,11 +311,20 @@ export default function FleetReportsHub() {
                         <Link href="/dashboard/vehicles" className="text-slate-400 hover:text-slate-800 text-sm font-bold transition flex items-center gap-1">
                             ⬅ Powrót do Floty
                         </Link>
+                        {/* WSKAŹNIK SYNCHRONIZACJI DEXIE */}
+                        <div className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${isSyncing ? 'bg-blue-100 text-blue-700 animate-pulse' : 'bg-green-100 text-green-700'}`}>
+                            {isSyncing ? `🔄 ${syncStatus}` : '✅ Baza Zsynchronizowana'}
+                        </div>
                     </div>
                     <h1 className="text-3xl font-black text-slate-800 tracking-tight mt-2 flex items-center gap-3">
-                        🤖 AI Data Analyst <span className="bg-purple-100 text-purple-700 text-[10px] uppercase px-2 py-1 rounded-lg">Wersja Eksperymentalna</span>
+                        🤖 AI Data Analyst <span className="bg-purple-100 text-purple-700 text-[10px] uppercase px-2 py-1 rounded-lg">Architektura Local-First</span>
                     </h1>
                 </div>
+
+                {/* PRZYCISK JEDNORAZOWEJ MIGRACJI - DO USUNIĘCIA */}
+                <button onClick={handleMigrateUpdatedAt} className="bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 font-bold px-4 py-2 rounded-xl text-xs transition shadow-sm">
+                    ⚠️ Uruchom Migrację Bazy (Zrób to tylko raz!)
+                </button>
             </div>
 
             {/* GŁÓWNY WIDOK: 50/50 CZAT vs CANVAS */}
@@ -283,7 +337,6 @@ export default function FleetReportsHub() {
                         Konsola poleceń AI
                     </div>
 
-                    {/* Lista wiadomości */}
                     <div className="flex-1 overflow-y-auto p-4 space-y-4">
                         {chatHistory.map((msg, i) => (
                             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -303,12 +356,11 @@ export default function FleetReportsHub() {
                         <div ref={chatEndRef} />
                     </div>
 
-                    {/* PLAN PRACY I ANALIZY AI */}
                     {executionLogs.length > 0 && (
                         <div className="border-t border-slate-200 bg-slate-50 p-4 max-h-[220px] overflow-y-auto">
                             <div className="flex justify-between items-center mb-3">
                                 <span className="text-xs font-black text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                                    🧠 Tok rozumowania i plan pracy AI
+                                    🧠 Przebieg analizy
                                 </span>
                                 <button
                                     onClick={() => setShowLogs(!showLogs)}
@@ -320,16 +372,11 @@ export default function FleetReportsHub() {
                             {showLogs && (
                                 <div className="space-y-2.5 text-xs text-slate-600">
                                     {executionLogs.map((log, i) => {
-                                        const isPlan = log.startsWith("Plan AI:");
                                         return (
-                                            <div key={i} className={`p-2.5 rounded-xl border ${isPlan ? 'bg-blue-50/60 border-blue-100 text-slate-700 font-medium' : 'bg-white border-slate-100'}`}>
+                                            <div key={i} className="p-2.5 rounded-xl border bg-white border-slate-100">
                                                 <div className="flex gap-2">
-                                                    <span className={isPlan ? "text-blue-600" : "text-emerald-600"}>
-                                                        {isPlan ? "📋" : "⚙"}
-                                                    </span>
-                                                    <span className="leading-relaxed">
-                                                        {isPlan ? log.replace("Plan AI:", "").trim() : log}
-                                                    </span>
+                                                    <span className="text-emerald-600">⚙</span>
+                                                    <span className="leading-relaxed">{log}</span>
                                                 </div>
                                             </div>
                                         );
@@ -339,7 +386,6 @@ export default function FleetReportsHub() {
                         </div>
                     )}
 
-                    {/* Input czatu */}
                     <div className="p-4 bg-white border-t border-slate-100">
                         <div className="relative">
                             <input
@@ -347,28 +393,26 @@ export default function FleetReportsHub() {
                                 value={prompt}
                                 onChange={e => setPrompt(e.target.value)}
                                 onKeyDown={e => e.key === 'Enter' && handleAskAI()}
-                                placeholder="np. Zrób wykres kosztów..."
-                                disabled={isThinking}
+                                placeholder="np. Zrób wykres kosztów na auta..."
+                                disabled={isThinking || isSyncing}
                                 className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 pl-4 pr-12 text-sm outline-none focus:border-blue-500 focus:bg-white transition"
                             />
                             <button
                                 onClick={handleAskAI}
-                                disabled={isThinking || !prompt.trim()}
+                                disabled={isThinking || isSyncing || !prompt.trim()}
                                 className="absolute right-2 top-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white p-1.5 rounded-xl transition-colors"
                             >
                                 ⬆️
                             </button>
                         </div>
+                        {isSyncing && <p className="text-[10px] text-blue-500 mt-2 text-center">Poczekaj na zakończenie synchronizacji...</p>}
                     </div>
                 </div>
 
-                {/* PRAWA STRONA: DYNAMIC CANVAS Z HISTORIĄ NAWIGACJI */}
+                {/* PRAWA STRONA: DYNAMIC CANVAS */}
                 <div className="w-full lg:w-2/3 bg-slate-50 border border-slate-200 border-dashed rounded-3xl p-4 relative overflow-hidden flex flex-col">
-
-                    {/* PASEK NAWIGACJI WSTECZ/W PRZÓD DLA WIDGETÓW */}
                     <div className="flex justify-between items-center mb-4 z-10">
                         <div className="text-xs font-black text-slate-400 uppercase tracking-widest">Strefa Wizualizacji (Canvas)</div>
-
                         {widgetHistory.length > 1 && (
                             <div className="flex items-center gap-3 bg-white px-3 py-1.5 rounded-2xl border shadow-sm">
                                 <button
@@ -396,7 +440,6 @@ export default function FleetReportsHub() {
                         {renderCanvas()}
                     </div>
                 </div>
-
             </div>
         </div>
     );
