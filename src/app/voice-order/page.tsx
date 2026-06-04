@@ -36,9 +36,19 @@ export default function MobileVoiceOrderPage() {
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
 
-    // Zabezpieczenie autoryzacji: jeśli niezalogowany, przekieruj do /login
+    // Zapisz trwałą flagę zalogowania w telefonie, gdy użytkownik jest aktywny
     useEffect(() => {
-        if (!loading && !user) {
+        if (user) {
+            localStorage.setItem("pesam_logged_in", "true");
+        }
+    }, [user]);
+
+    // Zabezpieczenie autoryzacji z ominięciem błędu offline
+    useEffect(() => {
+        // Czytamy flagę z pamięci telefonu (działa natychmiast i bez internetu!)
+        const isLocalLoggedIn = localStorage.getItem("pesam_logged_in") === "true";
+
+        if (!loading && !user && !isLocalLoggedIn) {
             router.push("/login");
         }
     }, [user, loading, router]);
@@ -189,7 +199,12 @@ export default function MobileVoiceOrderPage() {
                     <span className="font-black text-sm tracking-widest text-blue-400 uppercase">PESAM VOICE</span>
                 </div>
                 <button
-                    onClick={() => { if (confirm("Czy chcesz się wylogować?")) signOut(); }}
+                    onClick={() => {
+                        if (confirm("Czy chcesz się wylogować?")) {
+                            localStorage.removeItem("pesam_logged_in"); // Czyścimy flagę, aby móc się wylogować
+                            signOut();
+                        }
+                    }}
                     className="text-[10px] font-black text-red-400 border border-red-500/20 px-3 py-1.5 rounded-lg bg-red-500/5 hover:bg-red-500/10"
                 >
                     WYLOGUJ
