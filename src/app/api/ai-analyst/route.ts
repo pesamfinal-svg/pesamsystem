@@ -424,7 +424,15 @@ ZASADY: tylko json/collections/statistics/datetime. Bez wykresów matplotlib.
         });
         trackTokens(mathRes);
 
-        const mathResults = mathRes.text || 'Brak wyników.';
+        const parts = mathRes.candidates?.[0]?.content?.parts || [];
+        const mathResults = parts
+            .map((p: any) => {
+                if (p.text) return p.text;
+                if (p.codeExecutionResult?.output) return p.codeExecutionResult.output;
+                return '';
+            })
+            .filter(Boolean)
+            .join('\n') || 'Brak wyników.';
         const pythonExecuted = mathRes.candidates?.[0]?.content?.parts
             ?.some((p: any) => p.executableCode || p.codeExecutionResult) ?? false;
 
@@ -451,10 +459,12 @@ Wybierz JEDNO narzędzie i wypełnij danymi:
 - renderTableWidget  → lista lub ranking z min. 3 wierszami
 
 Dobór widgetu:
-• Jedna/kilka liczb sumarycznych → kpi
-• Koszty wg kategorii lub auta → bar lub pie
-• Trend miesięczny/roczny → line
-• Historia napraw, zestawienie → table
+- Jedna/kilka liczb sumarycznych → kpi
+- Koszty wg kategorii lub auta → bar lub pie
+- Trend miesięczny/roczny → line
+- Historia napraw, zestawienie → table
+
+BEZWZGLĘDNA ZASADA: ZAWSZE wywołaj jedno z narzędzi. Nawet dla jednej liczby użyj renderKpiWidget. Nigdy nie odpowiadaj samym tekstem bez wywołania narzędzia UI.
 
 BARDZO WAŻNE:
 Musisz wypełnić parametr 'aiMessage' krótkim, czystym zdaniem podsumowującym wyniki (np. "Najdroższym autem we flocie jest Iveco RDE HF31 (13.3k PLN). Szczegóły na wykresie."). 
