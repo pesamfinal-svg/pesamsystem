@@ -58,7 +58,7 @@ export default function LoginPage() {
             // Jeśli nie wymaga zmiany hasła, puszczamy dalej (obsługa powrotu do dyktafonu)
             const params = new URLSearchParams(window.location.search);
             const redirectParam = params.get("redirect");
-            router.push(redirectParam || "/dashboard");
+            window.location.href = redirectParam || "/dashboard"; // TWARDY REDIRECT DLA TRYBU OFFLINE
         } catch (err: any) {
             console.error("Błąd podczas logowania:", err);
             alert("Błąd logowania: " + (err.message || "Nieznany błąd"));

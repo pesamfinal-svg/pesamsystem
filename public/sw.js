@@ -1,5 +1,5 @@
 // public/sw.js
-const CACHE_NAME = 'pesam-voice-offline-v1';
+const CACHE_NAME = 'pesam-voice-offline-v2';
 
 // Ignorujemy zapytania do Firebase, API oraz baz danych
 const shouldIgnore = (url) => {
