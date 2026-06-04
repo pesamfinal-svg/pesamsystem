@@ -17,9 +17,12 @@ interface Vehicle {
 
 interface Repair {
     id: string; vehicleId: string; date: string; cost: number; accountingNumber: string;
-    mileage: number; comments: string; location: string; repairType: string;
-    category: string; invoiceUrl?: string; legacyId?: string;
+    mileage: number; comments: string; location: string;
+    repairType?: string; // Zostawione opcjonalnie dla starych wpisów
+    category: string;    // NOWE GŁÓWNE POLE ZAMIAST repairType
+    invoiceUrl?: string; legacyId?: string;
     partsList?: string[];
+    registrationNumberFromInvoice?: string; // Pole z weryfikacji AI
 }
 
 export default function VehiclesHub() {
@@ -51,13 +54,12 @@ export default function VehiclesHub() {
 
     const [repairForm, setRepairForm] = useState<Partial<Repair>>({
         date: new Date().toISOString().split("T")[0], cost: 0, accountingNumber: "",
-        mileage: 0, comments: "", location: "", repairType: "", category: "Inne",
+        mileage: 0, comments: "", location: "", category: "",
         partsList: []
     });
-    const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]); // Tablica załączników (dowolna ilość)
-    const [invoiceFile, setInvoiceFile] = useState<File | null>(null); // Trzymamy dla kompatybilności
+    const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]);
     const [isAiParsing, setIsAiParsing] = useState(false);
-    const [showAiSuccessBanner, setShowAiSuccessBanner] = useState(false); // Baner zamiast alertu
+    const [showAiSuccessBanner, setShowAiSuccessBanner] = useState(false);
 
     // --- STANY IMPORTERA CSV ---
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -162,7 +164,7 @@ export default function VehiclesHub() {
         setRepairForm({
             date: new Date().toISOString().split("T")[0],
             cost: 0, accountingNumber: "", mileage: vehicle.initialMileage,
-            comments: "", location: "", repairType: "", category: "Inne",
+            comments: "", location: "", category: "",
             partsList: []
         });
         setInvoiceFiles([]);
@@ -175,7 +177,6 @@ export default function VehiclesHub() {
         handleCancelEditRepair();
     };
 
-    // Włączenie trybu edycji dla wybranej naprawy
     const handleStartEditRepair = (repair: Repair) => {
         setIsEditingRepair(true);
         setEditingRepairId(repair.id);
@@ -186,8 +187,7 @@ export default function VehiclesHub() {
             mileage: repair.mileage,
             comments: repair.comments,
             location: repair.location,
-            repairType: repair.repairType,
-            category: repair.category,
+            category: repair.category || repair.repairType || "", // Kompatybilność wsteczna
             invoiceUrl: repair.invoiceUrl,
             legacyId: repair.legacyId,
             partsList: repair.partsList || []
@@ -196,14 +196,13 @@ export default function VehiclesHub() {
         setShowAiSuccessBanner(false);
     };
 
-    // Wyłączenie trybu edycji (powrót do dodawania nowej naprawy)
     const handleCancelEditRepair = () => {
         setIsEditingRepair(false);
         setEditingRepairId(null);
         setRepairForm({
             date: new Date().toISOString().split("T")[0],
             cost: 0, accountingNumber: "", mileage: selectedVehicle ? selectedVehicle.initialMileage : 0,
-            comments: "", location: "", repairType: "", category: "Inne",
+            comments: "", location: "", category: "",
             partsList: []
         });
         setInvoiceFiles([]);
@@ -223,14 +222,15 @@ export default function VehiclesHub() {
         }
     };
 
-    // Analiza 1, 2 lub 3 plików jednocześnie (KAS + Specyfikacja)
+    // ==========================================
+    // POJEDYNCZE DODAWANIE NAPRAWY - AI
+    // ==========================================
     const handleParseInvoiceWithAI = async () => {
         if (invoiceFiles.length === 0) return alert("Najpierw dodaj przynajmniej jeden plik (lub wklej zrzut ekranu)!");
         setIsAiParsing(true);
         setShowAiSuccessBanner(false);
 
         try {
-            // Konwertujemy wszystkie pliki z tablicy invoiceFiles na format Base64
             const filePromises = invoiceFiles.map(async (file) => {
                 const base64: string = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
@@ -243,7 +243,6 @@ export default function VehiclesHub() {
 
             const processedFiles = await Promise.all(filePromises);
 
-            // Wysyłamy tablicę plików do zsynchronizowanego API
             const response = await fetch('/api/parse-invoice', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -254,7 +253,6 @@ export default function VehiclesHub() {
 
             if (!response.ok) throw new Error(data.error || "Nieudana analiza plików przez AI");
 
-            // Wypełnianie pól formularza
             setRepairForm(prev => ({
                 ...prev,
                 date: data.date || prev.date,
@@ -262,12 +260,11 @@ export default function VehiclesHub() {
                 accountingNumber: data.accountingNumber || prev.accountingNumber,
                 mileage: data.mileage || prev.mileage,
                 comments: data.comments || prev.comments,
-                repairType: data.repairType || prev.repairType,
-                location: data.location || prev.location, // AUTOMATYCZNY WARSZTAT
-                partsList: data.partsList || [] // POBRANA LISTA CZĘŚCI
+                category: data.category || prev.category, // Używamy CATEGORY z API
+                location: data.location || prev.location,
+                partsList: data.partsList || []
             }));
 
-            // Zamiast wyskakującego alertu, odpalamy ładny baner powiadomienia na górze
             setShowAiSuccessBanner(true);
         } catch (error: any) {
             alert("Błąd analizy AI: " + error.message);
@@ -277,7 +274,7 @@ export default function VehiclesHub() {
     };
 
     // ==========================================
-    // BEZLIMITOWY ZAPIS NAPRAWY (Fuzja N-plików do jednego PDF)
+    // ZAPIS NAPRAWY DO BAZY (DODAWANIE/EDYCJA)
     // ==========================================
     const handleSaveRepair = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -293,11 +290,9 @@ export default function VehiclesHub() {
                 let fileNameToUpload: string;
 
                 if (invoiceFiles.length === 1 && invoiceFiles[0].type === "application/pdf") {
-                    // 1 plik i to już PDF -> bez łączenia
                     fileToUpload = invoiceFiles[0];
                     fileNameToUpload = invoiceFiles[0].name;
                 } else {
-                    // Wiele plików -> fuzja do PDF
                     const filePromises = invoiceFiles.map(async (file) => {
                         const base64: string = await new Promise((resolve, reject) => {
                             const reader = new FileReader();
@@ -349,10 +344,9 @@ export default function VehiclesHub() {
                 mileage: Number(repairForm.mileage),
                 comments: repairForm.comments,
                 location: repairForm.location,
-                repairType: repairForm.repairType,
-                category: repairForm.category || "Inne",
+                category: repairForm.category || "Inne", // Zapisujemy jako category
                 invoiceUrl: finalInvoiceUrl,
-                partsList: repairForm.partsList || [], // ZAPIS CZĘŚCI DO BAZY
+                partsList: repairForm.partsList || [],
                 ...(repairForm.legacyId && { legacyId: repairForm.legacyId })
             }, { merge: true });
 
@@ -387,12 +381,11 @@ export default function VehiclesHub() {
                 if (invoiceUrl && invoiceUrl.includes("firebasestorage.googleapis.com")) {
                     const storage = getStorage();
                     const fileRef = ref(storage, invoiceUrl);
-                    await deleteObject(fileRef); // Usuwanie z chmury Storage
+                    await deleteObject(fileRef);
                 }
             }
 
             await deleteDoc(repairRef);
-
             alert("Wpis naprawy oraz powiązany skan PDF zostały trwale usunięte z systemu.");
             if (selectedVehicle) fetchRepairs(selectedVehicle.id);
         } catch (error: any) {
@@ -516,11 +509,13 @@ export default function VehiclesHub() {
         };
 
         try {
+            const storage = getStorage(); // Inicjalizacja Storage do szukania starych PDFów
             const vDelimiter = vehiclesCsv.includes(';') ? ';' : ',';
             const vehicleRows = parseCSV(vehiclesCsv, vDelimiter);
 
             const idMap: Record<string, string> = {};
 
+            // 1. IMPORT POJAZDÓW
             for (let i = 1; i < vehicleRows.length; i++) {
                 const cols = vehicleRows[i].map(c => c.trim());
                 if (cols.length < 5 || !cols[0]) continue;
@@ -545,6 +540,7 @@ export default function VehiclesHub() {
                 idMap[oldId] = vehicleRef.id;
             }
 
+            // 2. IMPORT NAPRAW + AUTOMATYCZNE LINKOWANIE PDF ZE STORAGE
             if (repairsCsv.trim()) {
                 const rDelimiter = repairsCsv.includes(';') ? ';' : ',';
                 const repairRows = parseCSV(repairsCsv, rDelimiter);
@@ -562,8 +558,7 @@ export default function VehiclesHub() {
                     const mileage = Number(cols[5]) || 0;
                     const comments = cols[6] || "";
                     const location = cols[7] || "";
-                    const repairType = cols[8] || "Mechaniczna";
-                    const category = cols[9] || "Inne";
+                    const category = cols[8] || cols[9] || "Inne";
 
                     const newVehicleId = idMap[oldVehicleId];
                     if (!newVehicleId) {
@@ -571,15 +566,26 @@ export default function VehiclesHub() {
                         continue;
                     }
 
+                    // --- MAGIA: SZUKAMY PLIKU W CHMURZE ---
+                    let invoiceUrl = "";
+                    try {
+                        // Tworzymy referencję do pliku tak jak był zapisywany (np. legacy_Naprawa_100.pdf)
+                        const fileRef = ref(storage, `vehicles/invoices/legacy_Naprawa_${legacyId}.pdf`);
+                        invoiceUrl = await getDownloadURL(fileRef);
+                    } catch (err) {
+                        // Jeśli pliku nie ma, nic się nie dzieje, invoiceUrl zostaje puste
+                    }
+
                     const repairRef = doc(collection(db, "repairs"));
                     await setDoc(repairRef, {
                         vehicleId: newVehicleId,
-                        date, cost, accountingNumber, mileage, comments, location, repairType, category, legacyId
+                        date, cost, accountingNumber, mileage, comments, location, category, legacyId,
+                        ...(invoiceUrl && { invoiceUrl }) // Jeśli znaleźliśmy PDF, dodajemy link!
                     });
                 }
             }
 
-            alert("✅ Import zakończony pomyślnie! Baza pojazdów i napraw została zmigrowana.");
+            alert("✅ Import zakończony pomyślnie! Baza pojazdów i napraw została zmigrowana, a istniejące pliki PDF zostały automatycznie zlinkowane.");
             setIsImportModalOpen(false);
             setVehiclesCsv("");
             setRepairsCsv("");
@@ -592,20 +598,17 @@ export default function VehiclesHub() {
     };
 
     // =========================================================================
-    // NOWE: MASOWY AUTOMAT UZUPEŁNIANIA DANYCH AI BEZPOŚREDNIO W IMPORTERZE
+    // MASOWY AUTOMAT UZUPEŁNIANIA DANYCH AI BEZPOŚREDNIO W IMPORTERZE
     // =========================================================================
     const handleStartEnrichment = async () => {
         setIsProcessingEnrich(true);
         setEnrichLogs(["[START] Skanowanie bazy danych..."]);
 
         try {
-            // Skanujemy bazę w poszukiwaniu zaimportowanych napraw ze starym ID i wgranym skanem
             const q = query(collection(db, "repairs"), where("legacyId", "!=", ""));
             const snap = await getDocs(q);
 
             const allRepairs = snap.docs.map(d => ({ id: d.id, ...d.data() })) as Repair[];
-
-            // Kwalifikują się te naprawy, które posiadają wgrany skan oraz mają pustą tablicę części (partsList)
             const targets = allRepairs.filter(r => r.invoiceUrl && (!r.partsList || r.partsList.length === 0));
 
             setEnrichTotal(targets.length);
@@ -624,7 +627,6 @@ export default function VehiclesHub() {
                 addEnrichLog(`⚙️ [${i + 1}/${targets.length}] Pobieranie i analiza faktury o starym ID: ${repair.legacyId}...`);
 
                 try {
-                    // Pobieramy plik z Firebase Storage
                     const fileRes = await fetch(repair.invoiceUrl!);
                     const blob = await fileRes.blob();
 
@@ -635,7 +637,6 @@ export default function VehiclesHub() {
                         reader.onerror = error => reject(error);
                     });
 
-                    // Wywołujemy nasze wspólne, zsynchronizowane API
                     const response = await fetch('/api/parse-invoice', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -645,17 +646,18 @@ export default function VehiclesHub() {
                     const data = await response.json();
                     if (!response.ok) throw new Error(data.error || "Błąd API Gemini");
 
-                    // Aktualizujemy wpis w bazie (uaktualniamy opis, typ usterki i partsList, pomijając koszty/przebieg)
+                    // 🔴 AKTUALIZACJA: Używamy category i zapisujemy nr rejestracyjny
                     await setDoc(doc(db, "repairs", repair.id), {
-                        comments: data.comments || repair.comments, // Nadpisujemy opisem z AI
-                        repairType: data.repairType || repair.repairType, // Poprawiamy typ usterki przez AI
-                        partsList: data.partsList || [] // Zapisujemy części pod wyszukiwarkę
+                        comments: data.comments || repair.comments,
+                        category: data.category || repair.category || repair.repairType || "Inne",
+                        partsList: data.partsList || [],
+                        registrationNumberFromInvoice: data.registrationNumber || "", // Weryfikacja
+                        hasAiData: true
                     }, { merge: true });
 
                     const partsFound = data.partsList && data.partsList.length > 0 ? data.partsList.join(", ") : "brak";
-                    addEnrichLog(`✅ [SUKCES] Typ: ${data.repairType} | Wykryte części: [${partsFound}]`);
+                    addEnrichLog(`✅ [SUKCES] Kategoria: ${data.category} | Wykryte części: [${partsFound}]`);
 
-                    // Bezpieczna pauza 3 sekundy, aby nie przekroczyć limitów API Cloud i Vertex AI
                     await new Promise(resolve => setTimeout(resolve, 3000));
                 } catch (err: any) {
                     addEnrichLog(`❌ [BŁĄD] Naprawa o starym ID ${repair.legacyId}: ${err.message}`);
@@ -812,7 +814,7 @@ export default function VehiclesHub() {
                                                     <div>
                                                         <div className="flex items-center gap-2">
                                                             <span className="font-black text-lg text-slate-800">{repair.date}</span>
-                                                            <span className="bg-slate-100 text-slate-600 text-[10px] font-black px-2 py-0.5 rounded uppercase">{repair.repairType || "Nieznany typ"}</span>
+                                                            <span className="bg-slate-100 text-slate-600 text-[10px] font-black px-2 py-0.5 rounded uppercase">{repair.category || repair.repairType || "Nieznany typ"}</span>
                                                             {repair.legacyId && <span className="bg-yellow-100 text-yellow-800 text-[10px] font-black px-2 py-0.5 rounded uppercase border border-yellow-200">Stare ID: {repair.legacyId} (Migracja)</span>}
                                                         </div>
                                                         <span className="text-xs font-bold text-slate-400 uppercase mt-1 block">
@@ -966,8 +968,8 @@ export default function VehiclesHub() {
                                             </div>
                                         </div>
                                         <div>
-                                            <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Typ Usterki</label>
-                                            <select required value={repairForm.repairType} onChange={e => setRepairForm({ ...repairForm, repairType: e.target.value })} className="w-full p-2.5 bg-slate-50 border rounded-lg font-bold outline-none focus:border-purple-500">
+                                            <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Typ Usterki (Kategoria)</label>
+                                            <select required value={repairForm.category} onChange={e => setRepairForm({ ...repairForm, category: e.target.value })} className="w-full p-2.5 bg-slate-50 border rounded-lg font-bold outline-none focus:border-purple-500">
                                                 <option value="" disabled>Wybierz typ naprawy...</option>
                                                 <option value="Mechaniczna">Mechaniczna</option>
                                                 <option value="Elektryczna">Elektryczna</option>

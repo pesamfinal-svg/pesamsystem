@@ -37,7 +37,7 @@ export async function POST(req: Request) {
         }));
 
         const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview', // Używamy Twojego najnowszego wybranego modelu
+            model: 'gemini-3-flash-preview',
             contents: [
                 {
                     role: 'user',
@@ -79,18 +79,23 @@ export async function POST(req: Request) {
                             type: "STRING",
                             description: "Krótkie streszczenie wykonanych prac ze specyfikacji."
                         },
-                        repairType: {
+                        // ZMIANA Z repairType na category!
+                        category: {
                             type: "STRING",
                             description: "Wybierz JEDNĄ wartość: Mechaniczna, Elektryczna, Zawieszenie, Silnik, Wulkanizacja, Lakiernicza, Eksploatacyjna."
                         },
-                        // NOWA TABLICA CZĘŚCI I USŁUG POD WYSZUKIWARKĘ
                         partsList: {
                             type: "ARRAY",
                             items: { type: "STRING" },
                             description: "Lista wszystkich wymienionych części, materiałów i wykonanych usług/robocizny odczytanych z pozycji faktury (np. ['FILTR KABINY', 'filtr oleju', 'USŁUGA SERWISOWA', 'geometria kół', 'żarówka H7'])."
+                        },
+                        // NOWE POLE DLA BEZPIECZEŃSTWA
+                        registrationNumber: {
+                            type: "STRING",
+                            description: "Numer rejestracyjny pojazdu lub numer VIN odczytany z faktury (szukaj w uwagach lub nazwie pojazdu). Jeśli brak, zwróć puste."
                         }
                     },
-                    required: ["date", "cost", "accountingNumber", "mileage", "location", "comments", "repairType", "partsList"]
+                    required: ["date", "cost", "accountingNumber", "mileage", "location", "comments", "category", "partsList"]
                 }
             }
         });
