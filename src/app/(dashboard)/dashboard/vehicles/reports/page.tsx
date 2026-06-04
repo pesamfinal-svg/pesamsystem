@@ -75,6 +75,7 @@ export default function FleetReportsHub() {
     // --- FUNKCJONALNOŚĆ LOGÓW AI ---
     const [executionLogs, setExecutionLogs] = useState<string[]>([]);
     const [showLogs, setShowLogs] = useState(true);
+    const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0 }); // 🪙 DODANO: Licznik tokenów
     const chatEndRef = useRef<HTMLDivElement>(null);
 
     const canView = user ? hasPermission("viewVehicles", user.rolePermissions, user.permissionOverrides) : false;
@@ -167,6 +168,14 @@ export default function FleetReportsHub() {
 
             const data = await res.json();
             if (data.error) throw new Error(data.error);
+
+            // 🪙 DODANO: Aktualizacja stanu tokenów z odpowiedzi serwera
+            if (data.usage) {
+                setTokenUsage(prev => ({
+                    input: prev.input + data.usage.input,
+                    output: prev.output + data.usage.output
+                }));
+            }
 
             setChatHistory(prev => [...prev, { role: "ai", text: data.message || "Oto wynik analizy na panelu." }]);
 
@@ -332,9 +341,18 @@ export default function FleetReportsHub() {
 
                 {/* LEWA STRONA: CZAT */}
                 <div className="w-full lg:w-1/3 bg-white border border-slate-200 rounded-3xl shadow-sm flex flex-col overflow-hidden">
-                    <div className="bg-slate-50 border-b border-slate-200 p-4 font-bold text-slate-700 text-sm flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                        Konsola poleceń AI
+                    <div className="bg-slate-50 border-b border-slate-200 p-4 font-bold text-slate-700 text-sm flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                            Konsola poleceń AI
+                        </div>
+                        {/* 🪙 DODANO: LICZNIK TOKENÓW W NAGŁÓWKU */}
+                        {(tokenUsage.input > 0 || tokenUsage.output > 0) && (
+                            <div className="text-[10px] text-slate-500 font-mono font-medium bg-slate-200/50 px-2 py-1 rounded-md flex gap-3 border border-slate-200">
+                                <span title="Tokeny Wejściowe">In: <span className="font-bold text-blue-600">{(tokenUsage.input / 1000).toFixed(1)}k</span></span>
+                                <span title="Tokeny Wyjściowe">Out: <span className="font-bold text-emerald-600">{tokenUsage.output}</span></span>
+                            </div>
+                        )}
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-4 space-y-4">

@@ -129,13 +129,14 @@ const TOOL_RENDER_CHART = {
     parameters: {
         type: Type.OBJECT,
         properties: {
+            aiMessage: { type: Type.STRING, description: 'CZYSTE, naturalne zdanie do czatu podsumowujące wykres (np. "Najdroższym pojazdem jest Iveco. Szczegóły na wykresie."). BEZ KODU PYTHON!' },
             chartType: { type: Type.STRING, description: '"bar" | "pie" | "line"' },
             title: { type: Type.STRING },
             datasetLabel: { type: Type.STRING, description: 'np. "Koszt PLN"' },
             labels: { type: Type.ARRAY, items: { type: Type.STRING } },
             values: { type: Type.ARRAY, items: { type: Type.NUMBER } }
         },
-        required: ['chartType', 'title', 'datasetLabel', 'labels', 'values']
+        required: ['aiMessage', 'chartType', 'title', 'datasetLabel', 'labels', 'values']
     }
 };
 
@@ -145,6 +146,7 @@ const TOOL_RENDER_TABLE = {
     parameters: {
         type: Type.OBJECT,
         properties: {
+            aiMessage: { type: Type.STRING, description: 'CZYSTE, naturalne zdanie do czatu podsumowujące tabelę. BEZ KODU PYTHON!' },
             title: { type: Type.STRING },
             columns: { type: Type.ARRAY, items: { type: Type.STRING } },
             rows: {
@@ -152,7 +154,7 @@ const TOOL_RENDER_TABLE = {
                 items: { type: Type.ARRAY, items: { type: Type.STRING } }
             }
         },
-        required: ['title', 'columns', 'rows']
+        required: ['aiMessage', 'title', 'columns', 'rows']
     }
 };
 
@@ -162,6 +164,7 @@ const TOOL_RENDER_KPI = {
     parameters: {
         type: Type.OBJECT,
         properties: {
+            aiMessage: { type: Type.STRING, description: 'CZYSTE, naturalne zdanie do czatu podsumowujące dane liczbowe. BEZ KODU PYTHON!' },
             title: { type: Type.STRING },
             metrics: {
                 type: Type.ARRAY,
@@ -175,14 +178,12 @@ const TOOL_RENDER_KPI = {
                 }
             }
         },
-        required: ['title', 'metrics']
+        required: ['aiMessage', 'title', 'metrics']
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. PRZYCINANIE DANYCH
-// Usuwa zbędne pola tekstowe jeśli pytanie ich nie dotyczy.
-// Zapobiega przekroczeniu limitu tokenów przy dużych flotach.
 // ─────────────────────────────────────────────────────────────────────────────
 function pruneForAnalysis(
     vehicles: Vehicle[],
@@ -199,9 +200,6 @@ function pruneForAnalysis(
         id: v.id,
         brand: v.brand,
         model: v.model,
-        // PRO-TIP 1: registration zawsze widoczny dla Matematyka.
-        // Waży kilkanaście bajtów, ale daje Pythonowi ludzki identyfikator
-        // zamiast surowego ID — "Ford RDE HF31" zamiast "v-8f92a1".
         registration: v.registration,
         initialMileage: v.initialMileage
     }));
@@ -220,37 +218,54 @@ function pruneForAnalysis(
     return { vehicles: prunedVehicles, repairs: prunedRepairs };
 }
 
+// Odkurzacz na wypadek gdyby Agent 3 nie wygenerował widgetu, a chciał odpowiedzieć tylko tekstem
+function extractCleanSummary(rawText: string): string {
+    const summaryMatch = rawText.match(/podsumowanie:\s*([\s\S]*)/i);
+    if (summaryMatch && summaryMatch[1]) return summaryMatch[1].trim();
+    return rawText.replace(/```[\s\S]*?```/g, '').trim() || "Analiza zakończona. Spójrz na wyniki na panelu obok.";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. GŁÓWNY HANDLER
 // ─────────────────────────────────────────────────────────────────────────────
 export async function POST(req: Request) {
     const logs: string[] = [];
 
+    // 🪙 ZMIENNE DO ZLICZANIA TOKENÓW W TYM ZAPYTANIU
+    let sessionInputTokens = 0;
+    let sessionOutputTokens = 0;
+
+    // Funkcja pomocnicza do zliczania po każdym wywołaniu modelu
+    const trackTokens = (response: any) => {
+        if (response.usageMetadata) {
+            sessionInputTokens += response.usageMetadata.promptTokenCount || 0;
+            sessionOutputTokens += response.usageMetadata.candidatesTokenCount || 0;
+        }
+    };
+
     try {
         const body: RequestBody = await req.json();
         const { question, currentHistory, vehicles, repairs } = body;
 
-        // Walidacja — frontend powinien zawsze wysyłać te tablice
+        // Walidacja
         if (!Array.isArray(vehicles) || !Array.isArray(repairs)) {
             return NextResponse.json(
-                { error: 'Brak danych: vehicles i repairs muszą być tablicami.' },
+                { error: 'Brak danych: vehicles i repairs muszą być tablicami.', usage: { input: 0, output: 0 } },
                 { status: 400 }
             );
         }
 
         logs.push(`[Init] Odebrano: ${vehicles.length} pojazdów, ${repairs.length} napraw z IndexedDB`);
 
-        // PRO-TIP 2: Guard przed zbyt dużym payloadem (limit Vercel ~4.5 MB).
-        // Przy 2000+ naprawach model i tak nie przetworzyłby tego sensownie.
         if (repairs.length > 2000) {
             return NextResponse.json({
                 message: `⚠️ Zapytanie obejmuje zbyt wiele rekordów (${repairs.length} napraw). Proszę zawęzić analizę — podaj konkretną markę, pojazd lub ramy czasowe (np. "koszty Forda w 2024").`,
                 uiAction: null,
-                logs
+                logs,
+                usage: { input: 0, output: 0 }
             }, { status: 200 });
         }
 
-        // Skrócona historia — max 10 ostatnich wiadomości
         const historyText = (currentHistory || [])
             .slice(-10)
             .map(m => `${m.role === 'user' ? 'Użytkownik' : 'AI'}: ${m.text}`)
@@ -258,7 +273,6 @@ export async function POST(req: Request) {
 
         // =====================================================================
         // AGENT 1: DYSPOZYTOR
-        // Ocenia intencję — analityczna czy rozmowa?
         // =====================================================================
         logs.push('[Agent 1] Dyspozytor uruchomiony (gemini-2.5-flash-lite)');
 
@@ -275,10 +289,9 @@ export async function POST(req: Request) {
                 responseSchema: DISPATCHER_SCHEMA
             }
         });
+        trackTokens(dispatcherRes); // 🪙 Zliczamy tokeny Agenta 1
 
-        const dispatcherRaw = (dispatcherRes.text || '{}')
-            .replace(/```json|```/g, '')
-            .trim();
+        const dispatcherRaw = (dispatcherRes.text || '{}').replace(/```json|```/g, '').trim();
         const dispatcher = JSON.parse(dispatcherRaw);
 
         if (!dispatcher.isDataAnalysis) {
@@ -286,7 +299,8 @@ export async function POST(req: Request) {
             return NextResponse.json({
                 message: dispatcher.conversationalReply || 'W czym mogę pomóc?',
                 uiAction: null,
-                logs
+                logs,
+                usage: { input: sessionInputTokens, output: sessionOutputTokens }
             });
         }
 
@@ -294,16 +308,14 @@ export async function POST(req: Request) {
 
         // =====================================================================
         // PRZYGOTOWANIE DANYCH
-        // Przytnij zbędne pola tekstowe zależnie od treści pytania
         // =====================================================================
         const pruned = pruneForAnalysis(vehicles, repairs, question);
         logs.push(`[Data] Przycinanie: ${pruned.vehicles.length} pojazdów, ${pruned.repairs.length} napraw → gotowe dla Matematyka`);
 
         // =====================================================================
         // AGENT 2: MATEMATYK (Python Sandbox)
-        // Otrzymuje czyste dane — wykonuje obliczenia
         // =====================================================================
-        logs.push('[Agent 2] Matematyk uruchomiony (gemini-2.5-pro + Python Sandbox)');
+        logs.push('[Agent 2] Matematyk uruchomiony (gemini-3.1-pro-preview + Python Sandbox)');
 
         const mathPrompt = `
 ${DB_SCHEMA}
@@ -318,7 +330,7 @@ ZADANIE:
 1. Napisz kod Python który załaduje powyższe dane bezpośrednio (skopiuj JSON do kodu)
 2. Wykonaj obliczenia: sumy, średnie, grupowania, rankingi, trendy — zgodnie z pytaniem
 3. Wypisz wyniki na stdout z czytelnymi etykietami
-4. Podsumuj wyniki w 2-4 zdaniach po polsku (tylko liczby i fakty)
+4. Na samym końcu wypisz słowo "PODSUMOWANIE:" i dopisz 2-4 zdania wniosków po polsku (tylko liczby i fakty).
 
 ZASADY:
 - Używaj tylko: json, collections, statistics, datetime (bez zewnętrznych bibliotek)
@@ -335,6 +347,7 @@ ZASADY:
                 tools: [{ codeExecution: {} }]
             }
         });
+        trackTokens(mathRes); // 🪙 Zliczamy tokeny Agenta 2
 
         const mathResults = mathRes.text || 'Brak wyników obliczeń.';
 
@@ -348,14 +361,13 @@ ZASADY:
 
         // =====================================================================
         // AGENT 3: PREZENTER (dobór widgetu UI)
-        // Otrzymuje TYLKO wyniki Matematyka — zero surowych danych
         // =====================================================================
-        logs.push('[Agent 3] Prezenter uruchomiony (gemini-2.5-flash)');
+        logs.push('[Agent 3] Prezenter uruchomiony (gemini-3.5-flash)');
 
         const presenterPrompt = `
 Pytanie użytkownika: "${question}"
 
-Wyniki obliczeń Matematyka Floty:
+Wyniki obliczeń Matematyka Floty (zawierają surowy kod Python i wyniki konsoli):
 ${mathResults}
 
 ZADANIE: Wybierz DOKŁADNIE JEDNO narzędzie i wypełnij je gotowymi danymi:
@@ -372,70 +384,76 @@ Wskazówki:
 • Jedna liczba sumaryczna → kpi
 • Szczegółowa lista → table
 
-Użyj polskich etykiet. Liczby PLN formatuj z separatorem tysięcy.
+WAŻNE:
+Zawsze uzupełnij pole 'aiMessage' krótkim, czystym zdaniem podsumowującym wyniki (np. "Najdroższym autem jest Iveco. Spójrz na ranking obok."). 
+Ten tekst trafi do czatu z użytkownikiem. Bezwzględnie odfiltruj i UKRYJ surowy kod Python oraz zrzuty JSON!
+Użyj polskich etykiet w widgetach. Liczby PLN formatuj z separatorem tysięcy.
 `;
 
         const presenterRes = await generateContent({
             model: 'gemini-3.5-flash',
             contents: [{ role: 'user', parts: [{ text: presenterPrompt }] }],
             config: {
-                systemInstruction: `Jesteś Architektem UI PESAM. Wybierz JEDNO narzędzie wizualne i wypełnij je danymi od Matematyka. Nie analizuj danych — tylko prezentuj gotowe wyniki.`,
+                systemInstruction: `Jesteś Architektem UI PESAM. Wybierz JEDNO narzędzie wizualne. Pamiętaj o uzupełnieniu parametru 'aiMessage' czystym tekstem dla użytkownika, wolnym od jakiegokolwiek kodu programistycznego. Nie analizuj danych — tylko prezentuj gotowe wyniki.`,
                 temperature: 0.0,
                 tools: [{ functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }]
             }
         });
+        trackTokens(presenterRes); // 🪙 Zliczamy tokeny Agenta 3
 
         // =====================================================================
         // PARSOWANIE ODPOWIEDZI PREZENTERA
         // =====================================================================
-        let textMessage = mathResults;
+        let textMessage = "Zakończono analizę. Wyniki widoczne na panelu.";
         let uiAction = null;
 
         if (presenterRes.functionCalls?.length) {
             const call = presenterRes.functionCalls[0];
             const args = call.args as any;
 
+            textMessage = args.aiMessage || extractCleanSummary(mathResults);
+
             switch (call.name) {
                 case 'renderChartWidget':
                     uiAction = { type: 'chart', payload: args };
-                    textMessage += '\n\n[Wykres wygenerowany na panelu wizualizacji]';
                     logs.push(`[Agent 3] ✓ Wykres: "${args.title}" (${args.chartType})`);
                     break;
-
                 case 'renderTableWidget':
                     uiAction = { type: 'table', payload: args };
-                    textMessage += '\n\n[Tabela wygenerowana na panelu wizualizacji]';
                     logs.push(`[Agent 3] ✓ Tabela: "${args.title}" (${args.rows?.length || 0} wierszy)`);
                     break;
-
                 case 'renderKpiWidget':
                     uiAction = { type: 'kpi', payload: args };
-                    textMessage += '\n\n[Kafelki KPI wygenerowane na panelu wizualizacji]';
                     logs.push(`[Agent 3] ✓ KPI: "${args.title}" (${args.metrics?.length || 0} wskaźników)`);
                     break;
-
                 default:
                     logs.push(`[Agent 3] ⚠ Nieznane narzędzie: ${call.name}`);
             }
         } else {
+            textMessage = extractCleanSummary(mathResults);
             logs.push('[Agent 3] ⚠ Brak narzędzia — odpowiedź tekstowa');
         }
 
         // =====================================================================
-        // ODPOWIEDŹ
-        // Nie zwracamy już newCache — IndexedDB zarządza danymi lokalnie
+        // ODPOWIEDŹ Z DODANYM LICZNIKIEM TOKENÓW
         // =====================================================================
         return NextResponse.json({
             message: textMessage,
             uiAction,
-            logs
+            logs,
+            usage: { input: sessionInputTokens, output: sessionOutputTokens }
         }, { status: 200 });
 
     } catch (error: any) {
         console.error('[PESAM AI Error]', error);
         logs.push(`[BŁĄD KRYTYCZNY] ${error?.message || 'Nieznany błąd'}`);
         return NextResponse.json(
-            { error: error?.message || 'Błąd systemu analitycznego', logs },
+            {
+                error: error?.message || 'Błąd systemu analitycznego',
+                logs,
+                // W razie błędu też zwracamy tokeny użyte do momentu awarii
+                usage: { input: typeof sessionInputTokens === 'number' ? sessionInputTokens : 0, output: typeof sessionOutputTokens === 'number' ? sessionOutputTokens : 0 }
+            },
             { status: 500 }
         );
     }
