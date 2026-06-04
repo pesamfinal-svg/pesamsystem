@@ -89,7 +89,7 @@ export default function FleetReportsHub() {
     // Logi i tokeny
     const [executionLogs, setExecutionLogs] = useState<string[]>([]);
     const [showLogs, setShowLogs] = useState(true);
-    const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0 });
+    const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0 }); // 🪙 Licznik tokenów
 
     const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -122,7 +122,7 @@ export default function FleetReportsHub() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     question: userMsg,
-                    currentHistory: updatedHistory, // 🚀 Wysyłamy kompletną historię wraz z nowym pytaniem
+                    currentHistory: updatedHistory, // 🚀 Wysyłamy poprawną historię z nowym pytaniem
                 })
             });
 

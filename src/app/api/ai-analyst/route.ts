@@ -12,12 +12,6 @@
 //            ↓ executeQueryPlan() — odpytuje Firestore po serwerze
 //   Agent 2: Matematyk     — obliczenia Python na pobranych danych (flash, ~3s)
 //   Agent 3: Prezenter     — wybiera widget UI                  (flash-lite, ~0.5s)
-//
-// KORZYŚCI vs v4.0:
-//   • Frontend NIE wysyła danych — koniec z 17k tokenów wejściowych
-//   • Firestore filtruje na bazie — np. tylko 16 napraw Iveca zamiast 400+
-//   • Serwer pobiera minimalny zestaw pól (bez comments/location jeśli nie potrzeba)
-//   • Przy pytaniu "iveco daily koszty" → ~1-2k tokenów zamiast 17k
 // =============================================================================
 
 import { NextResponse } from 'next/server';
@@ -151,7 +145,7 @@ const QUERY_PLAN_SCHEMA = {
 // ─────────────────────────────────────────────────────────────────────────────
 const TOOL_RENDER_CHART = {
     name: 'renderChartWidget',
-    description: 'Wykres słupkowy, kołowy lub liniowy. Dla danych porównawczych, kategorialnych lub czasowych.',
+    description: 'Wykres słupkowy, kołowy lub liniowy. Użyj dla danych porównawczych, kategorialnych lub czasowych.',
     parameters: {
         type: Type.OBJECT,
         properties: {
@@ -168,14 +162,17 @@ const TOOL_RENDER_CHART = {
 
 const TOOL_RENDER_TABLE = {
     name: 'renderTableWidget',
-    description: 'Tabela danych. Dla list, rankingów, szczegółowych wpisów.',
+    description: 'Tabela danych. Użyj dla list, rankingów, szczegółowych wpisów (min. 3 wiersze).',
     parameters: {
         type: Type.OBJECT,
         properties: {
             aiMessage: { type: Type.STRING, description: 'CZYSTE, naturalne zdanie do czatu podsumowujące tabelę. BEZ KODU PYTHON i stdout!' },
             title: { type: Type.STRING },
             columns: { type: Type.ARRAY, items: { type: Type.STRING } },
-            rows: { type: Type.ARRAY, items: { type: Type.ARRAY, items: { type: Type.STRING } } }
+            rows: {
+                type: Type.ARRAY,
+                items: { type: Type.ARRAY, items: { type: Type.STRING } }
+            }
         },
         required: ['aiMessage', 'title', 'columns', 'rows']
     }
@@ -183,7 +180,7 @@ const TOOL_RENDER_TABLE = {
 
 const TOOL_RENDER_KPI = {
     name: 'renderKpiWidget',
-    description: 'Kafelki KPI. Dla 1-4 kluczowych liczb: suma, średnia, max.',
+    description: 'Kafelki KPI. Użyj dla 1-4 kluczowych liczb: suma, średnia, max.',
     parameters: {
         type: Type.OBJECT,
         properties: {
@@ -311,7 +308,13 @@ Kontekst rozmowy: ${historyText || 'brak'}
 
 Zbuduj plan zapytania do Firestore który pobierze TYLKO dane niezbędne do odpowiedzi.
 
-Zasady filtrowania:
+ŻELAZNE ZASADY LOGIKI BAZY (PRZECZYTAJ UWAŻNIE):
+1. Kolekcja "repairs" NIE zawiera informacji o marce ani modelu. Zawiera tylko vehicleId.
+2. Jeśli użytkownik filtruje po marce (brand), modelu (model) lub rejestracji (registration), MUSISZ ustawić needsVehicles = true. Inaczej nie poznamy ID aut i baza zwróci 0 napraw!
+3. Jeśli użytkownik pyta o zestawienie, koszty lub naprawy całej floty (lub wielu aut), ustaw needsVehicles = true oraz needsRepairs = true (Matematyk potrzebuje listy aut, by przypisać czytelne nazwy marek do vehicleId).
+4. Jeśli pytanie brzmi "jakie pojazdy/Iveco posiadamy", ustaw needsVehicles = true, ale needsRepairs = false (bo nie pytamy o naprawy, tylko o stan floty).
+
+Zasady szczegółowego filtrowania:
 - Jeśli pytanie zawiera nazwę marki (Iveco, Ford, Renault, Opel, Skoda...) → ustaw vehicleFilters.brand
 - Jeśli pytanie zawiera model (Daily, Transit, Trafic...) → ustaw vehicleFilters.model
 - Jeśli pytanie zawiera numer rejestracyjny → ustaw vehicleFilters.registration
