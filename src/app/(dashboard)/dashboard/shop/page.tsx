@@ -210,7 +210,12 @@ export default function ShopPage() {
     const [wizardItems, setWizardItems] = useState<any[]>([]);
     const [wizardStep, setWizardStep] = useState<number>(-1); // -1 = zamknięty kreator
     const [wizardSelections, setWizardSelections] = useState<Record<number, string>>({});
-    const [activeVoiceOrderId, setActiveVoiceOrderId] = useState<string | null>(null);
+
+    // Masowa synchronizacja - przechowujemy ID notatek do automatycznego usunięcia po sukcesie
+    const [activeVoiceOrderIds, setActiveVoiceOrderIds] = useState<string[]>([]);
+
+    // Obiekt do śledzenia, które notatki są zaznaczone checkboxem w modalu
+    const [selectedVoiceOrderIds, setSelectedVoiceOrderIds] = useState<Record<string, boolean>>({});
 
     // Notatki referencyjne o sprzęcie z magazynu (WAREHOUSE)
     const [warehouseNotes, setWarehouseNotes] = useState<string[]>([]);
@@ -425,7 +430,7 @@ export default function ShopPage() {
         setIsManualModalOpen(false);
     };
 
-    // Pobieranie oczekujących notatek głosowych dla wybranej budowy
+    // Pobieranie oczekujących notatek głosowych i automatyczne zaznaczenie ich do procesu
     const openVoiceModal = async () => {
         if (!selectedSiteId) return alert("Najpierw wybierz budowę, aby pobrać przypisane do niej notatki!");
         setIsVoiceModalOpen(true);
@@ -436,60 +441,103 @@ export default function ShopPage() {
                 where("status", "==", "PENDING")
             );
             const snap = await getDocs(q);
-            setVoiceOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+            const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            setVoiceOrders(docs);
+
+            // Domyślnie zaznaczamy wszystkie notatki checkboxem
+            const initialSelected: Record<string, boolean> = {};
+            docs.forEach(vo => { initialSelected[vo.id] = true; });
+            setSelectedVoiceOrderIds(initialSelected);
         } catch (err) {
             console.error("Błąd pobierania notatek głosowych:", err);
         }
     };
 
-    // Przetwarzanie wybranej notatki przez AI
-    const handleProcessVoiceOrder = async (orderId: string, audioUrl: string) => {
-        setIsParsingVoice(orderId);
+    // Ręczne usuwanie notatki głosowej z bazy Firestore
+    const handleDeleteVoiceOrder = async (orderId: string) => {
+        if (!confirm("⚠️ Czy na pewno chcesz trwale usunąć to nagranie z bazy danych? Tej operacji nie można cofnąć.")) return;
         try {
-            const res = await fetch("/api/parse-audio", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ audioUrl })
+            await deleteDoc(doc(db, "voiceOrders", orderId));
+            setVoiceOrders(prev => prev.filter(vo => vo.id !== orderId));
+            alert("Nagranie zostało pomyślnie skasowane.");
+        } catch (err) {
+            alert("Błąd usuwania nagrania: " + err);
+        }
+    };
+
+    // Masowe przetwarzanie zaznaczonych notatek przez AI
+    const handleProcessSelectedVoiceOrders = async () => {
+        const targetOrders = voiceOrders.filter(vo => selectedVoiceOrderIds[vo.id]);
+        if (targetOrders.length === 0) return alert("Wybierz przynajmniej jedno nagranie do przetworzenia!");
+
+        setIsParsingVoice("BULK"); // Włącza ekran ładowania
+        try {
+            let combinedWarehouse: string[] = [];
+            let combinedWizardItems: any[] = [];
+            let processedIds: string[] = [];
+
+            // Odpytujemy API dla każdego zaznaczonego pliku równolegle (bardzo szybko!)
+            const results = await Promise.all(
+                targetOrders.map(async (vo) => {
+                    try {
+                        const res = await fetch("/api/parse-audio", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ audioUrl: vo.audioUrl })
+                        });
+                        if (!res.ok) throw new Error("Błąd sieci");
+                        const data = await res.json();
+                        return { vo, data };
+                    } catch (err) {
+                        console.error(`Błąd nagrania ${vo.id}:`, err);
+                        return { vo, data: null };
+                    }
+                })
+            );
+
+            results.forEach(({ vo, data }) => {
+                if (data && data.items) {
+                    processedIds.push(vo.id);
+
+                    // 1. Zbiór narzędzi z magazynu
+                    const wh = data.items
+                        .filter((i: any) => i.type === "WAREHOUSE")
+                        .map((i: any) => `${i.quantity}x ${i.roughName}`);
+                    combinedWarehouse = [...combinedWarehouse, ...wh];
+
+                    // 2. Zbiór materiałów budowlanych (Zapisujemy audioUrl pod pozycję!)
+                    const pur = data.items
+                        .filter((i: any) => i.type === "PURCHASE")
+                        .map((i: any) => ({ ...i, audioUrl: vo.audioUrl }));
+                    combinedWizardItems = [...combinedWizardItems, ...pur];
+                }
             });
-            const data = await res.json();
 
-            if (!res.ok) throw new Error(data.error || "Błąd przetwarzania pliku audio przez AI");
-
-            if (data.items && data.items.length > 0) {
-                // 1. Sprzęt magazynowy (WAREHOUSE) -> trafia do żółtego paska u góry katalogu
-                const whItems = data.items
-                    .filter((i: any) => i.type === "WAREHOUSE")
-                    .map((i: any) => `${i.quantity}x ${i.roughName}`);
-
-                // 2. Materiały budowlane (PURCHASE) -> trafiają do kreatora (wizard)
-                const purItems = data.items.filter((i: any) => i.type === "PURCHASE");
-
-                setWarehouseNotes(whItems);
-                setWizardItems(purItems);
+            if (combinedWarehouse.length > 0 || combinedWizardItems.length > 0) {
+                setWarehouseNotes(prev => [...prev, ...combinedWarehouse]);
+                setWizardItems(combinedWizardItems);
                 setWizardSelections({});
-                setActiveVoiceOrderId(orderId);
-                setIsVoiceModalOpen(false); // Zamykamy listę notatek
+                setActiveVoiceOrderIds(processedIds);
+                setIsVoiceModalOpen(false); // Zamykamy listę, przechodzimy do kreatora
 
-                if (purItems.length > 0) {
+                if (combinedWizardItems.length > 0) {
                     setWizardStep(0); // Otwieramy krok 1 kreatora dla materiałów
                 } else {
-                    // Jeśli były tylko rzeczy z magazynu, od razu oznaczamy jako przetworzone
-                    if (orderId) {
-                        await setDoc(doc(db, "voiceOrders", orderId), { status: "PROCESSED" }, { merge: true });
-                    }
-                    alert(`📋 Sprzęt z magazynu został wczytany: ${whItems.join(", ")}.\nInstrukcja wyświetla się w żółtej ramce na górze katalogu.`);
+                    // Jeśli były tylko narzędzia, od razu usuwamy przetworzone notatki z bazy!
+                    await Promise.all(processedIds.map(id => deleteDoc(doc(db, "voiceOrders", id))));
+                    alert(`📋 Zaimportowano zapotrzebowanie na sprzęt z magazynu: ${combinedWarehouse.join(", ")}.\nNagrania zostały pomyślnie oczyszczone z bazy.`);
                 }
             } else {
-                alert("AI nie wykryło żadnych konkretnych pozycji w nagraniu.");
+                alert("AI nie wykryło żadnych konkretnych pozycji w zaznaczonych nagraniach.");
             }
         } catch (err: any) {
-            alert("Błąd analizy AI: " + err.message);
+            alert("Błąd masowego przetwarzania AI: " + err.message);
         } finally {
             setIsParsingVoice(null);
         }
     };
 
-    // Zapisanie dookreślonych w kreatorze materiałów do koszyka
+    // Zapisanie dookreślonych w kreatorze materiałów do koszyka + automatyczne czyszczenie bazy
     const handleFinishWizard = async () => {
         const materialsToAppend: string[] = [];
 
@@ -524,18 +572,19 @@ export default function ShopPage() {
             saveDraft(newCart, selectedSiteId, orderNotes);
         }
 
-        if (activeVoiceOrderId) {
+        // AUTOMATYCZNE BEZPIECZNE CZYSZCZENIE BAZY FIRESTORE PO POMYŚLNYM ZAPISIE
+        if (activeVoiceOrderIds.length > 0) {
             try {
-                await setDoc(doc(db, "voiceOrders", activeVoiceOrderId), { status: "PROCESSED" }, { merge: true });
+                await Promise.all(activeVoiceOrderIds.map(id => deleteDoc(doc(db, "voiceOrders", id))));
             } catch (err) {
-                console.error("Błąd aktualizacji statusu notatki:", err);
+                console.error("Błąd usuwania przetworzonych notatek z bazy:", err);
             }
         }
 
-        alert("🎉 Materiały budowlane zostały pomyślnie doprecyzowane i dodane do koszyka!");
+        alert("🎉 Wszystkie materiały zostały doprecyzowane i zapisane w Twoim koszyku. Zużyte nagrania usunięto z chmury.");
         setWizardStep(-1);
         setWizardItems([]);
-        setActiveVoiceOrderId(null);
+        setActiveVoiceOrderIds([]);
     };
 
     // ── Wysyłka zamówienia ────────────────────────────────────────────────────
@@ -1033,56 +1082,85 @@ export default function ShopPage() {
                 </div>
             )}
 
-            {/* ── Modal pobierania zamówień głosowych ── */}
+            {/* ── Modal pobierania zamówień głosowych (Zaznaczanie + Ręczne usuwanie) ── */}
             {isVoiceModalOpen && (
                 <div className="fixed inset-0 bg-black/60 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in border-t-4 border-purple-600 flex flex-col max-h-[80vh]">
-                        <div className="p-5 bg-purple-50 border-b border-purple-100 flex justify-between items-center">
+
+                        <div className="p-5 bg-purple-50 border-b border-purple-100 flex justify-between items-center flex-shrink-0">
                             <div>
                                 <h3 className="font-black text-purple-800 uppercase tracking-tight text-lg">🎙️ Notatki głosowe z budowy</h3>
-                                <p className="text-xs text-purple-600 mt-0.5">Wybierz nagranie i pozwól AI wyciągnąć zapotrzebowanie.</p>
+                                <p className="text-xs text-purple-600 mt-0.5">Zaznacz nagrania i prześlij je masowo do przetworzenia.</p>
                             </div>
                             <button onClick={() => setIsVoiceModalOpen(false)} className="text-2xl text-slate-400 hover:text-red-500 w-10 h-10 flex items-center justify-center rounded-full hover:bg-red-50 transition leading-none">&times;</button>
                         </div>
+
+                        {isParsingVoice === "BULK" && (
+                            <div className="p-8 flex flex-col items-center justify-center text-center bg-white border-b">
+                                <div className="w-10 h-10 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mb-3"></div>
+                                <span className="text-xs font-black text-purple-800 uppercase tracking-wider animate-pulse">Sztuczna Inteligencja analizuje wszystkie nagrania...</span>
+                                <p className="text-[10px] text-slate-400 mt-1">To może zająć kilkanaście sekund. Proszę czekać.</p>
+                            </div>
+                        )}
+
                         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
                             {voiceOrders.length === 0 ? (
                                 <p className="text-center py-12 text-sm text-slate-400 italic">Brak nowych, nieprzetworzonych notatek dla wybranej budowy.</p>
                             ) : (
                                 voiceOrders.map(vo => (
-                                    <div key={vo.id} className="bg-white border p-4 rounded-2xl shadow-sm flex flex-col gap-3 relative overflow-hidden">
-                                        {isParsingVoice === vo.id && (
-                                            <div className="absolute inset-0 bg-white/90 backdrop-blur-sm flex flex-col items-center justify-center text-center z-10 animate-fade-in">
-                                                <div className="w-8 h-8 border-3 border-purple-600 border-t-transparent rounded-full animate-spin mb-2"></div>
-                                                <span className="text-[11px] font-black text-purple-800 uppercase tracking-wider">AI analizuje nagranie...</span>
+                                    <div key={vo.id} className="bg-white border-2 p-4 rounded-2xl shadow-sm flex flex-col gap-3 relative overflow-hidden border-slate-100">
+                                        <div className="flex items-start gap-3">
+                                            {/* Checkbox wyboru */}
+                                            <input
+                                                type="checkbox"
+                                                checked={!!selectedVoiceOrderIds[vo.id]}
+                                                onChange={e => setSelectedVoiceOrderIds(prev => ({ ...prev, [vo.id]: e.target.checked }))}
+                                                className="w-5 h-5 mt-1 rounded text-purple-600 focus:ring-purple-500 border-slate-300 cursor-pointer"
+                                            />
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex justify-between items-start">
+                                                    <div>
+                                                        <p className="text-xs font-black text-slate-800 uppercase">Nagranie: {vo.id}</p>
+                                                        <p className="text-[10px] text-slate-400 mt-0.5">Nagrał: <b>{vo.userName}</b> · {new Date(vo.createdAt).toLocaleString()}</p>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => handleDeleteVoiceOrder(vo.id)}
+                                                        className="text-red-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 border border-transparent hover:border-red-100"
+                                                        title="Usuń trwale z bazy"
+                                                    >
+                                                        🗑️ Usuń
+                                                    </button>
+                                                </div>
+                                                <audio src={vo.audioUrl} controls className="w-full h-8 outline-none mt-3" />
                                             </div>
-                                        )}
-                                        <div className="flex justify-between items-start">
-                                            <div>
-                                                <p className="text-xs font-black text-slate-800 uppercase">Nagranie: {vo.id}</p>
-                                                <p className="text-[10px] text-slate-400 mt-0.5">Nagrał: <b>{vo.userName}</b> · {new Date(vo.createdAt).toLocaleString()}</p>
-                                            </div>
-                                            <span className="bg-purple-100 text-purple-700 text-[9px] font-black px-2 py-0.5 rounded border border-purple-200 uppercase">Głosowe</span>
                                         </div>
-                                        <audio src={vo.audioUrl} controls className="w-full h-10 outline-none" />
-                                        <button
-                                            onClick={() => handleProcessVoiceOrder(vo.id, vo.audioUrl)}
-                                            className="w-full py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl text-xs uppercase tracking-widest transition shadow-sm"
-                                        >
-                                            🤖 Procesuj notatkę przez AI
-                                        </button>
                                     </div>
                                 ))
                             )}
                         </div>
-                        <div className="p-4 border-t border-slate-200 bg-white flex justify-end">
-                            <button onClick={() => setIsVoiceModalOpen(false)} className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl text-xs transition">
-                                Zamknij
-                            </button>
+
+                        <div className="p-4 border-t border-slate-200 bg-white flex justify-between items-center flex-shrink-0">
+                            <p className="text-[10px] text-slate-400">
+                                💡 Zaznacz wybrane nagrania i przetwórz je za jednym razem.
+                            </p>
+                            <div className="flex gap-2">
+                                <button onClick={() => setIsVoiceModalOpen(false)} className="px-5 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-xl text-xs transition">
+                                    Zamknij
+                                </button>
+                                {voiceOrders.length > 0 && (
+                                    <button
+                                        onClick={handleProcessSelectedVoiceOrders}
+                                        disabled={isParsingVoice !== null}
+                                        className="px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black rounded-xl text-xs uppercase tracking-widest transition shadow-md disabled:opacity-40"
+                                    >
+                                        🤖 Procesuj zaznaczone ({voiceOrders.filter(vo => selectedVoiceOrderIds[vo.id]).length})
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
             )}
-
             {/* ── KREATOR AI (WIZARD DLA MATERIAŁÓW ZAKUPOWYCH) ── */}
             {wizardStep >= 0 && wizardItems.length > 0 && (
                 <div className="fixed inset-0 bg-black/70 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
@@ -1105,17 +1183,57 @@ export default function ShopPage() {
                                 const currentItem = wizardItems[wizardStep];
                                 return (
                                     <div className="space-y-4">
-                                        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                                            <span className="text-[9px] font-black text-slate-400 uppercase">Kierownik powiedział:</span>
-                                            <p className="text-xl font-black text-slate-800 mt-1 uppercase">
-                                                👉 "{currentItem.roughName}"
-                                            </p>
-                                            <div className="flex items-center gap-2 mt-2">
-                                                <span className="bg-slate-100 text-slate-600 text-[10px] font-bold px-2 py-0.5 rounded border">
-                                                    Ilość: {currentItem.quantity} {currentItem.unit}
-                                                </span>
-                                                <span className="text-[10px] font-black px-2 py-0.5 rounded border uppercase bg-orange-50 text-orange-700 border-orange-200">
-                                                    🛒 Zakup Zewnętrzny
+
+                                        {/* Głos i Odczyt kierownika */}
+                                        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                                            <div>
+                                                <span className="text-[9px] font-black text-slate-400 uppercase">Kierownik powiedział:</span>
+                                                <p className="text-xl font-black text-slate-800 mt-0.5 uppercase">
+                                                    👉 "{currentItem.roughName}"
+                                                </p>
+                                            </div>
+
+                                            {/* Odtwarzacz oryginalnego pliku audio powiązanego z tym konkretnym przedmiotem */}
+                                            {currentItem.audioUrl && (
+                                                <div className="bg-purple-50/40 p-2.5 rounded-xl border border-purple-100 flex flex-col gap-1">
+                                                    <span className="text-[9px] font-black text-purple-700 uppercase flex items-center gap-1">
+                                                        🔊 Odsłuchaj oryginalne nagranie tej pozycji:
+                                                    </span>
+                                                    <audio src={currentItem.audioUrl} controls className="w-full h-8 outline-none" />
+                                                </div>
+                                            )}
+
+                                            {/* Interaktywny korektor ilości plus/minus */}
+                                            <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                                <span className="text-[10px] font-black text-slate-500 uppercase">Koryguj Ilość:</span>
+                                                <div className="flex items-center gap-1.5">
+                                                    <button
+                                                        onClick={() => {
+                                                            const val = Math.max(1, currentItem.quantity - 1);
+                                                            setWizardItems(prev => prev.map((item, idx) => idx === wizardStep ? { ...item, quantity: val } : item));
+                                                        }}
+                                                        className="w-8 h-8 rounded-lg bg-white hover:bg-slate-200 font-bold border flex items-center justify-center shadow-sm transition"
+                                                    >−</button>
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        value={currentItem.quantity}
+                                                        onChange={e => {
+                                                            const val = Math.max(1, Number(e.target.value));
+                                                            setWizardItems(prev => prev.map((item, idx) => idx === wizardStep ? { ...item, quantity: val } : item));
+                                                        }}
+                                                        className="w-16 p-1 text-center font-black text-sm border rounded-lg bg-white outline-none focus:border-blue-500"
+                                                    />
+                                                    <button
+                                                        onClick={() => {
+                                                            const val = currentItem.quantity + 1;
+                                                            setWizardItems(prev => prev.map((item, idx) => idx === wizardStep ? { ...item, quantity: val } : item));
+                                                        }}
+                                                        className="w-8 h-8 rounded-lg bg-white hover:bg-slate-200 font-bold border flex items-center justify-center shadow-sm transition"
+                                                    >+</button>
+                                                </div>
+                                                <span className="text-xs font-bold text-slate-600 bg-white px-2.5 py-1 rounded border shadow-sm">
+                                                    {currentItem.unit}
                                                 </span>
                                             </div>
                                         </div>
@@ -1135,7 +1253,7 @@ export default function ShopPage() {
                                                             value={suggestion}
                                                             checked={wizardSelections[wizardStep] === suggestion}
                                                             onChange={() => setWizardSelections(prev => ({ ...prev, [wizardStep]: suggestion }))}
-                                                            className="mt-0.5 text-orange-600 focus:ring-orange-500"
+                                                            className="text-orange-600 focus:ring-orange-500"
                                                         />
                                                         <span className="text-xs font-semibold text-slate-700 leading-snug">{suggestion}</span>
                                                     </label>
