@@ -647,6 +647,35 @@ export default function ShopPage() {
         setIsChatOpen(false); // Zamykamy czat po dodaniu
     };
 
+    // --- Funkcje do edycji wyliczonych materiałów w czacie ---
+    const updateGeneratedItemQty = (msgIndex: number, itemIndex: number, newQty: number) => {
+        setChatHistory(prev => {
+            const next = [...prev];
+            const msg = { ...next[msgIndex] };
+            if (msg.generatedItems) {
+                const items = [...msg.generatedItems];
+                items[itemIndex] = { ...items[itemIndex], quantity: Math.max(1, newQty) };
+                msg.generatedItems = items;
+            }
+            next[msgIndex] = msg;
+            return next;
+        });
+    };
+
+    const removeGeneratedItem = (msgIndex: number, itemIndex: number) => {
+        setChatHistory(prev => {
+            const next = [...prev];
+            const msg = { ...next[msgIndex] };
+            if (msg.generatedItems) {
+                const items = [...msg.generatedItems];
+                items.splice(itemIndex, 1);
+                msg.generatedItems = items;
+            }
+            next[msgIndex] = msg;
+            return next;
+        });
+    };
+
     // Pobieranie oczekujących notatek głosowych i automatyczne zaznaczenie ich do procesu
     const openVoiceModal = async () => {
         if (!selectedSiteId) return alert("Najpierw wybierz budowę, aby pobrać przypisane do niej notatki!");
@@ -1681,7 +1710,21 @@ export default function ShopPage() {
                                     <p className="text-[10px] text-blue-400 font-bold">Wspierany przez Python Code Execution</p>
                                 </div>
                             </div>
-                            <button onClick={() => setIsChatOpen(false)} className="text-2xl text-slate-400 hover:text-red-500 transition">&times;</button>
+                            <div className="flex items-center gap-4">
+                                {chatHistory.length > 0 && (
+                                    <button 
+                                        onClick={() => {
+                                            if (confirm("Czy chcesz wyczyścić historię czatu i zacząć nowe wyliczenia z czystą kartą?")) {
+                                                setChatHistory([]);
+                                            }
+                                        }}
+                                        className="text-[10px] font-black uppercase text-red-400 hover:text-red-300 border border-red-500/30 px-3 py-1.5 rounded-lg bg-red-500/10 transition-colors"
+                                    >
+                                        🧹 Wyczyść czat
+                                    </button>
+                                )}
+                                <button onClick={() => setIsChatOpen(false)} className="text-2xl leading-none text-slate-400 hover:text-red-500 transition">&times;</button>
+                            </div>
                         </div>
 
                         {/* Obszar Wiadomości */}
@@ -1700,14 +1743,34 @@ export default function ShopPage() {
                                     </div>
                                     
                                     {/* Jeśli AI wygenerowało listę materiałów do dodania */}
-                                    {msg.generatedItems && (
+                                    {msg.generatedItems && msg.generatedItems.length > 0 && (
                                         <div className="mt-2 w-full bg-slate-800 border border-blue-500/50 p-4 rounded-xl shadow-lg">
-                                            <p className="text-[10px] font-black text-blue-400 uppercase mb-2">Wyliczone Materiały:</p>
-                                            <ul className="space-y-1 mb-4">
+                                            <p className="text-[10px] font-black text-blue-400 uppercase mb-3">Wyliczone Materiały (możesz edytować):</p>
+                                            <ul className="space-y-2 mb-4">
                                                 {msg.generatedItems.map((item: any, i: number) => (
-                                                    <li key={i} className="text-xs text-white flex justify-between border-b border-slate-700 pb-1">
-                                                        <span>{item.name}</span>
-                                                        <span className="font-bold text-green-400">{item.quantity} {item.unit}</span>
+                                                    <li key={i} className="text-xs text-white flex flex-col gap-1.5 border-b border-slate-700 pb-2">
+                                                        <div className="flex justify-between items-start gap-2">
+                                                            <span className="font-medium leading-tight">{item.name}</span>
+                                                            <button 
+                                                                onClick={() => removeGeneratedItem(idx, i)} 
+                                                                className="text-red-400 hover:text-red-300 hover:bg-red-400/10 w-6 h-6 rounded flex items-center justify-center font-bold text-lg leading-none transition-colors flex-shrink-0"
+                                                                title="Usuń pozycję"
+                                                            >&times;</button>
+                                                        </div>
+                                                        <div className="flex justify-end items-center gap-2">
+                                                            <div className="flex items-center bg-slate-900 rounded-lg border border-slate-600 overflow-hidden">
+                                                                <button onClick={() => updateGeneratedItemQty(idx, i, item.quantity - 1)} className="px-2.5 py-1 bg-slate-700 hover:bg-slate-600 text-white font-bold transition-colors">-</button>
+                                                                <input 
+                                                                    type="number" 
+                                                                    min="1" 
+                                                                    value={item.quantity} 
+                                                                    onChange={e => updateGeneratedItemQty(idx, i, parseInt(e.target.value) || 1)} 
+                                                                    className="w-12 bg-transparent text-center text-xs font-bold outline-none" 
+                                                                />
+                                                                <button onClick={() => updateGeneratedItemQty(idx, i, item.quantity + 1)} className="px-2.5 py-1 bg-slate-700 hover:bg-slate-600 text-white font-bold transition-colors">+</button>
+                                                            </div>
+                                                            <span className="text-slate-400 text-[10px] w-6">{item.unit}</span>
+                                                        </div>
                                                     </li>
                                                 ))}
                                             </ul>
@@ -1715,7 +1778,7 @@ export default function ShopPage() {
                                                 onClick={() => applyGeneratedItemsToCart(msg.generatedItems!)}
                                                 className="w-full bg-green-600 text-white py-2.5 rounded-lg text-xs font-black shadow-md hover:bg-green-500 transition-colors"
                                             >
-                                                🛒 DODAJ WSZYSTKO DO KOSZYKA
+                                                🛒 DODAJ DO KOSZYKA ({msg.generatedItems.length} poz.)
                                             </button>
                                         </div>
                                     )}
