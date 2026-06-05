@@ -1762,11 +1762,12 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                             <div className="flex items-center gap-4">
                                 {chatHistory.length > 0 && (
                                     <button 
-                                        onClick={() => {
-                                            if (confirm("Czy chcesz wyczyścić historię czatu i zacząć nowe wyliczenia z czystą kartą?")) {
-                                                setChatHistory([]);
-                                            }
-                                        }}
+    onClick={() => {
+        if (confirm("Czy chcesz wyczyścić historię czatu i zacząć nowe wyliczenia z czystą kartą?")) {
+            setChatHistory([]);
+            setChatSelections({}); // <--- TA LINIJKA NAPRAWIA BLOKUJĄCE SIĘ PRZYCISKI
+        }
+    }}
                                         className="text-[10px] font-black uppercase text-red-400 hover:text-red-300 border border-red-500/30 px-3 py-1.5 rounded-lg bg-red-500/10 transition-colors"
                                     >
                                         🧹 Wyczyść czat
