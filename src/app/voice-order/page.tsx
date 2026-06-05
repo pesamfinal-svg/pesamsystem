@@ -1,4 +1,3 @@
-// src/app/voice-order/page.tsx
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
@@ -36,24 +35,19 @@ export default function MobileVoiceOrderPage() {
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
 
-    // Zapisz trwałą flagę zalogowania w telefonie, gdy użytkownik jest aktywny
     useEffect(() => {
         if (user) {
             localStorage.setItem("pesam_logged_in", "true");
         }
     }, [user]);
 
-    // Zabezpieczenie autoryzacji z ominięciem błędu offline
     useEffect(() => {
-        // Czytamy flagę z pamięci telefonu (działa natychmiast i bez internetu!)
         const isLocalLoggedIn = localStorage.getItem("pesam_logged_in") === "true";
-
         if (!loading && !user && !isLocalLoggedIn) {
-            router.push("/login?redirect=/voice-order"); // <-- Przekazujemy cel powrotny!
+            router.push("/login?redirect=/voice-order");
         }
     }, [user, loading, router]);
 
-    // Wczytywanie danych budów (z obsługą offline)
     useEffect(() => {
         if (!user) return;
 
@@ -72,7 +66,6 @@ export default function MobileVoiceOrderPage() {
                 localStorage.setItem(`pesam_sites_${user.uid}`, JSON.stringify(filtered));
                 if (filtered.length === 1) setSelectedSiteId(filtered[0].id);
             } catch (err) {
-                // Tryb Offline: wczytaj budowy z pamięci podręcznej telefonu
                 const cached = localStorage.getItem(`pesam_sites_${user.uid}`);
                 if (cached) {
                     const parsed = JSON.parse(cached);
@@ -91,12 +84,9 @@ export default function MobileVoiceOrderPage() {
         setOfflineList(list);
     };
 
-    // Bezpieczne pobieranie offline
     const handleDownloadOffline = async () => {
         try {
             alert("Rozpoczynam zapisywanie plików dyktafonu w pamięci telefonu. Za chwilę ekran mrugnie.");
-            // Zwykłe przeładowanie. Nasz nowy silnik sw.js (v3) przejmie kontrolę
-            // i natychmiast zaciągnie wszystko do pamięci offline w bezpieczny sposób.
             window.location.reload();
         } catch (err: any) {
             alert("Błąd: " + err.message);
@@ -204,7 +194,6 @@ export default function MobileVoiceOrderPage() {
     return (
         <div className="min-h-[100dvh] bg-slate-900 text-white flex flex-col justify-between p-5 select-none overflow-hidden">
 
-            {/* Top Bar - Minimalistyczny nagłówek natywny */}
             <div className="flex justify-between items-center pb-4 border-b border-slate-800">
                 <div className="flex items-center gap-2">
                     <span className="text-xl">🎙️</span>
@@ -232,7 +221,6 @@ export default function MobileVoiceOrderPage() {
                 </div>
             </div>
 
-            {/* Wybór budowy */}
             <div className="my-4 bg-slate-800/60 p-4 rounded-2xl border border-slate-800/80">
                 <label className="block text-[9px] font-black text-slate-400 uppercase tracking-wider mb-2">Budowa docelowa:</label>
                 {sites.length === 0 ? (
@@ -251,7 +239,6 @@ export default function MobileVoiceOrderPage() {
                 )}
             </div>
 
-            {/* Centralny przycisk dyktafonu */}
             <div className="flex-1 flex flex-col items-center justify-center my-6">
                 {isRecording ? (
                     <button
@@ -275,7 +262,6 @@ export default function MobileVoiceOrderPage() {
                 </p>
             </div>
 
-            {/* Dolna lista offline */}
             <div className="bg-slate-850 border border-slate-800/80 p-4 rounded-2xl">
                 <div className="flex justify-between items-center mb-3">
                     <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Oczekujące w telefonie ({offlineList.length})</span>

@@ -1,8 +1,8 @@
-const CACHE_NAME = 'pesam-voice-v5';
+const CACHE_NAME = 'pesam-voice-v6';
 
+// Cachujemy TYLKO pliki które na pewno istnieją i są statyczne
 const PRECACHE = [
-  '/voice-order',
-  '/login',
+  '/voice-order.html',
   '/manifest.json',
   '/favicon.ico',
 ];
@@ -36,43 +36,46 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
+  // Ignoruj Firebase/API requesty
   if (
     request.method !== 'GET' ||
-    url.pathname.startsWith('/api') ||
     url.href.includes('firestore') ||
     url.href.includes('googleapis') ||
     url.href.includes('firebasestorage') ||
-    url.href.includes('identitytoolkit')
+    url.href.includes('identitytoolkit') ||
+    url.href.includes('gstatic.com')
   ) {
     return;
   }
 
-  const isNextStatic = url.pathname.startsWith('/_next/static/');
-
-  if (isNextStatic) {
+  // Cache-first dla voice-order.html — to jest nasz główny plik offline
+  if (url.pathname === '/voice-order.html' || url.pathname === '/') {
     event.respondWith(
-      caches.match(request).then(cached => {
-        if (cached) return cached;
-        return fetch(request).then(response => {
+      caches.match('/voice-order.html').then(cached => {
+        // W tle odśwież cache
+        const fetchPromise = fetch(request).then(response => {
           if (response.status === 200) {
-            caches.open(CACHE_NAME)
-              .then(cache => cache.put(request, response.clone()));
+            caches.open(CACHE_NAME).then(c => c.put(request, response.clone()));
           }
           return response;
-        });
+        }).catch(() => cached);
+
+        // Zwróć od razu z cache, nie czekaj na sieć
+        return cached || fetchPromise;
       })
     );
-  } else {
-    event.respondWith(
-      fetch(request)
-        .then(response => {
-          if (response.status === 200) {
-            caches.open(CACHE_NAME)
-              .then(cache => cache.put(request, response.clone()));
-          }
-          return response;
-        })
-        .catch(() => caches.match(request))
-    );
+    return;
   }
+
+  // Dla pozostałych: network first, fallback do cache
+  event.respondWith(
+    fetch(request)
+      .then(response => {
+        if (response.status === 200) {
+          caches.open(CACHE_NAME).then(c => c.put(request, response.clone()));
+        }
+        return response;
+      })
+      .catch(() => caches.match(request))
+  );
 });

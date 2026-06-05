@@ -1,10 +1,21 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth/AuthContext";
 
+// Poprawny sposób definiowania meta tagów dla PWA w Next.js
 export const metadata: Metadata = {
   title: "PESAM — System Zarządzania Magazynem",
   manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "PESAM Voice"
+  },
+};
+
+// Kolor motywu został wydzielony do osobnego obiektu (standard Next.js)
+export const viewport: Viewport = {
+  themeColor: "#0f172a",
 };
 
 export default function RootLayout({
@@ -14,17 +25,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="pl">
-      <head>
-        <meta name="theme-color" content="#0f172a" />
-        <meta name="mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-      </head>
       <body>
         <AuthProvider>
           {children}
         </AuthProvider>
 
+        {/* Skrypt rejestrujący Service Worker dla całego systemu */}
         <script
           dangerouslySetInnerHTML={{
             __html: `
