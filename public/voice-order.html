@@ -6,459 +6,413 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#0f172a" />
+  <meta name="theme-color" content="#0b1120" />
   <title>PESAM Voice</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:wght@400;600;700;900&display=swap');
 
     :root {
-      --bg: #0b1120;
-      --bg2: #111827;
-      --bg3: #1e293b;
+      --bg:     #0b1120;
+      --bg2:    #111827;
+      --bg3:    #1e293b;
       --border: #1e2d45;
-      --blue: #3b82f6;
-      --blue-dark: #1d4ed8;
-      --red: #ef4444;
-      --green: #22c55e;
-      --text: #f1f5f9;
-      --muted: #64748b;
-      --mono: 'IBM Plex Mono', monospace;
-      --sans: 'IBM Plex Sans', sans-serif;
+      --blue:   #3b82f6;
+      --blue-d: #1d4ed8;
+      --red:    #ef4444;
+      --green:  #22c55e;
+      --yellow: #fbbf24;
+      --text:   #f1f5f9;
+      --muted:  #64748b;
+      --mono:   'IBM Plex Mono', monospace;
+      --sans:   'IBM Plex Sans', sans-serif;
     }
 
-    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    *, *::before, *::after {
+      margin: 0; padding: 0; box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none; user-select: none;
+    }
 
     html, body {
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
-      overscroll-behavior: none;
-      overflow: hidden;
+      height: 100%; background: var(--bg);
+      color: var(--text); font-family: var(--sans);
+      overscroll-behavior: none; overflow: hidden;
     }
 
     #app {
-      display: flex;
-      flex-direction: column;
-      height: 100dvh;
-      max-width: 480px;
-      margin: 0 auto;
-      padding: 0;
-      position: relative;
+      display: flex; flex-direction: column;
+      height: 100dvh; max-width: 480px;
+      margin: 0 auto; position: relative;
     }
 
-    /* SCREENS */
     .screen { display: none; flex-direction: column; height: 100%; }
     .screen.active { display: flex; }
 
-    /* ─── LOGIN ─── */
+    /* ─── LOGIN ─────────────────────────────────── */
     #screen-login {
-      align-items: center;
-      justify-content: center;
-      padding: 32px 24px;
-      background: var(--bg);
+      align-items: center; justify-content: center;
+      padding: 32px 24px; gap: 0;
     }
     .login-logo {
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.25em;
-      color: var(--blue);
-      text-transform: uppercase;
-      margin-bottom: 8px;
+      font-family: var(--mono); font-size: 11px; font-weight: 700;
+      letter-spacing: 0.3em; color: var(--blue); text-transform: uppercase;
+      margin-bottom: 10px;
     }
-    .login-title {
-      font-size: 28px;
-      font-weight: 900;
-      margin-bottom: 4px;
-      letter-spacing: -0.02em;
-    }
-    .login-sub {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 40px;
-      font-family: var(--mono);
-    }
-    .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; width: 100%; }
-    .field label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted); text-transform: uppercase; font-family: var(--mono); }
+    .login-title { font-size: 30px; font-weight: 900; letter-spacing: -0.03em; margin-bottom: 4px; }
+    .login-sub   { font-size: 11px; color: var(--muted); margin-bottom: 36px; font-family: var(--mono); }
+    .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; width: 100%; }
+    .field label { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; font-family: var(--mono); }
     .field input {
-      background: var(--bg2);
-      border: 1.5px solid var(--border);
-      border-radius: 10px;
-      padding: 13px 16px;
-      font-size: 15px;
-      color: var(--text);
-      font-family: var(--sans);
-      outline: none;
-      transition: border-color 0.15s;
-      width: 100%;
+      background: var(--bg2); border: 1.5px solid var(--border);
+      border-radius: 10px; padding: 13px 16px;
+      font-size: 15px; color: var(--text); font-family: var(--sans);
+      outline: none; transition: border-color .15s; width: 100%;
     }
     .field input:focus { border-color: var(--blue); }
     .btn-primary {
-      width: 100%;
-      background: var(--blue);
-      color: white;
-      border: none;
-      border-radius: 12px;
-      padding: 15px;
-      font-size: 14px;
-      font-weight: 700;
-      font-family: var(--sans);
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      cursor: pointer;
-      margin-top: 8px;
-      transition: background 0.15s, transform 0.1s;
+      width: 100%; background: var(--blue); color: #fff;
+      border: none; border-radius: 12px; padding: 15px;
+      font-size: 13px; font-weight: 700; font-family: var(--sans);
+      letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
+      margin-top: 8px; transition: background .15s, transform .1s;
     }
-    .btn-primary:active { transform: scale(0.98); background: var(--blue-dark); }
-    .btn-primary:disabled { opacity: 0.5; }
+    .btn-primary:active { transform: scale(.98); background: var(--blue-d); }
+    .btn-primary:disabled { opacity: .5; }
 
     /* change password */
     #screen-changepass {
-      align-items: center;
-      justify-content: center;
-      padding: 32px 24px;
-      background: var(--bg);
+      align-items: center; justify-content: center;
+      padding: 32px 24px; background: var(--bg);
     }
     .changepass-badge {
-      background: #f97316;
-      color: white;
-      font-size: 10px;
-      font-weight: 700;
-      font-family: var(--mono);
-      letter-spacing: 0.1em;
-      padding: 4px 12px;
-      border-radius: 99px;
-      margin-bottom: 16px;
-      text-transform: uppercase;
+      background: #f97316; color: #fff;
+      font-size: 10px; font-weight: 700; font-family: var(--mono);
+      letter-spacing: .1em; padding: 4px 12px; border-radius: 99px;
+      margin-bottom: 16px; text-transform: uppercase;
     }
     .btn-orange {
-      width: 100%;
-      background: #f97316;
-      color: white;
-      border: none;
-      border-radius: 12px;
-      padding: 15px;
-      font-size: 14px;
-      font-weight: 700;
-      font-family: var(--sans);
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      cursor: pointer;
-      margin-top: 8px;
-      transition: background 0.15s, transform 0.1s;
+      width: 100%; background: #f97316; color: #fff;
+      border: none; border-radius: 12px; padding: 15px;
+      font-size: 13px; font-weight: 700; font-family: var(--sans);
+      letter-spacing: .06em; text-transform: uppercase; cursor: pointer;
+      margin-top: 8px; transition: background .15s, transform .1s;
     }
-    .btn-orange:active { transform: scale(0.98); }
-    .btn-orange:disabled { opacity: 0.5; }
+    .btn-orange:active { transform: scale(.98); }
+    .btn-orange:disabled { opacity: .5; }
 
-    /* ─── MAIN ─── */
-    #screen-main { padding: 0; }
+    /* no perm */
+    #screen-noperm {
+      align-items: center; justify-content: center;
+      padding: 32px; text-align: center;
+    }
+    #screen-noperm h2 { font-size: 18px; margin-top: 16px; }
+    #screen-noperm p  { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
 
-    /* Header */
+    /* ─── MAIN ──────────────────────────────────── */
+    #screen-main { padding: 0; overflow: hidden; }
+
+    /* Topbar */
     .topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px 20px 14px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 18px 12px;
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
     }
-    .topbar-brand {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
+    .topbar-brand { display: flex; align-items: center; gap: 8px; }
     .topbar-brand span {
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.2em;
-      color: var(--blue);
-      text-transform: uppercase;
+      font-family: var(--mono); font-size: 11px; font-weight: 700;
+      letter-spacing: .2em; color: var(--blue); text-transform: uppercase;
     }
     .topbar-icon { font-size: 18px; }
-    .topbar-actions { display: flex; gap: 8px; }
-    .btn-sm {
-      font-family: var(--mono);
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      border-radius: 8px;
-      padding: 7px 10px;
-      border: 1.5px solid;
-      cursor: pointer;
-      background: transparent;
-      transition: background 0.15s;
+    .topbar-right { display: flex; align-items: center; gap: 8px; }
+
+    /* WiFi badge */
+    .net-badge {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      padding: 4px 8px; border-radius: 6px; letter-spacing: .05em;
+      text-transform: uppercase; border: 1.5px solid;
     }
-    .btn-sm-red { color: #f87171; border-color: rgba(239,68,68,0.25); }
-    .btn-sm-red:active { background: rgba(239,68,68,0.1); }
+    .net-wifi   { color: #4ade80; border-color: rgba(34,197,94,.3); background: rgba(34,197,94,.08); }
+    .net-mobile { color: #fbbf24; border-color: rgba(251,191,36,.3); background: rgba(251,191,36,.08); }
+    .net-off    { color: #f87171; border-color: rgba(239,68,68,.3);  background: rgba(239,68,68,.08); }
+
+    .btn-sm {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      letter-spacing: .08em; text-transform: uppercase;
+      border-radius: 8px; padding: 6px 10px; border: 1.5px solid;
+      cursor: pointer; background: transparent; transition: background .15s;
+    }
+    .btn-sm-red { color: #f87171; border-color: rgba(239,68,68,.25); }
+    .btn-sm-red:active { background: rgba(239,68,68,.1); }
 
     /* Site selector */
     .site-section {
-      margin: 14px 16px 0;
-      background: var(--bg2);
-      border: 1.5px solid var(--border);
-      border-radius: 14px;
-      padding: 14px 16px;
-      flex-shrink: 0;
+      margin: 12px 14px 0;
+      background: var(--bg2); border: 1.5px solid var(--border);
+      border-radius: 14px; padding: 12px 14px; flex-shrink: 0;
     }
-    .site-label {
-      font-family: var(--mono);
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 0.15em;
-      color: var(--muted);
-      text-transform: uppercase;
+    .section-label {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      letter-spacing: .15em; color: var(--muted); text-transform: uppercase;
       margin-bottom: 8px;
     }
     .site-select {
-      width: 100%;
-      background: var(--bg3);
-      border: 1.5px solid var(--border);
-      border-radius: 10px;
-      padding: 11px 14px;
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--text);
-      font-family: var(--sans);
-      outline: none;
-      cursor: pointer;
+      width: 100%; background: var(--bg3);
+      border: 1.5px solid var(--border); border-radius: 10px;
+      padding: 11px 14px; font-size: 13px; font-weight: 700;
+      color: var(--text); font-family: var(--sans);
+      outline: none; cursor: pointer;
+      -webkit-appearance: none; appearance: none;
     }
-    .site-single {
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--blue);
+    .site-single { font-size: 14px; font-weight: 700; color: var(--blue); }
+
+    /* ─── RECORD AREA ───────────────────────────── */
+    .record-area {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      flex-shrink: 0; padding: 16px 20px 8px; gap: 12px;
     }
 
-    /* Record button */
-    .record-area {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 20px;
-      padding: 20px;
+    .rec-timer {
+      font-family: var(--mono); font-size: 42px; font-weight: 700;
+      color: var(--red); letter-spacing: .08em;
+      visibility: hidden; height: 52px; line-height: 52px;
     }
+    .rec-timer.visible { visibility: visible; }
+
+    /* Big record button */
     .rec-btn {
-      width: 152px;
-      height: 152px;
-      border-radius: 50%;
-      border: none;
-      cursor: pointer;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      font-family: var(--sans);
-      font-weight: 900;
-      font-size: 11px;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: white;
-      transition: transform 0.12s, box-shadow 0.12s;
+      width: 144px; height: 144px; border-radius: 50%;
+      border: none; cursor: pointer;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 4px;
+      font-family: var(--sans); font-weight: 900;
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+      color: #fff; touch-action: none;
+      transition: transform .1s;
       position: relative;
       -webkit-tap-highlight-color: transparent;
     }
-    .rec-btn:active { transform: scale(0.93); }
+    .rec-btn:active { transform: scale(.94); }
+
     .rec-btn-idle {
-      background: var(--blue);
-      box-shadow: 0 0 0 10px rgba(59,130,246,0.12), 0 8px 32px rgba(59,130,246,0.35);
+      background: radial-gradient(circle at 35% 35%, #60a5fa, #2563eb);
+      box-shadow: 0 0 0 12px rgba(59,130,246,.1), 0 12px 40px rgba(59,130,246,.4);
     }
-    .rec-btn-idle:active { box-shadow: 0 0 0 4px rgba(59,130,246,0.1); }
     .rec-btn-recording {
-      background: var(--red);
-      box-shadow: 0 0 0 10px rgba(239,68,68,0.12), 0 8px 32px rgba(239,68,68,0.35);
-      animation: pulse-ring 1.4s ease-in-out infinite;
+      background: radial-gradient(circle at 35% 35%, #f87171, #dc2626);
+      box-shadow: 0 0 0 0 rgba(239,68,68,.4);
+      animation: pulse-ring 1.2s ease-in-out infinite;
     }
     @keyframes pulse-ring {
-      0%   { box-shadow: 0 0 0 0px rgba(239,68,68,0.25), 0 8px 32px rgba(239,68,68,0.35); }
-      70%  { box-shadow: 0 0 0 22px rgba(239,68,68,0), 0 8px 32px rgba(239,68,68,0.35); }
-      100% { box-shadow: 0 0 0 0px rgba(239,68,68,0), 0 8px 32px rgba(239,68,68,0.35); }
+      0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.35), 0 12px 40px rgba(239,68,68,.4); }
+      60%  { box-shadow: 0 0 0 20px rgba(239,68,68,0), 0 12px 40px rgba(239,68,68,.4); }
+      100% { box-shadow: 0 0 0 0 rgba(239,68,68,0), 0 12px 40px rgba(239,68,68,.4); }
     }
-    .rec-btn-icon { font-size: 40px; line-height: 1; }
+
+    .rec-btn-icon { font-size: 44px; line-height: 1; pointer-events: none; }
+    .rec-btn-label { font-size: 10px; font-weight: 900; letter-spacing: .12em; pointer-events: none; }
+
     .rec-hint {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--muted);
-      text-align: center;
-      height: 16px;
+      font-family: var(--mono); font-size: 10px; color: var(--muted);
+      text-align: center; height: 14px; line-height: 14px;
     }
     .rec-hint.recording { color: #f87171; }
 
-    /* Timer */
-    .rec-timer {
-      font-family: var(--mono);
-      font-size: 36px;
-      font-weight: 700;
-      color: var(--red);
-      letter-spacing: 0.05em;
-      display: none;
+    /* ─── RECORDINGS LIST ───────────────────────── */
+    .recordings-section {
+      flex: 1; display: flex; flex-direction: column;
+      margin: 10px 14px 14px; min-height: 0;
     }
-    .rec-timer.visible { display: block; }
 
-    /* Offline list */
-    .offline-section {
-      margin: 0 16px 16px;
-      background: var(--bg2);
-      border: 1.5px solid var(--border);
-      border-radius: 14px;
-      padding: 14px 16px;
-      flex-shrink: 0;
+    .recordings-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px; flex-shrink: 0;
     }
-    .offline-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 10px;
+    .recordings-title {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      letter-spacing: .15em; color: var(--muted); text-transform: uppercase;
     }
-    .offline-title {
-      font-family: var(--mono);
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 0.15em;
-      color: var(--muted);
-      text-transform: uppercase;
-    }
+    .recordings-actions { display: flex; gap: 6px; align-items: center; }
+
     .btn-sync {
-      background: var(--green);
-      color: #052e16;
-      border: none;
-      border-radius: 8px;
-      padding: 6px 12px;
-      font-size: 10px;
-      font-weight: 700;
-      font-family: var(--mono);
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: opacity 0.15s;
-    }
-    .btn-sync:disabled { opacity: 0.5; cursor: default; }
-    .offline-list {
-      max-height: 130px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .offline-empty {
-      font-size: 11px;
-      color: var(--muted);
-      text-align: center;
-      padding: 12px 0;
-      font-style: italic;
-      font-family: var(--mono);
-    }
-    .rec-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: var(--bg3);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px 12px;
-    }
-    .rec-item-info { flex: 1; min-width: 0; }
-    .rec-item-site {
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--text);
+      background: var(--green); color: #052e16;
+      border: none; border-radius: 8px; padding: 6px 12px;
+      font-size: 10px; font-weight: 700; font-family: var(--mono);
+      letter-spacing: .05em; text-transform: uppercase;
+      cursor: pointer; transition: opacity .15s;
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
-    .rec-item-time {
-      font-size: 10px;
-      color: var(--muted);
-      font-family: var(--mono);
-      margin-top: 2px;
-    }
-    .rec-item-status {
-      font-size: 9px;
-      font-family: var(--mono);
-      font-weight: 700;
-      padding: 3px 7px;
-      border-radius: 6px;
-      margin-right: 8px;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-    .status-pending { background: rgba(251,191,36,0.15); color: #fbbf24; }
-    .status-sending { background: rgba(59,130,246,0.15); color: #60a5fa; animation: blink 1s infinite; }
-    .status-done { background: rgba(34,197,94,0.15); color: #4ade80; }
-    .status-error { background: rgba(239,68,68,0.15); color: #f87171; }
-    @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
-    .rec-item-del {
-      background: none;
-      border: none;
-      color: #f87171;
-      font-size: 18px;
-      cursor: pointer;
-      padding: 0 4px;
-      line-height: 1;
-      flex-shrink: 0;
+    .btn-sync:disabled { opacity: .5; cursor: default; }
+    .btn-sync-mobile {
+      background: rgba(251,191,36,.15); color: #fbbf24;
+      border: 1.5px solid rgba(251,191,36,.3);
     }
 
-    /* Sync progress bar */
+    .btn-del-all {
+      background: rgba(239,68,68,.1); color: #f87171;
+      border: 1.5px solid rgba(239,68,68,.2);
+      border-radius: 8px; padding: 6px 10px;
+      font-size: 10px; font-weight: 700; font-family: var(--mono);
+      letter-spacing: .05em; text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    /* Sync progress */
     .sync-bar {
-      height: 3px;
-      background: var(--border);
-      border-radius: 2px;
-      margin-bottom: 10px;
-      overflow: hidden;
+      height: 3px; background: var(--border); border-radius: 2px;
+      margin-bottom: 8px; overflow: hidden; flex-shrink: 0;
       display: none;
     }
     .sync-bar.visible { display: block; }
     .sync-bar-fill {
-      height: 100%;
-      background: var(--blue);
-      border-radius: 2px;
-      transition: width 0.4s ease;
+      height: 100%; background: var(--blue); border-radius: 2px;
+      transition: width .4s ease;
     }
-    .sync-status-text {
-      font-family: var(--mono);
-      font-size: 10px;
-      color: #60a5fa;
-      margin-bottom: 8px;
-      display: none;
+    .sync-status {
+      font-family: var(--mono); font-size: 10px; color: #60a5fa;
+      margin-bottom: 6px; display: none; flex-shrink: 0;
     }
-    .sync-status-text.visible { display: block; }
+    .sync-status.visible { display: block; }
 
-    /* Toast */
+    /* WiFi-only toggle */
+    .wifi-only-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 7px 12px; background: var(--bg2);
+      border: 1px solid var(--border); border-radius: 10px;
+      margin-bottom: 8px; flex-shrink: 0;
+    }
+    .wifi-only-label {
+      font-family: var(--mono); font-size: 10px; color: var(--muted);
+    }
+    .toggle {
+      position: relative; width: 36px; height: 20px; flex-shrink: 0;
+    }
+    .toggle input { display: none; }
+    .toggle-track {
+      position: absolute; inset: 0;
+      background: var(--border); border-radius: 10px;
+      transition: background .2s; cursor: pointer;
+    }
+    .toggle input:checked + .toggle-track { background: var(--blue); }
+    .toggle-thumb {
+      position: absolute; top: 3px; left: 3px;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #fff; transition: transform .2s; pointer-events: none;
+    }
+    .toggle input:checked ~ .toggle-thumb { transform: translateX(16px); }
+
+    /* List */
+    .recordings-list {
+      flex: 1; overflow-y: auto; display: flex;
+      flex-direction: column; gap: 6px;
+      padding-right: 2px; min-height: 0;
+    }
+    .recordings-list::-webkit-scrollbar { width: 3px; }
+    .recordings-list::-webkit-scrollbar-track { background: transparent; }
+    .recordings-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .list-empty {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      flex: 1; gap: 8px; padding: 24px 0;
+    }
+    .list-empty-icon { font-size: 32px; opacity: .4; }
+    .list-empty-text {
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      text-align: center; font-style: italic;
+    }
+
+    /* Site group */
+    .site-group { margin-bottom: 4px; }
+    .site-group-header {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      color: var(--blue); letter-spacing: .1em; text-transform: uppercase;
+      padding: 4px 4px 6px;
+    }
+
+    /* Recording item */
+    .rec-item {
+      display: flex; align-items: center;
+      background: var(--bg2); border: 1.5px solid var(--border);
+      border-radius: 10px; padding: 10px 10px 10px 12px;
+      gap: 8px; transition: border-color .15s;
+    }
+    .rec-item.status-done { border-color: rgba(34,197,94,.2); }
+    .rec-item.status-error { border-color: rgba(239,68,68,.25); }
+    .rec-item.status-sending { border-color: rgba(59,130,246,.25); }
+
+    .rec-item-info { flex: 1; min-width: 0; }
+    .rec-item-meta {
+      display: flex; align-items: center; gap: 6px;
+    }
+    .rec-item-num {
+      font-family: var(--mono); font-size: 9px; color: var(--muted);
+      flex-shrink: 0; min-width: 18px;
+    }
+    .rec-item-time {
+      font-size: 11px; font-weight: 700; color: var(--text);
+      font-family: var(--mono);
+    }
+    .rec-item-dur {
+      font-size: 10px; color: var(--muted); font-family: var(--mono);
+    }
+
+    .rec-item-status {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      padding: 3px 7px; border-radius: 6px; flex-shrink: 0;
+      text-transform: uppercase;
+    }
+    .s-pending  { background: rgba(251,191,36,.12); color: #fbbf24; }
+    .s-sending  { background: rgba(59,130,246,.12); color: #60a5fa; animation: blink 1s infinite; }
+    .s-done     { background: rgba(34,197,94,.12);  color: #4ade80; }
+    .s-error    { background: rgba(239,68,68,.12);  color: #f87171; }
+    @keyframes blink { 0%,100%{opacity:1}50%{opacity:.4} }
+
+    /* Play button */
+    .btn-play {
+      background: var(--bg3); border: 1.5px solid var(--border);
+      border-radius: 8px; width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; flex-shrink: 0; font-size: 14px;
+      transition: background .15s;
+    }
+    .btn-play:active { background: var(--border); }
+    .btn-play.playing { border-color: rgba(59,130,246,.4); background: rgba(59,130,246,.1); }
+
+    .btn-del-item {
+      background: none; border: none; color: #f87171;
+      font-size: 20px; cursor: pointer; padding: 0 2px;
+      line-height: 1; flex-shrink: 0; opacity: .7;
+      transition: opacity .15s;
+    }
+    .btn-del-item:active { opacity: 1; }
+
+    /* ─── TOAST ──────────────────────────────────── */
     #toast {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
+      position: fixed; bottom: 24px; left: 50%;
       transform: translateX(-50%) translateY(80px);
-      background: var(--bg3);
-      border: 1.5px solid var(--border);
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 700;
-      padding: 10px 20px;
-      border-radius: 12px;
-      white-space: nowrap;
-      transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
-      z-index: 999;
-      pointer-events: none;
+      background: var(--bg3); border: 1.5px solid var(--border);
+      color: var(--text); font-family: var(--mono);
+      font-size: 11px; font-weight: 700;
+      padding: 10px 20px; border-radius: 12px;
+      white-space: nowrap; z-index: 999; pointer-events: none;
+      transition: transform .3s cubic-bezier(.34,1.56,.64,1);
+      max-width: calc(100vw - 40px);
     }
-    #toast.show { transform: translateX(-50%) translateY(0); }
-    #toast.success { border-color: rgba(34,197,94,0.4); color: #4ade80; }
-    #toast.error { border-color: rgba(239,68,68,0.4); color: #f87171; }
+    #toast.show     { transform: translateX(-50%) translateY(0); }
+    #toast.success  { border-color: rgba(34,197,94,.4);  color: #4ade80; }
+    #toast.error    { border-color: rgba(239,68,68,.4);  color: #f87171; }
+    #toast.warning  { border-color: rgba(251,191,36,.4); color: #fbbf24; }
 
-    /* No permission screen */
-    #screen-noperm {
-      align-items: center;
-      justify-content: center;
-      padding: 32px;
-      text-align: center;
+    /* wifi warning banner */
+    .wifi-banner {
+      display: none; align-items: center; gap: 8px;
+      background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.25);
+      border-radius: 10px; padding: 8px 12px; margin: 0 14px 6px; flex-shrink: 0;
+      font-family: var(--mono); font-size: 10px; color: #fbbf24;
     }
-    #screen-noperm h2 { font-size: 18px; margin-top: 16px; }
-    #screen-noperm p { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .wifi-banner.show { display: flex; }
+    .wifi-banner strong { font-weight: 700; }
   </style>
 </head>
 <body>
@@ -466,7 +420,7 @@
 
   <!-- LOGIN -->
   <div id="screen-login" class="screen active">
-    <div class="login-logo">🎙️ PESAM</div>
+    <div class="login-logo">🎙️ &nbsp;PESAM</div>
     <div class="login-title">Voice Orders</div>
     <div class="login-sub">// system zamówień głosowych</div>
     <div class="field">
@@ -484,15 +438,9 @@
   <div id="screen-changepass" class="screen">
     <div class="changepass-badge">Pierwsze logowanie</div>
     <div class="login-title" style="margin-bottom:8px">Ustaw nowe hasło</div>
-    <div class="login-sub" style="margin-bottom:32px">Dla bezpieczeństwa zmień hasło tymczasowe</div>
-    <div class="field">
-      <label>Nowe hasło</label>
-      <input type="password" id="newpass1" autocomplete="new-password" minlength="6" />
-    </div>
-    <div class="field">
-      <label>Powtórz hasło</label>
-      <input type="password" id="newpass2" autocomplete="new-password" minlength="6" />
-    </div>
+    <div class="login-sub" style="margin-bottom:32px">Zmień hasło tymczasowe</div>
+    <div class="field"><label>Nowe hasło</label><input type="password" id="newpass1" autocomplete="new-password" minlength="6" /></div>
+    <div class="field"><label>Powtórz hasło</label><input type="password" id="newpass2" autocomplete="new-password" minlength="6" /></div>
     <button class="btn-orange" id="btn-changepass">Zapisz i kontynuuj</button>
   </div>
 
@@ -507,20 +455,27 @@
   <!-- MAIN -->
   <div id="screen-main" class="screen">
 
-    <!-- Top bar -->
+    <!-- Topbar -->
     <div class="topbar">
       <div class="topbar-brand">
         <span class="topbar-icon">🎙️</span>
         <span>PESAM VOICE</span>
       </div>
-      <div class="topbar-actions">
+      <div class="topbar-right">
+        <div class="net-badge net-off" id="net-badge">OFFLINE</div>
         <button class="btn-sm btn-sm-red" id="btn-logout">WYLOGUJ</button>
       </div>
     </div>
 
+    <!-- WiFi warning banner -->
+    <div class="wifi-banner" id="wifi-banner">
+      <span>⚠️</span>
+      <div><strong>Dane mobilne</strong> — wysyłanie może zużyć transfer. Włącz WiFi lub wyłącz opcję "Tylko WiFi".</div>
+    </div>
+
     <!-- Site selector -->
     <div class="site-section">
-      <div class="site-label">Budowa docelowa</div>
+      <div class="section-label">Budowa docelowa</div>
       <div id="site-container">
         <select class="site-select" id="site-select">
           <option value="">-- Wybierz budowę --</option>
@@ -528,26 +483,51 @@
       </div>
     </div>
 
-    <!-- Record -->
+    <!-- Record area -->
     <div class="record-area">
       <div class="rec-timer" id="rec-timer">00:00</div>
-      <button class="rec-btn rec-btn-idle" id="rec-btn">
-        <span class="rec-btn-icon">🎙️</span>
-        <span id="rec-btn-label">NAGRAJ</span>
+
+      <button class="rec-btn rec-btn-idle" id="rec-btn"
+              aria-label="Przytrzymaj aby nagrywać">
+        <span class="rec-btn-icon" id="rec-icon">🎙️</span>
+        <span class="rec-btn-label" id="rec-label">NAGRAJ</span>
       </button>
-      <div class="rec-hint" id="rec-hint">Dotknij okręgu, aby nagrać zamówienie</div>
+
+      <div class="rec-hint" id="rec-hint">Przytrzymaj aby nagrać • Puść aby zapisać</div>
     </div>
 
-    <!-- Offline list -->
-    <div class="offline-section">
+    <!-- Recordings section -->
+    <div class="recordings-section">
+
+      <!-- Sync bar -->
       <div class="sync-bar" id="sync-bar"><div class="sync-bar-fill" id="sync-bar-fill" style="width:0%"></div></div>
-      <div class="sync-status-text" id="sync-status-text"></div>
-      <div class="offline-header">
-        <span class="offline-title">Oczekujące w telefonie (<span id="offline-count">0</span>)</span>
-        <button class="btn-sync" id="btn-sync" style="display:none">🔄 Wyślij</button>
+      <div class="sync-status" id="sync-status"></div>
+
+      <!-- WiFi-only toggle -->
+      <div class="wifi-only-row">
+        <span class="wifi-only-label">📶 Synchronizuj tylko przez WiFi</span>
+        <label class="toggle">
+          <input type="checkbox" id="wifi-only-toggle" checked />
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
       </div>
-      <div class="offline-list" id="offline-list">
-        <div class="offline-empty">Brak nagrań. Wszystko wysłane ✓</div>
+
+      <!-- Header -->
+      <div class="recordings-header">
+        <span class="recordings-title">Nagrania w telefonie (<span id="rec-count">0</span>)</span>
+        <div class="recordings-actions">
+          <button class="btn-del-all" id="btn-del-all" style="display:none">🗑 Usuń wszystkie</button>
+          <button class="btn-sync" id="btn-sync" style="display:none">🔄 Wyślij</button>
+        </div>
+      </div>
+
+      <!-- List -->
+      <div class="recordings-list" id="recordings-list">
+        <div class="list-empty">
+          <div class="list-empty-icon">✅</div>
+          <div class="list-empty-text">Brak nagrań. Wszystko wysłane.</div>
+        </div>
       </div>
     </div>
 
@@ -566,7 +546,7 @@ import { getFirestore, collection, getDocs, query, orderBy, doc, getDoc, updateD
 import { getStorage, ref, uploadBytes, getDownloadURL }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
 
-// ─── FIREBASE CONFIG ─────────────────────────────────────────
+// ─── FIREBASE CONFIG ──────────────────────────────────────────────────────────
 const firebaseConfig = {
   apiKey: "AIzaSyCE470BBsa3CF-ik4XOjHs939kuLqNJpcc",
   authDomain: "pesam-system-81165.firebaseapp.com",
@@ -577,96 +557,76 @@ const firebaseConfig = {
   measurementId: "G-EK3TYCXR92"
 };
 
-// Zabezpieczenie: samodzielna rejestracja SW w pliku HTML dyktafonu
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js', { scope: '/' });
   });
 }
-// ─────────────────────────────────────────────────────────────
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+const app   = initializeApp(firebaseConfig);
+const auth  = getAuth(app);
+const db    = getFirestore(app);
 const storage = getStorage(app);
 
-// ─── INDEXEDDB ───────────────────────────────────────────────
-const DB_NAME = 'pesam-voice-db';
-const DB_VERSION = 1;
-const STORE = 'recordings';
+// ─── INDEXEDDB ────────────────────────────────────────────────────────────────
+const DB_NAME = 'pesam-voice-db', DB_VERSION = 2, STORE = 'recordings';
 
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = e => {
       const db = e.target.result;
-      if (!db.objectStoreNames.contains(STORE)) {
+      if (!db.objectStoreNames.contains(STORE))
         db.createObjectStore(STORE, { keyPath: 'id' });
-      }
     };
     req.onsuccess = e => resolve(e.target.result);
-    req.onerror = e => reject(e.target.error);
+    req.onerror   = e => reject(e.target.error);
   });
 }
 
-async function saveRec(rec) {
+async function idb(mode, fn) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(rec);
-    tx.oncomplete = resolve;
+    const tx = db.transaction(STORE, mode);
     tx.onerror = e => reject(e.target.error);
+    resolve(fn(tx.objectStore(STORE), resolve, reject));
   });
 }
 
-async function getAllRecs() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const req = tx.objectStore(STORE).getAll();
-    req.onsuccess = e => resolve(e.target.result);
-    req.onerror = e => reject(e.target.error);
-  });
-}
+const saveRec   = rec  => idb('readwrite', s => new Promise((res,rej) => { const r=s.put(rec); r.onsuccess=res; r.onerror=rej; }));
+const deleteRec = id   => idb('readwrite', s => new Promise((res,rej) => { const r=s.delete(id); r.onsuccess=res; r.onerror=rej; }));
+const getAllRecs = ()   => idb('readonly',  s => new Promise((res,rej) => { const r=s.getAll(); r.onsuccess=e=>res(e.target.result); r.onerror=rej; }));
 
 async function updateRecStatus(id, status) {
   const db = await openDB();
-  return new Promise(async (resolve, reject) => {
+  return new Promise((res, rej) => {
     const tx = db.transaction(STORE, 'readwrite');
     const store = tx.objectStore(STORE);
     const req = store.get(id);
     req.onsuccess = e => {
       const rec = e.target.result;
       if (rec) { rec.status = status; store.put(rec); }
-      resolve();
     };
-    req.onerror = e => reject(e.target.error);
-    tx.oncomplete = resolve;
+    tx.oncomplete = res;
+    tx.onerror = e => rej(e.target.error);
   });
 }
 
-async function deleteRec(id) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).delete(id);
-    tx.oncomplete = resolve;
-    tx.onerror = e => reject(e.target.error);
-  });
-}
-
-// ─── STATE ───────────────────────────────────────────────────
-let currentUser = null;
-let sites = [];
-let isRecording = false;
+// ─── STATE ────────────────────────────────────────────────────────────────────
+let currentUser   = null;
+let sites         = [];
+let isRecording   = false;
 let mediaRecorder = null;
-let audioChunks = [];
+let audioChunks   = [];
 let timerInterval = null;
-let timerSeconds = 0;
-let isSyncing = false;
-let syncAborted = false;
+let timerSeconds  = 0;
+let isSyncing     = false;
+let currentAudio  = null; // currently playing Audio obj
+let currentPlayId = null;
+let pttMode       = true; // push-to-talk vs toggle
+let autoSyncDebounceTimer = null; // Zabezpieczenie przez "migotaniem sieci"
 
-// ─── HELPERS ────────────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
@@ -681,23 +641,87 @@ function toast(msg, type = '') {
   toastTimer = setTimeout(() => { el.className = ''; }, 3000);
 }
 
-function formatTime(s) {
-  const m = Math.floor(s / 60).toString().padStart(2,'0');
-  const sec = (s % 60).toString().padStart(2,'0');
-  return `${m}:${sec}`;
+function fmt(s) {
+  return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
 }
 
-// ─── AUTH STATE ──────────────────────────────────────────────
+// ─── NETWORK BADGE ────────────────────────────────────────────────────────────
+function getNetworkType() {
+  if (!navigator.onLine) return 'offline';
+  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!conn) return 'unknown';
+  const t = conn.type || '';
+  if (t === 'wifi' || t === 'ethernet') return 'wifi';
+  return 'mobile';
+}
+
+function updateNetBadge() {
+  const badge = document.getElementById('net-badge');
+  const banner = document.getElementById('wifi-banner');
+  const syncBtn = document.getElementById('btn-sync');
+  const type = getNetworkType();
+  const wifiOnly = document.getElementById('wifi-only-toggle').checked;
+
+  badge.className = 'net-badge';
+  if (type === 'wifi') {
+    badge.classList.add('net-wifi');
+    badge.textContent = '📶 WiFi';
+    banner.classList.remove('show');
+  } else if (type === 'mobile') {
+    badge.classList.add('net-mobile');
+    badge.textContent = '📡 LTE';
+    if (wifiOnly) {
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
+  } else if (type === 'offline') {
+    badge.classList.add('net-off');
+    badge.textContent = 'OFFLINE';
+    banner.classList.remove('show');
+  } else {
+    badge.classList.add('net-wifi');
+    badge.textContent = 'ONLINE';
+    banner.classList.remove('show');
+  }
+
+  // Update sync button styling
+  if (syncBtn && type === 'mobile' && wifiOnly) {
+    syncBtn.classList.add('btn-sync-mobile');
+  } else if (syncBtn) {
+    syncBtn.classList.remove('btn-sync-mobile');
+  }
+}
+
+window.addEventListener('online', () => { 
+  updateNetBadge(); 
+  toast('Połączono z siecią', 'success'); 
+  clearTimeout(autoSyncDebounceTimer);
+  autoSyncDebounceTimer = setTimeout(() => {
+    if (!isRecording) checkAutoSync();
+  }, 2500); 
+});
+window.addEventListener('offline', () => { updateNetBadge(); toast('Brak połączenia', 'error'); });
+
+document.getElementById('wifi-only-toggle').addEventListener('change', () => {
+  updateNetBadge();
+  const wifiOnly = document.getElementById('wifi-only-toggle').checked;
+  localStorage.setItem('pesam_wifionly', wifiOnly ? '1' : '0');
+});
+
+// Load preference
+const savedWifiOnly = localStorage.getItem('pesam_wifionly');
+if (savedWifiOnly === '0') document.getElementById('wifi-only-toggle').checked = false;
+
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
 onAuthStateChanged(auth, async user => {
   if (user) {
     currentUser = user;
     localStorage.setItem('pesam_logged_in', 'true');
     await initMain();
   } else {
-    // Sprawdź czy jesteśmy offline z zapisaną sesją
     const localLogged = localStorage.getItem('pesam_logged_in') === 'true';
     if (localLogged && !navigator.onLine) {
-      // Offline z zapisaną sesją — pokaż główny ekran z danymi z cache
       await initMainOffline();
     } else {
       localStorage.removeItem('pesam_logged_in');
@@ -706,41 +730,32 @@ onAuthStateChanged(auth, async user => {
   }
 });
 
-// ─── LOGIN ───────────────────────────────────────────────────
+// ─── LOGIN ────────────────────────────────────────────────────────────────────
 document.getElementById('btn-login').addEventListener('click', async () => {
   const email = document.getElementById('login-email').value.trim();
-  const pass = document.getElementById('login-pass').value;
+  const pass  = document.getElementById('login-pass').value;
   if (!email || !pass) return toast('Wypełnij wszystkie pola', 'error');
-
   const btn = document.getElementById('btn-login');
-  btn.disabled = true;
-  btn.textContent = 'Logowanie...';
-
+  btn.disabled = true; btn.textContent = 'Logowanie...';
   try {
     await signInWithEmailAndPassword(auth, email, pass);
-    // onAuthStateChanged przejmie sterowanie
   } catch (err) {
-    toast('Błąd logowania: ' + (err.code === 'auth/invalid-credential' ? 'Zły email lub hasło' : err.message), 'error');
-    btn.disabled = false;
-    btn.textContent = 'Zaloguj się';
+    toast('Błąd: ' + (err.code === 'auth/invalid-credential' ? 'Zły email lub hasło' : err.message), 'error');
+    btn.disabled = false; btn.textContent = 'Zaloguj się';
   }
 });
-
 document.getElementById('login-pass').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-login').click();
 });
 
-// ─── CHANGE PASSWORD ────────────────────────────────────────
+// ─── CHANGE PASSWORD ──────────────────────────────────────────────────────────
 document.getElementById('btn-changepass').addEventListener('click', async () => {
   const p1 = document.getElementById('newpass1').value;
   const p2 = document.getElementById('newpass2').value;
   if (p1.length < 6) return toast('Hasło min. 6 znaków', 'error');
   if (p1 !== p2) return toast('Hasła się nie zgadzają', 'error');
-
   const btn = document.getElementById('btn-changepass');
-  btn.disabled = true;
-  btn.textContent = 'Zapisywanie...';
-
+  btn.disabled = true; btn.textContent = 'Zapisywanie...';
   try {
     await updatePassword(auth.currentUser, p1);
     await updateDoc(doc(db, 'users', auth.currentUser.uid), { requiresPasswordChange: false });
@@ -748,63 +763,48 @@ document.getElementById('btn-changepass').addEventListener('click', async () => 
     await initMain();
   } catch (err) {
     toast('Błąd: ' + err.message, 'error');
-    btn.disabled = false;
-    btn.textContent = 'Zapisz i kontynuuj';
+    btn.disabled = false; btn.textContent = 'Zapisz i kontynuuj';
   }
 });
 
-// ─── LOGOUT ─────────────────────────────────────────────────
+// ─── LOGOUT ───────────────────────────────────────────────────────────────────
 document.getElementById('btn-logout').addEventListener('click', async () => {
   if (!confirm('Czy chcesz się wylogować?')) return;
   localStorage.removeItem('pesam_logged_in');
   localStorage.removeItem('pesam_sites_cache');
+  localStorage.removeItem('pesam_last_site');
   await signOut(auth);
   showScreen('screen-login');
 });
-
 document.getElementById('btn-noperm-logout').addEventListener('click', async () => {
   localStorage.removeItem('pesam_logged_in');
   await signOut(auth);
   showScreen('screen-login');
 });
 
-// ─── INIT MAIN (online) ──────────────────────────────────────
+// ─── INIT MAIN ────────────────────────────────────────────────────────────────
 async function initMain() {
-  // Sprawdź uprawnienia i dane użytkownika
   try {
-    const userSnap = await getDoc(doc(db, 'users', auth.currentUser.uid));
-    if (!userSnap.exists()) { showScreen('screen-noperm'); return; }
+    const snap = await getDoc(doc(db, 'users', auth.currentUser.uid));
+    if (!snap.exists()) { showScreen('screen-noperm'); return; }
+    const ud = snap.data();
 
-    const userData = userSnap.data();
+    if (ud.requiresPasswordChange) { showScreen('screen-changepass'); return; }
 
-    // Wymuszona zmiana hasła
-    if (userData.requiresPasswordChange) {
-      showScreen('screen-changepass');
-      return;
-    }
-
-    // Sprawdź uprawnienia do dyktafonu
-    const perms = userData.rolePermissions || {};
-    const overrides = userData.permissionOverrides || {};
-    const hasVoice = overrides.voiceOrdering !== undefined
-      ? overrides.voiceOrdering
+    const perms = ud.rolePermissions || {};
+    const ov    = ud.permissionOverrides || {};
+    const hasVoice = ov.voiceOrdering !== undefined
+      ? ov.voiceOrdering
       : (perms.voiceOrdering === true);
+    if (!hasVoice) { showScreen('screen-noperm'); return; }
 
-    if (!hasVoice) {
-      showScreen('screen-noperm');
-      return;
-    }
-
-    currentUser = { ...auth.currentUser, ...userData };
-
-    // Załaduj budowy
-    await loadSites(userData);
+    currentUser = { ...auth.currentUser, ...ud };
+    await loadSites(ud);
     showScreen('screen-main');
-    await renderOfflineList();
+    updateNetBadge();
+    await renderList();
     checkAutoSync();
-
   } catch (err) {
-    // Offline podczas inicjalizacji — spróbuj z cache
     await initMainOffline();
   }
 }
@@ -815,30 +815,27 @@ async function initMainOffline() {
     sites = JSON.parse(cached);
     renderSites();
     showScreen('screen-main');
-    await renderOfflineList();
+    updateNetBadge();
+    await renderList();
     toast('Tryb offline — dane z pamięci', '');
   } else {
-    // Brak cache i brak internetu — pokaż login z komunikatem
     showScreen('screen-login');
     toast('Połącz z internetem przy pierwszym logowaniu', 'error');
   }
 }
 
-async function loadSites(userData) {
+async function loadSites(ud) {
   try {
     const snap = await getDocs(query(collection(db, 'sites'), orderBy('name', 'asc')));
-    const allSites = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const assigned = userData.assignedSites || [];
-
-    sites = allSites.filter(s =>
+    const all  = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const assigned = ud.assignedSites || [];
+    sites = all.filter(s =>
       (assigned.includes('ALL') || assigned.includes(s.id)) &&
-      s.location !== 'Wpis ręczny' &&
-      s.status !== 'ZAKOŃCZONA'
+      s.location !== 'Wpis ręczny' && s.status !== 'ZAKOŃCZONA'
     );
-
     localStorage.setItem('pesam_sites_cache', JSON.stringify(sites));
     renderSites();
-  } catch (err) {
+  } catch {
     const cached = localStorage.getItem('pesam_sites_cache');
     if (cached) { sites = JSON.parse(cached); renderSites(); }
   }
@@ -846,88 +843,139 @@ async function loadSites(userData) {
 
 function renderSites() {
   const container = document.getElementById('site-container');
+  const lastSite  = localStorage.getItem('pesam_last_site');
+
   if (sites.length === 0) {
-    container.innerHTML = '<p style="font-size:12px;color:#f87171;font-weight:700;">Brak przypisanych budów.</p>';
-  } else if (sites.length === 1) {
-    container.innerHTML = `<div class="site-single">🏢 ${sites[0].name}</div>`;
-    document.getElementById('site-select') && null;
-    // Zapisz id jedynej budowy
-    container.dataset.singleId = sites[0].id;
-  } else {
-    container.innerHTML = `<select class="site-select" id="site-select">
-      <option value="">-- Wybierz budowę --</option>
-      ${sites.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
-    </select>`;
+    container.innerHTML = '<p style="font-size:12px;color:#f87171;font-weight:700">Brak przypisanych budów.</p>';
+    return;
   }
+  if (sites.length === 1) {
+    container.innerHTML = `<div class="site-single">🏢 ${sites[0].name}</div>`;
+    container.dataset.singleId = sites[0].id;
+    return;
+  }
+  const opts = sites.map(s =>
+    `<option value="${s.id}" ${s.id === lastSite ? 'selected' : ''}>${s.name}</option>`
+  ).join('');
+  container.innerHTML = `
+    <select class="site-select" id="site-select">
+      <option value="">-- Wybierz budowę --</option>
+      ${opts}
+    </select>`;
+
+  document.getElementById('site-select').addEventListener('change', e => {
+    if (e.target.value) localStorage.setItem('pesam_last_site', e.target.value);
+  });
 }
 
 function getSelectedSiteId() {
-  const container = document.getElementById('site-container');
-  if (container.dataset.singleId) return container.dataset.singleId;
+  const c = document.getElementById('site-container');
+  if (c.dataset.singleId) return c.dataset.singleId;
   const sel = document.getElementById('site-select');
   return sel ? sel.value : '';
 }
-
 function getSelectedSiteName() {
-  const siteId = getSelectedSiteId();
-  const site = sites.find(s => s.id === siteId);
+  const site = sites.find(s => s.id === getSelectedSiteId());
   return site ? site.name : 'Nieznana';
 }
 
-// ─── RECORDING ──────────────────────────────────────────────
-document.getElementById('rec-btn').addEventListener('click', () => {
-  if (isRecording) stopRecording();
-  else startRecording();
+// ─── PUSH-TO-TALK ──────────────────────────────────────────────────────────────
+const recBtn = document.getElementById('rec-btn');
+let pttStream = null;
+let pttReleaseTimer = null;
+
+// Pointer events — works for touch AND mouse
+recBtn.addEventListener('pointerdown', async e => {
+  e.preventDefault();
+  if (isRecording) return; // already recording (toggle mode)
+  await startRecording();
+  pttMode = true;
 });
+
+recBtn.addEventListener('pointerup', e => {
+  e.preventDefault();
+  if (pttMode && isRecording) {
+    // Small delay to avoid accidental very-short recordings
+    pttReleaseTimer = setTimeout(() => stopRecording(), 100);
+  }
+});
+
+recBtn.addEventListener('pointerleave', e => {
+  // Finger slid off — still stop if PTT
+  if (pttMode && isRecording) {
+    clearTimeout(pttReleaseTimer);
+    stopRecording();
+  }
+});
+
+// Also allow tap-to-toggle as fallback for desktop / accessibility
+recBtn.addEventListener('click', () => {
+  if (!pttMode) {
+    // Toggle mode
+    if (isRecording) stopRecording();
+    else startRecording();
+  }
+  // pttMode handled by pointerdown/up above
+});
+
+// Switch to toggle mode if pointer up fires very quickly (tap, not hold)
+// We track this inside startRecording / stopRecording
 
 async function startRecording() {
   const siteId = getSelectedSiteId();
   if (!siteId) { toast('Najpierw wybierz budowę!', 'error'); return; }
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    pttStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioChunks = [];
-    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder = new MediaRecorder(pttStream);
 
     mediaRecorder.ondataavailable = e => {
       if (e.data.size > 0) audioChunks.push(e.data);
     };
 
     mediaRecorder.onstop = async () => {
+      // Ignore very short (< 0.5s) accidental recordings
+      if (timerSeconds < 1) {
+        pttStream.getTracks().forEach(t => t.stop());
+        toast('Za krótkie nagranie', 'warning');
+        return;
+      }
       const blob = new Blob(audioChunks, { type: 'audio/mp3' });
+      const dur  = timerSeconds;
       const rec = {
         id: `REC-${Date.now()}`,
         siteId,
         siteName: getSelectedSiteName(),
         audioBlob: blob,
+        durationSec: dur,
         createdAt: new Date().toISOString(),
-        status: 'PENDING', // PENDING | SENDING | DONE | ERROR
-        retries: 0
+        status: 'PENDING',
       };
       await saveRec(rec);
-      stream.getTracks().forEach(t => t.stop());
-      await renderOfflineList();
-      toast('Nagranie zapisane ✓', 'success');
+      localStorage.setItem('pesam_last_site', siteId);
+      pttStream.getTracks().forEach(t => t.stop());
+      await renderList();
+      toast(`Nagranie zapisane (${fmt(dur)}) ✓`, 'success');
       checkAutoSync();
     };
 
     mediaRecorder.start();
     isRecording = true;
 
-    // Timer
     timerSeconds = 0;
     const timerEl = document.getElementById('rec-timer');
     timerEl.textContent = '00:00';
     timerEl.classList.add('visible');
     timerInterval = setInterval(() => {
       timerSeconds++;
-      timerEl.textContent = formatTime(timerSeconds);
+      timerEl.textContent = fmt(timerSeconds);
     }, 1000);
 
-    const btn = document.getElementById('rec-btn');
-    btn.className = 'rec-btn rec-btn-recording';
-    document.getElementById('rec-btn-label').textContent = 'ZAKOŃCZ';
-    document.getElementById('rec-hint').textContent = '🔴 Nagrywanie... Mów do telefonu';
+    recBtn.className = 'rec-btn rec-btn-recording';
+    document.getElementById('rec-icon').textContent  = '⏹️';
+    document.getElementById('rec-label').textContent = 'PUŚĆ';
+    document.getElementById('rec-hint').textContent  = '🔴 Nagrywanie... Mów do telefonu';
     document.getElementById('rec-hint').classList.add('recording');
 
   } catch (err) {
@@ -939,199 +987,274 @@ function stopRecording() {
   if (mediaRecorder && isRecording) {
     mediaRecorder.stop();
     isRecording = false;
+    pttMode = true;
     clearInterval(timerInterval);
     document.getElementById('rec-timer').classList.remove('visible');
 
-    const btn = document.getElementById('rec-btn');
-    btn.className = 'rec-btn rec-btn-idle';
-    document.getElementById('rec-btn-label').textContent = 'NAGRAJ';
-    document.getElementById('rec-hint').textContent = 'Dotknij okręgu, aby nagrać zamówienie';
+    recBtn.className = 'rec-btn rec-btn-idle';
+    document.getElementById('rec-icon').textContent  = '🎙️';
+    document.getElementById('rec-label').textContent = 'NAGRAJ';
+    document.getElementById('rec-hint').textContent  = 'Przytrzymaj aby nagrać • Puść aby zapisać';
     document.getElementById('rec-hint').classList.remove('recording');
   }
 }
 
-// ─── OFFLINE LIST ────────────────────────────────────────────
-async function renderOfflineList() {
-  const recs = await getAllRecs();
-  const list = document.getElementById('offline-list');
-  const count = document.getElementById('offline-count');
-  const syncBtn = document.getElementById('btn-sync');
+// ─── PLAYBACK ─────────────────────────────────────────────────────────────────
+function playRec(id, blob) {
+  // Stop currently playing
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+    const oldBtn = document.querySelector(`[data-play="${currentPlayId}"]`);
+    if (oldBtn) { oldBtn.textContent = '▶'; oldBtn.classList.remove('playing'); }
+    if (currentPlayId === id) { currentPlayId = null; return; }
+  }
+
+  const url = URL.createObjectURL(blob);
+  currentAudio = new Audio(url);
+  currentPlayId = id;
+
+  const btn = document.querySelector(`[data-play="${id}"]`);
+  if (btn) { btn.textContent = '⏸'; btn.classList.add('playing'); }
+
+  currentAudio.play();
+  currentAudio.onended = () => {
+    URL.revokeObjectURL(url);
+    currentAudio = null;
+    currentPlayId = null;
+    if (btn) { btn.textContent = '▶'; btn.classList.remove('playing'); }
+  };
+}
+
+// ─── RENDER LIST ─────────────────────────────────────────────────────────────
+async function renderList() {
+  const recs  = await getAllRecs();
+  const list  = document.getElementById('recordings-list');
+  const count = document.getElementById('rec-count');
+  const syncBtn   = document.getElementById('btn-sync');
+  const delAllBtn = document.getElementById('btn-del-all');
 
   count.textContent = recs.length;
 
-  const pending = recs.filter(r => r.status !== 'DONE');
-
   if (recs.length === 0) {
-    list.innerHTML = '<div class="offline-empty">Brak nagrań. Wszystko wysłane ✓</div>';
-    syncBtn.style.display = 'none';
+    list.innerHTML = `
+      <div class="list-empty">
+        <div class="list-empty-icon">✅</div>
+        <div class="list-empty-text">Brak nagrań. Wszystko wysłane.</div>
+      </div>`;
+    syncBtn.style.display   = 'none';
+    delAllBtn.style.display = 'none';
     return;
   }
 
-  syncBtn.style.display = pending.length > 0 ? 'block' : 'none';
+  // Show delete-all always when there are recs
+  delAllBtn.style.display = 'inline-block';
 
-  list.innerHTML = recs.map(r => `
-    <div class="rec-item" id="item-${r.id}">
-      <div class="rec-item-info">
-        <div class="rec-item-site">🏢 ${r.siteName}</div>
-        <div class="rec-item-time">${new Date(r.createdAt).toLocaleTimeString('pl-PL')}</div>
-      </div>
-      <span class="rec-item-status status-${r.status === 'PENDING' ? 'pending' : r.status === 'SENDING' ? 'sending' : r.status === 'DONE' ? 'done' : 'error'}">
-        ${r.status === 'PENDING' ? 'OCZEKUJE' : r.status === 'SENDING' ? 'WYSYŁA...' : r.status === 'DONE' ? '✓ WYSŁANE' : '⚠ BŁĄD'}
-      </span>
-      ${r.status !== 'DONE' ? `<button class="rec-item-del" onclick="delRec('${r.id}')">×</button>` : ''}
-    </div>
-  `).join('');
+  const pending = recs.filter(r => r.status === 'PENDING' || r.status === 'ERROR');
+  syncBtn.style.display = pending.length > 0 ? 'inline-block' : 'none';
+
+  // Group by site
+  const groups = {};
+  recs.forEach(r => {
+    if (!groups[r.siteId]) groups[r.siteId] = { name: r.siteName, items: [] };
+    groups[r.siteId].items.push(r);
+  });
+
+  // Sort each group newest first
+  Object.values(groups).forEach(g => g.items.sort((a,b) => b.createdAt.localeCompare(a.createdAt)));
+
+  let globalIdx = recs.length;
+  let html = '';
+
+  Object.entries(groups).forEach(([siteId, group]) => {
+    const pendingCount = group.items.filter(r => r.status === 'PENDING' || r.status === 'ERROR').length;
+    html += `<div class="site-group">`;
+    if (Object.keys(groups).length > 1) {
+      html += `<div class="site-group-header">🏢 ${group.name} · ${group.items.length} nagrań${pendingCount ? ` · ${pendingCount} oczekuje` : ''}</div>`;
+    }
+    group.items.forEach(r => {
+      const statusClass = { PENDING:'s-pending', SENDING:'s-sending', DONE:'s-done', ERROR:'s-error' }[r.status] || 's-pending';
+      const statusLabel = { PENDING:'OCZEKUJE', SENDING:'WYSYŁA...', DONE:'✓ WYSŁANE', ERROR:'⚠ BŁĄD' }[r.status] || 'OCZEKUJE';
+      const time = new Date(r.createdAt).toLocaleTimeString('pl-PL', {hour:'2-digit', minute:'2-digit'});
+      const date = new Date(r.createdAt).toLocaleDateString('pl-PL', {day:'2-digit', month:'2-digit'});
+      const dur  = r.durationSec ? fmt(r.durationSec) : '—';
+
+      html += `
+        <div class="rec-item status-${r.status.toLowerCase()}" id="item-${r.id}">
+          <div class="rec-item-info">
+            <div class="rec-item-meta">
+              <span class="rec-item-time">${date} ${time}</span>
+              <span class="rec-item-dur">${dur}</span>
+            </div>
+          </div>
+          <span class="rec-item-status ${statusClass}">${statusLabel}</span>
+          <button class="btn-play" data-play="${r.id}" onclick="window.playRecItem('${r.id}')">▶</button>
+          ${r.status !== 'DONE' ? `<button class="btn-del-item" onclick="window.delRecItem('${r.id}')">×</button>` : ''}
+        </div>`;
+      globalIdx--;
+    });
+    html += `</div>`;
+  });
+
+  list.innerHTML = html;
+
+  // Store blobs reference for playback
+  window._recBlobs = {};
+  recs.forEach(r => { if (r.audioBlob) window._recBlobs[r.id] = r.audioBlob; });
 }
 
-window.delRec = async (id) => {
-  if (!confirm('Usunąć to nagranie?')) return;
-  await deleteRec(id);
-  await renderOfflineList();
+window.playRecItem = (id) => {
+  const blob = window._recBlobs?.[id];
+  if (!blob) { toast('Brak danych audio', 'error'); return; }
+  playRec(id, blob);
 };
 
-// ─── SYNC ────────────────────────────────────────────────────
-// Automatyczna próba synchronizacji gdy jest internet
+window.delRecItem = async (id) => {
+  if (!confirm('Usunąć to nagranie?')) return;
+  await deleteRec(id);
+  await renderList();
+};
+
+document.getElementById('btn-del-all').addEventListener('click', async () => {
+  const recs = await getAllRecs();
+  const pending = recs.filter(r => r.status !== 'DONE');
+  if (!confirm(`Usunąć wszystkie ${recs.length} nagrania (w tym ${pending.length} niewysłanych)?`)) return;
+  for (const r of recs) await deleteRec(r.id);
+  await renderList();
+  toast('Usunięto wszystkie nagrania', '');
+});
+
+// ─── SYNC ─────────────────────────────────────────────────────────────────────
+function canSync() {
+  if (!navigator.onLine) return { ok: false, reason: 'Brak połączenia z internetem' };
+  const wifiOnly = document.getElementById('wifi-only-toggle').checked;
+  const netType  = getNetworkType();
+  if (wifiOnly && netType === 'mobile') return { ok: false, reason: 'Włączone: tylko przez WiFi. Wyłącz opcję lub podłącz WiFi.' };
+  return { ok: true };
+}
+
 function checkAutoSync() {
-  if (navigator.onLine && !isSyncing) {
+  const { ok } = canSync();
+  if (ok && !isSyncing) {
     const btn = document.getElementById('btn-sync');
-    if (btn.style.display !== 'none') {
-      handleSync();
-    }
+    if (btn && btn.style.display !== 'none') handleSync();
   }
 }
 
-window.addEventListener('online', () => {
-  toast('Połączono z siecią — synchronizuję...', '');
-  setTimeout(checkAutoSync, 1000);
+document.getElementById('btn-sync').addEventListener('click', () => {
+  const { ok, reason } = canSync();
+  if (!ok) { toast(reason, 'warning'); return; }
+  handleSync();
 });
-
-document.getElementById('btn-sync').addEventListener('click', handleSync);
 
 async function handleSync() {
   if (isSyncing) return;
-
-  const recs = await getAllRecs();
+  const recs   = await getAllRecs();
   const toSend = recs.filter(r => r.status === 'PENDING' || r.status === 'ERROR');
   if (toSend.length === 0) return;
 
-  if (!navigator.onLine) {
-    toast('Brak internetu — spróbuj później', 'error');
-    return;
-  }
+  const check = canSync();
+  if (!check.ok) { toast(check.reason, 'warning'); return; }
 
   isSyncing = true;
-  syncAborted = false;
 
-  const syncBar = document.getElementById('sync-bar');
-  const syncFill = document.getElementById('sync-bar-fill');
-  const syncText = document.getElementById('sync-status-text');
+  const bar     = document.getElementById('sync-bar');
+  const fill    = document.getElementById('sync-bar-fill');
+  const status  = document.getElementById('sync-status');
   const syncBtn = document.getElementById('btn-sync');
 
-  syncBar.classList.add('visible');
-  syncText.classList.add('visible');
+  bar.classList.add('visible');
+  status.classList.add('visible');
   syncBtn.disabled = true;
 
-  let done = 0;
-  let failed = 0;
+  let done = 0, failed = 0;
 
   for (let i = 0; i < toSend.length; i++) {
     const rec = toSend[i];
 
-    // Sprawdź internet przed każdym plikiem
     if (!navigator.onLine) {
-      syncAborted = true;
-      toast('Zerwano połączenie — wznowię gdy będzie internet', 'error');
+      toast('Zerwano połączenie — wznowię gdy wróci sieć', 'error');
       break;
     }
 
-    syncText.textContent = `Wysyłanie ${i + 1} z ${toSend.length}: ${rec.siteName}`;
-    syncFill.style.width = `${Math.round((i / toSend.length) * 100)}%`;
+    status.textContent = `Wysyłanie ${i+1}/${toSend.length}: ${rec.siteName}`;
+    fill.style.width = `${Math.round(i / toSend.length * 100)}%`;
 
-    // Oznacz jako wysyłane
     await updateRecStatus(rec.id, 'SENDING');
-    await renderOfflineList();
+    await renderList();
 
     try {
-      // Upload pliku audio
       const fileRef = ref(storage, `voice_orders/${auth.currentUser?.uid || 'offline'}/${rec.id}.mp3`);
       await uploadBytesWithRetry(fileRef, rec.audioBlob, 3);
-      const fileUrl = await getDownloadURL(fileRef);
+      const url = await getDownloadURL(fileRef);
 
-      // Zapis do Firestore
       await setDoc(doc(db, 'voiceOrders', rec.id), {
         id: rec.id,
         siteId: rec.siteId,
         siteName: rec.siteName,
-        userId: auth.currentUser?.uid || 'offline',
+        userId:   auth.currentUser?.uid || 'offline',
         userName: currentUser
-          ? `${currentUser.firstName || ''} ${currentUser.lastName || ''}`.trim()
+          ? `${currentUser.firstName||''} ${currentUser.lastName||''}`.trim()
           : 'Nieznany',
-        audioUrl: fileUrl,
-        status: 'PENDING',
+        audioUrl: url,
+        status:   'PENDING',
+        durationSec: rec.durationSec || 0,
         createdAt: rec.createdAt
       });
 
-      // Oznacz jako wysłane (zachowaj w liście żeby użytkownik widział)
       await updateRecStatus(rec.id, 'DONE');
       done++;
+      await renderList();
 
-      // Usuń po 3 sekundach
+      // Remove sent item after 4s
       setTimeout(async () => {
         await deleteRec(rec.id);
-        await renderOfflineList();
-      }, 3000);
+        await renderList();
+      }, 4000);
 
     } catch (err) {
-      console.error('Błąd wysyłania:', rec.id, err);
+      console.error(err);
       await updateRecStatus(rec.id, 'ERROR');
       failed++;
-
-      // Jeśli to błąd sieci, przerwij całą synchronizację
-      if (!navigator.onLine || err.code === 'storage/retry-limit-exceeded') {
-        syncAborted = true;
-        toast('Zerwano połączenie w trakcie wysyłania', 'error');
-        break;
-      }
+      await renderList();
+      if (!navigator.onLine) { toast('Zerwano połączenie w trakcie wysyłania', 'error'); break; }
     }
-
-    await renderOfflineList();
   }
 
-  syncFill.style.width = '100%';
+  fill.style.width = '100%';
   setTimeout(() => {
-    syncBar.classList.remove('visible');
-    syncText.classList.remove('visible');
-    syncFill.style.width = '0%';
+    bar.classList.remove('visible');
+    status.classList.remove('visible');
+    fill.style.width = '0%';
   }, 1500);
 
   isSyncing = false;
   syncBtn.disabled = false;
 
-  if (!syncAborted) {
-    if (failed === 0) {
-      toast(`✅ Wysłano ${done} nagrań!`, 'success');
-    } else {
-      toast(`Wysłano ${done}, błąd ${failed} — spróbuj ponownie`, 'error');
-    }
+  if (failed === 0) {
+    toast(`✅ Wysłano ${done} nagrań!`, 'success');
+  } else {
+    toast(`Wysłano ${done}, błąd ${failed} — spróbuj ponownie`, 'error');
   }
 
-  await renderOfflineList();
+  await renderList();
 }
 
-// Upload z retry — odporne na chwilowe zerwanie
 async function uploadBytesWithRetry(fileRef, blob, maxRetries) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await uploadBytes(fileRef, blob);
-    } catch (err) {
-      if (attempt === maxRetries) throw err;
-      // Czekaj przed kolejną próbą (1s, 2s, 4s)
-      await new Promise(r => setTimeout(r, attempt * 1000));
+  for (let i = 1; i <= maxRetries; i++) {
+    try { return await uploadBytes(fileRef, blob); }
+    catch (err) {
+      if (i === maxRetries) throw err;
       if (!navigator.onLine) throw new Error('offline');
+      await new Promise(r => setTimeout(r, i * 1200));
     }
   }
 }
+
+// Initial network badge update
+updateNetBadge();
 
 </script>
 </body>
 </html>
+

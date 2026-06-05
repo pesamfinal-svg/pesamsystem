@@ -1,4 +1,5 @@
-const CACHE_NAME = 'pesam-voice-v6';
+// public/sw.js
+const CACHE_NAME = 'pesam-voice-v7';
 
 // Cachujemy TYLKO pliki które na pewno istnieją i są statyczne
 const PRECACHE = [
@@ -48,26 +49,22 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Cache-first dla voice-order.html — to jest nasz główny plik offline
+  // Cache-first dla voice-order.html
   if (url.pathname === '/voice-order.html' || url.pathname === '/') {
     event.respondWith(
       caches.match('/voice-order.html').then(cached => {
-        // W tle odśwież cache
         const fetchPromise = fetch(request).then(response => {
           if (response.status === 200) {
             caches.open(CACHE_NAME).then(c => c.put(request, response.clone()));
           }
           return response;
         }).catch(() => cached);
-
-        // Zwróć od razu z cache, nie czekaj na sieć
         return cached || fetchPromise;
       })
     );
     return;
   }
 
-  // Dla pozostałych: network first, fallback do cache
   event.respondWith(
     fetch(request)
       .then(response => {
