@@ -1,60 +1,78 @@
-// public/sw.js
-const CACHE_NAME = 'pesam-voice-offline-v2';
+const CACHE_NAME = 'pesam-voice-v5';
 
-// Ignorujemy zapytania do Firebase, API oraz baz danych
-const shouldIgnore = (url) => {
-    return (
-        url.pathname.startsWith('/api') ||
-        url.pathname.includes('firestore') ||
-        url.pathname.includes('identitytoolkit') ||
-        url.hostname.includes('firebase')
-    );
-};
+const PRECACHE = [
+  '/voice-order',
+  '/login',
+  '/manifest.json',
+  '/favicon.ico',
+];
 
 self.addEventListener('install', (event) => {
-    self.skipWaiting();
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(PRECACHE))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (event) => {
-    event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(
+        keys
+          .filter(k => k.startsWith('pesam-voice') && k !== CACHE_NAME)
+          .map(k => caches.delete(k))
+      ))
+      .then(() => self.clients.claim())
+      .then(() => {
+        return self.clients.matchAll({ type: 'window' }).then(clients => {
+          clients.forEach(client => client.postMessage({ type: 'SW_UPDATED' }));
+        });
+      })
+  );
 });
 
 self.addEventListener('fetch', (event) => {
-    const { request } = event;
-    const url = new URL(request.url);
+  const { request } = event;
+  const url = new URL(request.url);
 
-    // Obsługujemy tylko lokalne zapytania GET (pliki HTML, JS, CSS, obrazy)
-    if (request.method !== 'GET' || url.origin !== self.location.origin) {
-        return;
-    }
+  if (
+    request.method !== 'GET' ||
+    url.pathname.startsWith('/api') ||
+    url.href.includes('firestore') ||
+    url.href.includes('googleapis') ||
+    url.href.includes('firebasestorage') ||
+    url.href.includes('identitytoolkit')
+  ) {
+    return;
+  }
 
-    if (shouldIgnore(url)) {
-        return;
-    }
+  const isNextStatic = url.pathname.startsWith('/_next/static/');
 
+  if (isNextStatic) {
     event.respondWith(
-        fetch(request)
-            .then((response) => {
-                // Gdy jesteśmy online, zapisujemy/aktualizujemy pobrane pliki w pamięci telefonu
-                if (response.status === 200) {
-                    const responseClone = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => {
-                        cache.put(request, responseClone);
-                    });
-                }
-                return response;
-            })
-            .catch(() => {
-                // Gdy jesteśmy offline, serwujemy pliki z lokalnej pamięci telefonu
-                return caches.match(request).then((cachedResponse) => {
-                    if (cachedResponse) {
-                        return cachedResponse;
-                    }
-                    // Fallback: jeśli jesteśmy offline, a otwieramy główną stronę
-                    if (request.mode === 'navigate') {
-                        return caches.match('/voice-order');
-                    }
-                });
-            })
+      caches.match(request).then(cached => {
+        if (cached) return cached;
+        return fetch(request).then(response => {
+          if (response.status === 200) {
+            caches.open(CACHE_NAME)
+              .then(cache => cache.put(request, response.clone()));
+          }
+          return response;
+        });
+      })
     );
+  } else {
+    event.respondWith(
+      fetch(request)
+        .then(response => {
+          if (response.status === 200) {
+            caches.open(CACHE_NAME)
+              .then(cache => cache.put(request, response.clone()));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+  }
 });

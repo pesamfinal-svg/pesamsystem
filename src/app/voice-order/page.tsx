@@ -91,25 +91,15 @@ export default function MobileVoiceOrderPage() {
         setOfflineList(list);
     };
 
-    // Funkcja do ręcznego wymuszenia pobrania plików offline (czyszczenie starego cache i reload)
+    // Bezpieczne pobieranie offline
     const handleDownloadOffline = async () => {
-        if (confirm("Pobrać najnowszą wersję aplikacji do trybu offline? Nastąpi przeładowanie strony.")) {
-            try {
-                // Usuwamy zepsute pliki z pamięci przeglądarki
-                if ('caches' in window) {
-                    const keys = await caches.keys();
-                    for (const key of keys) {
-                        if (key.includes('pesam-voice-offline')) {
-                            await caches.delete(key);
-                        }
-                    }
-                }
-                // Twarde przeładowanie - Service Worker automatycznie przechwyci i zapisze świeże pliki!
-                window.location.reload();
-            } catch (err) {
-                console.error("Błąd czyszczenia cache:", err);
-                window.location.reload();
-            }
+        try {
+            alert("Rozpoczynam zapisywanie plików dyktafonu w pamięci telefonu. Za chwilę ekran mrugnie.");
+            // Zwykłe przeładowanie. Nasz nowy silnik sw.js (v3) przejmie kontrolę
+            // i natychmiast zaciągnie wszystko do pamięci offline w bezpieczny sposób.
+            window.location.reload();
+        } catch (err: any) {
+            alert("Błąd: " + err.message);
         }
     };
 
