@@ -1,5 +1,5 @@
 // public/sw.js
-const CACHE_NAME = 'pesam-voice-v9';
+const CACHE_NAME = 'pesam-voice-v10';
 
 // Cachujemy TYLKO pliki które na pewno istnieją i są statyczne
 const PRECACHE = [
