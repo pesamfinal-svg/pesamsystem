@@ -36,6 +36,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Pulpit", path: "/dashboard", icon: "📊" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
         { name: "Zamówienia Głosowe", path: "/dashboard/voice-order", icon: "🎙️", requiredPermission: "voiceOrdering" },
+        
+        // PROFESJONALNY PANEL KOSZTORYSOWANIA
+        { name: "Kosztorysant RMS", path: "/dashboard/estimator", icon: "🧮", requiredPermission: "useEstimatingPanel" },
 
         // ZMIANA: Widoczne, jeśli ma JAKIEKOLWIEK uprawnienie do protokołów
         {
