@@ -40,7 +40,10 @@ export const ALL_PERMISSIONS = {
     // --- NOWE UPRAWNIENIA AI W SKLEPIE ---
     useAiCartInspector: "Sklep AI: Inspektor (Weryfikacja koszyka i podpowiedzi)",
     useAiOrderText: "Sklep AI: Kosztorysant - pisanie tekstu (Generowanie list i wyliczeń)",
-    useAiOrderVoice: "Sklep AI: Kosztorysant - dyktowanie głosem (Rozpoznawanie mowy do wyliczeń)"
+    useAiOrderVoice: "Sklep AI: Kosztorysant - dyktowanie głosem (Rozpoznawanie mowy do wyliczeń)",
+
+    // --- PROFESJONALNY PANEL KOSZTORYSOWANIA ---
+    useEstimatingPanel: "Kalkulator AI: Dostęp do profesjonalnego panelu kosztorysowania (RMS)"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

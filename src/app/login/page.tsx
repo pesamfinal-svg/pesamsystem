@@ -93,7 +93,7 @@ export default function LoginPage() {
                 alert("Hasło zostało zmienione poprawnie!");
                 const params = new URLSearchParams(window.location.search);
                 const redirectParam = params.get("redirect");
-                router.push(redirectParam || "/dashboard");
+                window.location.href = redirectParam || "/dashboard"; // TWARDY REDIRECT DLA TRYBU OFFLINE
             }
         } catch (err: any) {
             console.error("Błąd podczas zmiany hasła:", err);
