@@ -124,7 +124,7 @@ Przeszukaj dokument pod kątem klauzul ryzyka:
 - Kody CPV (określają branżę i możliwe podwykonawstwo)
 - Zabezpieczenie należytego wykonania (% wartości, czas utrzymania)
 
-Format każdego alertu (jedno konkretne zdanie bez użycia znaku "):
+Format każdego alertu (jedno konkretne zdanie):
 "⚠️ UWAGA: [opis ryzyka i jego wartość/parametr z dokumentu]"
 "❗ RYZYKO: [opis ryzyka wysokiego / blokera ofertowego]"
 "✅ OK: [klauzula zgodna ze standardem rynkowym]"
@@ -133,9 +133,16 @@ Format każdego alertu (jedno konkretne zdanie bez użycia znaku "):
 ────────────────────────────────────────────────────────
 ZADANIE C – KOMENTARZ INŻYNIERSKI (GENERUJ REPLY)
 ────────────────────────────────────────────────────────
-Napisz profesjonalne podsumowanie w 5-8 zdaniach.
-Używaj profesjonalnego stylu. Nie stosuj znaku " wewnątrz tekstu (używaj pojedynczego apostrofu ').
-Podawaj konkretne liczby i nazwy (nie 'duże kary' tylko 'kara 10 000 zł/dzień').
+Napisz profesjonalne podsumowanie w 5-8 zdaniach:
+1. Rodzaj i cel inwestycji (co budujesz/remontujesz?)
+2. Kluczowe dane techniczne (powierzchnia, kubatura, klasa budynku itp.)
+3. Ocena kompletności dokumentacji (czy brakuje rysunków/przedmiaru?)
+4. Najważniejsze ryzyko kontraktowe (1 zdanie)
+5. Informacja o wygenerowanej tabeli RMS (ile pozycji, ile działów)
+6. Rekomendacja dot. suwaków trendów (komentarz do przekazanych nastaw)
+
+STYL: Profesjonalny, branżowy. Adresat to doświadczony Kosztorysant – nie tłumacz
+podstaw. Podawaj konkretne liczby i nazwy (nie "duże kary" tylko "kara 10 000 zł/dzień").
 
 ════════════════════════════════════════════════════════
 FORMAT ODPOWIEDZI: WYŁĄCZNIE JSON (bez markdown, bez komentarzy, bez tekstu poza JSON)
@@ -268,6 +275,10 @@ function cleanAndSanitizeJson(raw: string): string {
 // ── Główny Handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  console.log("==================================================");
+  console.log("[Upload Parser] === ODEBRANO NOWE ZAPYTANIE ===");
+  console.log("==================================================");
+
   const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
@@ -291,16 +302,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const trendsRaw = formData.get("trends") as string | null;
 
   if (!file) {
+    console.error("[Upload Parser] Błąd: Brak pliku w żądaniu.");
     return NextResponse.json(
       { error: 'Brak pliku w żądaniu. Upewnij się że pole formData nosi nazwę "file".' },
       { status: 400 }
     );
   }
 
+  console.log(`[Upload Parser] Nazwa pliku: "${file.name}"`);
+  console.log(`[Upload Parser] Rozmiar pliku: ${file.size} bajtów`);
+  console.log(`[Upload Parser] Typ MIME pliku: "${file.type}"`);
+
   // ── 2. Walidacja pliku ────────────────────────────────────────────────────
 
   const validation = validateFile(file);
   if (!validation.valid) {
+    console.error(`[Upload Parser] Błąd walidacji pliku: ${validation.error}`);
     return NextResponse.json(
       { error: validation.error },
       { status: 422 }
@@ -311,6 +328,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const trends = parseTrends(trendsRaw);
   const trendsContext = buildTrendsContext(trends);
+  console.log("[Upload Parser] Odebrane parametry wyceny:", JSON.stringify(trends));
 
   // ── 4. Konwersja pliku do Base64 ──────────────────────────────────────────
 
@@ -318,6 +336,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const arrayBuffer = await file.arrayBuffer();
     base64Data = Buffer.from(arrayBuffer).toString("base64");
+    console.log("[Upload Parser] Pomyślnie przekonwertowano bufor pliku do Base64.");
   } catch (err) {
     console.error("[Upload Parser] Błąd konwersji pliku do Base64:", err);
     return NextResponse.json(
@@ -337,6 +356,9 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
 `.trim();
 
   let rawAiText: string;
+  console.log("[Upload Parser] Wysyłam zapytanie do Gemini Pro...");
+  const startTime = Date.now();
+
   try {
     const response = await ai.models.generateContent({
       model: MODEL_PRO,
@@ -365,9 +387,23 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
     });
     rawAiText = response.text ?? "";
 
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[Upload Parser] Odebrano odpowiedź od Gemini w czasie: ${duration} sek.`);
+    console.log(`[Upload Parser] Długość surowej odpowiedzi AI: ${rawAiText.length} znaków`);
+
     if (!rawAiText.trim()) {
       throw new Error("Model zwrócił pustą odpowiedź.");
     }
+
+    // DIAGNOSTYKA: LOGUJEMY PIERWSZE I OSTATNIE LINIE ODPOWIEDZI AI
+    console.log("--------------------------------------------------");
+    console.log("[Upload Parser] PIERWSZE 1000 ZNAKÓW ODPOWIEDZI AI:");
+    console.log(rawAiText.substring(0, 1000));
+    console.log("--------------------------------------------------");
+    console.log("[Upload Parser] OSTATNIE 1000 ZNAKÓW ODPOWIEDZI AI:");
+    console.log(rawAiText.substring(Math.max(0, rawAiText.length - 1000)));
+    console.log("--------------------------------------------------");
+
   } catch (err) {
     console.error("[Upload Parser] Błąd wywołania Gemini API:", err);
     const msg = err instanceof Error ? err.message : "Nieznany błąd modelu AI.";
@@ -381,6 +417,7 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
 
   // Oczyszczamy tekst przed parsowaniem
   const sanitizedText = cleanAndSanitizeJson(rawAiText);
+  console.log(`[Upload Parser] Rozmiar tekstu po sanitacji: ${sanitizedText.length} znaków.`);
 
   // ── 6. Parsowanie JSON z odpowiedzi AI ───────────────────────────────────
 
@@ -389,20 +426,24 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
   try {
     // Po włączeniu responseMimeType, odpowiedź to w 100% czysty JSON
     parsed = JSON.parse(sanitizedText);
-  } catch (parseErr) {
-    console.warn("[Upload Parser] Standardowy JSON.parse zawiódł, używam ekstraktora awaryjnego...");
+    console.log("[Upload Parser] Sukces! Standardowy JSON.parse() przetworzył dane bez błędów.");
+  } catch (parseErr: any) {
+    console.warn(`[Upload Parser] Standardowy JSON.parse zawiódł. Błąd: "${parseErr.message}". Uruchamiam ekstraktor awaryjny...`);
     const extracted = extractAllJSONObjects(rawAiText) as Array<{
       reply?: string;
       generatedSections?: EstimateSection[];
       riskAlerts?: string[];
     }>;
+    
+    console.log(`[Upload Parser] Ekstraktor awaryjny znalazł ${extracted.length} obiektów JSON.`);
     if (extracted.length > 0) {
       parsed = extracted[extracted.length - 1];
+      console.log("[Upload Parser] Pomyślnie odzyskano obiekt JSON z ekstraktora awaryjnego.");
     }
   }
 
   if (!parsed) {
-    console.warn("[Upload Parser] Nie udało się sparsować JSON. Surowa odpowiedź:", rawAiText.slice(0, 500));
+    console.error("[Upload Parser] KATASTROFA: Nie udało się odczytać żadnego JSON-a z odpowiedzi modelu.");
     const fallbackResponse: RmsEngineResponse = {
       reply:
         `⚠️ System przeanalizował dokument "${file.name}", ale struktura odpowiedzi nie mogła zostać automatycznie odczytana. ` +
@@ -410,6 +451,9 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
     };
     return NextResponse.json(fallbackResponse);
   }
+
+  console.log("[Upload Parser] Dane skompletowane pomyślnie. Wysyłam odpowiedź na frontend.");
+  console.log("==================================================");
 
   // ── 7. Kompletowanie i zwrot odpowiedzi ──────────────────────────────────
 
