@@ -9,6 +9,7 @@ import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 import { getStorage, ref, deleteObject } from "firebase/storage";
+import { hasPermission } from "@/lib/auth/permissions";
 
 // ─── TYPY ────────────────────────────────────────────────────────────────────
 
@@ -246,14 +247,32 @@ export default function ShopPage() {
     const [cartSuggestions, setCartSuggestions] = useState<{ 
         analysis: string, 
         systemsIdentified: string[], 
-        suggestedItems: string[],
+        suggestedItems: { name: string, unit: string }[],
         normalizedItems: { original: string, professional: string }[]
     } | null>(null);
+    const [suggestionQtys, setSuggestionQtys] = useState<Record<number, number>>({}); 
 
+    // 💬 AI States (Czat Kosztorysant)
+    const canUseAiText = hasPermission("useAiOrderText", user?.rolePermissions, user?.permissionOverrides);
+    const canUseAiVoice = hasPermission("useAiOrderVoice", user?.rolePermissions, user?.permissionOverrides);
+    
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [chatHistory, setChatHistory] = useState<{ role: 'user'|'ai', content: string, generatedItems?: any[] }[]>([]);
+    const [chatInputText, setChatInputText] = useState("");
+    const [isChatLoading, setIsChatLoading] = useState(false);
+    const [isChatRecording, setIsChatRecording] = useState(false);
+    const chatMediaRecorder = useRef<MediaRecorder | null>(null);
+    const chatAudioChunks = useRef<BlobPart[]>([]);
+    const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+    // Scroll czatu na dół przy nowej wiadomości
+    useEffect(() => {
+        if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }, [chatHistory, isChatLoading]);
     // Debounce ref dla zapisu draftu
     const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // ── Pobieranie danych + wczytanie draftu ──────────────────────────────────
+    
     // ── Pobieranie danych + wczytanie draftu ──────────────────────────────────
     useEffect(() => {
         if (!user) return;
@@ -470,13 +489,16 @@ export default function ShopPage() {
         }
     };
 
-    // Dodanie sugestii AI do wpisu ręcznego
-    const addSuggestionToCart = (suggestion: string) => {
+    // Dodanie sugestii AI do wpisu ręcznego (z ilością i j.m.)
+    const addSuggestionToCart = (suggestionName: string, unit: string, idx: number) => {
+        const qty = suggestionQtys[idx] || 1; // domyślnie 1
+        const textToAdd = `${qty}x ${suggestionName} (j.m. ${unit})`;
+
         const existingManual = cart.find(item => item.isManual);
         let newCart: CartItem[];
         
         if (existingManual) {
-            const mergedText = [existingManual.name, `1x ${suggestion}`].filter(Boolean).join("\n");
+            const mergedText = [existingManual.name, textToAdd].filter(Boolean).join("\n");
             newCart = cart.map(item =>
                 item.cartId === existingManual.cartId ? { ...item, name: mergedText } : item
             );
@@ -484,7 +506,7 @@ export default function ShopPage() {
             newCart = [...cart, {
                 cartId: crypto.randomUUID(),
                 isManual: true,
-                name: `1x ${suggestion}`,
+                name: textToAdd,
                 quantity: 1
             }];
         }
@@ -495,9 +517,15 @@ export default function ShopPage() {
         if (cartSuggestions) {
             setCartSuggestions({
                 ...cartSuggestions,
-                suggestedItems: cartSuggestions.suggestedItems.filter(s => s !== suggestion)
+                suggestedItems: cartSuggestions.suggestedItems.filter(s => s.name !== suggestionName)
             });
         }
+        // Czyścimy stan ilości dla tego indexu
+        setSuggestionQtys(prev => {
+            const next = { ...prev };
+            delete next[idx];
+            return next;
+        });
     };
 
     // Podmiana potocznej nazwy z koszyka na profesjonalną zasugerowaną przez AI
@@ -520,6 +548,99 @@ export default function ShopPage() {
                 normalizedItems: cartSuggestions.normalizedItems.filter(n => n.original !== original)
             });
         }
+    };
+
+    // 💬 Funkcje Czatu Kosztorysanta
+    const sendChatMessage = async (text: string, audioBase64: string | null = null) => {
+        if (!text && !audioBase64) return;
+        
+        // Dodaj wiadomość usera do historii wizualnej
+        const userDisplay = text ? text : "🎤 [Wiadomość głosowa]";
+        const newHistory = [...chatHistory, { role: 'user' as const, content: userDisplay }];
+        setChatHistory(newHistory);
+        setChatInputText("");
+        setIsChatLoading(true);
+
+        try {
+            const res = await fetch("/api/ai-chat-order", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    history: chatHistory.filter(h => !h.generatedItems), // Nie wysyłamy JSONów przedmiotów z powrotem, tylko tekst
+                    currentText: text,
+                    currentAudioBase64: audioBase64 
+                })
+            });
+
+            if (!res.ok) throw new Error("Błąd AI");
+            const data = await res.json();
+            
+            // Dodaj odpowiedź AI do historii
+            setChatHistory(prev => [...prev, { 
+                role: 'ai', 
+                content: data.reply,
+                generatedItems: data.generatedItems && data.generatedItems.length > 0 ? data.generatedItems : undefined
+            }]);
+
+        } catch (err) {
+            alert("Błąd połączenia z Kosztorysantem.");
+        } finally {
+            setIsChatLoading(false);
+        }
+    };
+
+    const startChatRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const recorder = new MediaRecorder(stream);
+            chatAudioChunks.current = [];
+            
+            recorder.ondataavailable = e => { if (e.data.size > 0) chatAudioChunks.current.push(e.data); };
+            recorder.onstop = async () => {
+                const blob = new Blob(chatAudioChunks.current, { type: 'audio/mp3' });
+                stream.getTracks().forEach(t => t.stop());
+                
+                // Konwersja na Base64
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = () => {
+                    const base64 = (reader.result as string).split(',')[1];
+                    sendChatMessage("", base64); // Wysyłamy tylko audio
+                };
+            };
+            
+            chatMediaRecorder.current = recorder;
+            recorder.start();
+            setIsChatRecording(true);
+        } catch (err) {
+            alert("Brak dostępu do mikrofonu.");
+        }
+    };
+
+    const stopChatRecording = () => {
+        if (chatMediaRecorder.current && isChatRecording) {
+            chatMediaRecorder.current.stop();
+            setIsChatRecording(false);
+        }
+    };
+
+    const applyGeneratedItemsToCart = (items: any[]) => {
+        const textLines = items.map(i => `${i.quantity}x ${i.name} (j.m. ${i.unit})`).join("\n");
+        const existingManual = cart.find(item => item.isManual);
+        let newCart: CartItem[];
+        
+        if (existingManual) {
+            newCart = cart.map(item =>
+                item.cartId === existingManual.cartId 
+                ? { ...item, name: [existingManual.name, textLines].filter(Boolean).join("\n") } 
+                : item
+            );
+        } else {
+            newCart = [...cart, { cartId: crypto.randomUUID(), isManual: true, name: textLines, quantity: 1 }];
+        }
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+        setIsChatOpen(false); // Zamykamy czat po dodaniu
     };
 
     // Pobieranie oczekujących notatek głosowych i automatyczne zaznaczenie ich do procesu
@@ -1038,17 +1159,35 @@ export default function ShopPage() {
                     />
                     <div className="relative bg-white w-full max-w-md h-full shadow-2xl flex flex-col animate-slide-in" style={{ pointerEvents: "auto" }}>
 
-                        {/* Nagłówek koszyka */}
-                        <div className="p-4 border-b flex justify-between items-center bg-slate-50">
-                            <div>
-                                <h2 className="text-lg font-black uppercase">Koszyk zamówienia</h2>
-                                <p className="text-[10px] text-slate-500 font-medium mt-0.5">
-                                    {user?.firstName} {user?.lastName} · {cart.length} poz.
-                                    {draftSaving && <span className="ml-2 text-green-500 italic">Zapisuję...</span>}
-                                    {!draftSaving && cart.length > 0 && <span className="ml-2 text-green-600">💾 Zapisano</span>}
-                                </p>
+                        {/* Nagłówek koszyka z przyciskami AI */}
+                        <div className="p-3 border-b flex flex-col gap-3 bg-slate-50">
+                            <div className="flex justify-between items-start">
+                                <div>
+                                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
+                                        Twój koszyk ({cart.length} poz.)
+                                        {draftSaving && <span className="ml-2 text-green-500 italic lowercase normal-case">Zapisuję...</span>}
+                                        {!draftSaving && cart.length > 0 && <span className="ml-2 text-green-600 lowercase normal-case">💾 Zapisano</span>}
+                                    </p>
+                                </div>
+                                <button onClick={() => setIsCartOpen(false)} className="text-2xl leading-none text-slate-400 hover:text-red-500">&times;</button>
                             </div>
-                            <button onClick={() => setIsCartOpen(false)} className="text-2xl text-slate-400 hover:text-red-500">&times;</button>
+                            
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={verifyCartWithAI}
+                                    disabled={isVerifyingCart || cart.length === 0}
+                                    className="flex-1 bg-slate-800 text-blue-100 py-2.5 rounded-xl text-[10px] font-black shadow-sm flex items-center justify-center gap-1.5 hover:bg-slate-700 transition-colors disabled:opacity-50 border border-slate-700"
+                                >
+                                    {isVerifyingCart ? <span className="animate-spin">⏳</span> : <span className="text-sm">🤖</span>}
+                                    SPRAWDŹ BRAKI
+                                </button>
+                                <button
+                                    onClick={() => setIsChatOpen(true)}
+                                    className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl text-[10px] font-black shadow-sm flex items-center justify-center gap-1.5 hover:bg-blue-700 transition-colors border border-blue-600"
+                                >
+                                    <span className="text-sm">💬</span> ZAMÓW Z AI
+                                </button>
+                            </div>
                         </div>
 
                         {/* Wybór budowy */}
@@ -1114,7 +1253,7 @@ export default function ShopPage() {
 
                             {/* 🤖 Wyniki Inspektora AI */}
                             {cartSuggestions && (
-                                <div className="bg-slate-800 text-white p-4 rounded-xl shadow-md mb-4 animate-fade-in relative border border-slate-700">
+                                <div className="bg-[#1e2330] text-white p-4 rounded-xl shadow-md mb-4 animate-fade-in relative border border-slate-700">
                                     <button 
                                         onClick={() => setCartSuggestions(null)} 
                                         className="absolute top-2 right-3 text-slate-400 hover:text-white font-bold text-lg"
@@ -1124,12 +1263,12 @@ export default function ShopPage() {
                                         <span className="text-lg">🤖</span>
                                         <h4 className="font-black text-[11px] uppercase tracking-wider text-blue-400">Analiza Koszyka</h4>
                                     </div>
-                                    <p className="text-[11px] leading-relaxed text-slate-300 font-medium mb-2">
+                                    <p className="text-[11px] leading-relaxed text-slate-300 font-medium mb-3">
                                         {cartSuggestions.analysis}
                                     </p>
                                     
                                     <div className="flex gap-1.5 flex-wrap mb-4">
-                                        {cartSuggestions.systemsIdentified.map((sys, idx) => (
+                                        {cartSuggestions.systemsIdentified?.map((sys, idx) => (
                                             <span key={idx} className="text-[9px] font-bold bg-slate-700 text-slate-300 px-2 py-0.5 rounded border border-slate-600">
                                                 {sys}
                                             </span>
@@ -1159,20 +1298,32 @@ export default function ShopPage() {
                                         </div>
                                     )}
                                     
-                                    {/* SEKCJA: Sugerowane braki */}
+                                    {/* SEKCJA: Sugerowane braki (Z ILOŚCIĄ) */}
                                     {cartSuggestions.suggestedItems && cartSuggestions.suggestedItems.length > 0 && (
                                         <div>
                                             <p className="text-[10px] font-black uppercase text-blue-300 mb-2 flex items-center gap-1">
                                                 <span>🛒</span> Sugerowane domówienia:
                                             </p>
-                                            <div className="space-y-1.5">
+                                            <div className="space-y-2">
                                                 {cartSuggestions.suggestedItems.map((item, idx) => (
-                                                    <div key={idx} className="flex justify-between items-center bg-blue-900/30 p-2.5 rounded-lg border border-blue-500/30">
-                                                        <span className="text-xs font-bold text-blue-100 pr-2 line-clamp-2 leading-tight">• {item}</span>
-                                                        <button 
-                                                            onClick={() => addSuggestionToCart(item)}
-                                                            className="text-[9px] font-black bg-blue-600 text-white px-3 py-1.5 rounded shadow-sm hover:bg-blue-500 flex-shrink-0 transition-colors"
-                                                        >+ DODAJ</button>
+                                                    <div key={idx} className="flex flex-col gap-2 bg-[#181d29] p-3 rounded-lg border border-blue-500/30">
+                                                        <span className="text-xs font-bold text-blue-100 leading-tight">• {item.name}</span>
+                                                        <div className="flex items-center gap-2 justify-between">
+                                                            <div className="flex items-center gap-1.5 bg-slate-900 px-2 py-1.5 rounded-md border border-slate-700">
+                                                                <input 
+                                                                    type="number" 
+                                                                    min="1"
+                                                                    value={suggestionQtys[idx] || 1}
+                                                                    onChange={e => setSuggestionQtys(prev => ({...prev, [idx]: Math.max(1, parseInt(e.target.value)||1)}))}
+                                                                    className="w-12 bg-transparent text-white text-center text-xs font-bold outline-none"
+                                                                />
+                                                                <span className="text-[10px] text-slate-400 border-l border-slate-700 pl-1.5">{item.unit}</span>
+                                                            </div>
+                                                            <button 
+                                                                onClick={() => addSuggestionToCart(item.name, item.unit, idx)}
+                                                                className="text-[10px] font-black bg-blue-600 text-white px-4 py-2 rounded-lg shadow-sm hover:bg-blue-500 transition-colors"
+                                                            >+ DODAJ</button>
+                                                        </div>
                                                     </div>
                                                 ))}
                                             </div>
@@ -1518,6 +1669,112 @@ export default function ShopPage() {
                     </div>
                 </div>
             )}
+
+            {/* ── CZAT AI KOSZTORYSANT ── */}
+            {isChatOpen && (
+                <div className="fixed inset-0 bg-black/70 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-[#1e2330] rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-fade-in border-t-4 border-blue-500 flex flex-col h-[85vh]">
+                        
+                        {/* Nagłówek Czatu */}
+                        <div className="p-5 bg-slate-900 border-b border-slate-700 flex justify-between items-center flex-shrink-0">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-xl shadow-lg border border-blue-400">🤖</div>
+                                <div>
+                                    <h3 className="font-black text-white uppercase tracking-tight text-lg">AI Kosztorysant</h3>
+                                    <p className="text-[10px] text-blue-400 font-bold">Wspierany przez Python Code Execution</p>
+                                </div>
+                            </div>
+                            <button onClick={() => setIsChatOpen(false)} className="text-2xl text-slate-400 hover:text-red-500 transition">&times;</button>
+                        </div>
+
+                        {/* Obszar Wiadomości */}
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#141822]">
+                            {chatHistory.length === 0 && (
+                                <div className="text-center mt-10">
+                                    <p className="text-5xl mb-4">👷</p>
+                                    <p className="text-slate-400 text-sm font-medium">Cześć! Powiedz mi lub napisz, co chcesz zbudować.<br/>Wyliczę dla Ciebie materiały co do sztuki.</p>
+                                </div>
+                            )}
+
+                            {chatHistory.map((msg, idx) => (
+                                <div key={idx} className={`flex flex-col max-w-[85%] ${msg.role === 'user' ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                                    <div className={`p-3.5 rounded-2xl text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-sm'}`}>
+                                        {msg.content}
+                                    </div>
+                                    
+                                    {/* Jeśli AI wygenerowało listę materiałów do dodania */}
+                                    {msg.generatedItems && (
+                                        <div className="mt-2 w-full bg-slate-800 border border-blue-500/50 p-4 rounded-xl shadow-lg">
+                                            <p className="text-[10px] font-black text-blue-400 uppercase mb-2">Wyliczone Materiały:</p>
+                                            <ul className="space-y-1 mb-4">
+                                                {msg.generatedItems.map((item: any, i: number) => (
+                                                    <li key={i} className="text-xs text-white flex justify-between border-b border-slate-700 pb-1">
+                                                        <span>{item.name}</span>
+                                                        <span className="font-bold text-green-400">{item.quantity} {item.unit}</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                            <button 
+                                                onClick={() => applyGeneratedItemsToCart(msg.generatedItems!)}
+                                                className="w-full bg-green-600 text-white py-2.5 rounded-lg text-xs font-black shadow-md hover:bg-green-500 transition-colors"
+                                            >
+                                                🛒 DODAJ WSZYSTKO DO KOSZYKA
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                            {isChatLoading && (
+                                <div className="flex items-center gap-2 text-slate-400 bg-slate-800 p-3 rounded-2xl w-fit rounded-bl-sm">
+                                    <span className="animate-spin text-lg">⏳</span> <span className="text-xs font-medium">AI myśli i liczy...</span>
+                                </div>
+                            )}
+                            <div ref={chatEndRef} />
+                        </div>
+
+                        {/* Obszar Wejścia (Input) */}
+                        <div className="p-4 bg-slate-900 border-t border-slate-700 flex gap-2 items-end">
+                            {canUseAiText && (
+                                <textarea
+                                    value={chatInputText}
+                                    onChange={e => setChatInputText(e.target.value)}
+                                    placeholder="Napisz wymiary, np. ściana 10m x 2.5m..."
+                                    className="flex-1 bg-slate-800 text-white border border-slate-700 rounded-xl p-3 text-sm outline-none focus:border-blue-500 resize-none max-h-32"
+                                    rows={chatInputText.split('\n').length > 1 ? 3 : 1}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault();
+                                            sendChatMessage(chatInputText);
+                                        }
+                                    }}
+                                />
+                            )}
+                            
+                            {canUseAiVoice && (
+                                <button
+                                    onPointerDown={startChatRecording}
+                                    onPointerUp={stopChatRecording}
+                                    onPointerLeave={stopChatRecording}
+                                    className={`flex-shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-xl transition-all shadow-lg select-none touch-none ${isChatRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-700 text-white hover:bg-slate-600'}`}
+                                >
+                                    {isChatRecording ? '🔴' : '🎙️'}
+                                </button>
+                            )}
+
+                            {canUseAiText && (
+                                <button
+                                    onClick={() => sendChatMessage(chatInputText)}
+                                    disabled={!chatInputText.trim() || isChatLoading}
+                                    className="flex-shrink-0 bg-blue-600 text-white px-5 py-3 rounded-xl font-black text-xs hover:bg-blue-500 disabled:opacity-50 transition-colors h-12 flex items-center"
+                                >
+                                    WYŚLIJ
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
         </div>
     );
 }

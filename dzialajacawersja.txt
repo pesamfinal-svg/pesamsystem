@@ -1,0 +1,1 @@
+commit -m "dziala wszystko ale chce wiecej"

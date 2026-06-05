@@ -17,18 +17,11 @@ export async function POST(req: Request) {
 
         const systemInstruction = `
             Jesteś bardzo doświadczonym Inżynierem Budowy PESAM. 
-            Twoim zadaniem jest analiza poniższej listy materiałów (koszyka).
-            Zwróć uwagę, że zamówienie może dotyczyć naraz wielu różnych robót (np. szalunki i ściany G-K).
+            Analizujesz koszyk z materiałami i sugerujesz braki technologiczne oraz poprawiasz nazewnictwo.
 
-            MASZ DWA ZADANIA:
-            
-            1. SUGEROWANIE BRAKÓW (Domówienia):
-            Analizuj logiczne systemy. Jeśli są płyty G-K i profile, ale brakuje wkrętów, gipsu lub siatki - zasugeruj je. Jeśli są cegły, a nie ma zaprawy - zasugeruj.
-            Zasugerowane nazwy muszą być od razu profesjonalnymi określeniami rynkowymi.
-            
-            2. NORMALIZACJA (Tłumaczenie na profesjonalny język):
-            Jeśli użytkownik w koszyku wpisał coś potocznie, np. "regipsy", "wkręty", "piana", "folia", to do tablicy 'normalizedItems' wrzuć oryginał oraz poprawioną, pełną nazwę rynkową (np. "Płyta G-K typ A 12.5mm", "Wkręty fosfatowane TN 3.5x25", "Pianka montażowa niskoprężna wężykowa").
-            Jeśli nazwa w koszyku jest w miarę poprawna, zignoruj ją (nie normalizuj na siłę).
+            ZASADY DLA SUGESTII (Domówień):
+            Jeśli brakuje kluczowych elementów do systemu (np. zaprawa do cegieł, wkręty i gips do G-K), zaproponuj je.
+            Dla KAŻDEJ sugestii musisz podać jej logiczną jednostkę rynkową w polu 'unit' (np. "szt.", "worki 25kg", "rolki", "op. 1000szt", "wiadro 20kg").
         `;
 
         const response = await ai.models.generateContent({
@@ -43,33 +36,31 @@ export async function POST(req: Request) {
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.1, // Niska temperatura, zero halucynacji
+                temperature: 0.1, 
                 responseMimeType: "application/json",
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        analysis: {
-                            type: Type.STRING,
-                            description: "Krótkie podsumowanie. Np. 'Zidentyfikowano materiały do suchej zabudowy oraz dociepleń. Wymagane doprecyzowanie nazw.'"
-                        },
-                        systemsIdentified: {
-                            type: Type.ARRAY,
-                            description: "Jakie systemy budowlane tu widzisz? np. ['Sucha zabudowa', 'Szalunki systemowe']",
-                            items: { type: Type.STRING }
-                        },
+                        analysis: { type: Type.STRING, description: "Krótkie podsumowanie analizy." },
+                        systemsIdentified: { type: Type.ARRAY, items: { type: Type.STRING } },
                         suggestedItems: {
                             type: Type.ARRAY,
-                            description: "Lista dokładnych nazw sugerowanych materiałów do dodania.",
-                            items: { type: Type.STRING }
-                        },
-                        normalizedItems: {
-                            type: Type.ARRAY,
-                            description: "Lista pozycji do poprawy. Jeśli użytkownik użył slangowych nazw, podaj oryginał i sugerowaną nazwę.",
+                            description: "Lista brakujących materiałów z jednostkami",
                             items: {
                                 type: Type.OBJECT,
                                 properties: {
-                                    original: { type: Type.STRING, description: "Dokładny tekst z koszyka np. 'regipsy'" },
-                                    professional: { type: Type.STRING, description: "Profesjonalna nazwa np. 'Płyta G-K typ A 12.5mm'" }
+                                    name: { type: Type.STRING, description: "Nazwa profesjonalna np. 'Gips szpachlowy'" },
+                                    unit: { type: Type.STRING, description: "Logiczna jednostka np. 'worki 25kg', 'szt.', 'rolki'" }
+                                }
+                            }
+                        },
+                        normalizedItems: {
+                            type: Type.ARRAY,
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    original: { type: Type.STRING },
+                                    professional: { type: Type.STRING }
                                 }
                             }
                         }
@@ -82,14 +73,11 @@ export async function POST(req: Request) {
         if (response.text) {
             let aiText = response.text.trim();
             aiText = aiText.replace(/```json/g, '').replace(/```/g, '').trim();
-            const parsedJson = JSON.parse(aiText);
-            return NextResponse.json(parsedJson, { status: 200 });
+            return NextResponse.json(JSON.parse(aiText), { status: 200 });
         } else {
-            throw new Error("Pusta odpowiedź z API");
+            throw new Error("Pusta odpowiedź API");
         }
-
     } catch (err: any) {
-        console.error("Błąd AI podczas weryfikacji koszyka:", err);
-        return NextResponse.json({ error: err.message || "Błąd wewnętrzny" }, { status: 500 });
+        return NextResponse.json({ error: err.message }, { status: 500 });
     }
 }
