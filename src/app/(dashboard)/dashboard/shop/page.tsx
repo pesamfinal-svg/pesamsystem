@@ -577,27 +577,64 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         setIsChatLoading(true);
 
         try {
-            const res = await fetch("/api/ai-chat-order", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    history: chatHistory.filter(h => !h.generatedItems), // Nie wysyłamy JSONów przedmiotów z powrotem, tylko tekst
-                    currentText: text,
-                    currentAudioBase64: audioBase64 
-                })
-            });
+            // 1. WYWOŁANIE DYSPOZYTORA (ROUTERA) - dla wiadomości tekstowych
+            let intent = "MATERIALY_ZAKUPY"; // Domyślny bezpieczny fallback
+            if (text) {
+                try {
+                    const routerRes = await fetch("/api/ai-router", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ currentText: text })
+                    });
+                    if (routerRes.ok) {
+                        const routerData = await routerRes.json();
+                        intent = routerData.intent || "MATERIALY_ZAKUPY";
+                        console.log("🤖 Dyspozytor wykrył intencję:", intent);
+                    }
+                } catch (routerErr) {
+                    console.error("Błąd dyspozytora, wymuszam fallback do zakupów:", routerErr);
+                }
+            }
 
-            if (!res.ok) throw new Error("Błąd AI");
-            const data = await res.json();
-            
-            // Dodaj odpowiedź AI do historii
-            setChatHistory(prev => [...prev, { 
-                role: 'ai', 
-                content: data.reply,
-                generatedItems: data.generatedItems && data.generatedItems.length > 0 ? data.generatedItems : undefined,
-                materialOptions: data.materialOptions, // <--- TO WYŚWIETLI PRZYCISKI
-                originalRequest: data.originalRequest  // <--- TO ZAPAMIĘTA WYMIARY DLA KALKULATORA
-            }]);
+            // 2. KIEROWANIE RUCHU NA PODSTAWIE INTENCJI
+            if (intent === "MATERIALY_ZAKUPY" || audioBase64) {
+                // ORYGINALNY, NIETKNIĘTY TOR ZAKUPOWY (100% BEZPIECZEŃSTWA)
+                const res = await fetch("/api/ai-chat-order", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                        history: chatHistory.filter(h => !h.generatedItems),
+                        currentText: text,
+                        currentAudioBase64: audioBase64 
+                    })
+                });
+
+                if (!res.ok) throw new Error("Błąd AI");
+                const data = await res.json();
+                
+                setChatHistory(prev => [...prev, { 
+                    role: 'ai', 
+                    content: data.reply,
+                    generatedItems: data.generatedItems && data.generatedItems.length > 0 ? data.generatedItems : undefined,
+                    materialOptions: data.materialOptions,
+                    originalRequest: data.originalRequest
+                }]);
+            } else {
+                // TYMCZASOWY PILOT DO TESTOWANIA NOWYCH INTENCJI
+                let replyText = "";
+                if (intent === "SPRZET_CZAS") {
+                    replyText = "🚧 Wykryłem, że Twoje zapytanie dotyczy maszynogodzin / czasu pracy sprzętu. Pracujemy nad podłączeniem bazy maszyn i norm KNR dla tego Agenta!";
+                } else if (intent === "WIEDZA_OGOLNA") {
+                    replyText = "📚 Wykryłem, że pytasz o teorię budowlaną lub wiedzę inżynieryjną. Wkrótce podłączymy tu bazy wiedzy technicznej!";
+                } else {
+                    replyText = "💬 Cześć! Jak mogę Ci pomóc na budowie?";
+                }
+
+                setChatHistory(prev => [...prev, { 
+                    role: 'ai', 
+                    content: replyText
+                }]);
+            }
 
         } catch (err) {
             alert("Błąd połączenia z Kosztorysantem.");
