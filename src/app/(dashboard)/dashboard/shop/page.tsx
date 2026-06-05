@@ -592,7 +592,9 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             setChatHistory(prev => [...prev, { 
                 role: 'ai', 
                 content: data.reply,
-                generatedItems: data.generatedItems && data.generatedItems.length > 0 ? data.generatedItems : undefined
+                generatedItems: data.generatedItems && data.generatedItems.length > 0 ? data.generatedItems : undefined,
+                materialOptions: data.materialOptions, // <--- TO WYŚWIETLI PRZYCISKI
+                originalRequest: data.originalRequest  // <--- TO ZAPAMIĘTA WYMIARY DLA KALKULATORA
             }]);
 
         } catch (err) {
