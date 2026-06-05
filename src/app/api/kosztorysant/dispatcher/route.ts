@@ -20,11 +20,7 @@ import {
   DispatcherResponse,
 } from "../_shared/types";
 
-const ai = new GoogleGenAI({
-  vertexai: true,
-  project: process.env.GCP_PROJECT_ID!,
-  location: "global",
-});
+export const dynamic = "force-dynamic"; // <--- WYMUSZA DYNAMICZNE BUDOWANIE
 
 const MODEL_FLASH = "gemini-3.5-flash";
 
@@ -60,6 +56,12 @@ export async function POST(
   req: NextRequest
 ): Promise<NextResponse<DispatcherResponse>> {
   try {
+    const ai = new GoogleGenAI({
+      vertexai: true,
+      project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+      location: "global",
+    });
+
     const body: DispatcherRequest = await req.json();
     const { request } = body;
 

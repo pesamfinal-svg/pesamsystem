@@ -45,11 +45,7 @@ import {
 
 // ── Klient AI (używany przez agentów wbudowanych w Orkiestratora) ─────────────
 
-const ai = new GoogleGenAI({
-  vertexai: true,
-  project: process.env.GCP_PROJECT_ID!,
-  location: "global",
-});
+export const dynamic = "force-dynamic";
 
 const MODEL_PRO   = "gemini-2.5-pro";
 const MODEL_FLASH = "gemini-3.5-flash";
@@ -68,6 +64,11 @@ function internalUrl(req: NextRequest, path: string): string {
 // ── Agent C: Ryzyka (wbudowany w Orkiestratora) ───────────────────────────────
 
 async function agentRyzyka(request: string): Promise<string[]> {
+  const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global",
+  });
   const systemInstruction = `
 Jesteś Prawnikiem Kontraktowym specjalizującym się w polskim Prawie Zamówień
 Publicznych (PZP, Dz.U. 2019 poz. 2019 ze zm.) oraz w budownictwie kubaturowym
@@ -202,6 +203,11 @@ async function agentRedaktor(
   riskAlerts: string[],
   trends: MarketTrends
 ): Promise<string> {
+  const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global",
+  });
   const systemInstruction = `
 Jesteś Głównym Inżynierem Kontraktu w systemie PESAM. Przemawiasz bezpośrednio
 do Głównego Kosztorysanta – doświadczonego eksperta budowlanego znającego branżę.
@@ -256,6 +262,12 @@ export async function POST(
   req: NextRequest
 ): Promise<NextResponse<RmsEngineResponse>> {
   try {
+    const ai = new GoogleGenAI({
+      vertexai: true,
+      project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+      location: "global",
+    });
+
     const body: RmsEngineRequest = await req.json();
     const { request, currentTrends, currentSections } = body;
 

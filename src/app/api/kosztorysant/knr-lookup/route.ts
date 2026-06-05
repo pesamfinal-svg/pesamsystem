@@ -26,11 +26,7 @@ import {
   extractAllJSONObjects,
 } from "../_shared/types";
 
-const ai = new GoogleGenAI({
-  vertexai: true,
-  project: process.env.GCP_PROJECT_ID!,
-  location: "global",
-});
+export const dynamic = "force-dynamic";
 
 const MODEL_PRO = "gemini-2.5-pro";
 
@@ -112,6 +108,12 @@ export async function POST(
   req: NextRequest
 ): Promise<NextResponse<KnrLookupResponse>> {
   try {
+    const ai = new GoogleGenAI({
+      vertexai: true,
+      project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+      location: "global",
+    });
+
     const body: KnrLookupRequest = await req.json();
     const { request, currentTrends, mode, currentSections } = body;
 
