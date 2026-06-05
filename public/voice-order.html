@@ -43,6 +43,7 @@
       display: flex; flex-direction: column;
       height: 100dvh; max-width: 480px;
       margin: 0 auto; position: relative;
+      justify-content: space-between; /* Wymusza rozepchanie góra-dół */
     }
 
     .screen { display: none; flex-direction: column; height: 100%; }
@@ -108,24 +109,37 @@
     #screen-noperm h2 { font-size: 18px; margin-top: 16px; }
     #screen-noperm p  { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
 
-    /* ─── MAIN ──────────────────────────────────── */
-    #screen-main { padding: 0; overflow: hidden; }
+    /* ─── MAIN (GÓRNA SEKCJA) ───────────────────── */
+    #screen-main { padding: 0; display: flex; flex-direction: column; height: 100%; }
 
-    /* Topbar */
+    /* Topbar - Zgodnie z rysunkiem 2: WiFi po lewej, OFFLINE i WYLOGUJ po prawej */
     .topbar {
       display: flex; justify-content: space-between; align-items: center;
-      padding: 14px 18px 12px;
+      padding: 10px 14px;
       border-bottom: 1px solid var(--border); flex-shrink: 0;
     }
-    .topbar-brand { display: flex; align-items: center; gap: 8px; }
-    .topbar-brand span {
-      font-family: var(--mono); font-size: 11px; font-weight: 700;
-      letter-spacing: .2em; color: var(--blue); text-transform: uppercase;
-    }
-    .topbar-icon { font-size: 18px; }
-    .topbar-right { display: flex; align-items: center; gap: 8px; }
+    .topbar-left { display: flex; align-items: center; gap: 8px; }
+    .topbar-right { display: flex; align-items: center; gap: 6px; }
 
-    /* WiFi badge */
+    /* WiFi-only toggle w topbarze */
+    .wifi-only-row { display: flex; align-items: center; gap: 8px; }
+    .wifi-only-label { font-family: var(--mono); font-size: 9px; color: var(--muted); text-transform: uppercase; font-weight: 700; }
+    .toggle { position: relative; width: 32px; height: 18px; flex-shrink: 0; }
+    .toggle input { display: none; }
+    .toggle-track {
+      position: absolute; inset: 0;
+      background: var(--border); border-radius: 10px;
+      transition: background .2s; cursor: pointer;
+    }
+    .toggle input:checked + .toggle-track { background: var(--blue); }
+    .toggle-thumb {
+      position: absolute; top: 2px; left: 2px;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #fff; transition: transform .2s; pointer-events: none;
+    }
+    .toggle input:checked ~ .toggle-thumb { transform: translateX(14px); }
+
+    /* WiFi/LTE status badge */
     .net-badge {
       font-family: var(--mono); font-size: 9px; font-weight: 700;
       padding: 4px 8px; border-radius: 6px; letter-spacing: .05em;
@@ -144,84 +158,43 @@
     .btn-sm-red { color: #f87171; border-color: rgba(239,68,68,.25); }
     .btn-sm-red:active { background: rgba(239,68,68,.1); }
 
+    /* WiFi warning banner */
+    .wifi-banner {
+      display: none; align-items: center; gap: 8px;
+      background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.25);
+      border-radius: 10px; padding: 8px 12px; margin: 8px 14px 0; flex-shrink: 0;
+      font-family: var(--mono); font-size: 10px; color: #fbbf24;
+    }
+    .wifi-banner.show { display: flex; }
+
     /* Site selector */
     .site-section {
-      margin: 12px 14px 0;
+      margin: 10px 14px 0;
       background: var(--bg2); border: 1.5px solid var(--border);
-      border-radius: 14px; padding: 12px 14px; flex-shrink: 0;
+      border-radius: 14px; padding: 10px 12px; flex-shrink: 0;
     }
     .section-label {
       font-family: var(--mono); font-size: 9px; font-weight: 700;
       letter-spacing: .15em; color: var(--muted); text-transform: uppercase;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
     .site-select {
       width: 100%; background: var(--bg3);
       border: 1.5px solid var(--border); border-radius: 10px;
-      padding: 11px 14px; font-size: 13px; font-weight: 700;
+      padding: 10px 12px; font-size: 13px; font-weight: 700;
       color: var(--text); font-family: var(--sans);
       outline: none; cursor: pointer;
       -webkit-appearance: none; appearance: none;
     }
     .site-single { font-size: 14px; font-weight: 700; color: var(--blue); }
 
-    /* ─── RECORD AREA ───────────────────────────── */
-    .record-area {
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      flex-shrink: 0; padding: 16px 20px 8px; gap: 12px;
-    }
-
-    .rec-timer {
-      font-family: var(--mono); font-size: 42px; font-weight: 700;
-      color: var(--red); letter-spacing: .08em;
-      visibility: hidden; height: 52px; line-height: 52px;
-    }
-    .rec-timer.visible { visibility: visible; }
-
-    /* Big record button */
-    .rec-btn {
-      width: 144px; height: 144px; border-radius: 50%;
-      border: none; cursor: pointer;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 4px;
-      font-family: var(--sans); font-weight: 900;
-      font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
-      color: #fff; touch-action: none;
-      transition: transform .1s;
-      position: relative;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .rec-btn:active { transform: scale(.94); }
-
-    .rec-btn-idle {
-      background: radial-gradient(circle at 35% 35%, #60a5fa, #2563eb);
-      box-shadow: 0 0 0 12px rgba(59,130,246,.1), 0 12px 40px rgba(59,130,246,.4);
-    }
-    .rec-btn-recording {
-      background: radial-gradient(circle at 35% 35%, #f87171, #dc2626);
-      box-shadow: 0 0 0 0 rgba(239,68,68,.4);
-      animation: pulse-ring 1.2s ease-in-out infinite;
-    }
-    @keyframes pulse-ring {
-      0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.35), 0 12px 40px rgba(239,68,68,.4); }
-      60%  { box-shadow: 0 0 0 20px rgba(239,68,68,0), 0 12px 40px rgba(239,68,68,.4); }
-      100% { box-shadow: 0 0 0 0 rgba(239,68,68,0), 0 12px 40px rgba(239,68,68,.4); }
-    }
-
-    .rec-btn-icon { font-size: 44px; line-height: 1; pointer-events: none; }
-    .rec-btn-label { font-size: 10px; font-weight: 900; letter-spacing: .12em; pointer-events: none; }
-
-    .rec-hint {
-      font-family: var(--mono); font-size: 10px; color: var(--muted);
-      text-align: center; height: 14px; line-height: 14px;
-    }
-    .rec-hint.recording { color: #f87171; }
-
-    /* ─── RECORDINGS LIST ───────────────────────── */
+    /* ─── RECORDINGS LIST (SZTYWNA GRANICA ROZMIARU) ─── */
     .recordings-section {
-      flex: 1; display: flex; flex-direction: column;
-      margin: 10px 14px 14px; min-height: 0;
+      margin: 10px 14px 0;
+      background: var(--bg2); border: 1.5px solid var(--border);
+      border-radius: 14px; padding: 12px;
+      max-height: 180px; /* ŚCIŚLE OKREŚLONA CZERWONA LINIA - lista nigdy nie wejdzie niżej */
+      display: flex; flex-direction: column; flex-shrink: 0;
     }
 
     .recordings-header {
@@ -236,23 +209,21 @@
 
     .btn-sync {
       background: var(--green); color: #052e16;
-      border: none; border-radius: 8px; padding: 6px 12px;
-      font-size: 10px; font-weight: 700; font-family: var(--mono);
+      border: none; border-radius: 8px; padding: 5px 10px;
+      font-size: 9px; font-weight: 900; font-family: var(--mono);
       letter-spacing: .05em; text-transform: uppercase;
       cursor: pointer; transition: opacity .15s;
-      white-space: nowrap;
     }
     .btn-sync:disabled { opacity: .5; cursor: default; }
     .btn-sync-mobile {
       background: rgba(251,191,36,.15); color: #fbbf24;
       border: 1.5px solid rgba(251,191,36,.3);
     }
-
     .btn-del-all {
       background: rgba(239,68,68,.1); color: #f87171;
       border: 1.5px solid rgba(239,68,68,.2);
-      border-radius: 8px; padding: 6px 10px;
-      font-size: 10px; font-weight: 700; font-family: var(--mono);
+      border-radius: 8px; padding: 5px 8px;
+      font-size: 9px; font-weight: 900; font-family: var(--mono);
       letter-spacing: .05em; text-transform: uppercase;
       cursor: pointer;
     }
@@ -269,125 +240,123 @@
       transition: width .4s ease;
     }
     .sync-status {
-      font-family: var(--mono); font-size: 10px; color: #60a5fa;
+      font-family: var(--mono); font-size: 9px; color: #60a5fa;
       margin-bottom: 6px; display: none; flex-shrink: 0;
     }
     .sync-status.visible { display: block; }
 
-    /* WiFi-only toggle */
-    .wifi-only-row {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 7px 12px; background: var(--bg2);
-      border: 1px solid var(--border); border-radius: 10px;
-      margin-bottom: 8px; flex-shrink: 0;
-    }
-    .wifi-only-label {
-      font-family: var(--mono); font-size: 10px; color: var(--muted);
-    }
-    .toggle {
-      position: relative; width: 36px; height: 20px; flex-shrink: 0;
-    }
-    .toggle input { display: none; }
-    .toggle-track {
-      position: absolute; inset: 0;
-      background: var(--border); border-radius: 10px;
-      transition: background .2s; cursor: pointer;
-    }
-    .toggle input:checked + .toggle-track { background: var(--blue); }
-    .toggle-thumb {
-      position: absolute; top: 3px; left: 3px;
-      width: 14px; height: 14px; border-radius: 50%;
-      background: #fff; transition: transform .2s; pointer-events: none;
-    }
-    .toggle input:checked ~ .toggle-thumb { transform: translateX(16px); }
-
-    /* List */
+    /* List container */
     .recordings-list {
       flex: 1; overflow-y: auto; display: flex;
-      flex-direction: column; gap: 6px;
-      padding-right: 2px; min-height: 0;
+      flex-direction: column; gap: 5px; min-height: 0;
     }
     .recordings-list::-webkit-scrollbar { width: 3px; }
-    .recordings-list::-webkit-scrollbar-track { background: transparent; }
     .recordings-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
     .list-empty {
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      flex: 1; gap: 8px; padding: 24px 0;
+      display: flex; align-items: center; justify-content: center;
+      flex: 1; gap: 8px; padding: 16px 0;
     }
-    .list-empty-icon { font-size: 32px; opacity: .4; }
+    .list-empty-icon { font-size: 20px; opacity: .4; }
     .list-empty-text {
-      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      font-family: var(--mono); font-size: 10px; color: var(--muted);
       text-align: center; font-style: italic;
     }
 
     /* Site group */
-    .site-group { margin-bottom: 4px; }
+    .site-group { margin-bottom: 2px; }
     .site-group-header {
-      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      font-family: var(--mono); font-size: 8px; font-weight: 700;
       color: var(--blue); letter-spacing: .1em; text-transform: uppercase;
-      padding: 4px 4px 6px;
+      padding: 2px 4px 4px;
     }
 
     /* Recording item */
     .rec-item {
       display: flex; align-items: center;
-      background: var(--bg2); border: 1.5px solid var(--border);
-      border-radius: 10px; padding: 10px 10px 10px 12px;
-      gap: 8px; transition: border-color .15s;
+      background: var(--bg3); border: 1.5px solid var(--border);
+      border-radius: 8px; padding: 8px 10px;
+      gap: 6px;
     }
-    .rec-item.status-done { border-color: rgba(34,197,94,.2); }
-    .rec-item.status-error { border-color: rgba(239,68,68,.25); }
-    .rec-item.status-sending { border-color: rgba(59,130,246,.25); }
-
     .rec-item-info { flex: 1; min-width: 0; }
-    .rec-item-meta {
-      display: flex; align-items: center; gap: 6px;
-    }
-    .rec-item-num {
-      font-family: var(--mono); font-size: 9px; color: var(--muted);
-      flex-shrink: 0; min-width: 18px;
-    }
-    .rec-item-time {
-      font-size: 11px; font-weight: 700; color: var(--text);
-      font-family: var(--mono);
-    }
-    .rec-item-dur {
-      font-size: 10px; color: var(--muted); font-family: var(--mono);
-    }
+    .rec-item-meta { display: flex; align-items: center; gap: 6px; }
+    .rec-item-time { font-size: 10px; font-weight: 700; color: var(--text); font-family: var(--mono); }
+    .rec-item-dur { font-size: 9px; color: var(--muted); font-family: var(--mono); }
 
     .rec-item-status {
-      font-family: var(--mono); font-size: 9px; font-weight: 700;
-      padding: 3px 7px; border-radius: 6px; flex-shrink: 0;
-      text-transform: uppercase;
+      font-family: var(--mono); font-size: 8px; font-weight: 700;
+      padding: 2px 6px; border-radius: 5px; flex-shrink: 0;
     }
     .s-pending  { background: rgba(251,191,36,.12); color: #fbbf24; }
     .s-sending  { background: rgba(59,130,246,.12); color: #60a5fa; animation: blink 1s infinite; }
     .s-done     { background: rgba(34,197,94,.12);  color: #4ade80; }
     .s-error    { background: rgba(239,68,68,.12);  color: #f87171; }
-    @keyframes blink { 0%,100%{opacity:1}50%{opacity:.4} }
 
-    /* Play button */
     .btn-play {
-      background: var(--bg3); border: 1.5px solid var(--border);
-      border-radius: 8px; width: 32px; height: 32px;
+      background: var(--bg); border: 1.5px solid var(--border);
+      border-radius: 6px; width: 28px; height: 28px;
       display: flex; align-items: center; justify-content: center;
-      cursor: pointer; flex-shrink: 0; font-size: 14px;
-      transition: background .15s;
+      cursor: pointer; flex-shrink: 0; font-size: 12px;
+      color: var(--text);
     }
-    .btn-play:active { background: var(--border); }
     .btn-play.playing { border-color: rgba(59,130,246,.4); background: rgba(59,130,246,.1); }
 
     .btn-del-item {
       background: none; border: none; color: #f87171;
-      font-size: 20px; cursor: pointer; padding: 0 2px;
+      font-size: 18px; cursor: pointer; padding: 0 2px;
       line-height: 1; flex-shrink: 0; opacity: .7;
-      transition: opacity .15s;
     }
-    .btn-del-item:active { opacity: 1; }
 
-    /* ─── TOAST ──────────────────────────────────── */
+    /* ─── RECORD AREA (DOLNA STREFA KCIUKA) ──────────────── */
+    .record-area {
+      flex: 1; /* Zabiera całą wolną przestrzeń na dole */
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: flex-end; /* Pcha przycisk na sam dół */
+      padding-bottom: 24px; gap: 10px;
+    }
+
+    .rec-timer {
+      font-family: var(--mono); font-size: 40px; font-weight: 700;
+      color: var(--red); letter-spacing: .08em;
+      visibility: hidden; height: 44px; line-height: 44px;
+    }
+    .rec-timer.visible { visibility: visible; }
+
+    /* Big record button */
+    .rec-btn {
+      width: 140px; height: 140px; border-radius: 50%;
+      border: none; cursor: pointer;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 4px;
+      font-family: var(--sans); font-weight: 900;
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+      color: #fff; touch-action: none;
+      transition: transform .1s;
+      position: relative;
+      -webkit-touch-callout: none; /* Zablokowanie systemowego lupy na iOS */
+    }
+    .rec-btn:active { transform: scale(.94); }
+
+    .rec-btn-idle {
+      background: radial-gradient(circle at 35% 35%, #60a5fa, #2563eb);
+      box-shadow: 0 0 0 10px rgba(59,130,246,.1), 0 10px 32px rgba(59,130,246,.4);
+    }
+    .rec-btn-recording {
+      background: radial-gradient(circle at 35% 35%, #f87171, #dc2626);
+      box-shadow: 0 0 0 0 rgba(239,68,68,.4);
+      animation: pulse-ring 1.2s ease-in-out infinite;
+    }
+
+    .rec-btn-icon { font-size: 42px; line-height: 1; pointer-events: none; }
+    .rec-btn-label { font-size: 10px; font-weight: 900; letter-spacing: .12em; pointer-events: none; }
+
+    .rec-hint {
+      font-family: var(--mono); font-size: 10px; color: var(--muted);
+      text-align: center; height: 14px; line-height: 14px;
+    }
+    .rec-hint.recording { color: #f87171; }
+
+    /* Toast */
     #toast {
       position: fixed; bottom: 24px; left: 50%;
       transform: translateX(-50%) translateY(80px);
@@ -403,16 +372,6 @@
     #toast.success  { border-color: rgba(34,197,94,.4);  color: #4ade80; }
     #toast.error    { border-color: rgba(239,68,68,.4);  color: #f87171; }
     #toast.warning  { border-color: rgba(251,191,36,.4); color: #fbbf24; }
-
-    /* wifi warning banner */
-    .wifi-banner {
-      display: none; align-items: center; gap: 8px;
-      background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.25);
-      border-radius: 10px; padding: 8px 12px; margin: 0 14px 6px; flex-shrink: 0;
-      font-family: var(--mono); font-size: 10px; color: #fbbf24;
-    }
-    .wifi-banner.show { display: flex; }
-    .wifi-banner strong { font-weight: 700; }
   </style>
 </head>
 <body>
@@ -455,11 +414,17 @@
   <!-- MAIN -->
   <div id="screen-main" class="screen">
 
-    <!-- Topbar -->
+    <!-- Topbar - Toggle WiFi po lewej, status i WYLOGUJ po prawej -->
     <div class="topbar">
-      <div class="topbar-brand">
-        <span class="topbar-icon">🎙️</span>
-        <span>PESAM VOICE</span>
+      <div class="topbar-left">
+        <div class="wifi-only-row">
+          <span class="wifi-only-label">📶 Tylko WiFi</span>
+          <label class="toggle">
+            <input type="checkbox" id="wifi-only-toggle" checked />
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
       </div>
       <div class="topbar-right">
         <div class="net-badge net-off" id="net-badge">OFFLINE</div>
@@ -470,7 +435,7 @@
     <!-- WiFi warning banner -->
     <div class="wifi-banner" id="wifi-banner">
       <span>⚠️</span>
-      <div><strong>Dane mobilne</strong> — wysyłanie może zużyć transfer. Włącz WiFi lub wyłącz opcję "Tylko WiFi".</div>
+      <div><strong>LTE</strong> — wysyłanie może zużyć pakiet danych.</div>
     </div>
 
     <!-- Site selector -->
@@ -483,41 +448,17 @@
       </div>
     </div>
 
-    <!-- Record area -->
-    <div class="record-area">
-      <div class="rec-timer" id="rec-timer">00:00</div>
-
-      <button class="rec-btn rec-btn-idle" id="rec-btn"
-              aria-label="Przytrzymaj aby nagrywać">
-        <span class="rec-btn-icon" id="rec-icon">🎙️</span>
-        <span class="rec-btn-label" id="rec-label">NAGRAJ</span>
-      </button>
-
-      <div class="rec-hint" id="rec-hint">Przytrzymaj aby nagrać • Puść aby zapisać</div>
-    </div>
-
-    <!-- Recordings section -->
+    <!-- Recordings section - Sztywna granica max-height -->
     <div class="recordings-section">
-
-      <!-- Sync bar -->
+      <!-- Sync progress bar -->
       <div class="sync-bar" id="sync-bar"><div class="sync-bar-fill" id="sync-bar-fill" style="width:0%"></div></div>
       <div class="sync-status" id="sync-status"></div>
 
-      <!-- WiFi-only toggle -->
-      <div class="wifi-only-row">
-        <span class="wifi-only-label">📶 Synchronizuj tylko przez WiFi</span>
-        <label class="toggle">
-          <input type="checkbox" id="wifi-only-toggle" checked />
-          <div class="toggle-track"></div>
-          <div class="toggle-thumb"></div>
-        </label>
-      </div>
-
       <!-- Header -->
       <div class="recordings-header">
-        <span class="recordings-title">Nagrania w telefonie (<span id="rec-count">0</span>)</span>
+        <span class="recordings-title">Notatki w telefonie (<span id="rec-count">0</span>)</span>
         <div class="recordings-actions">
-          <button class="btn-del-all" id="btn-del-all" style="display:none">🗑 Usuń wszystkie</button>
+          <button class="btn-del-all" id="btn-del-all" style="display:none">🗑 Usuń</button>
           <button class="btn-sync" id="btn-sync" style="display:none">🔄 Wyślij</button>
         </div>
       </div>
@@ -529,6 +470,18 @@
           <div class="list-empty-text">Brak nagrań. Wszystko wysłane.</div>
         </div>
       </div>
+    </div>
+
+    <!-- Record area (Dolna strefa kciuka) -->
+    <div class="record-area">
+      <div class="rec-timer" id="rec-timer">00:00</div>
+
+      <button class="rec-btn rec-btn-idle" id="rec-btn" aria-label="Przytrzymaj aby nagrywać">
+        <span class="rec-btn-icon" id="rec-icon">🎙️</span>
+        <span class="rec-btn-label" id="rec-label">NAGRAJ</span>
+      </button>
+
+      <div class="rec-hint" id="rec-hint">Przytrzymaj aby nagrać • Puść aby zapisać</div>
     </div>
 
   </div><!-- /screen-main -->
@@ -559,7 +512,15 @@ const firebaseConfig = {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(reg => console.log('SW PWA Zarejestrowany', reg.scope))
+      .catch(err => console.error('Błąd rejestracji SW', err));
+      
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'SW_UPDATED') {
+        window.location.reload();
+      }
+    });
   });
 }
 
@@ -624,7 +585,7 @@ let isSyncing     = false;
 let currentAudio  = null; // currently playing Audio obj
 let currentPlayId = null;
 let pttMode       = true; // push-to-talk vs toggle
-let autoSyncDebounceTimer = null; // Zabezpieczenie przez "migotaniem sieci"
+let autoSyncDebounceTimer = null; // Zabezpieczenie przed "migotaniem sieci"
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function showScreen(id) {
@@ -908,6 +869,9 @@ recBtn.addEventListener('pointerleave', e => {
   }
 });
 
+// Zablokowanie systemowego menu kontekstowego przy długim naciśnięciu
+recBtn.addEventListener('contextmenu', e => e.preventDefault());
+
 // Also allow tap-to-toggle as fallback for desktop / accessibility
 recBtn.addEventListener('click', () => {
   if (!pttMode) {
@@ -957,7 +921,12 @@ async function startRecording() {
       pttStream.getTracks().forEach(t => t.stop());
       await renderList();
       toast(`Nagranie zapisane (${fmt(dur)}) ✓`, 'success');
-      checkAutoSync();
+      
+      // Auto-sync dopiero po nagraniu (zabezpieczenie)
+      clearTimeout(autoSyncDebounceTimer);
+      autoSyncDebounceTimer = setTimeout(() => {
+        if (!isRecording) checkAutoSync();
+      }, 1500);
     };
 
     mediaRecorder.start();
@@ -1172,8 +1141,9 @@ async function handleSync() {
   for (let i = 0; i < toSend.length; i++) {
     const rec = toSend[i];
 
+    // POPRAWKA: Sprawdzaj internet przed każdym plikiem
     if (!navigator.onLine) {
-      toast('Zerwano połączenie — wznowię gdy wróci sieć', 'error');
+      toast('Wznowię wysyłanie gdy powróci sieć', 'error');
       break;
     }
 
@@ -1257,4 +1227,3 @@ updateNetBadge();
 </script>
 </body>
 </html>
-
