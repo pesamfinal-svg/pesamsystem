@@ -1,1 +1,2 @@
 commit -m "dziala wszystko ale chce wiecej"
+git commit -m "dziala wykurwiscie"

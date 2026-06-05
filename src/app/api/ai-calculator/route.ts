@@ -54,11 +54,16 @@ export async function POST(req: Request) {
             
             Zwróć DOKŁADNIE JEDEN obiekt JSON w formacie:
             {
-                "reply": "Krótkie podsumowanie, np. 'Oto wyliczone materiały dla Twojej ścianki (uwzględniłem zapas na docinki):'",
+                "reply": "Krótkie podsumowanie, np. 'Oto wyliczone materiały dla Twojej ścianki...'",
+                "reasoning": [
+                    "Wymiary: ściana 4.0m × 2.5m = 10.0 m²",
+                    "Słupki CW: ⌈4.0 / 0.60⌉ + 1 = 8 szt. → 8 × profil 3m (nie skracamy i nie sztukujemy!)",
+                    "Profile UW (góra i dół): 2 × ⌈4.0 / 4.0m⌉ = 2 szt.",
+                    "Płyty G-K: 10.0 m² / (1.2×2.6m) = 3.2 → 4 szt. × 2 strony = 8 szt. + 10% odpadu = 9 szt."
+                ],
+                "asciiDrawing": "PROFIL UW (SUFITOWY) - 400 cm\n================================\n||      |      |      |      ||\n||      |      |      |      ||\nCW      CW     CW     CW     CW\n\nNarysuj tutaj zwięzły szkic ASCII (używając znaków |, -, =, +, itp.) odpowiedni do zadania (np. przekrój ocieplenia, układ profili, rzut siatki). Używaj znaków nowej linii (\\n).",
                 "generatedItems": [
-                    { "name": "Płyta G-K Wodoodporna", "quantity": 10, "unit": "szt." },
-                    { "name": "Profil CW 75 (dł. 3m)", "quantity": 15, "unit": "szt." },
-                    { "name": "Wkręty (opakowanie)", "quantity": 1, "unit": "op." }
+                    { "name": "Płyta G-K Wodoodporna", "quantity": 10, "unit": "szt." }
                 ]
             }
         `;

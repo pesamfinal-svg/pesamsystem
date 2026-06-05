@@ -263,7 +263,9 @@ export default function ShopPage() {
     content: string, 
     generatedItems?: any[],
     materialOptions?: { category: string, options: string[] }[], // Nowe: Opcje od Doradcy
-    originalRequest?: string // Nowe: Zapamiętanie wymiarów do kalkulatora
+    originalRequest?: string, // Nowe: Zapamiętanie wymiarów do kalkulatora
+    reasoning?: string[],    // <--- DODANE: Tok myślenia / Obliczenia
+    asciiDrawing?: string    // <--- DODANE: Rysunek ASCII
 }[]>([]);
 
 // Stan do przechowywania zaznaczonych opcji w czacie
@@ -629,7 +631,9 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             setChatHistory(prev => [...prev, { 
                 role: 'ai', 
                 content: data.reply,
-                generatedItems: data.generatedItems
+                generatedItems: data.generatedItems,
+                reasoning: data.reasoning,      // <--- ZAPIS TOKU OBLICZEŃ
+                asciiDrawing: data.asciiDrawing // <--- ZAPIS RYSUNKU ASCII
             }]);
         } catch (err) {
             alert("Błąd połączenia z Kalkulatorem.");
@@ -1786,6 +1790,32 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                     <div className={`p-3.5 rounded-2xl text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-sm'}`}>
                                         {msg.content}
                                     </div>
+
+                                    {/* TOK OBLICZEŃ AI */}
+                                    {msg.reasoning && msg.reasoning.length > 0 && (
+                                        <div className="mt-2 w-full bg-slate-800 border border-slate-700 p-4 rounded-xl shadow-lg">
+                                            <p className="text-[10px] font-black text-slate-400 uppercase mb-2 tracking-wider flex items-center gap-1.5">
+                                                <span>🧮</span> Założenia i obliczenia:
+                                            </p>
+                                            <ul className="space-y-1.5 pl-4 list-decimal text-xs text-slate-300 font-medium leading-relaxed marker:text-slate-500">
+                                                {msg.reasoning.map((step, i) => (
+                                                    <li key={i} className="pl-1">{step}</li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+
+                                    {/* RYSUNEK POGLĄDOWY ASCII */}
+                                    {msg.asciiDrawing && (
+                                        <div className="mt-2 w-full bg-[#0d1117] border border-slate-700 p-4 rounded-xl shadow-lg overflow-x-auto">
+                                            <p className="text-[10px] font-black text-slate-400 uppercase mb-2 tracking-wider flex items-center gap-1.5">
+                                                <span>📐</span> Schemat poglądowy:
+                                            </p>
+                                            <pre className="text-[11px] text-blue-300 font-mono leading-tight whitespace-pre bg-[#0d1117]">
+                                                {msg.asciiDrawing}
+                                            </pre>
+                                        </div>
+                                    )}
 
                                     {/* Jeśli AI 1 (Doradca) wygenerowało opcje do wyboru */}
                                     {msg.materialOptions && msg.materialOptions.length > 0 && (
