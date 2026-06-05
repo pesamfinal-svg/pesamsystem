@@ -258,7 +258,16 @@ export default function ShopPage() {
     const canUseAiVoice = hasPermission("useAiOrderVoice", user?.rolePermissions, user?.permissionOverrides);
     
     const [isChatOpen, setIsChatOpen] = useState(false);
-    const [chatHistory, setChatHistory] = useState<{ role: 'user'|'ai', content: string, generatedItems?: any[] }[]>([]);
+    const [chatHistory, setChatHistory] = useState<{ 
+    role: 'user'|'ai', 
+    content: string, 
+    generatedItems?: any[],
+    materialOptions?: { category: string, options: string[] }[], // Nowe: Opcje od Doradcy
+    originalRequest?: string // Nowe: Zapamiętanie wymiarów do kalkulatora
+}[]>([]);
+
+// Stan do przechowywania zaznaczonych opcji w czacie
+const [chatSelections, setChatSelections] = useState<Record<number, Record<string, string>>>({});
     const [chatInputText, setChatInputText] = useState("");
     const [isChatLoading, setIsChatLoading] = useState(false);
     const [isChatRecording, setIsChatRecording] = useState(false);
@@ -588,6 +597,40 @@ export default function ShopPage() {
 
         } catch (err) {
             alert("Błąd połączenia z Kosztorysantem.");
+        } finally {
+            setIsChatLoading(false);
+        }
+    };
+
+    // Funkcja wywołująca AI nr 2 (Kalkulator)
+    const sendToCalculator = async (msgIndex: number, originalRequest: string) => {
+        const selections = chatSelections[msgIndex];
+        if (!selections) return alert("Wybierz najpierw parametry materiałów!");
+
+        const selectionText = Object.entries(selections).map(([cat, opt]) => `${cat}: ${opt}`).join(", ");
+        const promptForCalculator = `Wymiary/Zadanie: ${originalRequest}\nWybrane materiały: ${selectionText}`;
+
+        // Dodajemy info do czatu
+        setChatHistory(prev => [...prev, { role: 'user', content: `Oblicz dla: ${selectionText}` }]);
+        setIsChatLoading(true);
+
+        try {
+            const res = await fetch("/api/ai-calculator", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ request: promptForCalculator })
+            });
+
+            if (!res.ok) throw new Error("Błąd Kalkulatora AI");
+            const data = await res.json();
+            
+            setChatHistory(prev => [...prev, { 
+                role: 'ai', 
+                content: data.reply,
+                generatedItems: data.generatedItems
+            }]);
+        } catch (err) {
+            alert("Błąd połączenia z Kalkulatorem.");
         } finally {
             setIsChatLoading(false);
         }
@@ -1741,6 +1784,44 @@ export default function ShopPage() {
                                     <div className={`p-3.5 rounded-2xl text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-sm'}`}>
                                         {msg.content}
                                     </div>
+
+                                    {/* Jeśli AI 1 (Doradca) wygenerowało opcje do wyboru */}
+                                    {msg.materialOptions && msg.materialOptions.length > 0 && (
+                                        <div className="mt-2 w-full bg-slate-800 border border-orange-500/50 p-4 rounded-xl shadow-lg">
+                                            <p className="text-[10px] font-black text-orange-400 uppercase mb-3">Doprecyzuj parametry przed obliczeniami:</p>
+                                            <div className="space-y-4 mb-4">
+                                                {msg.materialOptions.map((optionGroup, groupIdx) => (
+                                                    <div key={groupIdx} className="bg-slate-900/50 p-3 rounded-lg border border-slate-700">
+                                                        <p className="text-xs font-bold text-slate-300 mb-2">{optionGroup.category}:</p>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {optionGroup.options.map((opt, optIdx) => {
+                                                                const isSelected = chatSelections[idx]?.[optionGroup.category] === opt;
+                                                                return (
+                                                                    <button
+                                                                        key={optIdx}
+                                                                        onClick={() => setChatSelections(prev => ({
+                                                                            ...prev,
+                                                                            [idx]: { ...(prev[idx] || {}), [optionGroup.category]: opt }
+                                                                        }))}
+                                                                        className={`px-3 py-1.5 text-[11px] font-bold rounded-lg border transition-colors ${isSelected ? 'bg-orange-600 text-white border-orange-500' : 'bg-slate-800 text-slate-400 border-slate-600 hover:border-orange-500/50 hover:text-slate-200'}`}
+                                                                    >
+                                                                        {opt}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <button 
+                                                onClick={() => sendToCalculator(idx, msg.originalRequest || msg.content)}
+                                                disabled={Object.keys(chatSelections[idx] || {}).length !== msg.materialOptions.length}
+                                                className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-xs font-black shadow-md hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                🧮 OBLICZ ILOŚCI MATERIAŁÓW
+                                            </button>
+                                        </div>
+                                    )}
                                     
                                     {/* Jeśli AI wygenerowało listę materiałów do dodania */}
                                     {msg.generatedItems && msg.generatedItems.length > 0 && (
