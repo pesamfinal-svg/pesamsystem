@@ -9,7 +9,7 @@ export const ALL_PERMISSIONS = {
     viewInventory: "Katalog: Przeglądanie sprzętu",
     manageInventory: "Katalog: Dodawanie i edycja sprzętu",
     createOrder: "Sklep: Składanie zamówień na budowę",
-    voiceOrdering: "Sklep: Zamawianie głosowe (Offline/Budowa)", // <-- NOWE UPRAWNIENIE
+    voiceOrdering: "Sklep: Zamawianie głosowe (Dyktafon offline)",
     manageOrders: "Magazyn: Realizacja zamówień",
 
     protocolsIssue: "Protokoły: Wydania z magazynu",
@@ -19,8 +19,8 @@ export const ALL_PERMISSIONS = {
     viewProtocolHistory: "Protokoły: Historia i zaawansowana wyszukiwarka",
 
     viewSiteState: "Podgląd: Stany na budowach",
-    manageProjectCloseouts: "Zarządzanie: Rozliczanie i zamykanie budów", // <-- NOWE UPRAWNIENIE
-    approveProjectCloseouts: "Podpisywanie i akceptacja zamknięć budów (Kierownik / Dyrekcja)", // <-- NOWE UPRAWNIENIE
+    manageProjectCloseouts: "Zarządzanie: Rozliczanie i zamykanie budów",
+    approveProjectCloseouts: "Podpisywanie i akceptacja zamknięć budów (Kierownik / Dyrekcja)",
 
     viewClaims: "Sąd: Dostęp do panelu (Widzi tylko swoje sprawy)",
     viewAllClaims: "Sąd: Widok wszystkich spraw w firmie",
@@ -31,11 +31,16 @@ export const ALL_PERMISSIONS = {
     viewVehicles: "Flota: Podgląd bazy pojazdów i historii napraw",
     manageVehicles: "Flota: Zarządzanie (dodawanie/edycja pojazdów i napraw)",
 
-    // --- NOWE UPRAWNIENIA DLA PRACOWNIKÓW FIZYCZNYCH ---
+    // --- UPRAWNIENIA PRACOWNIKÓW FIZYCZNYCH ---
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",
     workersIssueWarehouse: "Pracownicy fizyczni: Wydawanie z Magazynu Głównego",
     workersIssueSite: "Pracownicy fizyczni: Wydawanie ze swoich budów",
-    workersAddToSite: "Wprowadź na stan budowy"
+    workersAddToSite: "Wprowadź na stan budowy",
+
+    // --- NOWE UPRAWNIENIA AI W SKLEPIE ---
+    useAiCartInspector: "Sklep AI: Inspektor (Weryfikacja koszyka i podpowiedzi)",
+    useAiOrderText: "Sklep AI: Kosztorysant - pisanie tekstu (Generowanie list i wyliczeń)",
+    useAiOrderVoice: "Sklep AI: Kosztorysant - dyktowanie głosem (Rozpoznawanie mowy do wyliczeń)"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

@@ -236,11 +236,19 @@ export default function ShopPage() {
     const [draftSaving, setDraftSaving] = useState(false);
 
     // UI
-    // UI
     const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
     const [isManualModalOpen, setIsManualModalOpen] = useState(false);
     const [manualText, setManualText] = useState("");
     const [bulkPickModal, setBulkPickModal] = useState<{ item: InventoryItem; qty: number } | null>(null);
+
+    // 🤖 AI States (Weryfikacja koszyka)
+    const [isVerifyingCart, setIsVerifyingCart] = useState(false);
+    const [cartSuggestions, setCartSuggestions] = useState<{ 
+        analysis: string, 
+        systemsIdentified: string[], 
+        suggestedItems: string[],
+        normalizedItems: { original: string, professional: string }[]
+    } | null>(null);
 
     // Debounce ref dla zapisu draftu
     const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -429,6 +437,89 @@ export default function ShopPage() {
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
         setIsManualModalOpen(false);
+    };
+
+    // 🤖 Weryfikacja koszyka przez AI
+    const verifyCartWithAI = async () => {
+        if (cart.length === 0) return alert("Twój koszyk jest pusty!");
+        setIsVerifyingCart(true);
+        setCartSuggestions(null);
+
+        // Przygotowujemy płaską listę tego, co jest w koszyku, dla AI
+        const itemsToAnalyze = cart.flatMap(item => {
+            if (item.isManual) {
+                return item.name.split("\n").filter(l => l.trim() !== "");
+            }
+            return [`${item.quantity}x ${item.name}`];
+        });
+
+        try {
+            const res = await fetch("/api/verify-cart", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ items: itemsToAnalyze })
+            });
+
+            if (!res.ok) throw new Error("Błąd sieci");
+            const data = await res.json();
+            setCartSuggestions(data);
+        } catch (err) {
+            alert("Błąd połączenia z AI. Spróbuj ponownie.");
+        } finally {
+            setIsVerifyingCart(false);
+        }
+    };
+
+    // Dodanie sugestii AI do wpisu ręcznego
+    const addSuggestionToCart = (suggestion: string) => {
+        const existingManual = cart.find(item => item.isManual);
+        let newCart: CartItem[];
+        
+        if (existingManual) {
+            const mergedText = [existingManual.name, `1x ${suggestion}`].filter(Boolean).join("\n");
+            newCart = cart.map(item =>
+                item.cartId === existingManual.cartId ? { ...item, name: mergedText } : item
+            );
+        } else {
+            newCart = [...cart, {
+                cartId: crypto.randomUUID(),
+                isManual: true,
+                name: `1x ${suggestion}`,
+                quantity: 1
+            }];
+        }
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+        
+        // Usuwamy dodaną sugestię z widoku
+        if (cartSuggestions) {
+            setCartSuggestions({
+                ...cartSuggestions,
+                suggestedItems: cartSuggestions.suggestedItems.filter(s => s !== suggestion)
+            });
+        }
+    };
+
+    // Podmiana potocznej nazwy z koszyka na profesjonalną zasugerowaną przez AI
+    const applyNormalization = (original: string, professional: string) => {
+        const newCart = cart.map(c => {
+            if (c.isManual && c.name.includes(original)) {
+                // Podmiana stringa wewnątrz wieloliniowego tekstu wpisu ręcznego
+                return { ...c, name: c.name.replace(original, professional) };
+            }
+            return c;
+        });
+        
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+        
+        // Ukryj wykorzystaną sugestię
+        if (cartSuggestions) {
+            setCartSuggestions({
+                ...cartSuggestions,
+                normalizedItems: cartSuggestions.normalizedItems.filter(n => n.original !== original)
+            });
+        }
     };
 
     // Pobieranie oczekujących notatek głosowych i automatyczne zaznaczenie ich do procesu
@@ -988,23 +1079,107 @@ export default function ShopPage() {
 
                         {/* Lista pozycji */}
                         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
-                            <div className="flex justify-between items-center border-b border-slate-200 pb-2 mb-4">
-                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Twoje przedmioty</span>
-                                <div className="flex gap-2">
-                                    <button
-                                        onClick={openVoiceModal}
-                                        className="text-[10px] font-black text-purple-600 bg-purple-100 border border-purple-200 px-3 py-1.5 rounded-lg hover:bg-purple-200 transition-all shadow-sm"
-                                    >
-                                        🎙️ WCZYTAJ GŁOS
-                                    </button>
-                                    <button
-                                        onClick={openManualModal}
-                                        className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
-                                    >
-                                        + WPIS RĘCZNY
-                                    </button>
+                            <div className="flex flex-col gap-3 border-b border-slate-200 pb-3 mb-4">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Twoje przedmioty</span>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={openVoiceModal}
+                                            className="text-[10px] font-black text-purple-600 bg-purple-100 border border-purple-200 px-3 py-1.5 rounded-lg hover:bg-purple-200 transition-all shadow-sm"
+                                        >
+                                            🎙️ WCZYTAJ GŁOS
+                                        </button>
+                                        <button
+                                            onClick={openManualModal}
+                                            className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
+                                        >
+                                            + WPIS RĘCZNY
+                                        </button>
+                                    </div>
                                 </div>
+                                
+                                {/* 🤖 Przycisk Inspektora AI */}
+                                <button
+                                    onClick={verifyCartWithAI}
+                                    disabled={isVerifyingCart || cart.length === 0}
+                                    className="w-full bg-blue-50 border border-blue-200 text-blue-700 py-2 rounded-xl text-xs font-black shadow-sm flex items-center justify-center gap-2 hover:bg-blue-100 transition-colors disabled:opacity-50"
+                                >
+                                    {isVerifyingCart ? (
+                                        <><span className="animate-spin text-lg leading-none">⏳</span> AI analizuje Twój koszyk...</>
+                                    ) : (
+                                        <><span>🤖</span> SPRAWDŹ CZY O CZYMŚ NIE ZAPOMNIAŁEŚ</>
+                                    )}
+                                </button>
                             </div>
+
+                            {/* 🤖 Wyniki Inspektora AI */}
+                            {cartSuggestions && (
+                                <div className="bg-slate-800 text-white p-4 rounded-xl shadow-md mb-4 animate-fade-in relative border border-slate-700">
+                                    <button 
+                                        onClick={() => setCartSuggestions(null)} 
+                                        className="absolute top-2 right-3 text-slate-400 hover:text-white font-bold text-lg"
+                                    >&times;</button>
+                                    
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-lg">🤖</span>
+                                        <h4 className="font-black text-[11px] uppercase tracking-wider text-blue-400">Analiza Koszyka</h4>
+                                    </div>
+                                    <p className="text-[11px] leading-relaxed text-slate-300 font-medium mb-2">
+                                        {cartSuggestions.analysis}
+                                    </p>
+                                    
+                                    <div className="flex gap-1.5 flex-wrap mb-4">
+                                        {cartSuggestions.systemsIdentified.map((sys, idx) => (
+                                            <span key={idx} className="text-[9px] font-bold bg-slate-700 text-slate-300 px-2 py-0.5 rounded border border-slate-600">
+                                                {sys}
+                                            </span>
+                                        ))}
+                                    </div>
+
+                                    {/* SEKCJA: Normalizacja wpisów */}
+                                    {cartSuggestions.normalizedItems && cartSuggestions.normalizedItems.length > 0 && (
+                                        <div className="mb-4">
+                                            <p className="text-[10px] font-black uppercase text-orange-400 mb-2 flex items-center gap-1">
+                                                <span>✨</span> Doprecyzuj wpisy ręczne:
+                                            </p>
+                                            <div className="space-y-1.5">
+                                                {cartSuggestions.normalizedItems.map((item, idx) => (
+                                                    <div key={idx} className="flex flex-col bg-slate-900/50 p-2.5 rounded-lg border border-slate-600/50 gap-2">
+                                                        <div className="text-xs text-slate-300">
+                                                            Zmień <span className="line-through text-red-400">{item.original}</span> na:
+                                                            <br/><span className="font-bold text-green-400">{item.professional}</span>
+                                                        </div>
+                                                        <button 
+                                                            onClick={() => applyNormalization(item.original, item.professional)}
+                                                            className="text-[10px] font-black bg-orange-600 text-white px-3 py-1.5 rounded shadow-sm hover:bg-orange-500 w-full transition-colors"
+                                                        >✓ ZASTĄP W KOSZYKU</button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    
+                                    {/* SEKCJA: Sugerowane braki */}
+                                    {cartSuggestions.suggestedItems && cartSuggestions.suggestedItems.length > 0 && (
+                                        <div>
+                                            <p className="text-[10px] font-black uppercase text-blue-300 mb-2 flex items-center gap-1">
+                                                <span>🛒</span> Sugerowane domówienia:
+                                            </p>
+                                            <div className="space-y-1.5">
+                                                {cartSuggestions.suggestedItems.map((item, idx) => (
+                                                    <div key={idx} className="flex justify-between items-center bg-blue-900/30 p-2.5 rounded-lg border border-blue-500/30">
+                                                        <span className="text-xs font-bold text-blue-100 pr-2 line-clamp-2 leading-tight">• {item}</span>
+                                                        <button 
+                                                            onClick={() => addSuggestionToCart(item)}
+                                                            className="text-[9px] font-black bg-blue-600 text-white px-3 py-1.5 rounded shadow-sm hover:bg-blue-500 flex-shrink-0 transition-colors"
+                                                        >+ DODAJ</button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {cart.length === 0 ? (
                                 <div className="text-center py-20 text-slate-300 font-bold uppercase text-xs italic">Koszyk jest pusty</div>
