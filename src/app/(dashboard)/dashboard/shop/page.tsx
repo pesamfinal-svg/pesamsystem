@@ -619,20 +619,39 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                     materialOptions: data.materialOptions,
                     originalRequest: data.originalRequest
                 }]);
-            } else {
-                // TYMCZASOWY PILOT DO TESTOWANIA NOWYCH INTENCJI
-                let replyText = "";
-                if (intent === "SPRZET_CZAS") {
-                    replyText = "🚧 Wykryłem, że Twoje zapytanie dotyczy maszynogodzin / czasu pracy sprzętu. Pracujemy nad podłączeniem bazy maszyn i norm KNR dla tego Agenta!";
-                } else if (intent === "WIEDZA_OGOLNA") {
-                    replyText = "📚 Wykryłem, że pytasz o teorię budowlaną lub wiedzę inżynieryjną. Wkrótce podłączymy tu bazy wiedzy technicznej!";
-                } else {
-                    replyText = "💬 Cześć! Jak mogę Ci pomóc na budowie?";
-                }
+            } else if (intent === "SPRZET_CZAS") {
+                // NOWY AGENT: SPRZĘT I CZAS
+                const res = await fetch("/api/ai-equipment", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ request: text })
+                });
+
+                if (!res.ok) throw new Error("Błąd AI");
+                const data = await res.json();
 
                 setChatHistory(prev => [...prev, { 
                     role: 'ai', 
-                    content: replyText
+                    content: data.reply,
+                    generatedItems: data.generatedItems,
+                    reasoning: data.reasoning,
+                    asciiDrawing: data.asciiDrawing,
+                    isEquipment: true // <--- DODANY ZNACZNIK (ZABLOKUJE KOSZYK DLA MASZYN)
+                } as any]);
+            } else {
+                // NOWY AGENT: WIEDZA INŻYNIERYJNA (ORAZ CHIT_CHAT)
+                const res = await fetch("/api/ai-knowledge", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ request: text })
+                });
+
+                if (!res.ok) throw new Error("Błąd AI");
+                const data = await res.json();
+
+                setChatHistory(prev => [...prev, { 
+                    role: 'ai', 
+                    content: data.reply
                 }]);
             }
 
@@ -1880,6 +1899,24 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                                                 );
                                                             })}
                                                         </div>
+                                                        
+                                                        {/* Własna, niestandardowa wartość */}
+                                                        <div className="mt-2.5 pt-2.5 border-t border-slate-700/30 flex items-center gap-2">
+                                                            <span className="text-[10px] font-bold text-slate-400 uppercase flex-shrink-0">Własny wybór:</span>
+                                                            <input
+                                                                type="text"
+                                                                placeholder="Wpisz niestandardowy parametr..."
+                                                                value={chatSelections[idx]?.[optionGroup.category] || ""}
+                                                                onChange={e => {
+                                                                    const val = e.target.value;
+                                                                    setChatSelections(prev => ({
+                                                                        ...prev,
+                                                                        [idx]: { ...(prev[idx] || {}), [optionGroup.category]: val }
+                                                                    }));
+                                                                }}
+                                                                className="flex-1 bg-slate-900 text-xs text-white px-2.5 py-1.5 rounded-lg border border-slate-700 outline-none focus:border-orange-500 font-medium"
+                                                            />
+                                                        </div>
                                                     </div>
                                                 ))}
                                             </div>
@@ -1925,12 +1962,18 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                                     </li>
                                                 ))}
                                             </ul>
-                                            <button 
-                                                onClick={() => applyGeneratedItemsToCart(msg.generatedItems!)}
-                                                className="w-full bg-green-600 text-white py-2.5 rounded-lg text-xs font-black shadow-md hover:bg-green-500 transition-colors"
-                                            >
-                                                🛒 DODAJ DO KOSZYKA ({msg.generatedItems.length} poz.)
-                                            </button>
+                                            {!(msg as any).isEquipment ? (
+                                                <button 
+                                                    onClick={() => applyGeneratedItemsToCart(msg.generatedItems!)}
+                                                    className="w-full bg-green-600 text-white py-2.5 rounded-lg text-xs font-black shadow-md hover:bg-green-500 transition-colors"
+                                                >
+                                                    🛒 DODAJ DO KOSZYKA ({msg.generatedItems.length} poz.)
+                                                </button>
+                                            ) : (
+                                                <div className="text-center text-[10px] text-slate-400 italic bg-slate-900/50 p-2 rounded-lg border border-slate-700/50 mt-2">
+                                                    ⚙️ Wyniki czasowe i sprzętowe zostały obliczone na potrzeby harmonogramu.
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
