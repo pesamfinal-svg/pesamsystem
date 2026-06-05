@@ -521,7 +521,7 @@ export default function ShopPage() {
         if (cartSuggestions) {
             setCartSuggestions({
                 ...cartSuggestions,
-                suggestedItems: cartSuggestions.suggestedItems.filter(s => s.name !== suggestionName)
+                suggestedItems: cartSuggestions.suggestedItems.filter(s => s.name !== originalName)
             });
         }
         // Czyścimy stan ilości dla tego indexu
