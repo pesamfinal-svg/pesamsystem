@@ -1,6 +1,6 @@
 // src/app/api/ai-chat-order/route.ts
 import { NextResponse } from 'next/server';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -8,7 +8,7 @@ const ai = new GoogleGenAI({
     location: 'global'
 });
 
-export const maxDuration = 60; // AI z Pythonem potrzebuje czasem chwili
+export const maxDuration = 60; // AI z Pythonem potrzebuje czasem chwili na uruchomienie kodu
 
 export async function POST(req: Request) {
     try {
@@ -20,8 +20,14 @@ export async function POST(req: Request) {
             TWOJE ZASADY:
             1. Pytaj o szczegóły: Jeśli kierownik mówi "chcę ściankę z regipsów", dopytaj o długość, wysokość, grubość profilu (50/75/100), rodzaj płyty (zwykła/zielona/ogień) i czy wełna w środek.
             2. Python (Kalkulator): Do wszelkich wyliczeń zużycia (np. ile sztuk profili CD, ile m2 płyty, ile kg gipsu) UŻYWAJ PYTHONA. Znasz normy budowlane (np. profile co 60cm).
-            3. Jeśli wciąż zbierasz dane -> zostaw tablicę 'generatedItems' PUSTĄ, a w 'reply' zadaj pytanie.
-            4. Jeśli wyliczyłeś wszystko i zadanie jest gotowe -> w 'reply' podsumuj wyliczenia (np. "Na ściankę 10m2 potrzebujesz..."), a w tablicy 'generatedItems' podaj gotową listę.
+            3. Twoja odpowiedź musi być ZAWSZE poprawnym i czystym obiektem JSON zawierającym dwa pola:
+               - "reply": Twoja wiadomość tekstowa do kierownika (odpowiedź, podsumowanie obliczeń lub dodatkowe pytania).
+               - "generatedItems": Tablica z wyliczonymi materiałami (jeśli masz komplet danych). Jeśli wciąż pytasz o szczegóły, tablica musi być pusta: [].
+            
+            Struktura pojedynczego elementu w "generatedItems":
+            { "name": "Pełna nazwa rynkowa", "quantity": 10, "unit": "szt." }
+
+            BEZWZGLĘDNY WARUNEK: Zwróć tylko i wyłącznie poprawny obiekt JSON. Nie pisz żadnego tekstu wstępnego, nie dodawaj komentarzy poza strukturą JSON.
         `;
 
         // Budujemy historię dla modelu
@@ -50,37 +56,29 @@ export async function POST(req: Request) {
             contents: contents,
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.2,
-                tools: [{ codeExecution: {} }], // URUCHAMIAMY PYTHONA!
-                responseMimeType: "application/json",
-                responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                        reply: {
-                            type: Type.STRING,
-                            description: "Twoja odpowiedź dla kierownika. Widzi ją w oknie czatu."
-                        },
-                        generatedItems: {
-                            type: Type.ARRAY,
-                            description: "Wypełnij TO TYLKO, jeśli masz już komplet danych i wygenerowałeus listę. Inaczej zostaw puste.",
-                            items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                    name: { type: Type.STRING, description: "Pełna nazwa rynkowa np. 'Płyta G-K typ A'" },
-                                    quantity: { type: Type.INTEGER, description: "Wyliczona ilość (Zawsze zaokrąglaj w górę do pełnych sztuk/opakowań)" },
-                                    unit: { type: Type.STRING, description: "Jednostka np. 'szt.', 'worki 25kg', 'rolki'" }
-                                }
-                            }
-                        }
-                    },
-                    required: ["reply", "generatedItems"]
-                }
+                temperature: 0.1, // Bardzo niska temperatura, aby AI ściśle trzymała się formatu JSON
+                tools: [{ codeExecution: {} }] // ZOSTAWIAMY PYTHONA! (responseSchema usunięte z konfiguracji)
             }
         });
 
         if (response.text) {
-            let aiText = response.text.trim().replace(/```json/g, '').replace(/```/g, '').trim();
-            return NextResponse.json(JSON.parse(aiText), { status: 200 });
+            let aiText = response.text.trim();
+            
+            // Oczyszczamy odpowiedź na wypadek, gdyby AI mimo wszystko ubrała JSON w znaczniki markdownu (```json ... ```)
+            aiText = aiText.replace(/```json/gi, '').replace(/```/gi, '').trim();
+            
+            try {
+                const parsedJson = JSON.parse(aiText);
+                return NextResponse.json(parsedJson, { status: 200 });
+            } catch (parseErr) {
+                console.error("Błąd parsowania JSON z odpowiedzi AI. Surowy tekst:", aiText);
+                
+                // Bezpieczny fallback na wypadek gdyby model wygenerował surowy tekst zamiast JSONa
+                return NextResponse.json({
+                    reply: aiText || "Mam problem z przetworzeniem tych obliczeń. Podaj wymiary ponownie.",
+                    generatedItems: []
+                }, { status: 200 });
+            }
         } else {
             throw new Error("Pusta odpowiedź z API");
         }
