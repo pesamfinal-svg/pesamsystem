@@ -344,11 +344,9 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0.1,    // Niska temperatura = spójny, deterministyczny JSON
         maxOutputTokens: 8192,
-        // Code Execution wyłączony celowo – Normatywny KNR Lookup ma własny pipeline
-        // do przeliczania geometrii. Tu zależy nam na szybkim parsowaniu dokumentu.
+        responseMimeType: "application/json", // <--- WYMUSZENIE CZYSZTEGO I BEZPIECZNEGO FORMATU JSON
       },
     });
-
     rawAiText = response.text ?? "";
 
     if (!rawAiText.trim()) {
@@ -367,25 +365,32 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
 
   // ── 6. Parsowanie JSON z odpowiedzi AI ───────────────────────────────────
 
-  const extracted = extractAllJSONObjects(rawAiText) as Array<{
-    reply?: string;
-    generatedSections?: EstimateSection[];
-    riskAlerts?: string[];
-  }>;
+  let parsed: any = null;
 
-  if (extracted.length === 0) {
-    // Ostatnia linia obrony: zwróć przynajmniej surowy tekst jako reply
+  try {
+    // Po włączeniu responseMimeType, odpowiedź to w 100% czysty JSON
+    parsed = JSON.parse(rawAiText);
+  } catch (parseErr) {
+    console.warn("[Upload Parser] Standardowy JSON.parse zawiódł, używam ekstraktora awaryjnego...");
+    const extracted = extractAllJSONObjects(rawAiText) as Array<{
+      reply?: string;
+      generatedSections?: EstimateSection[];
+      riskAlerts?: string[];
+    }>;
+    if (extracted.length > 0) {
+      parsed = extracted[extracted.length - 1];
+    }
+  }
+
+  if (!parsed) {
     console.warn("[Upload Parser] Nie udało się sparsować JSON. Surowa odpowiedź:", rawAiText.slice(0, 500));
     const fallbackResponse: RmsEngineResponse = {
       reply:
-        `⚠️ System przeanalizował dokument "${file.name}", ale odpowiedź AI nie mogła być sparsowana jako JSON. ` +
-        `Spróbuj ponownie lub prześlij dokument w innym formacie (preferowany PDF tekstowy).`,
+        `⚠️ System przeanalizował dokument "${file.name}", ale struktura odpowiedzi nie mogła zostać automatycznie odczytana. ` +
+        `Spróbuj ponownie lub prześlij dokument w postaci PDF tekstowego (wygenerowanego cyfrowo).`,
     };
     return NextResponse.json(fallbackResponse);
   }
-
-  // Bierzemy OSTATNI obiekt JSON (model może emitować chain-of-thought przed finalnym JSON)
-  const parsed = extracted[extracted.length - 1];
 
   // ── 7. Kompletowanie i zwrot odpowiedzi ──────────────────────────────────
 

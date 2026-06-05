@@ -161,6 +161,7 @@ ${contextBlock}
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0.1,
         tools: [{ codeExecution: {} }], // Python do obliczeń geometrycznych
+        responseMimeType: "application/json", // <--- WYMUSZENIE FORMATU JSON
       },
     });
 
