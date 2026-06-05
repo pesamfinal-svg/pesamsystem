@@ -63,6 +63,13 @@ TWOJE ZADANIE: PEŁNA ANALIZA DOKUMENTU PRZETARGOWEGO
 
 Przeanalizuj dostarczony dokument i wykonaj TRZY zadania jednocześnie:
 
+ZASADY FORMATOWANIA JSON (KRYTYCZNE DLA BEZPIECZEŃSTWA PARSOWANIA):
+1. NIGDY nie używaj standardowych znaków cudzysłowu (") wewnątrz wartości tekstowych (np. w polach "reply", "name" czy "riskAlerts"). 
+   Jeśli musisz coś zacytować lub wyróżnić, używaj WYŁĄCZNIE pojedynczego apostrofu (') lub polskich cudzysłowów drukarskich („ oraz ”).
+   Błędny przykład: "reply": "Inwestycja "zaprojektuj i wybuduj""
+   Poprawny przykład: "reply": "Inwestycja 'zaprojektuj i wybuduj'" lub "reply": "Inwestycja „zaprojektuj i wybuduj”"
+2. Odpowiedź musi być w 100% poprawnym i czystym obiektem JSON.
+
 ────────────────────────────────────────────────────────
 ZADANIE A – PRZEDMIAR ROBÓT (GENERUJ SECTIONS)
 ────────────────────────────────────────────────────────
@@ -117,7 +124,7 @@ Przeszukaj dokument pod kątem klauzul ryzyka:
 - Kody CPV (określają branżę i możliwe podwykonawstwo)
 - Zabezpieczenie należytego wykonania (% wartości, czas utrzymania)
 
-Format każdego alertu (jedno konkretne zdanie):
+Format każdego alertu (jedno konkretne zdanie bez użycia znaku "):
 "⚠️ UWAGA: [opis ryzyka i jego wartość/parametr z dokumentu]"
 "❗ RYZYKO: [opis ryzyka wysokiego / blokera ofertowego]"
 "✅ OK: [klauzula zgodna ze standardem rynkowym]"
@@ -126,16 +133,9 @@ Format każdego alertu (jedno konkretne zdanie):
 ────────────────────────────────────────────────────────
 ZADANIE C – KOMENTARZ INŻYNIERSKI (GENERUJ REPLY)
 ────────────────────────────────────────────────────────
-Napisz profesjonalne podsumowanie w 5-8 zdaniach:
-1. Rodzaj i cel inwestycji (co budujesz/remontujesz?)
-2. Kluczowe dane techniczne (powierzchnia, kubatura, klasa budynku itp.)
-3. Ocena kompletności dokumentacji (czy brakuje rysunków/przedmiaru?)
-4. Najważniejsze ryzyko kontraktowe (1 zdanie)
-5. Informacja o wygenerowanej tabeli RMS (ile pozycji, ile działów)
-6. Rekomendacja dot. suwaków trendów (komentarz do przekazanych nastaw)
-
-STYL: Profesjonalny, branżowy. Adresat to doświadczony Kosztorysant – nie tłumacz
-podstaw. Podawaj konkretne liczby i nazwy (nie "duże kary" tylko "kara 10 000 zł/dzień").
+Napisz profesjonalne podsumowanie w 5-8 zdaniach.
+Używaj profesjonalnego stylu. Nie stosuj znaku " wewnątrz tekstu (używaj pojedynczego apostrofu ').
+Podawaj konkretne liczby i nazwy (nie 'duże kary' tylko 'kara 10 000 zł/dzień').
 
 ════════════════════════════════════════════════════════
 FORMAT ODPOWIEDZI: WYŁĄCZNIE JSON (bez markdown, bez komentarzy, bez tekstu poza JSON)
@@ -247,6 +247,22 @@ Uwzględnij te nastawienia w komentarzu inżynierskim (pole "reply") – oceń c
 są adekwatne do warunków rynkowych wynikających z dokumentacji i lokalizacji
 inwestycji. Ceny w "basePrice" pozostają cenami bazowymi 2025 bez tych korekt.
 `.trim();
+}
+
+// ── Pomocnik oczyszczający surowy JSON przed parsowaniem ─────────────────────
+
+function cleanAndSanitizeJson(raw: string): string {
+  let cleaned = raw.trim();
+  
+  // Usuń ewentualne znaczniki markdown ```json ... ```
+  if (cleaned.startsWith("```json")) cleaned = cleaned.substring(7);
+  if (cleaned.endsWith("```")) cleaned = cleaned.substring(0, cleaned.length - 3);
+  cleaned = cleaned.trim();
+
+  // Zamień surowe znaki nowej linii wewnątrz cudzysłowów na bezpieczne spacje
+  cleaned = cleaned.replace(/[\r\n]+/g, " ");
+
+  return cleaned;
 }
 
 // ── Główny Handler ────────────────────────────────────────────────────────────
@@ -363,13 +379,16 @@ Pamiętaj: odpowiedź WYŁĄCZNIE jako obiekt JSON zgodny z instrukcją systemow
     );
   }
 
+  // Oczyszczamy tekst przed parsowaniem
+  const sanitizedText = cleanAndSanitizeJson(rawAiText);
+
   // ── 6. Parsowanie JSON z odpowiedzi AI ───────────────────────────────────
 
   let parsed: any = null;
 
   try {
     // Po włączeniu responseMimeType, odpowiedź to w 100% czysty JSON
-    parsed = JSON.parse(rawAiText);
+    parsed = JSON.parse(sanitizedText);
   } catch (parseErr) {
     console.warn("[Upload Parser] Standardowy JSON.parse zawiódł, używam ekstraktora awaryjnego...");
     const extracted = extractAllJSONObjects(rawAiText) as Array<{
