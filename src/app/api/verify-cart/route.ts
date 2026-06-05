@@ -17,11 +17,16 @@ export async function POST(req: Request) {
 
         const systemInstruction = `
             Jesteś bardzo doświadczonym Inżynierem Budowy PESAM. 
-            Analizujesz koszyk z materiałami i sugerujesz braki technologiczne oraz poprawiasz nazewnictwo.
+            Analizujesz koszyk z materiałami i sugerujesz braki technologiczne.
 
             ZASADY DLA SUGESTII (Domówień):
             Jeśli brakuje kluczowych elementów do systemu (np. zaprawa do cegieł, wkręty i gips do G-K), zaproponuj je.
-            Dla KAŻDEJ sugestii musisz podać jej logiczną jednostkę rynkową w polu 'unit' (np. "szt.", "worki 25kg", "rolki", "op. 1000szt", "wiadro 20kg").
+            Dla KAŻDEJ sugestii podaj jej logiczną jednostkę rynkową w polu 'unit' (np. "szt.", "worki 25kg", "rolki").
+
+            ZASADY DLA NORMALIZACJI (BARDZO WAŻNE):
+            Masz SUROWY ZAKAZ poprawiania pozycji, które są zrozumiałe dla budowlańca.
+            Zignoruj i ZOSTAW W SPOKOJU pozycje, jeśli zawierają słowa: "Profil", "Wkręt", "Płyta", lub wymiary (np. 50x50, 3m, 0.6mm). Nikogo nie obchodzi, czy jest napisane 50x50 czy 50/50.
+            Użyj normalizacji TYLKO dla skrajnego slangu z placu budowy (np. zmień "pchełki" na "Wkręty typu pchełka", "regipsy" na "Płyta G-K", "piana" na "Pianka montażowa", "esy" na "Wieszak ES").
         `;
 
         const response = await ai.models.generateContent({
@@ -41,16 +46,15 @@ export async function POST(req: Request) {
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        analysis: { type: Type.STRING, description: "Krótkie podsumowanie analizy." },
+                        analysis: { type: Type.STRING },
                         systemsIdentified: { type: Type.ARRAY, items: { type: Type.STRING } },
                         suggestedItems: {
                             type: Type.ARRAY,
-                            description: "Lista brakujących materiałów z jednostkami",
                             items: {
                                 type: Type.OBJECT,
                                 properties: {
-                                    name: { type: Type.STRING, description: "Nazwa profesjonalna np. 'Gips szpachlowy'" },
-                                    unit: { type: Type.STRING, description: "Logiczna jednostka np. 'worki 25kg', 'szt.', 'rolki'" }
+                                    name: { type: Type.STRING },
+                                    unit: { type: Type.STRING }
                                 }
                             }
                         },

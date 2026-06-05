@@ -251,6 +251,7 @@ export default function ShopPage() {
         normalizedItems: { original: string, professional: string }[]
     } | null>(null);
     const [suggestionQtys, setSuggestionQtys] = useState<Record<number, number>>({}); 
+    const [suggestionNames, setSuggestionNames] = useState<Record<number, string>>({}); // Przechowuje zedytowane przez usera nazwy
 
     // 💬 AI States (Czat Kosztorysant)
     const canUseAiText = hasPermission("useAiOrderText", user?.rolePermissions, user?.permissionOverrides);
@@ -463,6 +464,8 @@ export default function ShopPage() {
         if (cart.length === 0) return alert("Twój koszyk jest pusty!");
         setIsVerifyingCart(true);
         setCartSuggestions(null);
+        setSuggestionQtys({});
+        setSuggestionNames({});
 
         // Przygotowujemy płaską listę tego, co jest w koszyku, dla AI
         const itemsToAnalyze = cart.flatMap(item => {
@@ -489,10 +492,11 @@ export default function ShopPage() {
         }
     };
 
-    // Dodanie sugestii AI do wpisu ręcznego (z ilością i j.m.)
-    const addSuggestionToCart = (suggestionName: string, unit: string, idx: number) => {
-        const qty = suggestionQtys[idx] || 1; // domyślnie 1
-        const textToAdd = `${qty}x ${suggestionName} (j.m. ${unit})`;
+    // Dodanie sugestii AI do wpisu ręcznego (z ilością, j.m. i edytowalną nazwą)
+    const addSuggestionToCart = (originalName: string, unit: string, idx: number) => {
+        const qty = suggestionQtys[idx] || 1; 
+        const finalName = suggestionNames[idx] !== undefined ? suggestionNames[idx] : originalName;
+        const textToAdd = `${qty}x ${finalName} (j.m. ${unit})`;
 
         const existingManual = cart.find(item => item.isManual);
         let newCart: CartItem[];
@@ -1218,37 +1222,22 @@ export default function ShopPage() {
 
                         {/* Lista pozycji */}
                         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
-                            <div className="flex flex-col gap-3 border-b border-slate-200 pb-3 mb-4">
-                                <div className="flex justify-between items-center">
-                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Twoje przedmioty</span>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={openVoiceModal}
-                                            className="text-[10px] font-black text-purple-600 bg-purple-100 border border-purple-200 px-3 py-1.5 rounded-lg hover:bg-purple-200 transition-all shadow-sm"
-                                        >
-                                            🎙️ WCZYTAJ GŁOS
-                                        </button>
-                                        <button
-                                            onClick={openManualModal}
-                                            className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
-                                        >
-                                            + WPIS RĘCZNY
-                                        </button>
-                                    </div>
+                            <div className="flex justify-between items-center border-b border-slate-200 pb-2 mb-4">
+                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Twoje przedmioty</span>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={openVoiceModal}
+                                        className="text-[10px] font-black text-purple-600 bg-purple-100 border border-purple-200 px-3 py-1.5 rounded-lg hover:bg-purple-200 transition-all shadow-sm"
+                                    >
+                                        🎙️ WCZYTAJ GŁOS
+                                    </button>
+                                    <button
+                                        onClick={openManualModal}
+                                        className="text-[10px] font-black text-orange-600 bg-orange-100 border border-orange-200 px-3 py-1.5 rounded-lg hover:bg-orange-200 transition-all shadow-sm"
+                                    >
+                                        + WPIS RĘCZNY
+                                    </button>
                                 </div>
-                                
-                                {/* 🤖 Przycisk Inspektora AI */}
-                                <button
-                                    onClick={verifyCartWithAI}
-                                    disabled={isVerifyingCart || cart.length === 0}
-                                    className="w-full bg-blue-50 border border-blue-200 text-blue-700 py-2 rounded-xl text-xs font-black shadow-sm flex items-center justify-center gap-2 hover:bg-blue-100 transition-colors disabled:opacity-50"
-                                >
-                                    {isVerifyingCart ? (
-                                        <><span className="animate-spin text-lg leading-none">⏳</span> AI analizuje Twój koszyk...</>
-                                    ) : (
-                                        <><span>🤖</span> SPRAWDŹ CZY O CZYMŚ NIE ZAPOMNIAŁEŚ</>
-                                    )}
-                                </button>
                             </div>
 
                             {/* 🤖 Wyniki Inspektora AI */}
@@ -1302,13 +1291,21 @@ export default function ShopPage() {
                                     {cartSuggestions.suggestedItems && cartSuggestions.suggestedItems.length > 0 && (
                                         <div>
                                             <p className="text-[10px] font-black uppercase text-blue-300 mb-2 flex items-center gap-1">
-                                                <span>🛒</span> Sugerowane domówienia:
+                                                <span>🛒</span> Sugerowane domówienia (możesz edytować nazwy):
                                             </p>
                                             <div className="space-y-2">
                                                 {cartSuggestions.suggestedItems.map((item, idx) => (
-                                                    <div key={idx} className="flex flex-col gap-2 bg-[#181d29] p-3 rounded-lg border border-blue-500/30">
-                                                        <span className="text-xs font-bold text-blue-100 leading-tight">• {item.name}</span>
-                                                        <div className="flex items-center gap-2 justify-between">
+                                                    <div key={idx} className="flex flex-col gap-2 bg-[#181d29] p-3 rounded-lg border border-blue-500/30 focus-within:border-blue-400 transition-colors">
+                                                        <div className="flex items-start gap-1">
+                                                            <span className="text-blue-400 font-bold mt-0.5">•</span>
+                                                            <input 
+                                                                type="text"
+                                                                value={suggestionNames[idx] !== undefined ? suggestionNames[idx] : item.name}
+                                                                onChange={e => setSuggestionNames(prev => ({...prev, [idx]: e.target.value}))}
+                                                                className="flex-1 bg-transparent text-xs font-bold text-blue-100 leading-tight outline-none border-b border-dashed border-slate-600 focus:border-blue-400 pb-0.5"
+                                                            />
+                                                        </div>
+                                                        <div className="flex items-center gap-2 justify-between mt-1">
                                                             <div className="flex items-center gap-1.5 bg-slate-900 px-2 py-1.5 rounded-md border border-slate-700">
                                                                 <input 
                                                                     type="number" 
