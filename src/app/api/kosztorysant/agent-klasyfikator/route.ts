@@ -5,17 +5,17 @@
  * 
  * Odpowiedzialność:
  *  - Uruchamiany jako pierwszy, przed stworzeniem zadań dla Roju.
- *  - Na podstawie metadanych plików (nazwy, rozszerzenia, podsumowania) ocenia kompletność.
+ *  - Na podstawie metadanych plików ocenia kompletność.
  *  - Zwraca docLevel (0-4) oraz rekomendowaną estimationMethod.
- *  - Generuje raport o brakach i ryzyku z nich wynikającym.
+ *  - Wymusza dokładną strukturę JSON przez Google GenAI Schema.
  */
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-3.5-flash";
+const MODEL_FLASH = "gemini-3.5-flash"; // Wymagany najnowszy Flash do obsługi pełnych schematów
 
 // ── Interfejsy ────────────────────────────────────────────────────────────────
 
@@ -27,10 +27,10 @@ export type DocLevel =
     | "LEVEL_4_EXECUTIVE";
 
 export type EstimationMethod =
-    | "PARAMETRIC"      // Dla poziomów 0-1 (wskaźniki PLN/m2)
-    | "ANALOGICAL"      // Dla poziomu 1-2 (rozbicie na stany wg analogii)
-    | "ELEMENT_BASED"   // Dla poziomu 2-3 (KNR + normatywne zgadywanie braków)
-    | "DETAILED_KNR";   // Dla poziomu 4 (pełny szczegółowy KNR)
+    | "PARAMETRIC"      // Dla poziomów 0-1
+    | "ANALOGICAL"      // Dla poziomu 1-2
+    | "ELEMENT_BASED"   // Dla poziomu 2-3
+    | "DETAILED_KNR";   // Dla poziomu 4
 
 export interface DocumentationAssessment {
     docLevel: DocLevel;
@@ -54,6 +54,59 @@ export interface DocumentationAssessment {
     executiveSummary: string;
 }
 
+// ── Schemat wymuszający (Response Schema) ─────────────────────────────────────
+// To gwarantuje, że model NIGDY nie zwróci pustego {} ani nie pominie missingData
+
+const classificationSchema = {
+    type: Type.OBJECT,
+    properties: {
+        docLevel: {
+            type: Type.STRING,
+            enum: [
+                "LEVEL_0_DESCRIPTION_ONLY",
+                "LEVEL_1_PFU",
+                "LEVEL_2_CONCEPT",
+                "LEVEL_3_BUILDING_PERMIT",
+                "LEVEL_4_EXECUTIVE"
+            ]
+        },
+        estimationMethod: {
+            type: Type.STRING,
+            enum: ["PARAMETRIC", "ANALOGICAL", "ELEMENT_BASED", "DETAILED_KNR"]
+        },
+        availableData: {
+            type: Type.OBJECT,
+            properties: {
+                hasFloorPlans: { type: Type.BOOLEAN },
+                hasStructuralDrawings: { type: Type.BOOLEAN },
+                hasReinforcementDetails: { type: Type.BOOLEAN },
+                hasInstallationSchemas: { type: Type.BOOLEAN },
+                hasBillOfQuantities: { type: Type.BOOLEAN },
+                hasGeotechnicalReport: { type: Type.BOOLEAN },
+                hasPFU: { type: Type.BOOLEAN }
+            },
+            required: ["hasFloorPlans", "hasStructuralDrawings", "hasReinforcementDetails", "hasInstallationSchemas", "hasBillOfQuantities", "hasGeotechnicalReport", "hasPFU"]
+        },
+        missingData: {
+            type: Type.ARRAY,
+            description: "Lista braków w dokumentacji. Zwróć pustą tablicę, jeśli braków nie ma.",
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    item: { type: Type.STRING },
+                    impact: { type: Type.STRING, enum: ["CRITICAL", "HIGH", "MEDIUM"] },
+                    assumption: { type: Type.STRING },
+                    riskAddPercent: { type: Type.NUMBER }
+                },
+                required: ["item", "impact", "assumption", "riskAddPercent"]
+            }
+        },
+        uncertaintyPercent: { type: Type.NUMBER },
+        executiveSummary: { type: Type.STRING }
+    },
+    required: ["docLevel", "estimationMethod", "availableData", "missingData", "uncertaintyPercent", "executiveSummary"]
+};
+
 // ── Prompt Systemowy ──────────────────────────────────────────────────────────
 
 const SYSTEM_INSTRUCTION = `
@@ -72,37 +125,6 @@ METODY WYCENY (przypisz odpowiednią):
 - LEVEL 1 -> ANALOGICAL
 - LEVEL 2 i 3 -> ELEMENT_BASED
 - LEVEL 4 -> DETAILED_KNR
-
-Zwróć DOKŁADNIE jeden obiekt JSON (bez znaczników markdown):
-{
-  "docLevel": "LEVEL_3_BUILDING_PERMIT",
-  "estimationMethod": "ELEMENT_BASED",
-  "availableData": {
-    "hasFloorPlans": true,
-    "hasStructuralDrawings": true,
-    "hasReinforcementDetails": false,
-    "hasInstallationSchemas": false,
-    "hasBillOfQuantities": true,
-    "hasGeotechnicalReport": false,
-    "hasPFU": false
-  },
-  "missingData": [
-    {
-      "item": "Rysunki zbrojenia (schematy)",
-      "impact": "HIGH",
-      "assumption": "Zbrojenie zostanie oszacowane normatywnie (kg stali / m3 betonu).",
-      "riskAddPercent": 15
-    },
-    {
-      "item": "Badania geotechniczne gruntów",
-      "impact": "MEDIUM",
-      "assumption": "Założono standardowe warunki wodno-gruntowe (kategoria III).",
-      "riskAddPercent": 5
-    }
-  ],
-  "uncertaintyPercent": 20,
-  "executiveSummary": "Dokumentacja na poziomie Projektu Budowlanego. Brak detali zbrojenia wymusza zastosowanie normatywnych wskaźników zużycia stali, co generuje ok. 20% niepewności kosztowej."
-}
 `.trim();
 
 // ── Główny Handler ────────────────────────────────────────────────────────────
@@ -129,46 +151,48 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
         console.log(`[Klasyfikator Dokumentacji] Projekt: "${projectName}". Liczba plików do oceny: ${filesList.length}`);
 
-        // Tworzymy uproszczoną listę dla AI (żeby oszczędzać tokeny)
-        const fileManifest = filesList.map(f => `- Plik: ${f.fileName} | Typ AI: ${f.category} | Opis: ${f.summary}`).join("\n");
-        console.log(`[Klasyfikator Dokumentacji] Zbudowano manifest plików:\n${fileManifest}`);
+        const fileManifest = filesList.map(f => `- Plik: ${f.fileName} | Typ: ${f.category} | Opis: ${f.summary}`).join("\n");
 
         const userPrompt = `
-Ocenić kompletność dokumentacji dla projektu: "${projectName}".
-Oto lista załączonych plików wraz z ich wstępną analizą:
+Dokonaj klasyfikacji poziomu dokumentacji dla projektu: "${projectName}".
+Oto lista załączonych plików wraz z ich wstępną analizą z poprzedniego etapu:
 ${fileManifest}
-
-Zwróć ocenę w formacie JSON zgodnie z instrukcjami.
         `.trim();
 
-        console.log("[Klasyfikator Dokumentacji] Wysyłam zapytanie do Gemini Flash...");
+        console.log("[Klasyfikator Dokumentacji] Wysyłam zapytanie do Gemini Flash z wymuszonym Response Schema...");
 
         const response = await ai.models.generateContent({
             model: MODEL_FLASH,
             contents: [{ role: "user", parts: [{ text: userPrompt }] }],
             config: {
                 systemInstruction: SYSTEM_INSTRUCTION,
-                temperature: 0.1,
+                temperature: 0.0, // Ustalone na 0.0, aby klasyfikacja była maksymalnie analityczna i deterministyczna
                 maxOutputTokens: 2048,
                 responseMimeType: "application/json",
+                responseSchema: classificationSchema, // 🔴 TO JEST KLUCZOWE - wymuszamy strukturę na API
             },
         });
 
         const rawText = response.text ?? "{}";
-        console.log(`[Klasyfikator Dokumentacji] Otrzymano odpowiedź (${rawText.length} znaków). Parsowanie...`);
+        console.log(`[Klasyfikator Dokumentacji] Otrzymano odpowiedź (${rawText.length} znaków).`);
 
         let assessment: DocumentationAssessment;
         try {
             assessment = JSON.parse(rawText);
-            console.log(`[Klasyfikator Dokumentacji] Wynik klasyfikacji: Poziom = ${assessment.docLevel}, Metoda = ${assessment.estimationMethod}`);
-            console.log(`[Klasyfikator Dokumentacji] Szacowana niepewność projektu: ${assessment.uncertaintyPercent}%`);
 
-            if (assessment.missingData.length > 0) {
-                console.log(`[Klasyfikator Dokumentacji] Zidentyfikowano ${assessment.missingData.length} kluczowych braków w dokumentacji.`);
+            // Zabezpieczenie przed uszkodzoną tablicą (choć przy responseSchema nie powinno to wystąpić)
+            if (!Array.isArray(assessment.missingData)) {
+                assessment.missingData = [];
             }
+
+            console.log(`[Klasyfikator Dokumentacji] Wynik klasyfikacji: Poziom = ${assessment.docLevel}, Metoda = ${assessment.estimationMethod}`);
+            console.log(`[Klasyfikator Dokumentacji] Szacowana niepewność: ${assessment.uncertaintyPercent}%`);
+            console.log(`[Klasyfikator Dokumentacji] Wykryto braków: ${assessment.missingData.length}`);
+
         } catch (e) {
-            console.error("[Klasyfikator Dokumentacji] Błąd parsowania odpowiedzi AI:", e);
-            throw new Error("AI nie zwróciło poprawnego formatu JSON.");
+            // Jeśli parsowanie zawiedzie POMIMO Response Schema (bardzo rzadkie), przerywamy proces
+            console.error("[Klasyfikator Dokumentacji] Błąd parsowania odpowiedzi. Odpowiedź z modelu była wadliwa:", rawText);
+            throw new Error("Model sztucznej inteligencji zwrócił nieprawidłową strukturę danych. Proszę spróbować ponownie.");
         }
 
         console.log("==================================================");
