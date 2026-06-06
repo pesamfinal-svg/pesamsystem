@@ -6,7 +6,7 @@ import { hasPermission } from "@/lib/auth/permissions";
 import { useRouter } from "next/navigation";
 import { uploadTenderDocument, UploadProgress } from "@/lib/kosztorysant/uploadTenderDocument";
 import { db } from "@/lib/firebase/config"; // Klient Firestore
-import { collection, onSnapshot, doc, updateDoc } from "firebase/firestore"; // Metody Real-time
+import { collection, onSnapshot, doc, updateDoc, runTransaction, getDocs, query, where } from "firebase/firestore";
 
 // ─── TYPY DANYCH ─────────────────────────────────────────────────────────────
 
@@ -19,6 +19,16 @@ interface EstimateItem {
     unit: string;
     basePrice: number;
     unitPrice: number;
+    complexity?: string;
+    priceConfidence?: string;
+    priceRange?: { min: number; optimal: number; max: number; unit: string };
+    // NOWE POLE: Wskaźnik jakości i pewności danych (FIX #1 koncepcji)
+    dataQuality?: {
+        method: "FROM_DRAWING" | "NORMATIVE" | "PARAMETRIC" | "ASSUMED";
+        confidence: "HIGH" | "MEDIUM" | "LOW";
+        riskBuffer: number; // zalecana rezerwa w %
+        notes: string[];
+    };
 }
 
 interface EstimateSection {
@@ -46,11 +56,19 @@ interface MarketTrends {
 
 interface SwarmTask {
     id: string;
-    agentType: "LEGAL" | "QUANTITY" | "CONSTRUCTION" | "PRICING";
+    agentType: "LEGAL" | "QUANTITY" | "CONSTRUCTION" | "PRICING" | "VISION" | "AUDIT" | "NORMATIVE_STEEL" | "PARAMETRIC_ESTIMATE";
     description: string;
     status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
     inputFiles: string[];
     result: any;
+    taskKeywords?: string[];
+}
+
+interface TenderMetadata {
+    docLevel?: string;
+    estimationMethod?: string;
+    uncertaintyPercent?: number;
+    missingDataReport?: { item: string; impact: string; assumption: string; riskAddPercent: number }[];
 }
 
 export default function EstimatorPage() {
@@ -106,6 +124,7 @@ export default function EstimatorPage() {
     // Stany Roju i Zadania w czasie rzeczywistym
     const [activeTenderId, setActiveTenderId] = useState<string | null>(null);
     const [tasks, setTasks] = useState<SwarmTask[]>([]);
+    const [tenderStats, setTenderStats] = useState<TenderMetadata>({}); // NOWE: Stan na metadane dokumentacji
 
     const [activeTab, setActiveTab] = useState<"R" | "M" | "S" | "ALL">("ALL");
     const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -114,6 +133,30 @@ export default function EstimatorPage() {
         if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }, [messages, isLoading]);
 
+    // ── KROK 1: SŁUCHANIE METADANYCH PRZETARGU (REAL-TIME METADATA) ──────────
+
+    useEffect(() => {
+        if (!activeTenderId) return;
+
+        console.log(`[Frontend] Podpinam nasłuch Real-Time dla metadanych przetargu: ${activeTenderId}`);
+        const tenderDocRef = doc(db, "tenders", activeTenderId);
+
+        const unsubscribe = onSnapshot(tenderDocRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                setTenderStats({
+                    docLevel: data.docLevel,
+                    estimationMethod: data.estimationMethod,
+                    uncertaintyPercent: data.uncertaintyPercent,
+                    missingDataReport: data.missingDataReport
+                });
+                console.log("[Frontend] Zsynchronizowano metadane projektu z Firestore:", data);
+            }
+        });
+
+        return () => unsubscribe();
+    }, [activeTenderId]);
+
     // ── KROK 2: SUBSKRYPCJA ZADAŃ W FIRESTORE (REAL-TIME LISTENER) ───────────
 
     useEffect(() => {
@@ -121,7 +164,6 @@ export default function EstimatorPage() {
 
         console.log(`[Frontend Roju] Podpinam nasłuch Real-Time dla przetargu: ${activeTenderId}`);
 
-        // Słuchamy podkolekcji "tasks" dla naszego aktywnego przetargu
         const tasksRef = collection(db, "tenders", activeTenderId, "tasks");
         const unsubscribe = onSnapshot(tasksRef, (snapshot) => {
             const updatedTasks: SwarmTask[] = [];
@@ -149,77 +191,180 @@ export default function EstimatorPage() {
         }
     }, [tasks, activeTenderId, isLoading]);
 
+    // ── FIX #4: WATCHDOG DLA ZAWIESZONYCH ZADAŃ ──────────────────────────────
+    const resetStaleTasks = async (tenderId: string) => {
+        console.log(`[Watchdog] Sprawdzam zawieszone zadania dla projektu: ${tenderId}`);
+        const staleThreshold = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5 minut
+        const tasksRef = collection(db, "tenders", tenderId, "tasks");
+
+        const staleSnap = await getDocs(
+            query(tasksRef,
+                where("status", "==", "IN_PROGRESS"),
+                where("updatedAt", "<", staleThreshold)
+            )
+        );
+
+        const resets = staleSnap.docs.map(docSnap => {
+            console.log(`[Watchdog] Resetuję zawieszone zadanie: ${docSnap.id}`);
+            return updateDoc(docSnap.ref, { status: "PENDING", claimedAt: null, updatedAt: new Date().toISOString() });
+        });
+
+        await Promise.all(resets);
+        if (resets.length > 0) {
+            console.log(`[Watchdog] Zresetowano ${resets.length} zawieszonych zadań.`);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTenderId) {
+            resetStaleTasks(activeTenderId);
+        }
+    }, [activeTenderId]);
+
     const executeSwarmTask = async (task: SwarmTask) => {
         setIsLoading(true);
 
-        // 1. Zmieniamy status w Firestore na "IN_PROGRESS" – koledzy agenci i użytkownik widzą, że robot ruszył
         const taskDocRef = doc(db, "tenders", activeTenderId!, "tasks", task.id);
-        await updateDoc(taskDocRef, { status: "IN_PROGRESS" });
 
-        console.log(`[Rój PESAM] Uruchamiam Agenta: ${task.agentType} dla zadania ${task.id}...`);
+        // ── FIX #3: TRANSAKCJA FIRESTORE ──
+        console.log(`[Rój PESAM] Próba przejęcia zadania ${task.id} przez transakcję...`);
+        try {
+            const claimed = await runTransaction(db, async (tx) => {
+                const snap = await tx.get(taskDocRef);
+                if (snap.data()?.status !== "PENDING") return false;
+                tx.update(taskDocRef, {
+                    status: "IN_PROGRESS",
+                    claimedAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                });
+                return true;
+            });
+
+            if (!claimed) {
+                console.log(`[Rój PESAM] Zadanie ${task.id} już przejęte. Skip.`);
+                setIsLoading(false);
+                return;
+            }
+        } catch (err) {
+            console.error("[Rój PESAM] Błąd transakcji przejęcia zadania:", err);
+            setIsLoading(false);
+            return;
+        }
+
+        console.log(`[Rój PESAM] Transakcja udana. Uruchamiam Agenta: ${task.agentType}...`);
 
         try {
             let endpoint = "";
             let payload: any = {};
 
-            // Dopasowujemy agenta i przygotowujemy dla niego precyzyjne małe dane wejściowe
             if (task.agentType === "LEGAL") {
                 endpoint = "/api/kosztorysant/czytacz-dokumentow";
-                payload = {
-                    fileUrl: task.inputFiles[0], // Wysyłamy bezpośredni link do wyciętego pliku
-                    trends
-                };
+                payload = { fileUrl: task.inputFiles[0], trends, taskKeywords: task.taskKeywords || [] };
             } else if (task.agentType === "QUANTITY") {
                 endpoint = "/api/kosztorysant/agent-knr";
+                payload = { request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
+            } else if (task.agentType === "VISION") {
+                endpoint = "/api/kosztorysant/agent-vision-konstruktor";
+                payload = { fileUrl: task.inputFiles[0], drawingHints: task.description };
+            } else if (task.agentType === "NORMATIVE_STEEL") {
+                // Wyciągamy elementy betonowe z wyników VISION
+                const visionResult = tasks.find(t => t.agentType === "VISION" && t.status === "DONE")?.result;
+                endpoint = "/api/kosztorysant/agent-normatywne-zbrojenie";
                 payload = {
-                    request: task.description,
-                    currentTrends: trends,
-                    mode: "GENERATE_FROM_SCRATCH"
+                    concreteElements: visionResult?.elements || [],
+                    projectContext: project.name
                 };
+            } else if (task.agentType === "PARAMETRIC_ESTIMATE") {
+                endpoint = "/api/kosztorysant/agent-wycena-wskaznikowa";
+                payload = { request: task.description, region: project.soilType.includes("Rzeszów") ? "Podkarpackie" : "Polska" };
+            } else if (task.agentType === "PRICING") {
+                const quantityDone = tasks.find(t => t.agentType === "QUANTITY" && t.status === "DONE");
+                const parametricDone = tasks.find(t => t.agentType === "PARAMETRIC_ESTIMATE" && t.status === "DONE");
+
+                if (!quantityDone && !parametricDone) {
+                    console.log("[A2A] Broker czeka na przedmiar (QUANTITY / PARAMETRIC)...");
+                    await updateDoc(taskDocRef, { status: "PENDING", claimedAt: null });
+                    setIsLoading(false);
+                    return;
+                }
+                const visionTask = tasks.find(t => t.agentType === "VISION" && t.status === "DONE");
+                endpoint = "/api/kosztorysant/agent-broker-cenowy";
+                payload = {
+                    sections: sections,
+                    region: "Polska",
+                    projectContext: project.name,
+                    visionSignals: visionTask?.result?.complexitySignals ?? null
+                };
+            } else if (task.agentType === "AUDIT") {
+                const pendingTasks = tasks.filter(t => t.agentType !== "AUDIT" && t.status !== "DONE" && t.status !== "ERROR");
+                if (pendingTasks.length > 0) {
+                    console.log("[A2A] Rewident czeka na resztę zadań...");
+                    await updateDoc(taskDocRef, { status: "PENDING", claimedAt: null });
+                    setIsLoading(false);
+                    return;
+                }
+                endpoint = "/api/kosztorysant/agent-rewident";
+                payload = { sections: sections, buildingType: project.name, buildingAreaM2: 2000, kp: trends.kp, zysk: trends.zysk };
             }
 
-            if (!endpoint) {
-                throw new Error(`Nieobsługiwany typ agenta: ${task.agentType}`);
-            }
+            if (!endpoint) throw new Error(`Nieobsługiwany typ agenta: ${task.agentType}`);
 
+            console.log(`[Rój PESAM] Wywołuję API: ${endpoint}`);
             const res = await fetch(endpoint, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
             });
 
-            if (!res.ok) throw new Error("Błąd agenta wykonawczego.");
+            if (!res.ok) throw new Error(`Błąd sieci HTTP ${res.status}`);
             const data = await res.json();
 
-            // 2. Zapisujemy wynik pracy agenta i oznaczamy jako "DONE" w Firestore
+            // Zapisujemy wynik pracy agenta i oznaczamy jako "DONE"
             await updateDoc(taskDocRef, {
                 status: "DONE",
                 result: data,
                 updatedAt: new Date().toISOString()
             });
 
-            // 3. Wstrzykujemy wyniki na żywo do naszego interfejsu
-            if (data.reply) {
-                setMessages(prev => [...prev, { role: "ai", content: data.reply }]);
-            }
-            if (data.generatedSections && data.generatedSections.length > 0) {
-                setSections(prev => [...prev, ...data.generatedSections]);
-            }
-            if (data.riskAlerts && data.riskAlerts.length > 0) {
+            // ── OBSŁUGA STRATEGICZNA WYNIKÓW POŁĄCZENIA ──
+            if (task.agentType === "NORMATIVE_STEEL" && data.sections) {
+                setSections(prev => [...prev, ...data.sections]);
+                setMessages(prev => [...prev, { role: "ai", content: `Agent Normatywnego Zbrojenia oszacował zbrojenie. ${data.engineeringComment}` }]);
+            } else if (task.agentType === "PARAMETRIC_ESTIMATE" && data.sections) {
+                setSections(data.sections);
+                setMessages(prev => [...prev, { role: "ai", content: data.parametricComment }]);
+            } else if (task.agentType === "PRICING" && data.pricedItems) {
+                setSections(prev => prev.map(sec => ({
+                    ...sec,
+                    items: sec.items.map(item => {
+                        const priced = data.pricedItems.find((p: any) => p.itemId === item.id);
+                        if (!priced) return item;
+                        return {
+                            ...item,
+                            unitPrice: priced.recommendedPrice,
+                            complexity: priced.complexity.level,
+                            priceConfidence: priced.confidence,
+                            priceRange: priced.priceRange
+                        };
+                    })
+                })));
+                setMessages(prev => [...prev, { role: "ai", content: `Broker Cenowy zaktualizował ceny rynkowe. ${data.marketSummary}` }]);
+            } else if (task.agentType === "AUDIT" && data.alerts) {
+                setMessages(prev => [...prev, { role: "ai", content: `Rewident zakończył audyt. Wynik: ${data.score}/100. ${data.executiveSummary}` }]);
                 setRiskAlerts(prev => {
-                    const uniqueAlerts = Array.from(new Set([...prev, ...data.riskAlerts]));
-                    return uniqueAlerts.filter(a => !a.startsWith("ℹ️ INFO:")); // Usuń pusty placeholder
+                    const newAlerts = data.alerts.map((a: any) => `${a.severity === 'CRITICAL' ? '❗' : '⚠️'} ${a.message}`);
+                    return Array.from(new Set([...prev, ...newAlerts]));
                 });
+            } else {
+                if (data.reply) setMessages(prev => [...prev, { role: "ai", content: data.reply }]);
+                if (data.generatedSections) setSections(prev => [...prev, ...data.generatedSections]);
             }
 
-            console.log(`[Rój PESAM] Agent ${task.agentType} pomyślnie ukończył zadanie ${task.id}!`);
+            console.log(`[Rój PESAM] Agent ${task.agentType} ukończył zadanie ${task.id}.`);
 
         } catch (err: any) {
-            console.error(`[Rój PESAM] Krytyczny błąd podczas pracy agenta ${task.agentType}:`, err);
-            await updateDoc(taskDocRef, {
-                status: "ERROR",
-                error: err.message
-            });
+            console.error(`[Rój PESAM] Krytyczny błąd agenta ${task.agentType}:`, err);
+            await updateDoc(taskDocRef, { status: "ERROR", error: err.message, updatedAt: new Date().toISOString() });
         } finally {
             setIsLoading(false);
         }
@@ -248,25 +393,21 @@ export default function EstimatorPage() {
                 }
             });
 
-            // Wywołanie merytorycznego komentarza na czacie
             if (result.reply) {
                 setMessages(prev => [...prev, { role: "ai", content: result.reply }]);
             }
 
-            // INTELIGENTNE ŁĄCZENIE (MERGE) SEKCJI DLA KOLEJNYCH PLIKÓW PDF
             if (result.generatedSections && result.generatedSections.length > 0) {
                 setSections(prev => {
                     const merged = [...prev];
                     result.generatedSections!.forEach(newSec => {
                         const existingSecIdx = merged.findIndex(s => s.id === newSec.id || s.name === newSec.name);
                         if (existingSecIdx > -1) {
-                            // Jeśli dział już istnieje, doklejamy nowe pozycje do jego wnętrza
                             merged[existingSecIdx] = {
                                 ...merged[existingSecIdx],
                                 items: [...merged[existingSecIdx].items, ...newSec.items]
                             };
                         } else {
-                            // Jeśli dział jest nowy, po prostu go dodajemy
                             merged.push(newSec);
                         }
                     });
@@ -274,19 +415,17 @@ export default function EstimatorPage() {
                 });
             }
 
-            // Łączenie nowych alertów ryzyka (unikamy dublowania)
             if (result.riskAlerts && result.riskAlerts.length > 0) {
                 setRiskAlerts(prev => {
                     const mergedAlerts = Array.from(new Set([...prev, ...result.riskAlerts!]));
-                    return mergedAlerts.filter(a => !a.startsWith("ℹ️ INFO:")); // Usuwamy startowy placeholder
+                    return mergedAlerts.filter(a => !a.startsWith("ℹ️ INFO:"));
                 });
             }
 
-            // Aktywujemy ID przetargu (tylko w przypadku paczki ZIP, która tworzy tenderId i uruchamia asynchroniczny rój w bazie)
             if (result.tenderId) {
                 console.log(`[Frontend] Aktywuję nasłuchiwanie roju dla tenderId: ${result.tenderId}`);
                 setActiveTenderId(result.tenderId);
-                setProject(prev => ({ ...prev, name: result.projectName || prev.name })); // <--- ROZWIĄZANIE BŁĘDU TYPESCRIPT
+                setProject(prev => ({ ...prev, name: result.projectName || prev.name }));
             }
 
         } catch (err) {
@@ -302,7 +441,7 @@ export default function EstimatorPage() {
     // ── METODY OBLICZANIA KOSZTORYSU (TRENDY I NARZUTY) ──────────────────────
 
     const calculateRowValue = (item: EstimateItem) => {
-        let price = item.basePrice;
+        let price = item.unitPrice || item.basePrice;
 
         if (item.type === "R") {
             price = price * (1 + trends.laborAdjustment / 100);
@@ -326,18 +465,27 @@ export default function EstimatorPage() {
     const getEstimateTotals = () => {
         let totalBase = 0;
         let totalMarket = 0;
+        let totalRiskBufferPln = 0; // Łączna rezerwa ryzyka
 
         sections.forEach(sec => {
             sec.items.forEach(item => {
-                totalBase += item.quantity * item.basePrice;
-                totalMarket += calculateRowValue(item);
+                const itemBase = item.quantity * (item.unitPrice || item.basePrice);
+                const itemMarket = calculateRowValue(item);
+
+                totalBase += itemBase;
+                totalMarket += itemMarket;
+
+                // Liczenie rezerwy (np. +15% zbrojenie, +25% wycena wskaźnikowa)
+                if (item.dataQuality?.riskBuffer) {
+                    totalRiskBufferPln += itemMarket * (item.dataQuality.riskBuffer / 100);
+                }
             });
         });
 
-        return { totalBase, totalMarket };
+        return { totalBase, totalMarket, totalRiskBufferPln };
     };
 
-    const { totalBase, totalMarket } = getEstimateTotals();
+    const { totalBase, totalMarket, totalRiskBufferPln } = getEstimateTotals();
 
     // Ręczna modyfikacja ilości/ceny bezpośrednio w tabeli
     const updateItemValue = (sectionId: string, itemId: string, field: "quantity" | "basePrice", value: number) => {
@@ -352,7 +500,6 @@ export default function EstimatorPage() {
         }));
     };
 
-    // Usunięcie pozycji
     const removeItem = (sectionId: string, itemId: string) => {
         setSections(prev => prev.map(sec => {
             if (sec.id !== sectionId) return sec;
@@ -360,7 +507,6 @@ export default function EstimatorPage() {
         }));
     };
 
-    // Czat ręczny z Mózgiem Kosztorysanta
     const handleAskEstimator = async () => {
         if (!inputText.trim()) return;
 
@@ -397,19 +543,6 @@ export default function EstimatorPage() {
         }
     };
 
-    const handleLoadTemplate = (type: string) => {
-        if (type === "PL_FUNDAMENT") {
-            setProject({
-                name: "Budowa Przedszkola Samorządowego",
-                length: "40.0",
-                width: "25.0",
-                depthHeight: "1.20",
-                soilType: "Grunt średni (kat. III)",
-                additionalNotes: "Zbrojenie dołem i górą siatką fi 12, podbudowa z chudego betonu 10cm"
-            });
-        }
-    };
-
     return (
         <div className="p-4 md:p-6 max-w-[1800px] mx-auto h-[90vh] flex flex-col relative animate-fade-in overflow-hidden text-slate-800 bg-slate-50">
 
@@ -429,6 +562,12 @@ export default function EstimatorPage() {
                         <span className="text-[9px] font-black text-slate-400 uppercase block">Cena Bazowa (Direct)</span>
                         <span className="text-sm font-bold text-slate-500 line-through">{totalBase.toLocaleString()} PLN</span>
                     </div>
+                    {totalRiskBufferPln > 0 && (
+                        <div className="text-right text-orange-600 font-bold px-3 py-1 bg-orange-50 border border-orange-200 rounded-2xl">
+                            <span className="text-[9px] font-black uppercase block">Bufor Ryzyka PZP</span>
+                            <span className="text-sm">+{Math.round(totalRiskBufferPln).toLocaleString()} PLN</span>
+                        </div>
+                    )}
                     <div className="text-right bg-blue-600 text-white px-5 py-2.5 rounded-2xl shadow-md">
                         <span className="text-[9px] font-black text-blue-200 uppercase block">Budżet Ofertowy (z Narzutami & Trendem)</span>
                         <span className="text-xl font-black tracking-tight">{Math.round(totalMarket).toLocaleString()} PLN</span>
@@ -439,9 +578,42 @@ export default function EstimatorPage() {
             {/* ── Trzykolumnowy Layout ── */}
             <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5 overflow-hidden min-h-0">
 
-                {/* ── LEWA KOLUMNA: Suwaki + Dropzone + Alerty Ryzyka (3/12) ── */}
+                {/* ── LEWA KOLUMNA: Suwaki + Dropzone + Alerty Ryzyka + Analiza Dokumentów (3/12) ── */}
                 <div className="lg:col-span-3 bg-white border border-slate-200 rounded-3xl p-5 flex flex-col justify-between shadow-sm overflow-y-auto">
                     <div className="space-y-4">
+
+                        {/* ── NOWE: RAPORT OCENY DOKUMENTACJI (KLASYFIKATOR) ── */}
+                        {tenderStats.docLevel && (
+                            <div className="p-4 bg-slate-900 text-white rounded-3xl border border-slate-800 space-y-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Poziom Projektu</span>
+                                    <span className="text-[9px] font-black px-2 py-0.5 bg-blue-600 rounded-full text-white">{tenderStats.docLevel.replace("LEVEL_", "LVL ")}</span>
+                                </div>
+                                <div className="flex justify-between items-center border-t border-slate-800 pt-2">
+                                    <span className="text-[9px] text-slate-400 font-bold">Metoda wyceny:</span>
+                                    <span className="text-[10px] font-black text-slate-200">{tenderStats.estimationMethod}</span>
+                                </div>
+                                <div className="flex justify-between items-center border-t border-slate-800 pt-2">
+                                    <span className="text-[9px] text-slate-400 font-bold">Niepewność kosztu:</span>
+                                    <span className={`text-xs font-black ${tenderStats.uncertaintyPercent && tenderStats.uncertaintyPercent > 15 ? 'text-red-400' : 'text-green-400'}`}>
+                                        ±{tenderStats.uncertaintyPercent}%
+                                    </span>
+                                </div>
+                                {tenderStats.missingDataReport && tenderStats.missingDataReport.length > 0 && (
+                                    <div className="border-t border-slate-800 pt-2">
+                                        <span className="text-[8px] font-black text-red-400 uppercase block tracking-wider">Wykryte braki SWZ/Projektu:</span>
+                                        <div className="space-y-1 mt-1 max-h-24 overflow-y-auto">
+                                            {tenderStats.missingDataReport.map((m, i) => (
+                                                <div key={i} className="text-[9px] leading-tight text-slate-300">
+                                                    ⚠️ <span className="font-bold">{m.item}:</span> {m.assumption}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         <div className="border-b pb-3">
                             <h3 className="font-black text-xs text-slate-500 uppercase tracking-wider">📐 Przedmiar i Parametry</h3>
                             <p className="text-[10px] text-slate-400 mt-0.5">Dane wejściowe pod zaawansowane formuły matematyczne</p>
@@ -699,11 +871,11 @@ export default function EstimatorPage() {
                                         <div className="space-y-2 pl-2">
                                             {filteredItems.map(item => {
                                                 const adjustedValue = calculateRowValue(item);
-                                                const baseValue = item.quantity * item.basePrice;
+                                                const baseValue = item.quantity * (item.unitPrice || item.basePrice);
                                                 return (
                                                     <div key={item.id} className="border border-slate-100 p-3 rounded-2xl bg-white shadow-sm flex items-center justify-between gap-3 hover:border-slate-200 transition-colors">
                                                         <div className="flex-1 min-w-0">
-                                                            <div className="flex items-center gap-1.5">
+                                                            <div className="flex items-center gap-1.5 flex-wrap">
                                                                 <span className={`text-[7px] font-black px-1.5 py-0.5 rounded ${item.type === "R" ? "bg-amber-100 text-amber-700" :
                                                                     item.type === "M" ? "bg-green-100 text-green-700" :
                                                                         "bg-purple-100 text-purple-700"
@@ -711,8 +883,42 @@ export default function EstimatorPage() {
                                                                     {item.type}
                                                                 </span>
                                                                 {item.code && <span className="text-[8px] text-slate-400 font-mono font-bold">{item.code}</span>}
+
+                                                                {/* Wyświetlanie Złożoności od Brokera */}
+                                                                {item.complexity && (
+                                                                    <span className={`text-[7px] font-black px-1.5 py-0.5 rounded ${item.complexity === 'SIMPLE' ? 'bg-green-50 text-green-700' :
+                                                                            item.complexity === 'VERY_COMPLEX' ? 'bg-red-100 text-red-700 font-extrabold' :
+                                                                                item.complexity === 'COMPLEX' ? 'bg-amber-100 text-amber-700 font-bold' :
+                                                                                    'bg-slate-200 text-slate-700'
+                                                                        }`}>
+                                                                        {item.complexity}
+                                                                    </span>
+                                                                )}
+                                                                {item.priceConfidence === 'MARKET_VERIFIED' && (
+                                                                    <span title="Cena zweryfikowana w hurtowniach online przez AI" className="text-[10px] cursor-help">🌐</span>
+                                                                )}
+
+                                                                {/* ── NOWE: PASEK JAKOŚCI DANYCH I REZERWY ── */}
+                                                                {item.dataQuality && (
+                                                                    <div className="flex items-center gap-1 bg-slate-50 px-1.5 py-0.5 rounded border text-[7px] font-bold text-slate-500">
+                                                                        <span className={`w-1.5 h-1.5 rounded-full ${item.dataQuality.confidence === 'HIGH' ? 'bg-green-500' :
+                                                                                item.dataQuality.confidence === 'MEDIUM' ? 'bg-amber-500' : 'bg-red-500'
+                                                                            }`} />
+                                                                        <span>{item.dataQuality.method}</span>
+                                                                        {item.dataQuality.riskBuffer > 0 && (
+                                                                            <span className="text-orange-600 font-black">+{item.dataQuality.riskBuffer}% rezerwy</span>
+                                                                        )}
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                             <p className="text-[11px] font-bold text-slate-800 truncate mt-1 leading-tight uppercase" title={item.name}>{item.name}</p>
+
+                                                            {/* Notatki techniczne o brakach / założeniach */}
+                                                            {item.dataQuality?.notes && item.dataQuality.notes.length > 0 && (
+                                                                <div className="text-[8px] italic text-slate-400 mt-0.5 leading-normal max-w-md">
+                                                                    {item.dataQuality.notes.join("; ")}
+                                                                </div>
+                                                            )}
 
                                                             <div className="text-[9px] font-semibold text-slate-400 mt-1 flex gap-2">
                                                                 <span>Baza: {Math.round(baseValue).toLocaleString()} zł</span>
@@ -740,7 +946,7 @@ export default function EstimatorPage() {
                                                                 <div className="flex items-center gap-0.5 bg-slate-50 px-1.5 py-1 rounded-lg border">
                                                                     <input
                                                                         type="number"
-                                                                        value={item.basePrice}
+                                                                        value={item.unitPrice || item.basePrice}
                                                                         onChange={e => updateItemValue(sec.id, item.id, "basePrice", Number(e.target.value))}
                                                                         className="w-10 bg-transparent text-center font-black text-[10px] outline-none"
                                                                     />

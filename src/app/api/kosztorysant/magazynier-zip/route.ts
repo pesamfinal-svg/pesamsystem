@@ -1,13 +1,12 @@
-// src/app/api/kosztorysant/magazynier-zip/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import JSZip from "jszip";
-import { adminDb, adminStorage } from "@/lib/firebase/admin"; // Używamy Admin SDK do zapisu
+import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { PDFDocument } from "pdf-lib"; // Wymagane do Fix #7
 
 // Budowanie bezpiecznego URL dla wywołań wewnętrznych
 function internalUrl(req: NextRequest, path: string): string {
     const url = new URL(req.url);
-    // Wewnątrz kontenera Google Cloud komunikacja idzie po HTTP
     if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
         url.protocol = "http:";
     }
@@ -43,11 +42,9 @@ export async function POST(req: NextRequest) {
 
         console.log(`[Magazynier ZIP] Odczytano metadane pliku: "${file.name}" (${file.size} bajtów).`);
 
-        // Tworzymy unikalne ID dla nowej inwestycji (Tender ID)
         const tenderId = `TND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
         const bucket = adminStorage.bucket(process.env.FIREBASE_STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
 
-        // Wczytujemy plik ZIP do pamięci RAM
         console.log("[Magazynier ZIP] Wczytuję archiwum do bufora pamięci RAM...");
         const arrayBuffer = await file.arrayBuffer();
 
@@ -56,11 +53,9 @@ export async function POST(req: NextRequest) {
 
         const filesToProcess: { name: string; buffer: Buffer; type: string }[] = [];
 
-        // Przeglądamy pliki wewnątrz ZIP
         for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
-            if (zipEntry.dir) continue; // Pomijamy foldery
+            if (zipEntry.dir) continue;
 
-            // Ignorujemy pliki systemowe macOS/Windows (np. __MACOSX, DS_Store)
             if (relativePath.startsWith("__MACOSX") || relativePath.includes(".DS_Store")) {
                 console.log(`[Magazynier ZIP] Pominięto plik systemowy: ${relativePath}`);
                 continue;
@@ -68,7 +63,6 @@ export async function POST(req: NextRequest) {
 
             const fileBuffer = await zipEntry.async("nodebuffer");
 
-            // Proste dopasowanie typu MIME na podstawie rozszerzenia
             let type = "application/octet-stream";
             if (relativePath.endsWith(".pdf")) type = "application/pdf";
             else if (relativePath.endsWith(".xlsx")) type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -78,7 +72,6 @@ export async function POST(req: NextRequest) {
             else if (relativePath.endsWith(".jpg") || relativePath.endsWith(".jpeg")) type = "image/jpeg";
             else if (relativePath.endsWith(".png")) type = "image/png";
 
-            // Pobieramy samą nazwę pliku (bez ścieżki folderu)
             const fileName = relativePath.split("/").pop() || relativePath;
 
             console.log(`[Magazynier ZIP] Wyekstrahowano plik: "${fileName}" (Typ: ${type}, rozmiar: ${fileBuffer.length} bajtów)`);
@@ -87,7 +80,6 @@ export async function POST(req: NextRequest) {
 
         console.log(`[Magazynier ZIP] Zakończono rozpakowywanie. Wykryto łącznie ${filesToProcess.length} poprawnych plików do przetworzenia.`);
 
-        // Zakładamy główny dokument przetargu w Firestore
         console.log(`[Magazynier ZIP] Zakładam nowy rekord przetargu w kolekcji "tenders" pod ID: "${tenderId}"...`);
         await adminDb.collection("tenders").doc(tenderId).set({
             id: tenderId,
@@ -103,36 +95,44 @@ export async function POST(req: NextRequest) {
             location: "global",
         });
 
-        // Przesyłamy każdy plik na Storage i rejestrujemy w bazie
         for (const item of filesToProcess) {
             const storagePath = `kosztorysy/${tenderId}/${item.name}`;
             const storageFile = bucket.file(storagePath);
 
-            // 1. Zapis na Firebase Cloud Storage
             console.log(`[Magazynier ZIP] Przesyłam plik do Cloud Storage: "${storagePath}"...`);
             await storageFile.save(item.buffer, {
                 metadata: { contentType: item.type },
             });
 
-            // Tworzymy podpisany link (URL) ważny przez rok
-            const [url] = await storageFile.getSignedUrl({
-                action: "read",
-                expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
-            });
-            console.log(`[Magazynier ZIP] Wygenerowano bezpieczny podpisany URL dla: "${item.name}"`);
-
-            // 2. Wywołanie szybkiego Agenta Bibliotekarza (Gemini Flash), aby sklasyfikował plik
             let fileCategory = "OTHER";
             let fileSummary = "Dokument pomocniczy przetargu.";
 
             try {
-                // Przekazujemy modelowi pierwsze 500 bajtów jako tekst do szybkiej analizy
-                const previewText = item.buffer.slice(0, 500).toString("utf-8");
-                console.log(`[Magazynier ZIP] Wysyłam nagłówek pliku "${item.name}" do klasyfikacji AI...`);
+                let classificationParts = [];
 
+                // ── FIX #7: WIZUALNA KLASYFIKACJA PDF ──
+                if (item.type === "application/pdf") {
+                    console.log(`[Magazynier ZIP] Konwersja pierwszej strony PDF "${item.name}" na obraz dla AI...`);
+                    const miniDoc = await PDFDocument.load(item.buffer);
+                    const previewDoc = await PDFDocument.create();
+                    const pagesToPreview = await previewDoc.copyPages(miniDoc, [0].filter(i => i < miniDoc.getPageCount()));
+                    pagesToPreview.forEach(p => previewDoc.addPage(p));
+                    const previewBuffer = Buffer.from(await previewDoc.save());
+
+                    classificationParts = [
+                        { inlineData: { data: previewBuffer.toString("base64"), mimeType: "application/pdf" } },
+                        { text: `Sklasyfikuj ten dokument. Nazwa pliku: ${item.name}` }
+                    ];
+                } else {
+                    classificationParts = [
+                        { text: `Sklasyfikuj dokument na podstawie nazwy pliku: ${item.name}` }
+                    ];
+                }
+
+                console.log(`[Magazynier ZIP] Wysyłam zapytanie klasyfikacyjne do Gemini Flash...`);
                 const response = await ai.models.generateContent({
                     model: MODEL_FLASH,
-                    contents: [{ role: "user", parts: [{ text: `Plik: ${item.name}. Podgląd nagłówka:\n${previewText}` }] }],
+                    contents: [{ role: "user", parts: classificationParts }],
                     config: {
                         systemInstruction: SYSTEM_INSTRUCTION,
                         temperature: 0.1,
@@ -141,23 +141,22 @@ export async function POST(req: NextRequest) {
                 });
 
                 if (response.text) {
-                    const [parsed] = extractAllJSONObjects(response.text) as any[];
-                    if (parsed) {
-                        fileCategory = parsed.category || "OTHER";
-                        fileSummary = parsed.summary || fileSummary;
-                    }
+                    const parsed = JSON.parse(response.text);
+                    fileCategory = parsed.category || "OTHER";
+                    fileSummary = parsed.summary || fileSummary;
                 }
             } catch (err) {
                 console.warn(`[Magazynier ZIP] Ostrzeżenie: Nie udało się sklasyfikować pliku ${item.name} przez AI. Używam domyślnych kategorii.`, err);
             }
 
-            // 3. Zapisujemy plik do podkolekcji w Firestore
             const fileId = `file-${Math.random().toString(36).slice(2, 9)}`;
             console.log(`[Magazynier ZIP] Zapisuję metadane pliku do podkolekcji "files" pod ID: "${fileId}"...`);
+
+            // ── FIX #2: ZAPISUJEMY storagePath ZAMIAST URL ──
             await adminDb.collection("tenders").doc(tenderId).collection("files").doc(fileId).set({
                 id: fileId,
                 fileName: item.name,
-                storageUrl: url,
+                storagePath: storagePath, // Zmiana tutaj!
                 category: fileCategory,
                 summary: fileSummary,
                 type: item.type,
@@ -167,15 +166,11 @@ export async function POST(req: NextRequest) {
             console.log(`[Magazynier ZIP] Pomyślnie zmapowano i zapisano plik: ${item.name} jako [${fileCategory}]`);
         }
 
-        // Aktualizujemy status przetargu na gotowy dla reszty roju
         console.log(`[Magazynier ZIP] Aktualizuję status główny przetargu "${tenderId}" na "READY"...`);
         await adminDb.collection("tenders").doc(tenderId).update({
             status: "READY",
         });
 
-        // =========================================================================
-        // AUTOMATYCZNY ZAPŁON: Wywołujemy wewnętrznie nasz inicjalizator zadań w tle
-        // =========================================================================
         try {
             const initUrl = internalUrl(req, "/api/kosztorysant/glowny-kosztorysant/inicjalizuj");
             console.log(`[Magazynier ZIP] [ZAPŁON] Automatycznie odpalam proces inicjalizacji zadań pod adresem: ${initUrl}...`);
@@ -194,7 +189,6 @@ export async function POST(req: NextRequest) {
         } catch (initErr) {
             console.error("[Magazynier ZIP] [ZAPŁON] Krytyczny błąd automatycznego wywołania inicjalizatora zadań:", initErr);
         }
-        // =========================================================================
 
         console.log(`[Magazynier ZIP] Zakończono import przetargu ${tenderId}. Zwracam dane do przeglądarki.`);
         console.log("==================================================");
@@ -209,31 +203,4 @@ export async function POST(req: NextRequest) {
         console.error("[Magazynier ZIP] Krytyczny błąd podczas importu:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
-}
-
-// Funkcja pomocnicza do parsowania (taka sama jak w shared types)
-function extractAllJSONObjects(text: string) {
-    const objects = [];
-    let depth = 0; let startIndex = -1; let inString = false; let escape = false;
-    for (let i = 0; i < text.length; i++) {
-        const char = text[i];
-        if (inString) {
-            if (char === '\\') escape = !escape;
-            else if (char === '"' && !escape) inString = false;
-            else escape = false;
-        } else {
-            if (char === '"') inString = true;
-            else if (char === '{') { if (depth === 0) startIndex = i; depth++; }
-            else if (char === '}') {
-                if (depth > 0) {
-                    depth--;
-                    if (depth === 0 && startIndex !== -1) {
-                        try { objects.push(JSON.parse(text.substring(startIndex, i + 1))); } catch (e) { }
-                        startIndex = -1;
-                    }
-                }
-            }
-        }
-    }
-    return objects;
 }

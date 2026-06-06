@@ -1,20 +1,11 @@
 /**
- * PESAM – Agent 2: KNR Lookup (Normatywny)
+ * PESAM – Agent 2: KNR Lookup (Normatywny) - WERSJA DWUETAPOWA (Fix #6)
  *
  * Ścieżka: src/app/api/kosztorysant/knr-lookup/route.ts
  *
  * Odpowiedzialność:
- *  - Przyjmuje polecenie, tryb pracy i opcjonalnie bieżącą strukturę kosztorysu.
- *  - Używa Gemini 2.5 Pro z włączonym Code Execution (Python) do:
- *      a) dopasowania kodów KNR/KNNR do pozycji robót,
- *      b) obliczenia ilości geometrycznych (kubatury, powierzchnie, m.b.),
- *      c) rozbicia nakładów na R (robocizna), M (materiały), S (sprzęt),
- *      d) wyceny bazowej wg cen 2025 (bez trendów – te nakłada Orkiestrator).
- *  - Zwraca { sections, narrativeHints } – nie liczy narzutów ani trendów.
- *
- * Ceny bazowe są CENAMI WYJŚCIOWYMI przed korektą rynkową.
- * Korekty (kp, zysk, trendy) celowo NIE są tu stosowane – to domena agentFinansowy
- * w Orkiestratorze, co gwarantuje deterministyczność obliczeń finansowych.
+ *  - ETAP 1: Używa Gemini 2.5 Pro z Code Execution (Python) do precyzyjnego obliczenia ilości geometrycznych.
+ *  - ETAP 2: Używa Gemini 2.5 Pro (bez Pythona, z wymuszonym JSON) do wygenerowania czystej struktury kosztorysu.
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -67,17 +58,10 @@ ZASADY TWORZENIA POZYCJI:
    - Koparka kołowa (m-g): 180–260 PLN/m-g
    - Transport wywrotką (kurs 10 km): 120–180 PLN/kurs
 4. Ilości muszą być REALISTYCZNE i spójne z zakresem projektu:
-   - Przelicz kubatury geometryczne dokładnie (użyj Code Execution dla złożonych geometrii).
-   - Do materiałów dolictz straty technologiczne: beton +3%, stal +5%, płytki +10%, tynki +8%.
+   - Do materiałów dolicz straty technologiczne: beton +3%, stal +5%, płytki +10%, tynki +8%.
 5. Zachowaj logiczny podział na działy (sekcje) zgodny z branżami lub etapami budowy.
 
-UŻYCIE CODE EXECUTION:
-- Użyj Pythona do weryfikacji i obliczenia ilości geometrycznych (kubatura wykopu,
-  powierzchnia dachu, ciężar zbrojenia, itp.) zanim zwrócisz wynik JSON.
-- Przykład: dla stropu żelbetowego 200m² × 0,20m = 40m³ betonu, zbrojenie ≈ 100kg/m³ = 4000kg.
-- Nie ujawniaj kodu Pythona w finalnym JSON – tylko używaj go do obliczeń.
-
-FORMAT ODPOWIEDZI:
+FORMAT ODPOWIEDZI (Dla Etapu 2):
 Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON (bez markdown, bez komentarzy):
 {
   "sections": [
@@ -98,7 +82,7 @@ Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON (bez markdown, bez komentarzy):
       ]
     }
   ],
-  "narrativeHints": "2-3 zdania: kluczowe informacje techniczne dla Kosztorysanta (ryzyka techniczne, alternatywy materiałowe, uwagi do norm)."
+  "narrativeHints": "2-3 zdania: kluczowe informacje techniczne dla Kosztorysanta."
 }
 `.trim();
 
@@ -107,6 +91,10 @@ Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON (bez markdown, bez komentarzy):
 export async function POST(
   req: NextRequest
 ): Promise<NextResponse<KnrLookupResponse>> {
+  console.log("==================================================");
+  console.log("[KNR Lookup] === ROZPOCZĘTO WYSZUKIWANIE NORM (DWUETAPOWE) ===");
+  console.log("==================================================");
+
   try {
     const ai = new GoogleGenAI({
       vertexai: true,
@@ -118,6 +106,7 @@ export async function POST(
     const { request, currentTrends, mode, currentSections } = body;
 
     if (!request?.trim()) {
+      console.warn("[KNR Lookup] Brak polecenia w żądaniu.");
       return NextResponse.json(
         {
           sections: currentSections ?? [],
@@ -127,23 +116,18 @@ export async function POST(
       );
     }
 
-    // Kontekst bieżącego kosztorysu (jeśli modyfikujemy istniejący)
+    console.log(`[KNR Lookup] Tryb: ${mode} | Polecenie: "${request.substring(0, 50)}..."`);
+
+    // Kontekst bieżącego kosztorysu
     const contextBlock = currentSections?.length
-      ? `\n\nBIEŻĄCA STRUKTURA KOSZTORYSU DO MODYFIKACJI:\n${JSON.stringify(
-          currentSections,
-          null,
-          2
-        )}`
+      ? `\n\nBIEŻĄCA STRUKTURA KOSZTORYSU DO MODYFIKACJI:\n${JSON.stringify(currentSections, null, 2)}`
       : "";
 
-    // Kontekst parametrów wyceny (informacyjnie – nie stosuj ich tutaj)
     const trendsBlock = `
 PARAMETRY WYCENY (TYLKO DO INFORMACJI – nie stosuj ich w cenach bazowych):
 - Korekta robocizny: ${currentTrends.laborAdjustment}%
 - Korekta materiałów: ${currentTrends.materialAdjustment}%
 - Korekta sprzętu: ${currentTrends.equipmentAdjustment}%
-- Koszty pośrednie Kp: ${currentTrends.kp}%
-- Zysk Z: ${currentTrends.zysk}%
 Podaj WYŁĄCZNIE ceny bazowe 2025 bez powyższych korekt.`.trim();
 
     const userPrompt = `
@@ -154,19 +138,77 @@ ${trendsBlock}
 ${contextBlock}
 `.trim();
 
-    const response = await ai.models.generateContent({
+    // ════════════════════════════════════════════════════════════════════════
+    // ETAP 1: OBLICZENIA PYTHON (CODE EXECUTION)
+    // ════════════════════════════════════════════════════════════════════════
+    console.log("[KNR Lookup] ETAP 1: Uruchamiam Code Execution (Python) do obliczeń geometrycznych...");
+
+    const calcPrompt = `
+${userPrompt}
+
+ZADANIE: Oblicz TYLKO ilości geometryczne dla pozycji kosztorysowych.
+Użyj Pythona do obliczeń (np. objętości, powierzchni, ciężaru zbrojenia).
+Na końcu wypisz TYLKO jedną linię w formacie:
+WYNIKI: {"wykop_m3": 450, "beton_fundamenty_m3": 85, "stal_kg": 12500}
+Nie generuj JSON kosztorysu – tylko liczby.
+    `.trim();
+
+    const calcResponse = await ai.models.generateContent({
       model: MODEL_PRO,
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      contents: [{ role: "user", parts: [{ text: calcPrompt }] }],
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0.1,
-        tools: [{ codeExecution: {} }], // Python do obliczeń geometrycznych
-        responseMimeType: "application/json", // <--- WYMUSZENIE FORMATU JSON
+        tools: [{ codeExecution: {} }], // Włączamy Pythona
+        // Brak responseMimeType, aby Python mógł swobodnie działać
       },
     });
 
-    // Wyciągamy ostatni (najdokładniejszy) obiekt JSON z odpowiedzi
-    const rawText = response.text ?? "";
+    const calcText = calcResponse.text ?? "";
+    console.log(`[KNR Lookup] Odpowiedź z Pythona odebrana (${calcText.length} znaków). Szukam bloku WYNIKI...`);
+
+    const wynikiMatch = calcText.match(/WYNIKI:\s*(\{[^}]+\})/);
+    let obliczone = {};
+
+    if (wynikiMatch) {
+      try {
+        obliczone = JSON.parse(wynikiMatch[1]);
+        console.log(`[KNR Lookup] Sukces! Wyekstrahowane obliczenia z Pythona:`, obliczone);
+      } catch (e) {
+        console.warn(`[KNR Lookup] Błąd parsowania wyników z Pythona: ${wynikiMatch[1]}`);
+      }
+    } else {
+      console.warn(`[KNR Lookup] Ostrzeżenie: Model nie zwrócił bloku WYNIKI. Przechodzę do Etapu 2 bez precyzyjnych obliczeń.`);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ETAP 2: GENEROWANIE CZYSTEGO JSON KOSZTORYSU
+    // ════════════════════════════════════════════════════════════════════════
+    console.log("[KNR Lookup] ETAP 2: Generowanie czystego JSON kosztorysu na bazie obliczeń...");
+
+    const jsonPrompt = `
+${userPrompt}
+
+OBLICZONE ILOŚCI (zweryfikowane przez Python w poprzednim kroku):
+${JSON.stringify(obliczone, null, 2)}
+
+Użyj tych dokładnych ilości. Wygeneruj pełny kosztorys w formacie JSON.
+Pamiętaj o zachowaniu struktury: sections -> items.
+    `.trim();
+
+    const jsonResponse = await ai.models.generateContent({
+      model: MODEL_PRO,
+      contents: [{ role: "user", parts: [{ text: jsonPrompt }] }],
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        temperature: 0.1,
+        responseMimeType: "application/json", // Wymuszamy czysty JSON (bez Pythona)
+      },
+    });
+
+    const rawText = jsonResponse.text ?? "";
+    console.log(`[KNR Lookup] Odebrano finalny JSON (${rawText.length} znaków). Parsowanie...`);
+
     const extracted = extractAllJSONObjects(rawText) as Array<{
       sections?: EstimateSection[];
       narrativeHints?: string;
@@ -175,24 +217,23 @@ ${contextBlock}
     if (extracted.length > 0) {
       const parsed = extracted[extracted.length - 1];
       const sections = parsed.sections ?? [];
-      const narrativeHints =
-        parsed.narrativeHints ??
-        "Struktura kosztorysu zaktualizowana. Proszę zweryfikować ilości.";
+      const narrativeHints = parsed.narrativeHints ?? "Struktura kosztorysu zaktualizowana. Proszę zweryfikować ilości.";
 
+      console.log(`[KNR Lookup] Sukces. Wygenerowano ${sections.length} sekcji.`);
+      console.log("==================================================");
       return NextResponse.json({ sections, narrativeHints });
     }
 
     // Fallback gdy AI nie zwróciło parsowanego JSON
-    console.warn("[KNR Lookup] Nie udało się sparsować JSON z odpowiedzi AI.");
+    console.warn("[KNR Lookup] Nie udało się sparsować JSON z odpowiedzi AI w Etapie 2.");
     return NextResponse.json({
       sections: currentSections ?? [],
-      narrativeHints:
-        "Nie udało się przetworzyć odpowiedzi AI. Proszę spróbować ponownie z bardziej precyzyjnym poleceniem.",
+      narrativeHints: "Nie udało się przetworzyć odpowiedzi AI. Proszę spróbować ponownie z bardziej precyzyjnym poleceniem.",
     });
+
   } catch (error) {
-    console.error("[KNR Lookup] Błąd agenta normatywnego:", error);
-    const msg =
-      error instanceof Error ? error.message : "Nieznany błąd agenta KNR.";
+    console.error("[KNR Lookup] Krytyczny błąd agenta normatywnego:", error);
+    const msg = error instanceof Error ? error.message : "Nieznany błąd agenta KNR.";
 
     return NextResponse.json(
       {
@@ -206,24 +247,9 @@ ${contextBlock}
 
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
-    service: "PESAM KNR Lookup (Normatywny)",
+    service: "PESAM KNR Lookup (Normatywny - Dwuetapowy)",
     model: MODEL_PRO,
-    tools: ["codeExecution (Python)"],
-    responsibility:
-      "KNR/KNNR code matching, quantity calculation, RMS decomposition",
-    catalogs: [
-      "KNR 2-01",
-      "KNR 2-02",
-      "KNR 2-10",
-      "KNR 2-17",
-      "KNR 2-18",
-      "KNR 2-22",
-      "KNR 2-28",
-      "KNR 4-01",
-      "KNR 4-02",
-      "KNR 5-01",
-      "KNNR 1",
-      "KNNR 6",
-    ],
+    tools: ["codeExecution (Python) - Stage 1", "JSON Schema - Stage 2"],
+    responsibility: "KNR/KNNR code matching, quantity calculation, RMS decomposition",
   });
 }

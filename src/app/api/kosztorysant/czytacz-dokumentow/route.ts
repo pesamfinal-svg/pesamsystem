@@ -1,12 +1,12 @@
 /**
- * PESAM – Agent: Czytacz Dokumentów (Z systemem wirtualnych nożyczek PDF-LIB)
+ * PESAM – Agent: Czytacz Dokumentów (Z obsługą Dual-Mode, Smart Chunking i pełnym logowaniem)
  *
  * Ścieżka: src/app/api/kosztorysant/czytacz-dokumentow/route.ts
  */
 
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
-import { PDFDocument } from "pdf-lib"; // <--- NOWY IMPORT DLA WIRTUALNYCH NOŻYCZEK
+import { PDFDocument } from "pdf-lib";
 import {
   MarketTrends,
   EstimateSection,
@@ -14,7 +14,9 @@ import {
   extractAllJSONObjects,
 } from "../_shared/types";
 
-export const dynamic = "force-dynamic";
+export const dynamic = "force-dynamic"; // <--- WYMUSZENIE TRYBU DYNAMICZNEGO DLA KOMPILATORA
+
+// ── Stałe ─────────────────────────────────────────────────────────────────────
 
 const MODEL_PRO = "gemini-2.5-pro";
 const MAX_FILE_SIZE_BYTES = 19 * 1024 * 1024; // 19 MB
@@ -34,17 +36,26 @@ const SUPPORTED_MIME_TYPES: Record<string, string> = {
 
 const SYSTEM_INSTRUCTION = `
 Jesteś Wielomodalnym Agentem Analizy Przetargowej systemu PESAM – doświadczonym
-Inżynierem Kontraktu i Kosztorysantem z 20-letnim stażem. Potrafisz czytać wycięte fragmenty SWZ i przedmiarów.
+Inżynierem Kontraktu i Kosztorysantem z 20-letnim stażem w budownictwie kubaturowym,
+drogowym i instalacyjnym. Potrafisz czytać dokumenty PDF wielostronicowe (SWZ, SIWZ,
+PFU, opisy techniczne, ślepe kosztorysy w tabelach) oraz rysunki techniczne (rzuty,
+przekroje, elewacje).
 
-TWOJE ZADANIE: SZYBKA ANALIZA WYCIĘTEGO FRAGMENTU DOKUMENTU I WYEKSTRAHOWANIE GŁÓWNYCH POZYCJI
+════════════════════════════════════════════════════════
+TWOJE ZADANIE: PEŁNA ANALIZA DOKUMENTU PRZETARGOWEGO
+════════════════════════════════════════════════════════
+
+Przeanalizuj dostarczony dokument i wykonaj TRZY zadania jednocześnie:
 
 ZASADY FORMATOWANIA JSON (KRYTYCZNE DLA BEZPIECZEŃSTWA PARSOWANIA):
 1. NIGDY nie używaj standardowych znaków cudzysłowu (") wewnątrz wartości tekstowych (np. w polach "reply", "name" czy "riskAlerts"). 
-   Jeśli musisz coś zacytować lub wyróżnić, używaj WYŁĄCZNIE pojedynczego apostrofu (').
+   Jeśli musisz coś zacytować lub wyróżnić, używaj WYŁĄCZNIE pojedynczego apostrofu (') lub polskich cudzysłowów drukarskich („ oraz ”).
+   Błędny przykład: "reply": "Inwestycja "zaprojektuj i wybuduj""
+   Poprawny przykład: "reply": "Inwestycja 'zaprojektuj i wybuduj'" lub "reply": "Inwestycja „zaprojektuj i wybuduj”"
 2. Odpowiedź musi być w 100% poprawnym i czystym obiektem JSON.
 
 ────────────────────────────────────────────────────────
-ZADANIE A – GŁÓWNE POZYCJE PRZEDMIARU (MAX 10 POZYCJI SCALONYCH)
+ZADANIE A – PRZEDMIAR ROBÓT (GENERUJ SECTIONS)
 ────────────────────────────────────────────────────────
 Wybierz z dokumentu maksymalnie 5-10 GŁÓWNYCH, najważniejszych pozycji scalonych (np. Wykop mechaniczny, Ławy żelbetowe, Ściany nośne, Strop żelbetowy, Pokrycie dachu).
 Zasady:
@@ -101,7 +112,7 @@ interface ValidationResult {
   mimeLabel?: string;
 }
 
-function validateFile(file: File): ValidationResult {
+function validateFile(file: { size: number; type: string; name: string }): ValidationResult {
   if (!file || file.size === 0) {
     return { valid: false, error: "Plik jest pusty." };
   }
@@ -151,46 +162,102 @@ function parseTrends(raw: string | null): MarketTrends {
   }
 }
 
-// ── METODA "WIRTUALNYCH NOŻYCZEK" DLA PDF ────────────────────────────────────
+// ── Pomocnik: buduje blok kontekstu trendów dla promptu ──────────────────────
 
-async function slicePdf(arrayBuffer: ArrayBuffer): Promise<{ buffer: Buffer; sliced: boolean }> {
-  try {
-    const srcDoc = await PDFDocument.load(arrayBuffer);
-    const pageCount = srcDoc.getPageCount();
+function buildTrendsContext(trends: MarketTrends): string {
+  const laborSign = trends.laborAdjustment >= 0 ? "+" : "";
+  const materialSign = trends.materialAdjustment >= 0 ? "+" : "";
+  const equipSign = trends.equipmentAdjustment >= 0 ? "+" : "";
 
-    console.log(`[Czytacz Dokumentów] Wykryto dokument PDF o długości: ${pageCount} stron.`);
-
-    // Jeśli plik ma mniej niż 12 stron, przesyłamy go w całości (nie ma ryzyka timeoutu)
-    if (pageCount <= 12) {
-      console.log("[Czytacz Dokumentów] Plik ma 12 lub mniej stron. Przesyłam w całości.");
-      return { buffer: Buffer.from(arrayBuffer), sliced: false };
-    }
-
-    console.log("[Czytacz Dokumentów] Plik jest duży (> 12 stron). Uruchamiam procedurę 'Nożyczek' (pdf-lib)...");
-    const dstDoc = await PDFDocument.create();
-
-    // Wycinamy pierwsze 5 stron (metadane, cel, NIP, terminy)
-    const firstPagesIndices = Array.from({ length: Math.min(5, pageCount) }, (_, i) => i);
-    // Wycinamy ostatnie 5 stron (podsumowania, działy, podpisy)
-    const lastPagesIndices = Array.from({ length: Math.min(5, pageCount) }, (_, i) => pageCount - 1 - i).reverse();
-
-    // Łączymy indeksy stron (upewniamy się, że są unikalne)
-    const pagesToKeep = Array.from(new Set([...firstPagesIndices, ...lastPagesIndices]));
-    console.log(`[Czytacz Dokumentów] Wycinam i łączę strony: ${pagesToKeep.map(p => p + 1).join(", ")}`);
-
-    const copiedPages = await dstDoc.copyPages(srcDoc, pagesToKeep);
-    copiedPages.forEach((page) => dstDoc.addPage(page));
-
-    const pdfBytes = await dstDoc.save();
-    return { buffer: Buffer.from(pdfBytes), sliced: true };
-  } catch (err) {
-    console.error("[Czytacz Dokumentów] Krytyczny błąd podczas pracy nożyczek pdf-lib:", err);
-    // Fallback: w razie błędu biblioteki zwracamy oryginalny bufor, aby nie wyłożyć systemu
-    return { buffer: Buffer.from(arrayBuffer), sliced: false };
-  }
+  return `
+PARAMETRY RYNKOWE USTAWIONE PRZEZ KOSZTORYSANTA (informacyjnie – nie doliczaj do cen bazowych):
+- Korekta robocizny (R):    ${laborSign}${trends.laborAdjustment}%
+- Korekta materiałów (M):   ${materialSign}${trends.materialAdjustment}%
+- Korekta sprzętu (S):      ${equipSign}${trends.equipmentAdjustment}%
+- Koszty pośrednie (Kp):    ${trends.kp}%
+- Zysk kosztorysowy (Z):    ${trends.zysk}%
+`.trim();
 }
 
-// ── Pomocnik oczyszczający surowy JSON przed parsowaniem ─────────────────────
+// ── FIX #5: SMART CHUNKING (INTELIGENTNE CIĘCIE PDF) ─────────────────────────
+
+async function smartSlicePdf(
+  arrayBuffer: ArrayBuffer,
+  taskKeywords: string[] = []
+): Promise<{ buffer: Buffer; sliced: boolean; foundPages: number[] }> {
+  console.log(`[SmartSlicer] Uruchamiam inteligentne cięcie PDF. Słowa kluczowe zadania: [${taskKeywords.join(", ")}]`);
+
+  const srcDoc = await PDFDocument.load(arrayBuffer);
+  const pageCount = srcDoc.getPageCount();
+
+  if (pageCount <= 12) {
+    console.log(`[SmartSlicer] Plik ma tylko ${pageCount} stron. Przesyłam w całości bez cięcia.`);
+    return { buffer: Buffer.from(arrayBuffer), sliced: false, foundPages: [] };
+  }
+
+  console.log(`[SmartSlicer] Plik jest duży (${pageCount} stron). KROK 1: Wyciągam spis treści (pierwsze 4 strony)...`);
+  const tocDoc = await PDFDocument.create();
+  const tocPages = await tocDoc.copyPages(srcDoc, [0, 1, 2, 3].filter(i => i < pageCount));
+  tocPages.forEach(p => tocDoc.addPage(p));
+  const tocBuffer = Buffer.from(await tocDoc.save());
+
+  const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global",
+  });
+
+  let targetPages: number[] = [];
+
+  try {
+    console.log(`[SmartSlicer] Pytam Gemini Flash o numery stron na podstawie spisu treści...`);
+    const tocResponse = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{
+        role: "user",
+        parts: [
+          { inlineData: { data: tocBuffer.toString("base64"), mimeType: "application/pdf" } },
+          { text: `Przeanalizuj spis treści tego dokumentu. Znajdź numery stron dla tematów pasujących do słów kluczowych: [${taskKeywords.join(", ")}]. Zwróć TYLKO JSON (bez markdown): { "pages": [12, 13, 25] }. Jeśli nie ma spisu treści, zwróć: { "pages": [] }` }
+        ]
+      }],
+      config: {
+        temperature: 0.0,
+        maxOutputTokens: 256,
+        responseMimeType: "application/json",
+      }
+    });
+
+    const parsed = JSON.parse(tocResponse.text ?? "{}");
+    // Gemini zwraca numery stron (1-based), konwertujemy na indeksy (0-based)
+    targetPages = (parsed.pages ?? [])
+      .map((p: number) => p - 1)
+      .filter((i: number) => i >= 0 && i < pageCount);
+
+    console.log(`[SmartSlicer] AI wskazało strony (0-based): ${targetPages.join(", ")}`);
+  } catch (e) {
+    console.warn("[SmartSlicer] Nie udało się odczytać spisu treści przez AI. Fallback do metody 5+5.");
+  }
+
+  // KROK 2: Fallback jeśli AI nic nie znalazło
+  if (targetPages.length === 0) {
+    console.log(`[SmartSlicer] Fallback: Biorę 5 pierwszych i 5 ostatnich stron.`);
+    const first = Array.from({ length: Math.min(5, pageCount) }, (_, i) => i);
+    const last = Array.from({ length: Math.min(5, pageCount) }, (_, i) => pageCount - 1 - i).reverse();
+    targetPages = Array.from(new Set([...first, ...last]));
+  }
+
+  // KROK 3: Wycinanie docelowych stron
+  console.log(`[SmartSlicer] KROK 3: Wycinam i łączę wybrane strony...`);
+  const dstDoc = await PDFDocument.create();
+  const copiedPages = await dstDoc.copyPages(srcDoc, targetPages);
+  copiedPages.forEach(p => dstDoc.addPage(p));
+
+  return {
+    buffer: Buffer.from(await dstDoc.save()),
+    sliced: true,
+    foundPages: targetPages.map(i => i + 1) // Zwracamy 1-based do logów
+  };
+}
 
 function cleanAndSanitizeJson(raw: string): string {
   let cleaned = raw.trim();
@@ -214,57 +281,107 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     location: "global",
   });
 
-  let formData: FormData;
-  try {
-    formData = await req.formData();
-  } catch (err) {
-    console.error("[Czytacz Dokumentów] Błąd parsowania formData:", err);
-    return NextResponse.json({ error: "Nieprawidłowy typ żądania." }, { status: 400 });
-  }
+  const contentType = req.headers.get("content-type") || "";
+  let base64Data = "";
+  let fileName = "";
+  let fileType = "";
+  let fileSize = 0;
+  let trends: MarketTrends;
+  let taskKeywords: string[] = [];
 
-  const file = formData.get("file") as File | null;
-  const trendsRaw = formData.get("trends") as string | null;
+  // ── TRYB A: Obsługa żądania JSON wywołanego przez asynchroniczny Rój ──
+  if (contentType.includes("application/json")) {
+    console.log("[Czytacz Dokumentów] Wykryto żądanie typu JSON (Zadanie asynchroniczne Roju)...");
 
-  if (!file) {
-    console.error("[Czytacz Dokumentów] Błąd: Brak pliku w żądaniu.");
-    return NextResponse.json({ error: 'Brak pliku "file" w żądaniu.' }, { status: 400 });
-  }
+    try {
+      const body = await req.json();
+      const { fileUrl, trends: trendsRaw } = body;
+      taskKeywords = body.taskKeywords || []; // Odbieramy słowa kluczowe z zadania
 
-  const validation = validateFile(file);
-  if (!validation.valid) {
-    console.error(`[Czytacz Dokumentów] Błąd walidacji: ${validation.error}`);
-    return NextResponse.json({ error: validation.error }, { status: 422 });
-  }
+      trends = trendsRaw || { laborAdjustment: 0, materialAdjustment: 0, equipmentAdjustment: 0, kp: 65, zysk: 12 };
 
-  const trends = parseTrends(trendsRaw);
+      if (!fileUrl) {
+        return NextResponse.json({ error: "Brak parametru fileUrl w zadaniu." }, { status: 400 });
+      }
 
-  // ── 4. Wycinanie stron i konwersja do Base64 ──────────────────────────────
-  let base64Data: string;
-  let wasSliced = false;
+      console.log(`[Czytacz Dokumentów] Pobieram plik ze Storage za pomocą linku: ${fileUrl}...`);
+      const fileRes = await fetch(fileUrl);
+      if (!fileRes.ok) throw new Error(`Błąd sieci HTTP ${fileRes.status}`);
 
-  try {
-    const arrayBuffer = await file.arrayBuffer();
+      const arrayBuffer = await fileRes.arrayBuffer();
+      fileName = fileUrl.split("/").pop()?.split("?")[0] || "dokument.pdf";
+      fileType = fileRes.headers.get("content-type") || "application/pdf";
+      fileSize = arrayBuffer.byteLength;
 
-    // Jeśli to plik PDF, odpalamy nasze "Wirtualne Nożyczki"
-    if (file.type === "application/pdf") {
-      const { buffer, sliced } = await slicePdf(arrayBuffer);
-      base64Data = buffer.toString("base64");
-      wasSliced = sliced;
-    } else {
-      // Dla pozostałych formatów (Excel/Obrazy) przesyłamy bufor w całości
-      base64Data = Buffer.from(arrayBuffer).toString("base64");
+      const validation = validateFile({ size: fileSize, type: fileType, name: fileName });
+      if (!validation.valid) {
+        return NextResponse.json({ error: validation.error }, { status: 422 });
+      }
+
+      if (fileType === "application/pdf") {
+        const { buffer, sliced, foundPages } = await smartSlicePdf(arrayBuffer, taskKeywords);
+        console.log(`[Czytacz Dokumentów] Wycięto strony: ${foundPages.join(", ")}`);
+        base64Data = buffer.toString("base64");
+      } else {
+        base64Data = Buffer.from(arrayBuffer).toString("base64");
+      }
+
+    } catch (err: any) {
+      console.error("[Czytacz Dokumentów] Błąd pobierania pliku ze Storage:", err);
+      return NextResponse.json({ error: `Nie udało się pobrać pliku: ${err.message}` }, { status: 422 });
     }
 
-    console.log(`[Czytacz Dokumentów] Pomyślnie przygotowano dane Base64 do wysyłki. Rozmiar: ${base64Data.length} znaków.`);
-  } catch (err) {
-    console.error("[Czytacz Dokumentów] Błąd przygotowania danych Base64:", err);
-    return NextResponse.json({ error: "Nie udało się odczytać zawartości pliku." }, { status: 422 });
+    // ── TRYB B: Obsługa bezpośredniego uploadu z Dropzone (multipart/form-data) ──
+  } else {
+    console.log("[Czytacz Dokumentów] Wykryto żądanie typu multipart/form-data (Upload bezpośredni)...");
+
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch (err) {
+      console.error("[Czytacz Dokumentów] Błąd parsowania formData:", err);
+      return NextResponse.json({ error: "Błąd odczytu danych formularza." }, { status: 400 });
+    }
+
+    const file = formData.get("file") as File | null;
+    const trendsRaw = formData.get("trends") as string | null;
+
+    if (!file) {
+      return NextResponse.json({ error: 'Brak pliku "file" w żądaniu.' }, { status: 400 });
+    }
+
+    fileName = file.name;
+    fileType = file.type;
+    fileSize = file.size;
+
+    const validation = validateFile(file);
+    if (!validation.valid) {
+      return NextResponse.json({ error: validation.error }, { status: 422 });
+    }
+
+    trends = parseTrends(trendsRaw);
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      if (file.type === "application/pdf") {
+        const { buffer, sliced, foundPages } = await smartSlicePdf(arrayBuffer, []); // Brak słów kluczowych przy ręcznym uploadzie
+        console.log(`[Czytacz Dokumentów] Wycięto strony (fallback 5+5): ${foundPages.join(", ")}`);
+        base64Data = buffer.toString("base64");
+      } else {
+        base64Data = Buffer.from(arrayBuffer).toString("base64");
+      }
+    } catch (err) {
+      return NextResponse.json({ error: "Nie udało się odczytać zawartości pliku." }, { status: 422 });
+    }
   }
 
+  const trendsContext = buildTrendsContext(trends);
+
   const userPrompt = `
-    Przeanalizuj plik: "${file.name}" (${validation.mimeLabel}, ${(file.size / 1024).toFixed(0)} KB).
-    ${wasSliced ? "UWAGA: Do analizy przesłano wycięte pierwsze i ostatnie strony tego dużego dokumentu (Triage)." : ""}
+    Przeanalizuj plik: "${fileName}" (${SUPPORTED_MIME_TYPES[fileType] || "Nieznany"}, ${(fileSize / 1024).toFixed(0)} KB).
     Odpowiedz jako poprawny obiekt JSON. Pamiętaj: NIGDY nie używaj znaku " wewnątrz wartości tekstowych.
+    
+    ${trendsContext}
   `.trim();
 
   let rawAiText: string;
@@ -281,7 +398,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             {
               inlineData: {
                 data: base64Data,
-                mimeType: file.type,
+                mimeType: fileType,
               },
             },
             { text: userPrompt },
@@ -330,22 +447,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!parsed) {
     console.error("[Czytacz Dokumentów] KATASTROFA: Nie udało się odczytać żadnego JSON-a.");
     return NextResponse.json({
-      reply: `⚠️ Przeanalizowano dokument "${file.name}", ale struktura odpowiedzi nie mogła zostać odczytana jako JSON.`
+      reply: `⚠️ Przeanalizowano dokument "${fileName}", ale struktura odpowiedzi nie mogła zostać odczytana jako JSON.`
     });
   }
 
   const responsePayload: RmsEngineResponse & { riskAlerts?: string[] } = {
-    reply: parsed.reply ?? `Dokument "${file.name}" został pomyślnie przeanalizowany.`,
+    reply: parsed.reply ?? `Dokument "${fileName}" został pomyślnie przeanalizowany.`,
     ...(parsed.generatedSections?.length ? { generatedSections: parsed.generatedSections } : {}),
     ...(parsed.riskAlerts?.length ? { riskAlerts: parsed.riskAlerts } : {}),
   };
 
+  console.log("[Czytacz Dokumentów] Zakończono sukcesem. Zwracam payload do klienta.");
   return NextResponse.json(responsePayload);
 }
 
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
-    service: "PESAM Czytacz Dokumentów (Slicer)",
+    service: "PESAM Czytacz Dokumentów (Smart Slicer)",
     model: MODEL_PRO,
     supportedFormats: SUPPORTED_MIME_TYPES,
   });
