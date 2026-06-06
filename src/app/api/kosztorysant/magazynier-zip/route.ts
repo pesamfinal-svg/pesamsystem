@@ -2,9 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import JSZip from "jszip";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
-import { PDFDocument } from "pdf-lib"; // Wymagane do Fix #7
+import { PDFDocument } from "pdf-lib";
 
-// Budowanie bezpiecznego URL dla wywołań wewnętrznych
 function internalUrl(req: NextRequest, path: string): string {
     const url = new URL(req.url);
     if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
@@ -57,7 +56,6 @@ export async function POST(req: NextRequest) {
             if (zipEntry.dir) continue;
 
             if (relativePath.startsWith("__MACOSX") || relativePath.includes(".DS_Store")) {
-                console.log(`[Magazynier ZIP] Pominięto plik systemowy: ${relativePath}`);
                 continue;
             }
 
@@ -73,14 +71,11 @@ export async function POST(req: NextRequest) {
             else if (relativePath.endsWith(".png")) type = "image/png";
 
             const fileName = relativePath.split("/").pop() || relativePath;
-
-            console.log(`[Magazynier ZIP] Wyekstrahowano plik: "${fileName}" (Typ: ${type}, rozmiar: ${fileBuffer.length} bajtów)`);
             filesToProcess.push({ name: fileName, buffer: fileBuffer, type });
         }
 
-        console.log(`[Magazynier ZIP] Zakończono rozpakowywanie. Wykryto łącznie ${filesToProcess.length} poprawnych plików do przetworzenia.`);
+        console.log(`[Magazynier ZIP] Zakończono rozpakowywanie. Wykryto łącznie ${filesToProcess.length} plików.`);
 
-        console.log(`[Magazynier ZIP] Zakładam nowy rekord przetargu w kolekcji "tenders" pod ID: "${tenderId}"...`);
         await adminDb.collection("tenders").doc(tenderId).set({
             id: tenderId,
             name: file.name.replace(".zip", ""),
@@ -95,11 +90,14 @@ export async function POST(req: NextRequest) {
             location: "global",
         });
 
-        for (const item of filesToProcess) {
+        console.log(`[Magazynier ZIP] ROZPOCZYNAM RÓWNOLEGŁE PRZETWARZANIE ${filesToProcess.length} PLIKÓW...`);
+
+        // 🔴 KLUCZOWA ZMIANA: Równoległe przetwarzanie wszystkich plików (Promise.all)
+        const processPromises = filesToProcess.map(async (item) => {
             const storagePath = `kosztorysy/${tenderId}/${item.name}`;
             const storageFile = bucket.file(storagePath);
 
-            console.log(`[Magazynier ZIP] Przesyłam plik do Cloud Storage: "${storagePath}"...`);
+            console.log(`[Magazynier ZIP] Przesyłam plik do Storage: "${item.name}"...`);
             await storageFile.save(item.buffer, {
                 metadata: { contentType: item.type },
             });
@@ -110,9 +108,7 @@ export async function POST(req: NextRequest) {
             try {
                 let classificationParts = [];
 
-                // ── FIX #7: WIZUALNA KLASYFIKACJA PDF ──
                 if (item.type === "application/pdf") {
-                    console.log(`[Magazynier ZIP] Konwersja pierwszej strony PDF "${item.name}" na obraz dla AI...`);
                     const miniDoc = await PDFDocument.load(item.buffer);
                     const previewDoc = await PDFDocument.create();
                     const pagesToPreview = await previewDoc.copyPages(miniDoc, [0].filter(i => i < miniDoc.getPageCount()));
@@ -129,7 +125,6 @@ export async function POST(req: NextRequest) {
                     ];
                 }
 
-                console.log(`[Magazynier ZIP] Wysyłam zapytanie klasyfikacyjne do Gemini Flash...`);
                 const response = await ai.models.generateContent({
                     model: MODEL_FLASH,
                     contents: [{ role: "user", parts: classificationParts }],
@@ -146,34 +141,35 @@ export async function POST(req: NextRequest) {
                     fileSummary = parsed.summary || fileSummary;
                 }
             } catch (err) {
-                console.warn(`[Magazynier ZIP] Ostrzeżenie: Nie udało się sklasyfikować pliku ${item.name} przez AI. Używam domyślnych kategorii.`, err);
+                console.warn(`[Magazynier ZIP] Błąd analizy pliku ${item.name}. Używam kategorii domyślnej.`);
             }
 
             const fileId = `file-${Math.random().toString(36).slice(2, 9)}`;
-            console.log(`[Magazynier ZIP] Zapisuję metadane pliku do podkolekcji "files" pod ID: "${fileId}"...`);
 
-            // ── FIX #2: ZAPISUJEMY storagePath ZAMIAST URL ──
             await adminDb.collection("tenders").doc(tenderId).collection("files").doc(fileId).set({
                 id: fileId,
                 fileName: item.name,
-                storagePath: storagePath, // Zmiana tutaj!
+                storagePath: storagePath,
                 category: fileCategory,
                 summary: fileSummary,
                 type: item.type,
                 sizeBytes: item.buffer.length,
             });
 
-            console.log(`[Magazynier ZIP] Pomyślnie zmapowano i zapisano plik: ${item.name} jako [${fileCategory}]`);
-        }
+            console.log(`[Magazynier ZIP] Gotowe: ${item.name} -> [${fileCategory}]`);
+        });
 
-        console.log(`[Magazynier ZIP] Aktualizuję status główny przetargu "${tenderId}" na "READY"...`);
+        // Oczekiwanie aż WSZYSTKIE pliki przetworzą się jednocześnie
+        await Promise.all(processPromises);
+
+        console.log(`[Magazynier ZIP] Wszystkie pliki przetworzone pomyślnie. Aktualizuję status przetargu na "READY"...`);
         await adminDb.collection("tenders").doc(tenderId).update({
             status: "READY",
         });
 
         try {
             const initUrl = internalUrl(req, "/api/kosztorysant/glowny-kosztorysant/inicjalizuj");
-            console.log(`[Magazynier ZIP] [ZAPŁON] Automatycznie odpalam proces inicjalizacji zadań pod adresem: ${initUrl}...`);
+            console.log(`[Magazynier ZIP] [ZAPŁON] Odpalam inicjalizator zadań: ${initUrl}`);
 
             const initRes = await fetch(initUrl, {
                 method: "POST",
@@ -182,17 +178,15 @@ export async function POST(req: NextRequest) {
             });
 
             if (initRes.ok) {
-                console.log(`[Magazynier ZIP] [ZAPŁON] SUKCES: Pomyślnie wygenerowano listę zadań w Firestore dla projektu: ${tenderId}`);
+                console.log(`[Magazynier ZIP] [ZAPŁON] SUKCES: Wygenerowano listę zadań.`);
             } else {
-                console.warn(`[Magazynier ZIP] [ZAPŁON] Ostrzeżenie: Inicjalizator zadań zwrócił status błędu: ${initRes.status}`);
+                console.warn(`[Magazynier ZIP] [ZAPŁON] Ostrzeżenie: HTTP ${initRes.status}`);
             }
         } catch (initErr) {
-            console.error("[Magazynier ZIP] [ZAPŁON] Krytyczny błąd automatycznego wywołania inicjalizatora zadań:", initErr);
+            console.error("[Magazynier ZIP] [ZAPŁON] Błąd wywołania inicjalizatora:", initErr);
         }
 
-        console.log(`[Magazynier ZIP] Zakończono import przetargu ${tenderId}. Zwracam dane do przeglądarki.`);
         console.log("==================================================");
-
         return NextResponse.json({
             tenderId,
             projectName: file.name.replace(".zip", ""),

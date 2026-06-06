@@ -176,16 +176,18 @@ function uploadWithProgress(
       resolve(syntheticResponse);
     });
 
+    // ZNAJDŹ TEN FRAGMENT I PODMIEŃ:
+
     xhr.addEventListener("error", () => {
       reject(new Error("Połączenie z serwerem zostało przerwane."));
     });
 
     xhr.addEventListener("timeout", () => {
-      reject(new Error("Przekroczono limit czasu połączenia (90 sekund)."));
+      reject(new Error("Przekroczono limit czasu połączenia (30 minut). Proces może być zbyt duży."));
     });
 
     xhr.open("POST", endpoint); // <--- DYNAMICZNY ENDPOINT
-    xhr.timeout = 90_000;
+    xhr.timeout = 1800_000; // ZMIANA: 1 800 000 ms = 30 minut (zamiast 90 000)
     xhr.send(formData);
   });
 }
