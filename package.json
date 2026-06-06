@@ -16,6 +16,7 @@
     "dexie": "^4.4.3",
     "firebase": "^12.13.0",
     "firebase-admin": "^13.9.0",
+    "jszip": "^3.10.1",
     "lib": "^5.1.0",
     "next": "16.2.6",
     "nodemailer": "^8.0.7",
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/jszip": "^3.4.0",
     "@types/node": "^20",
     "@types/nodemailer": "^8.0.0",
     "@types/react": "^19",

@@ -4,23 +4,26 @@ import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
 import { useRouter } from "next/navigation";
+import { uploadTenderDocument, UploadProgress } from "@/lib/kosztorysant/uploadTenderDocument";
+import { db } from "@/lib/firebase/config"; // Klient Firestore
+import { collection, onSnapshot, doc, updateDoc } from "firebase/firestore"; // Metody Real-time
 
-// ─── TYPY DANYCH DLA KOSZTORYSOWANIA ─────────────────────────────────────────
+// ─── TYPY DANYCH ─────────────────────────────────────────────────────────────
 
 interface EstimateItem {
     id: string;
     code?: string;
     name: string;
-    type: "R" | "M" | "S"; // Robocizna, Materiał, Sprzęt
+    type: "R" | "M" | "S";
     quantity: number;
     unit: string;
-    basePrice: number; // Cena bezpośrednia (Direct)
-    unitPrice: number; // Korygowana cena
+    basePrice: number;
+    unitPrice: number;
 }
 
 interface EstimateSection {
     id: string;
-    name: string; // np. "Dział 1. Roboty ziemne i przygotowawcze"
+    name: string;
     items: EstimateItem[];
 }
 
@@ -41,11 +44,19 @@ interface MarketTrends {
     zysk: number;
 }
 
+interface SwarmTask {
+    id: string;
+    agentType: "LEGAL" | "QUANTITY" | "CONSTRUCTION" | "PRICING";
+    description: string;
+    status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
+    inputFiles: string[];
+    result: any;
+}
+
 export default function EstimatorPage() {
     const { user } = useAuth();
     const router = useRouter();
 
-    // ── Zabezpieczenie Uprawnień ──
     const canUseEstimator = hasPermission("useEstimatingPanel", user?.rolePermissions, user?.permissionOverrides);
 
     useEffect(() => {
@@ -55,7 +66,7 @@ export default function EstimatorPage() {
         }
     }, [canUseEstimator, router]);
 
-    // ── Główne Parametry Przedmiaru ──
+    // ── Główne Stany Kosztorysu ──
     const [project, setProject] = useState<ProjectInfo>({
         name: "Budowa Przedszkola Samorządowego",
         length: "40.0",
@@ -65,7 +76,6 @@ export default function EstimatorPage() {
         additionalNotes: "Zbrojenie dołem i górą siatką fi 12, podbudowa z chudego betonu 10cm"
     });
 
-    // ── Suwaki i Wycena Rynkowa (Narzuty) ──
     const [trends, setTrends] = useState<MarketTrends>({
         laborAdjustment: -5,
         materialAdjustment: 12,
@@ -74,42 +84,28 @@ export default function EstimatorPage() {
         zysk: 12
     });
 
-    // ── Struktura Działów Przedmiarowych (RMS) ──
-    const [sections, setSections] = useState<EstimateSection[]>([
+    const [sections, setSections] = useState<EstimateSection[]>([]);
+    const [riskAlerts, setRiskAlerts] = useState<string[]>([]);
+    const [messages, setMessages] = useState<{ role: 'user' | 'ai'; content: string }[]>([
         {
-            id: "sec-1",
-            name: "Dział 1. Roboty ziemne i przygotowawcze",
-            items: [
-                { id: "item-1-1", code: "KNR 2-01 0110-01", name: "Ręczne ścinanie krzaków i poszycia leśnego", type: "R", quantity: 180, unit: "m²", basePrice: 12, unitPrice: 12 },
-                { id: "item-1-2", code: "KNR 2-01 0210-02", name: "Roboty ziemne koparką kołową z odwozem", type: "S", quantity: 1200, unit: "m³", basePrice: 28, unitPrice: 28 },
-                { id: "item-1-3", code: "KNR 2-01 0510-04", name: "Transport nadmiaru urobku wywrotkami na 10 km", type: "S", quantity: 80, unit: "kurs", basePrice: 150, unitPrice: 150 }
-            ]
-        },
-        {
-            id: "sec-2",
-            name: "Dział 2. Stan zero (Konstrukcje betonowe i fundamenty)",
-            items: [
-                { id: "item-2-1", code: "KNR 2-02 0102-02", name: "Zbrojarz - przygotowanie i montaż stali B500SP", type: "R", quantity: 120, unit: "r-g", basePrice: 55, unitPrice: 55 },
-                { id: "item-2-2", code: "KNR 2-02 0110-01", name: "Stal zbrojeniowa prętowa fi 12mm", type: "M", quantity: 8400, unit: "kg", basePrice: 4.10, unitPrice: 4.10 },
-                { id: "item-2-3", code: "KNR 2-02 0105-04", name: "Beton towarowy konstrukcyjny C25/30 wodoszczelny (np. C30/37 W8)", type: "M", quantity: 145, unit: "m³", basePrice: 390, unitPrice: 390 }
-            ]
+            role: 'ai',
+            content: "Cześć! Jestem Twoim Agentem Wyceny i Sprawdzania Ryzyka. Przeciągnij i upuść paczkę ZIP z dokumentacją przetargową lub ślepy kosztorys do pola po lewej stronie, aby automatycznie zbudować strukturę i wycenę."
         }
     ]);
 
-    // ── Stany Czatu i Wgrywania Dokumentacji ──
-    const [messages, setMessages] = useState<{ role: 'user' | 'ai'; content: string }[]>([
-        { 
-            role: 'ai', 
-            content: "Cześć! Jestem Twoim Agentem Wyceny i Sprawdzania Ryzyka. Przeciągnij i upuść paczkę ZIP z dokumentacją przetargową lub ślepy kosztorys do pola po lewej stronie, aby automatycznie zbudować strukturę i wycenić projekt." 
-        }
-    ]);
     const [inputText, setInputText] = useState("");
     const [isLoading, setIsLoading] = useState(false);
 
-    // Stany Drag & Drop
+    // Stany Drag & Drop z monitorowaniem procentowym
     const [isDragging, setIsDragging] = useState(false);
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
+    const [uploadPercent, setUploadPercent] = useState<number | undefined>(undefined);
+    const [uploadMsg, setUploadMsg] = useState<string>("");
+
+    // Stany Roju i Zadania w czasie rzeczywistym
+    const [activeTenderId, setActiveTenderId] = useState<string | null>(null);
+    const [tasks, setTasks] = useState<SwarmTask[]>([]);
 
     const [activeTab, setActiveTab] = useState<"R" | "M" | "S" | "ALL">("ALL");
     const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -118,7 +114,116 @@ export default function EstimatorPage() {
         if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }, [messages, isLoading]);
 
-    if (!canUseEstimator) return null;
+    // ── KROK 2: SUBSKRYPCJA ZADAŃ W FIRESTORE (REAL-TIME LISTENER) ───────────
+
+    useEffect(() => {
+        if (!activeTenderId) return;
+
+        console.log(`[Frontend Roju] Podpinam nasłuch Real-Time dla przetargu: ${activeTenderId}`);
+
+        // Słuchamy podkolekcji "tasks" dla naszego aktywnego przetargu
+        const tasksRef = collection(db, "tenders", activeTenderId, "tasks");
+        const unsubscribe = onSnapshot(tasksRef, (snapshot) => {
+            const updatedTasks: SwarmTask[] = [];
+            snapshot.forEach((doc) => {
+                updatedTasks.push(doc.data() as SwarmTask);
+            });
+            console.log(`[Frontend Roju] Baza zaktualizowana, wczytano ${updatedTasks.length} zadań.`);
+            setTasks(updatedTasks);
+        });
+
+        return () => unsubscribe();
+    }, [activeTenderId]);
+
+    // ── KROK 3: AUTOMATYCZNY SILNIK WYKONYWANIA ZADAŃ ROJU (A2A LOOP) ─────────
+
+    useEffect(() => {
+        if (!activeTenderId || tasks.length === 0) return;
+
+        // Szukamy pierwszego zadania o statusie PENDING (Oczekujące)
+        const nextPendingTask = tasks.find(t => t.status === "PENDING");
+
+        if (nextPendingTask && !isLoading) {
+            console.log(`[Rój PESAM] Wykryto oczekujące zadanie: ${nextPendingTask.id} (${nextPendingTask.agentType})`);
+            executeSwarmTask(nextPendingTask);
+        }
+    }, [tasks, activeTenderId, isLoading]);
+
+    const executeSwarmTask = async (task: SwarmTask) => {
+        setIsLoading(true);
+
+        // 1. Zmieniamy status w Firestore na "IN_PROGRESS" – koledzy agenci i użytkownik widzą, że robot ruszył
+        const taskDocRef = doc(db, "tenders", activeTenderId!, "tasks", task.id);
+        await updateDoc(taskDocRef, { status: "IN_PROGRESS" });
+
+        console.log(`[Rój PESAM] Uruchamiam Agenta: ${task.agentType} dla zadania ${task.id}...`);
+
+        try {
+            let endpoint = "";
+            let payload: any = {};
+
+            // Dopasowujemy agenta i przygotowujemy dla niego precyzyjne małe dane wejściowe
+            if (task.agentType === "LEGAL") {
+                endpoint = "/api/kosztorysant/czytacz-dokumentow";
+                payload = {
+                    fileUrl: task.inputFiles[0], // Wysyłamy bezpośredni link do wyciętego pliku
+                    trends
+                };
+            } else if (task.agentType === "QUANTITY") {
+                endpoint = "/api/kosztorysant/agent-knr";
+                payload = {
+                    request: task.description,
+                    currentTrends: trends,
+                    mode: "GENERATE_FROM_SCRATCH"
+                };
+            }
+
+            if (!endpoint) {
+                throw new Error(`Nieobsługiwany typ agenta: ${task.agentType}`);
+            }
+
+            const res = await fetch(endpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) throw new Error("Błąd agenta wykonawczego.");
+            const data = await res.json();
+
+            // 2. Zapisujemy wynik pracy agenta i oznaczamy jako "DONE" w Firestore
+            await updateDoc(taskDocRef, {
+                status: "DONE",
+                result: data,
+                updatedAt: new Date().toISOString()
+            });
+
+            // 3. Wstrzykujemy wyniki na żywo do naszego interfejsu
+            if (data.reply) {
+                setMessages(prev => [...prev, { role: "ai", content: data.reply }]);
+            }
+            if (data.generatedSections && data.generatedSections.length > 0) {
+                setSections(prev => [...prev, ...data.generatedSections]);
+            }
+            if (data.riskAlerts && data.riskAlerts.length > 0) {
+                setRiskAlerts(prev => {
+                    const uniqueAlerts = Array.from(new Set([...prev, ...data.riskAlerts]));
+                    return uniqueAlerts.filter(a => !a.startsWith("ℹ️ INFO:")); // Usuń pusty placeholder
+                });
+            }
+
+            console.log(`[Rój PESAM] Agent ${task.agentType} pomyślnie ukończył zadanie ${task.id}!`);
+
+        } catch (err: any) {
+            console.error(`[Rój PESAM] Krytyczny błąd podczas pracy agenta ${task.agentType}:`, err);
+            await updateDoc(taskDocRef, {
+                status: "ERROR",
+                error: err.message
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
     // ── OBSŁUGA PLIKÓW PRZETARGOWYCH (UPLOAD) ────────────────────────────────
 
@@ -127,38 +232,70 @@ export default function EstimatorPage() {
         setIsUploading(true);
         setIsLoading(true);
 
-        setMessages(prev => [...prev, { 
-            role: 'user', 
-            content: `Wgrałem plik przetargowy: ${file.name}. Rozpocznij pełną analizę i wycenę.` 
+        setMessages(prev => [...prev, {
+            role: 'user',
+            content: `Wgrałem dokumentację przetargową: ${file.name}. Rozpocznij pełną analizę i wycenę.`
         }]);
 
         try {
-            const formData = new FormData();
-            formData.append("file", file);
-            formData.append("trends", JSON.stringify(trends));
-
-            const res = await fetch("/api/kosztorysant/upload-parser", {
-                method: "POST",
-                body: formData,
+            // Wywołanie pomocnika z progressem (XHR)
+            const result = await uploadTenderDocument(file, trends, (p: UploadProgress) => {
+                setUploadMsg(p.message);
+                if (p.stage === "uploading" && p.percent !== undefined) {
+                    setUploadPercent(p.percent);
+                } else {
+                    setUploadPercent(undefined);
+                }
             });
 
-            if (!res.ok) throw new Error("Błąd podczas analizy pliku");
-            const data = await res.json();
+            // Wywołanie merytorycznego komentarza na czacie
+            if (result.reply) {
+                setMessages(prev => [...prev, { role: "ai", content: result.reply }]);
+            }
 
-            setMessages(prev => [...prev, { 
-                role: 'ai', 
-                content: data.reply 
-            }]);
+            // INTELIGENTNE ŁĄCZENIE (MERGE) SEKCJI DLA KOLEJNYCH PLIKÓW PDF
+            if (result.generatedSections && result.generatedSections.length > 0) {
+                setSections(prev => {
+                    const merged = [...prev];
+                    result.generatedSections!.forEach(newSec => {
+                        const existingSecIdx = merged.findIndex(s => s.id === newSec.id || s.name === newSec.name);
+                        if (existingSecIdx > -1) {
+                            // Jeśli dział już istnieje, doklejamy nowe pozycje do jego wnętrza
+                            merged[existingSecIdx] = {
+                                ...merged[existingSecIdx],
+                                items: [...merged[existingSecIdx].items, ...newSec.items]
+                            };
+                        } else {
+                            // Jeśli dział jest nowy, po prostu go dodajemy
+                            merged.push(newSec);
+                        }
+                    });
+                    return merged;
+                });
+            }
 
-            if (data.generatedSections && data.generatedSections.length > 0) {
-                setSections(data.generatedSections);
+            // Łączenie nowych alertów ryzyka (unikamy dublowania)
+            if (result.riskAlerts && result.riskAlerts.length > 0) {
+                setRiskAlerts(prev => {
+                    const mergedAlerts = Array.from(new Set([...prev, ...result.riskAlerts!]));
+                    return mergedAlerts.filter(a => !a.startsWith("ℹ️ INFO:")); // Usuwamy startowy placeholder
+                });
+            }
+
+            // Aktywujemy ID przetargu (tylko w przypadku paczki ZIP, która tworzy tenderId i uruchamia asynchroniczny rój w bazie)
+            if (result.tenderId) {
+                console.log(`[Frontend] Aktywuję nasłuchiwanie roju dla tenderId: ${result.tenderId}`);
+                setActiveTenderId(result.tenderId);
+                setProject(prev => ({ ...prev, name: result.projectName || prev.name })); // <--- ROZWIĄZANIE BŁĘDU TYPESCRIPT
             }
 
         } catch (err) {
-            alert("Błąd połączenia z parserem dokumentacji.");
+            alert(err instanceof Error ? err.message : "Błąd połączenia z parserem dokumentacji.");
         } finally {
             setIsUploading(false);
             setIsLoading(false);
+            setUploadPercent(undefined);
+            setUploadMsg("");
         }
     };
 
@@ -208,7 +345,7 @@ export default function EstimatorPage() {
             if (sec.id !== sectionId) return sec;
             return {
                 ...sec,
-                items: sec.items.map(item => 
+                items: sec.items.map(item =>
                     item.id === itemId ? { ...item, [field]: value } : item
                 )
             };
@@ -223,7 +360,7 @@ export default function EstimatorPage() {
         }));
     };
 
-    // Obsługa zapytań i korekt inżynieryjnych na czacie
+    // Czat ręczny z Mózgiem Kosztorysanta
     const handleAskEstimator = async () => {
         if (!inputText.trim()) return;
 
@@ -233,13 +370,14 @@ export default function EstimatorPage() {
         setIsLoading(true);
 
         try {
-            const res = await fetch("/api/kosztorysant/rms-engine", {
+            const res = await fetch("/api/kosztorysant/glowny-kosztorysant", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    request: userMsg, 
+                body: JSON.stringify({
+                    request: userMsg,
                     currentTrends: trends,
-                    currentSections: sections
+                    currentSections: sections,
+                    tenderId: activeTenderId
                 })
             });
 
@@ -272,24 +410,9 @@ export default function EstimatorPage() {
         }
     };
 
-    const exportToCsv = () => {
-        const headers = "Kod KNR,Nazwa pozycji,Typ (R/M/S),Ilość,J.m.,Cena bezpośrednia (zł),Wycena rynkowa (zł)\n";
-        const rows = sections.flatMap(sec => 
-            sec.items.map(i => 
-                `"${i.code || ''}","${i.name}","${i.type}",${i.quantity},"${i.unit}",${i.basePrice},${calculateRowValue(i) / i.quantity}`
-            )
-        ).join("\n");
-        const blob = new Blob([headers + rows], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.setAttribute("href", url);
-        link.setAttribute("download", `Wycena_${project.name.replace(/\s+/g, '_')}.csv`);
-        link.click();
-    };
-
     return (
         <div className="p-4 md:p-6 max-w-[1800px] mx-auto h-[90vh] flex flex-col relative animate-fade-in overflow-hidden text-slate-800 bg-slate-50">
-            
+
             {/* ── Nagłówek ── */}
             <div className="flex justify-between items-center mb-4 border-b pb-4 bg-white p-4 rounded-3xl shadow-sm">
                 <div>
@@ -315,8 +438,8 @@ export default function EstimatorPage() {
 
             {/* ── Trzykolumnowy Layout ── */}
             <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5 overflow-hidden min-h-0">
-                
-                {/* ── LEWA KOLUMNA: Suwaki Trendów + Dropzone Przetargowy (3/12) ── */}
+
+                {/* ── LEWA KOLUMNA: Suwaki + Dropzone + Alerty Ryzyka (3/12) ── */}
                 <div className="lg:col-span-3 bg-white border border-slate-200 rounded-3xl p-5 flex flex-col justify-between shadow-sm overflow-y-auto">
                     <div className="space-y-4">
                         <div className="border-b pb-3">
@@ -327,7 +450,7 @@ export default function EstimatorPage() {
                         {/* Dropzone Przetargowy */}
                         <div className="space-y-2">
                             <label className="text-[10px] font-black uppercase text-slate-400">Paczka Przetargowa (ZIP/PDF/Excel):</label>
-                            <div 
+                            <div
                                 onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
                                 onDragLeave={() => setIsDragging(false)}
                                 onDrop={async e => {
@@ -337,14 +460,18 @@ export default function EstimatorPage() {
                                     if (file) handleFileUpload(file);
                                 }}
                                 onClick={() => document.getElementById("tender-file-input")?.click()}
-                                className={`border-2 border-dashed rounded-3xl p-4 text-center transition-all cursor-pointer flex flex-col items-center justify-center min-h-[110px] relative ${
-                                    isDragging ? "border-blue-500 bg-blue-50/50" : "border-slate-200 hover:border-slate-300 bg-slate-50/50"
-                                }`}
+                                className={`border-2 border-dashed rounded-3xl p-4 text-center transition-all cursor-pointer flex flex-col items-center justify-center min-h-[115px] relative ${isDragging ? "border-blue-500 bg-blue-50/50" : "border-slate-200 hover:border-slate-300 bg-slate-50/50"
+                                    }`}
                             >
                                 {isUploading ? (
-                                    <div className="flex flex-col items-center gap-2">
+                                    <div className="flex flex-col items-center gap-2 w-full px-2">
                                         <span className="animate-spin text-lg text-blue-600">⏳</span>
-                                        <span className="text-[9px] font-black uppercase text-blue-600 animate-pulse">Analiza dokumentacji...</span>
+                                        <span className="text-[9px] font-black uppercase text-blue-600 animate-pulse truncate max-w-full">{uploadMsg}</span>
+                                        {uploadPercent !== undefined && (
+                                            <div className="w-full bg-slate-200 h-1 rounded-full overflow-hidden mt-1">
+                                                <div className="bg-blue-600 h-full transition-all duration-300" style={{ width: `${uploadPercent}%` }} />
+                                            </div>
+                                        )}
                                     </div>
                                 ) : uploadedFile ? (
                                     <div className="flex flex-col items-center gap-1.5">
@@ -352,7 +479,7 @@ export default function EstimatorPage() {
                                         <span className="text-[10px] font-bold text-slate-700 truncate max-w-[180px]" title={uploadedFile.name}>
                                             {uploadedFile.name}
                                         </span>
-                                        <button 
+                                        <button
                                             onClick={e => { e.stopPropagation(); setUploadedFile(null); }}
                                             className="text-[9px] font-black text-red-500 hover:underline uppercase z-10"
                                         >Usuń plik</button>
@@ -364,29 +491,66 @@ export default function EstimatorPage() {
                                         <p className="text-[8px] text-slate-400 font-semibold">SWZ, ślepy kosztorys, rzuty</p>
                                     </div>
                                 )}
-                                <input 
-                                    type="file" 
+                                <input
+                                    type="file"
                                     onChange={e => {
                                         const file = e.target.files?.[0];
                                         if (file) handleFileUpload(file);
                                     }}
-                                    className="hidden" 
+                                    className="hidden"
                                     id="tender-file-input"
                                     accept=".zip,.pdf,.xlsx,.xls"
                                 />
                             </div>
                         </div>
 
-                        {/* Szybkie Szablony */}
-                        <div className="space-y-1.5">
-                            <label className="text-[10px] font-black uppercase text-slate-400">Szybkie Szablony Robót:</label>
-                            <button 
-                                onClick={() => handleLoadTemplate("PL_FUNDAMENT")}
-                                className="w-full bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-700 border border-slate-200 hover:border-blue-200 p-2 text-[10px] font-bold rounded-lg text-left transition-all"
-                            >
-                                🏗️ Wczytaj Rzut Przedszkola (Makieta)
-                            </button>
-                        </div>
+                        {/* PANEL ROJU AGENTÓW (REAL-TIME STATUS) */}
+                        {tasks.length > 0 && (
+                            <div className="space-y-2 pt-2 border-t">
+                                <label className="text-[9px] font-black uppercase text-slate-400 block">Status pracy Roju PESAM:</label>
+                                <div className="space-y-1.5 bg-slate-900 text-white p-3 rounded-2xl border border-slate-800">
+                                    {tasks.map((task) => (
+                                        <div key={task.id} className="flex items-center justify-between gap-2 text-[10px]">
+                                            <span className="font-semibold text-slate-300 truncate max-w-[150px]">{task.agentType}: {task.description.slice(0, 25)}...</span>
+                                            <span className={`px-2 py-0.5 rounded-full font-black text-[8px] uppercase tracking-wider ${task.status === "DONE" ? "bg-green-500/20 text-green-400" :
+                                                task.status === "IN_PROGRESS" ? "bg-blue-500/20 text-blue-400 animate-pulse" :
+                                                    task.status === "ERROR" ? "bg-red-500/20 text-red-400" :
+                                                        "bg-slate-700 text-slate-400"
+                                                }`}>
+                                                {task.status === "IN_PROGRESS" ? "⏳ TRWA" : task.status === "DONE" ? "✓ OK" : task.status}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Alerty ryzyka kontraktowego (PZP / SWZ) */}
+                        {riskAlerts.length > 0 && (
+                            <div className="space-y-2 pt-2 border-t">
+                                <label className="text-[9px] font-black uppercase text-slate-400 block">Alerty Ryzyka PZP / Kontraktowe:</label>
+                                <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                    {riskAlerts.map((alert, index) => {
+                                        const isHighRisk = alert.startsWith("❗");
+                                        const isWarning = alert.startsWith("⚠️");
+                                        const isOk = alert.startsWith("✅");
+
+                                        return (
+                                            <div
+                                                key={index}
+                                                className={`p-2.5 rounded-xl border text-[10px] font-bold leading-normal ${isHighRisk ? "bg-red-500/10 border-red-500/30 text-red-700" :
+                                                    isWarning ? "bg-amber-500/10 border-amber-500/30 text-amber-700" :
+                                                        isOk ? "bg-green-500/10 border-green-500/30 text-green-700" :
+                                                            "bg-slate-50 border-slate-200 text-slate-600"
+                                                    }`}
+                                            >
+                                                {alert}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
 
                         {/* Suwaki Trendów i Wyceny */}
                         <div className="space-y-4 pt-2 border-t">
@@ -395,10 +559,10 @@ export default function EstimatorPage() {
                                     <span>Korekta Robocizny (R):</span>
                                     <span>{trends.laborAdjustment}%</span>
                                 </div>
-                                <input 
+                                <input
                                     type="range" min="-20" max="20" step="1"
                                     value={trends.laborAdjustment}
-                                    onChange={e => setTrends({...trends, laborAdjustment: Number(e.target.value)})}
+                                    onChange={e => setTrends({ ...trends, laborAdjustment: Number(e.target.value) })}
                                     className="w-full accent-amber-500 cursor-pointer h-1 bg-slate-100 rounded-lg appearance-none"
                                 />
                             </div>
@@ -408,10 +572,10 @@ export default function EstimatorPage() {
                                     <span>Korekta Materiałów (M):</span>
                                     <span>+{trends.materialAdjustment}%</span>
                                 </div>
-                                <input 
+                                <input
                                     type="range" min="-10" max="30" step="1"
                                     value={trends.materialAdjustment}
-                                    onChange={e => setTrends({...trends, materialAdjustment: Number(e.target.value)})}
+                                    onChange={e => setTrends({ ...trends, materialAdjustment: Number(e.target.value) })}
                                     className="w-full accent-green-500 cursor-pointer h-1 bg-slate-100 rounded-lg appearance-none"
                                 />
                             </div>
@@ -421,31 +585,24 @@ export default function EstimatorPage() {
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="text-[8px] font-black text-slate-500 uppercase">Koszty Pośrednie (Kp %):</label>
-                                        <input 
-                                            type="number" 
+                                        <input
+                                            type="number"
                                             value={trends.kp}
-                                            onChange={e => setTrends({...trends, kp: Number(e.target.value)})}
+                                            onChange={e => setTrends({ ...trends, kp: Number(e.target.value) })}
                                             className="w-full mt-1 p-2 border rounded-xl text-xs bg-slate-50 font-black text-center outline-none"
                                         />
                                     </div>
                                     <div>
                                         <label className="text-[8px] font-black text-slate-500 uppercase">Zysk (Z %):</label>
-                                        <input 
-                                            type="number" 
+                                        <input
+                                            type="number"
                                             value={trends.zysk}
-                                            onChange={e => setTrends({...trends, zysk: Number(e.target.value)})}
+                                            onChange={e => setTrends({ ...trends, zysk: Number(e.target.value) })}
                                             className="w-full mt-1 p-2 border rounded-xl text-xs bg-slate-50 font-black text-center outline-none"
                                         />
                                     </div>
                                 </div>
                             </div>
-                        </div>
-                    </div>
-
-                    <div className="pt-4 border-t border-slate-200">
-                        <div className="flex gap-2">
-                            <button onClick={exportToCsv} className="flex-1 bg-slate-800 text-white text-[10px] font-black py-2.5 rounded-xl transition-all">CSV</button>
-                            <button onClick={() => window.print()} className="flex-1 bg-blue-600 text-white text-[10px] font-black py-2.5 rounded-xl transition-all">DRUK PDF</button>
                         </div>
                     </div>
                 </div>
@@ -455,7 +612,7 @@ export default function EstimatorPage() {
                     <div className="p-4 bg-slate-950 border-b border-slate-800 flex items-center gap-3">
                         <div className="w-9 h-9 bg-blue-600 rounded-full flex items-center justify-center text-lg shadow-inner">👷</div>
                         <div>
-                            <h3 className="font-black text-white text-xs uppercase tracking-wider leading-none">Konsola Inżyniera Kontraktu</h3>
+                            <h3 className="font-black text-white text-xs uppercase tracking-wider leading-none">Konsola Głównego Kosztorysanta</h3>
                             <p className="text-[9px] text-blue-400 mt-1 font-bold">Wsparcie KNR, KNNR oraz Python Code Execution</p>
                         </div>
                     </div>
@@ -470,14 +627,14 @@ export default function EstimatorPage() {
                         ))}
                         {isLoading && (
                             <div className="flex items-center gap-2 text-slate-400 bg-slate-800 p-3 rounded-2xl w-fit rounded-bl-none">
-                                <span className="animate-spin text-sm">⏳</span> <span className="text-[10px] font-black uppercase tracking-wider">Inżynier przelicza wskaźniki...</span>
+                                <span className="animate-spin text-sm">⏳</span> <span className="text-[10px] font-black uppercase tracking-wider">Rój przetwarza dane w tle...</span>
                             </div>
                         )}
                         <div ref={chatEndRef} />
                     </div>
 
                     <div className="p-3 bg-slate-950 border-t border-slate-800 flex gap-2">
-                        <input 
+                        <input
                             type="text"
                             value={inputText}
                             onChange={e => setInputText(e.target.value)}
@@ -485,7 +642,7 @@ export default function EstimatorPage() {
                             placeholder="Wprowadź instrukcję lub zapytanie o pozycję..."
                             className="flex-1 bg-slate-800 text-white border border-slate-700 rounded-xl px-3 py-2.5 text-xs outline-none focus:border-blue-500 font-semibold"
                         />
-                        <button 
+                        <button
                             onClick={handleAskEstimator}
                             disabled={!inputText.trim() || isLoading}
                             className="bg-blue-600 hover:bg-blue-500 text-white font-black text-xs px-4 rounded-xl transition-all"
@@ -498,7 +655,7 @@ export default function EstimatorPage() {
                 {/* ── PRAWA KOLUMNA: Tabela Kosztorysu Przedmiarowego (5/12) ── */}
                 <div className="lg:col-span-5 bg-white border border-slate-200 rounded-3xl p-5 flex flex-col justify-between shadow-sm overflow-hidden">
                     <div className="flex flex-col h-full overflow-hidden">
-                        
+
                         <div className="border-b pb-3 mb-4">
                             <h3 className="font-black text-xs text-slate-500 uppercase tracking-wider">📝 Podgląd Kosztorysu / Przedmiaru</h3>
                             <p className="text-[10px] text-slate-400 mt-0.5">Działy kosztorysu oparte o tabele KNR/KNNR</p>
@@ -506,19 +663,19 @@ export default function EstimatorPage() {
 
                         {/* Filtrowanie zakładkami RMS */}
                         <div className="flex bg-slate-100 p-1 rounded-xl border mb-3 flex-shrink-0">
-                            <button 
+                            <button
                                 onClick={() => setActiveTab("ALL")}
                                 className={`flex-1 py-1 rounded-lg text-[8px] font-black uppercase transition-all ${activeTab === "ALL" ? "bg-white text-blue-600 shadow-sm" : "text-slate-500"}`}
                             >WSZYSTKO</button>
-                            <button 
+                            <button
                                 onClick={() => setActiveTab("R")}
                                 className={`flex-1 py-1 rounded-lg text-[8px] font-black uppercase transition-all ${activeTab === "R" ? "bg-white text-amber-600 shadow-sm" : "text-slate-500"}`}
                             >👷 Robocizna</button>
-                            <button 
+                            <button
                                 onClick={() => setActiveTab("M")}
                                 className={`flex-1 py-1 rounded-lg text-[8px] font-black uppercase transition-all ${activeTab === "M" ? "bg-white text-green-600 shadow-sm" : "text-slate-500"}`}
                             >🧱 Materiały</button>
-                            <button 
+                            <button
                                 onClick={() => setActiveTab("S")}
                                 className={`flex-1 py-1 rounded-lg text-[8px] font-black uppercase transition-all ${activeTab === "S" ? "bg-white text-purple-600 shadow-sm" : "text-slate-500"}`}
                             >🚜 Sprzęt</button>
@@ -529,7 +686,7 @@ export default function EstimatorPage() {
                             {sections.map(sec => {
                                 const filteredItems = sec.items.filter(item => activeTab === "ALL" || item.type === activeTab);
                                 if (filteredItems.length === 0) return null;
-                                
+
                                 return (
                                     <div key={sec.id} className="space-y-2">
                                         <div className="bg-slate-100 px-3 py-1.5 rounded-xl flex justify-between items-center border border-slate-200">
@@ -547,17 +704,16 @@ export default function EstimatorPage() {
                                                     <div key={item.id} className="border border-slate-100 p-3 rounded-2xl bg-white shadow-sm flex items-center justify-between gap-3 hover:border-slate-200 transition-colors">
                                                         <div className="flex-1 min-w-0">
                                                             <div className="flex items-center gap-1.5">
-                                                                <span className={`text-[7px] font-black px-1.5 py-0.5 rounded ${
-                                                                    item.type === "R" ? "bg-amber-100 text-amber-700" :
+                                                                <span className={`text-[7px] font-black px-1.5 py-0.5 rounded ${item.type === "R" ? "bg-amber-100 text-amber-700" :
                                                                     item.type === "M" ? "bg-green-100 text-green-700" :
-                                                                    "bg-purple-100 text-purple-700"
-                                                                }`}>
+                                                                        "bg-purple-100 text-purple-700"
+                                                                    }`}>
                                                                     {item.type}
                                                                 </span>
                                                                 {item.code && <span className="text-[8px] text-slate-400 font-mono font-bold">{item.code}</span>}
                                                             </div>
                                                             <p className="text-[11px] font-bold text-slate-800 truncate mt-1 leading-tight uppercase" title={item.name}>{item.name}</p>
-                                                            
+
                                                             <div className="text-[9px] font-semibold text-slate-400 mt-1 flex gap-2">
                                                                 <span>Baza: {Math.round(baseValue).toLocaleString()} zł</span>
                                                                 <span className="text-blue-500 font-bold">Po korekcie: {Math.round(adjustedValue).toLocaleString()} zł</span>
@@ -569,7 +725,7 @@ export default function EstimatorPage() {
                                                             <div className="flex flex-col items-center">
                                                                 <span className="text-[7px] font-black text-slate-400 uppercase leading-none mb-0.5">Ilość</span>
                                                                 <div className="flex items-center gap-0.5 bg-slate-50 px-1.5 py-1 rounded-lg border">
-                                                                    <input 
+                                                                    <input
                                                                         type="number" step="1"
                                                                         value={item.quantity}
                                                                         onChange={e => updateItemValue(sec.id, item.id, "quantity", Number(e.target.value))}
@@ -582,7 +738,7 @@ export default function EstimatorPage() {
                                                             <div className="flex flex-col items-center">
                                                                 <span className="text-[7px] font-black text-slate-400 uppercase leading-none mb-0.5">Cena b.</span>
                                                                 <div className="flex items-center gap-0.5 bg-slate-50 px-1.5 py-1 rounded-lg border">
-                                                                    <input 
+                                                                    <input
                                                                         type="number"
                                                                         value={item.basePrice}
                                                                         onChange={e => updateItemValue(sec.id, item.id, "basePrice", Number(e.target.value))}
@@ -592,7 +748,7 @@ export default function EstimatorPage() {
                                                                 </div>
                                                             </div>
 
-                                                            <button 
+                                                            <button
                                                                 onClick={() => removeItem(sec.id, item.id)}
                                                                 className="text-red-400 hover:text-red-600 hover:bg-red-50 w-6 h-6 mt-2 rounded flex items-center justify-center text-sm font-bold transition-colors"
                                                             >

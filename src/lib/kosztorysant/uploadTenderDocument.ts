@@ -1,16 +1,7 @@
 /**
- * PESAM – Helper: uploadTenderDocument
+ * PESAM – Helper: uploadTenderDocument (Z AUTOMATYCZNYM WYBOREM ENDPOINTU PDF/ZIP)
  *
  * Ścieżka: src/lib/kosztorysant/uploadTenderDocument.ts
- *
- * Wysyła plik przetargowy z Dropzone do endpointu /api/kosztorysant/upload-parser
- * i zwraca sparsowany wynik gotowy do wstrzyknięcia w stan strony EstimatorPage.
- *
- * Użycie w komponencie:
- *   const result = await uploadTenderDocument(file, currentTrends, onProgress);
- *   if (result.generatedSections) setSections(result.generatedSections);
- *   if (result.riskAlerts)        setRiskAlerts(result.riskAlerts);
- *   setMessages(prev => [...prev, { role: "ai", content: result.reply }]);
  */
 
 import { MarketTrends, EstimateSection } from "@/app/api/kosztorysant/_shared/types";
@@ -21,6 +12,9 @@ export interface UploadParserResult {
   reply: string;
   generatedSections?: EstimateSection[];
   riskAlerts?: string[];
+  tenderId?: string;    // <--- DODANE OPCJONALNE POLE DLA IMPORTU ZIP
+  projectName?: string; // <--- DODANE OPCJONALNE POLE DLA IMPORTU ZIP
+  filesCount?: number;  // <--- DODANE OPCJONALNE POLE DLA IMPORTU ZIP
 }
 
 export interface UploadProgress {
@@ -34,13 +28,16 @@ type ProgressCallback = (progress: UploadProgress) => void;
 
 // ── Stałe ────────────────────────────────────────────────────────────────────
 
-const ENDPOINT = "/api/kosztorysant/upload-parser";
+const ENDPOINT_PDF = "/api/kosztorysant/upload-parser";
+const ENDPOINT_ZIP = "/api/kosztorysant/magazynier-zip";
 
 /** Limit po stronie klienta – Gemini przyjmuje do 19 MB, ale odrzucamy wcześniej */
 export const MAX_UPLOAD_SIZE_BYTES = 19 * 1024 * 1024;
 
 export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "application/pdf": ".pdf",
+  "application/zip": ".zip", // <--- DODANY ZIP DO AKCEPTOWANYCH TYPÓW
+  "application/x-zip-compressed": ".zip",
   "application/vnd.ms-excel": ".xls",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
   "application/msword": ".doc",
@@ -60,8 +57,8 @@ export function validateFileClient(file: File): string | null {
     const sizeMB = (file.size / 1024 / 1024).toFixed(1);
     return `Plik jest za duży (${sizeMB} MB). Maksimum to 19 MB.`;
   }
-  if (!ACCEPTED_MIME_TYPES[file.type]) {
-    return `Nieobsługiwany format pliku "${file.name}". Prześlij PDF, Excel, Word lub obraz.`;
+  if (!ACCEPTED_MIME_TYPES[file.type] && !file.name.endsWith(".zip")) {
+    return `Nieobsługiwany format pliku "${file.name}". Prześlij ZIP, PDF, Excel, Word lub obraz.`;
   }
   return null; // OK
 }
@@ -95,8 +92,11 @@ export async function uploadTenderDocument(
 
   let response: Response;
   try {
+    // Wybór odpowiedniego endpointu na podstawie rozszerzenia pliku
+    const endpoint = file.name.endsWith(".zip") ? ENDPOINT_ZIP : ENDPOINT_PDF;
+
     // XMLHttpRequest daje nam rzeczywisty progress – fetch tego nie oferuje
-    response = await uploadWithProgress(formData, onProgress);
+    response = await uploadWithProgress(endpoint, formData, onProgress);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Błąd sieci podczas przesyłania.";
     onProgress?.({ stage: "error", message });
@@ -104,9 +104,12 @@ export async function uploadTenderDocument(
   }
 
   // Faza 2: Analiza AI (czekamy na odpowiedź modelu)
+  const isZip = file.name.endsWith(".zip");
   onProgress?.({
     stage: "analyzing",
-    message: "Gemini analizuje dokumentację przetargową… (może potrwać 20–60 sekund)",
+    message: isZip
+      ? "Rozpakowywanie archiwum ZIP i rejestracja plików w bazie PESAM..."
+      : "Gemini analizuje dokumentację przetargową… (może potrwać 20–60 sekund)",
   });
 
   if (!response.ok) {
@@ -131,13 +134,14 @@ export async function uploadTenderDocument(
     throw new Error(msg);
   }
 
-  if (!result.reply) {
+  // Dla ZIP-a nie sprawdzamy "reply" na wejściu, bo Magazynier zwraca meta-dane rozpakowania
+  if (!isZip && !result.reply) {
     const msg = "Serwer zwrócił niekompletną odpowiedź (brak pola reply).";
     onProgress?.({ stage: "error", message: msg });
     throw new Error(msg);
   }
 
-  onProgress?.({ stage: "done", message: "Analiza zakończona – tabela RMS gotowa." });
+  onProgress?.({ stage: "done", message: isZip ? "ZIP pomyślnie rozpakowany – Rój rozpoczął pracę!" : "Analiza zakończona – tabela RMS gotowa." });
 
   return result;
 }
@@ -145,6 +149,7 @@ export async function uploadTenderDocument(
 // ── XMLHttpRequest z progress dla dużych plików ───────────────────────────────
 
 function uploadWithProgress(
+  endpoint: string,
   formData: FormData,
   onProgress?: ProgressCallback
 ): Promise<Response> {
@@ -163,7 +168,6 @@ function uploadWithProgress(
     });
 
     xhr.addEventListener("load", () => {
-      // Tworzymy syntetyczny obiekt Response kompatybilny z fetch API
       const syntheticResponse = new Response(xhr.responseText, {
         status: xhr.status,
         statusText: xhr.statusText,
@@ -180,8 +184,8 @@ function uploadWithProgress(
       reject(new Error("Przekroczono limit czasu połączenia (90 sekund)."));
     });
 
-    xhr.open("POST", ENDPOINT);
-    xhr.timeout = 90_000; // 90 sekund – Gemini Pro na dużym PDF może potrzebować czasu
+    xhr.open("POST", endpoint); // <--- DYNAMICZNY ENDPOINT
+    xhr.timeout = 90_000;
     xhr.send(formData);
   });
 }
