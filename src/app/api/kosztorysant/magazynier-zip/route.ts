@@ -6,8 +6,12 @@ import { adminDb, adminStorage } from "@/lib/firebase/admin"; // Używamy Admin 
 
 // Budowanie bezpiecznego URL dla wywołań wewnętrznych
 function internalUrl(req: NextRequest, path: string): string {
-    const origin = new URL(req.url).origin;
-    return `${origin}${path}`;
+    const url = new URL(req.url);
+    // Wewnątrz kontenera Google Cloud komunikacja idzie po HTTP
+    if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+        url.protocol = "http:";
+    }
+    return `${url.origin}${path}`;
 }
 
 export const dynamic = "force-dynamic";
@@ -41,9 +45,7 @@ export async function POST(req: NextRequest) {
 
         // Tworzymy unikalne ID dla nowej inwestycji (Tender ID)
         const tenderId = `TND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-        console.log(`[Magazynier ZIP] Wygenerowano unikalny identyfikator przetargu: "${tenderId}"`);
-
-        const bucket = adminStorage.bucket();
+        const bucket = adminStorage.bucket(process.env.FIREBASE_STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
 
         // Wczytujemy plik ZIP do pamięci RAM
         console.log("[Magazynier ZIP] Wczytuję archiwum do bufora pamięci RAM...");

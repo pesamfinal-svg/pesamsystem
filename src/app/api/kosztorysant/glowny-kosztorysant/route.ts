@@ -32,8 +32,11 @@ const MODEL_FLASH = "gemini-3.5-flash";
 
 // Budowanie bezpiecznego URL dla wewnętrznych wywołań API w Next.js
 function internalUrl(req: NextRequest, path: string): string {
-  const origin = new URL(req.url).origin;
-  return `${origin}${path}`;
+  const url = new URL(req.url);
+  if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+    url.protocol = "http:";
+  }
+  return `${url.origin}${path}`;
 }
 
 // ── AGENT RYZYKA (Wbudowany - Gemini 3.5 Flash) ───────────────────────────────
