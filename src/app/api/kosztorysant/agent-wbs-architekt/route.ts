@@ -30,7 +30,7 @@ import type {
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-2.0-flash-001";
+const MODEL_FLASH = "gemini-3.5-flash";
 
 // ================================================================
 // Response Schema – DNA budynku (używane TYLKO w Kroku 2, bez Search)

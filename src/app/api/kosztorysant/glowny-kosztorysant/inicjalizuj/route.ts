@@ -22,6 +22,7 @@ interface Task {
     order: number;
     dependsOn: string[];
     payload: Record<string, unknown>;
+    inputFiles?: string[];
 }
 
 interface ClassifierOutput {
@@ -144,6 +145,7 @@ function buildTaskQueue(
             order: order++,
             dependsOn: [], // Brak zależności
             payload: { tenderId, fileIds: swzFiles.map((f) => f.fileId) },
+            inputFiles: swzFiles.map((f) => f.storagePath) // Przekazujemy ścieżkę do czytacza
         });
     }
 

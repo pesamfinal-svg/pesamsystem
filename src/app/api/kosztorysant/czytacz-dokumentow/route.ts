@@ -7,6 +7,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 import { PDFDocument } from "pdf-lib";
+import { adminStorage } from "@/lib/firebase/admin";
 import {
   MarketTrends,
   EstimateSection,
@@ -304,13 +305,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ error: "Brak parametru fileUrl w zadaniu." }, { status: 400 });
       }
 
-      console.log(`[Czytacz Dokumentów] Pobieram plik ze Storage za pomocą linku: ${fileUrl}...`);
-      const fileRes = await fetch(fileUrl);
-      if (!fileRes.ok) throw new Error(`Błąd sieci HTTP ${fileRes.status}`);
+      let arrayBuffer: ArrayBuffer;
 
-      const arrayBuffer = await fileRes.arrayBuffer();
-      fileName = fileUrl.split("/").pop()?.split("?")[0] || "dokument.pdf";
-      fileType = fileRes.headers.get("content-type") || "application/pdf";
+      if (fileUrl.startsWith("http")) {
+        console.log(`[Czytacz Dokumentów] Pobieram plik za pomocą linku HTTP: ${fileUrl}...`);
+        const fileRes = await fetch(fileUrl);
+        if (!fileRes.ok) throw new Error(`Błąd sieci HTTP ${fileRes.status}`);
+        arrayBuffer = await fileRes.arrayBuffer();
+        fileName = fileUrl.split("/").pop()?.split("?")[0] || "dokument.pdf";
+        fileType = fileRes.headers.get("content-type") || "application/pdf";
+      } else {
+        console.log(`[Czytacz Dokumentów] Pobieram plik bezpośrednio z Firebase Storage: ${fileUrl}...`);
+        const bucket = adminStorage.bucket();
+        const fileObj = bucket.file(fileUrl);
+        const [downloadedBuffer] = await fileObj.download();
+        arrayBuffer = downloadedBuffer.buffer.slice(downloadedBuffer.byteOffset, downloadedBuffer.byteOffset + downloadedBuffer.byteLength);
+        fileName = fileUrl.split("/").pop() || "dokument.pdf";
+        fileType = fileName.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream";
+      }
+
       fileSize = arrayBuffer.byteLength;
 
       const validation = validateFile({ size: fileSize, type: fileType, name: fileName });
