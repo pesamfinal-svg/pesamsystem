@@ -55,14 +55,15 @@ interface MarketTrends {
 }
 
 interface SwarmTask {
-    id: string;
-    agentType: "ANALITYK_ZAKRESU" | "LEGAL" | "QUANTITY" | "CONSTRUCTION" | "PRICING" | "VISION" | "AUDIT" | "NORMATIVE_STEEL" | "PARAMETRIC_ESTIMATE" | "GAP_FILLER";
+    id: string; // Traktujemy to tożsamo z taskId
+    agentType: string; // Przepięte na string, żeby przyjmować wszelkie nowe agenty od Claude'a
     description: string;
     status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
     inputFiles: string[];
     result: any;
     taskKeywords?: string[];
-    payload?: any; // 👈 DODANA WŁAŚCIWOŚĆ DLA TS
+    payload?: any;
+    dependsOn?: string[]; // 👈 KLUCZOWE DLA DAG: lista ID zadań, które muszą być DONE
 }
 
 interface TenderMetadata {
@@ -326,58 +327,24 @@ export default function EstimatorPage() {
         return () => unsubscribe();
     }, [activeTenderId]);
 
-    // ── KROK 3: AUTOMATYCZNY SILNIK WYKONYWANIA ZADAŃ ROJU (WSPÓŁBIEŻNY - PROMISE.ALL) ──
+
+    // ── KROK 3: AUTOMATYCZNY SILNIK WYKONYWANIA ZADAŃ ROJU (WSPÓŁBIEŻNY DAG) ──
 
     const runningTasksRef = useRef<Set<string>>(new Set());
 
+    // UNIWERSALNA LOGIKA DAG: Zero hardkodowania! Czyta zależności wprost z bazy danych
     const isTaskReady = (task: SwarmTask, allTasks: SwarmTask[]): boolean => {
         if (task.status !== "PENDING") return false;
         if (runningTasksRef.current.has(task.id)) return false;
 
-        const getTaskStatus = (type: string) => allTasks.find(t => t.agentType === type)?.status;
+        // Jeśli agent nie ma zależności, jest gotowy do startu
+        if (!task.dependsOn || task.dependsOn.length === 0) return true;
 
-        switch (task.agentType) {
-            case "ANALITYK_ZAKRESU":
-                return true;
-
-            case "LEGAL":
-            case "VISION":
-            case "PARAMETRIC_ESTIMATE": {
-                const analitykStatus = getTaskStatus("ANALITYK_ZAKRESU");
-                return analitykStatus === "DONE" || !analitykStatus;
-            }
-
-            case "QUANTITY":
-            case "NORMATIVE_STEEL": {
-                const visionStatus = getTaskStatus("VISION");
-                return visionStatus === "DONE";
-            }
-
-            case "PRICING": {
-                const knrStatus = getTaskStatus("QUANTITY");
-                const parametricStatus = getTaskStatus("PARAMETRIC_ESTIMATE");
-                const knrReady = knrStatus ? knrStatus === "DONE" : true;
-                const parametricReady = parametricStatus ? parametricStatus === "DONE" : true;
-                return knrReady && parametricReady;
-            }
-
-            case "GAP_FILLER": {
-                const pricingStatus = getTaskStatus("PRICING");
-                return pricingStatus === "DONE";
-            }
-
-            case "AUDIT": {
-                const gapFillerStatus = getTaskStatus("GAP_FILLER");
-                const legalStatus = getTaskStatus("LEGAL");
-
-                const gapReady = gapFillerStatus ? gapFillerStatus === "DONE" : true;
-                const legalReady = legalStatus ? legalStatus === "DONE" : true;
-                return gapReady && legalReady;
-            }
-
-            default:
-                return false;
-        }
+        // Jeśli ma zależności, wszystkie muszą mieć status "DONE"
+        return task.dependsOn.every(depId => {
+            const depTask = allTasks.find(t => t.id === depId || t.id.includes(depId));
+            return depTask && depTask.status === "DONE";
+        });
     };
 
     useEffect(() => {
@@ -386,7 +353,7 @@ export default function EstimatorPage() {
         const readyTasks = tasks.filter(t => isTaskReady(t, tasks));
 
         if (readyTasks.length > 0) {
-            console.log(`%c[Rój PESAM] [Współbieżność] Wykryto ${readyTasks.length} zadań gotowych do równoległego uruchomienia: [${readyTasks.map(t => t.agentType).join(", ")}]`, "color: #10b981; font-weight: bold;");
+            console.log(`%c[Rój PESAM 2.0] [Współbieżność] Wykryto ${readyTasks.length} zadań gotowych do uruchomienia wg drzewa DAG: [${readyTasks.map(t => t.agentType).join(", ")}]`, "color: #10b981; font-weight: bold;");
             Promise.all(readyTasks.map(t => executeSwarmTask(t)));
         }
     }, [tasks, activeTenderId]);
@@ -414,7 +381,6 @@ export default function EstimatorPage() {
                 console.log(`[Watchdog] Odblokowano ${resets.length} zawieszonych procesów.`);
             }
         } catch (indexErr) {
-            // Zabezpieczenie przed przerwaniem działania aplikacji przy braku indeksu w Firestore
             console.warn("[Watchdog] Brak indeksu złożonego dla Watchdoga w bazie danych. Pomijam auto-reset zadań. Utwórz indeks za pomocą linku w konsoli.", indexErr);
         }
     };
@@ -455,72 +421,49 @@ export default function EstimatorPage() {
         }
 
         try {
-            let endpoint = "";
-            let payload: any = {};
+            // Słownik Endpointów (Obsługuje nowe Agenty Progresywne i stare kompatybilne)
+            const endpointMap: Record<string, string> = {
+                "WBS_ARCHITECT": "/api/kosztorysant/agent-wbs-architekt",
+                "MAPPING_DETECTIVE": "/api/kosztorysant/agent-detektyw-mapowania",
+                "QUANTITY_SURVEYOR": "/api/kosztorysant/agent-ilosciowiec",
+                "SILENT_AUDITOR": "/api/kosztorysant/agent-cichy-rewident",
+                "ANALITYK_ZAKRESU": "/api/kosztorysant/agent-analityk-zakresu",
+                "GAP_FILLER": "/api/kosztorysant/agent-gap-filler",
+                "LEGAL": "/api/kosztorysant/czytacz-dokumentow",
+                "KNR": "/api/kosztorysant/agent-knr",
+                "QUANTITY": "/api/kosztorysant/agent-knr",
+                "VISION": "/api/kosztorysant/agent-vision-konstruktor",
+                "NORMATIVE_STEEL": "/api/kosztorysant/agent-normatywne-zbrojenie",
+                "PARAMETRIC": "/api/kosztorysant/agent-wycena-wskaznikowa",
+                "PARAMETRIC_ESTIMATE": "/api/kosztorysant/agent-wycena-wskaznikowa",
+                "BROKER": "/api/kosztorysant/broker-cenowy",
+                "PRICING": "/api/kosztorysant/broker-cenowy",
+                "REWIDENT": "/api/kosztorysant/agent-rewident",
+                "AUDIT": "/api/kosztorysant/agent-rewident"
+            };
 
-            if (task.agentType === "ANALITYK_ZAKRESU") {
-                const fileContents = await fetchTextFileContents(activeTenderId!);
-                endpoint = "/api/kosztorysant/agent-analityk-zakresu";
-                payload = {
-                    tenderId: activeTenderId,
-                    fileContents,
-                    docLevel: task.payload?.docLevel || 0,
-                    estimationMethod: task.payload?.estimationMethod || "PARAMETRIC",
-                    sourceDocuments: task.payload?.sourceDocuments || [],
-                };
-            }
-            else if (task.agentType === "GAP_FILLER") {
-                endpoint = "/api/kosztorysant/agent-gap-filler";
-                payload = { tenderId: activeTenderId };
-            }
-            else if (task.agentType === "LEGAL") {
-                endpoint = "/api/kosztorysant/czytacz-dokumentow";
-                payload = { fileUrl: task.inputFiles?.[0] || "", trends, taskKeywords: task.taskKeywords || [] };
-            } else if (task.agentType === "QUANTITY") {
-                endpoint = "/api/kosztorysant/agent-knr";
-                payload = { request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
+            const endpoint = endpointMap[task.agentType];
+            if (!endpoint) throw new Error(`Brak zdefiniowanego endpointu dla Agenta: ${task.agentType}`);
+
+            // Przygotowanie payloadu (Nowe agenty mają wszystko we własnym `task.payload`)
+            let payload = task.payload || { tenderId: activeTenderId };
+
+            // Utrzymanie kompatybilności wstecznej dla starszych agentów
+            if (task.agentType === "LEGAL") {
+                payload = { ...payload, fileUrl: task.inputFiles?.[0] || "", trends, taskKeywords: task.taskKeywords || [] };
+            } else if (task.agentType === "KNR" || task.agentType === "QUANTITY") {
+                payload = { ...payload, request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
             } else if (task.agentType === "VISION") {
-                endpoint = "/api/kosztorysant/agent-vision-konstruktor";
-                payload = { fileUrl: task.inputFiles?.[0] || "", drawingHints: task.description };
+                payload = { ...payload, fileUrl: task.inputFiles?.[0] || "", drawingHints: task.description };
             } else if (task.agentType === "NORMATIVE_STEEL") {
                 const visionResult = tasks.find(t => t.agentType === "VISION" && t.status === "DONE")?.result;
-                endpoint = "/api/kosztorysant/agent-normatywne-zbrojenie";
-                payload = {
-                    concreteElements: visionResult?.elements || [],
-                    projectContext: project.name
-                };
-            } else if (task.agentType === "PARAMETRIC_ESTIMATE") {
-                endpoint = "/api/kosztorysant/agent-wycena-wskaznikowa";
-                payload = { request: task.description, region: project.soilType.includes("Rzeszów") ? "Podkarpackie" : "Polska" };
-            } else if (task.agentType === "PRICING") {
-                const quantityDone = tasks.find(t => t.agentType === "QUANTITY" && t.status === "DONE");
-                const parametricDone = tasks.find(t => t.agentType === "PARAMETRIC_ESTIMATE" && t.status === "DONE");
-
-                if (!quantityDone && !parametricDone) {
-                    await updateDoc(taskDocRef, { status: "PENDING", claimedAt: null });
-                    setIsLoading(false);
-                    return;
-                }
+                payload = { ...payload, concreteElements: visionResult?.elements || [], projectContext: project.name };
+            } else if (task.agentType === "PARAMETRIC" || task.agentType === "PARAMETRIC_ESTIMATE") {
+                payload = { ...payload, request: task.description, region: project.soilType.includes("Rzeszów") ? "Podkarpackie" : "Polska" };
+            } else if (task.agentType === "BROKER" || task.agentType === "PRICING") {
                 const visionTask = tasks.find(t => t.agentType === "VISION" && t.status === "DONE");
-                endpoint = "/api/kosztorysant/agent-broker-cenowy";
-                payload = {
-                    sections: sections,
-                    region: "Polska",
-                    projectContext: project.name,
-                    visionSignals: visionTask?.result?.complexitySignals ?? null
-                };
-            } else if (task.agentType === "AUDIT") {
-                const pendingTasks = tasks.filter(t => t.agentType !== "AUDIT" && t.status !== "DONE" && t.status !== "ERROR");
-                if (pendingTasks.length > 0) {
-                    await updateDoc(taskDocRef, { status: "PENDING", claimedAt: null });
-                    setIsLoading(false);
-                    return;
-                }
-                endpoint = "/api/kosztorysant/agent-rewident";
-                payload = { tenderId: activeTenderId };
+                payload = { ...payload, sections, region: "Polska", projectContext: project.name, visionSignals: visionTask?.result?.complexitySignals ?? null };
             }
-
-            if (!endpoint) throw new Error(`Nieobsługiwany typ agenta: ${task.agentType}`);
 
             const res = await fetch(endpoint, {
                 method: "POST",
@@ -538,93 +481,85 @@ export default function EstimatorPage() {
             });
 
             // ── STRATEGICZNA AKTUALIZACJA CZATU I KOSZTORYSU NA FRONTENDZIE ──
-            if (task.agentType === "ANALITYK_ZAKRESU" && data.success) {
-                setMessages(prev => [...prev, {
-                    role: "ai",
-                    content: `🗺️ **Analityk Zakresu** pomyślnie wygenerował ScopeManifest:\n` +
-                        `• Typ obiektu: **${data.summary.objectType.toUpperCase()}**\n` +
+            if (data.summary || data.chatMessages || data.reply) {
+                // Generowanie dynamicznych komunikatów na podstawie typu Agenta
+                let msgContent = `🤖 **Agent ${task.agentType}** zakończył pracę.`;
+
+                if (task.agentType === "WBS_ARCHITECT") {
+                    msgContent = `🏗️ **Architekt WBS** zbudował szkielet projektu. Wykryto ${data.summary?.elementsCount || 0} wymaganych elementów.`;
+                } else if (task.agentType === "MAPPING_DETECTIVE") {
+                    msgContent = `🕵️ **Detektyw Mapowania** dopasował pliki. Elementy pokryte dokumentacją: ${data.summary?.mappedCount || 0}/${data.summary?.totalElements || 0}.`;
+                } else if (task.agentType === "QUANTITY_SURVEYOR") {
+                    msgContent = `📐 **Ilościowiec** zliczył wartości. Zebrano dane z projektów: ${data.summary?.coveredByVision || 0}, uzupełniono wskaźnikowo: ${data.summary?.gapFilledByBrain || 0}.`;
+                } else if (task.agentType === "SILENT_AUDITOR") {
+                    msgContent = `🛡️ **Cichy Rewident** zabezpieczył projekt. Wykryte pułapki technologiczne (dodano do wyceny): ${data.alertsGenerated || 0}.`;
+                } else if (task.agentType === "LEGAL" && data.riskAlerts) {
+                    msgContent = `⚖️ **Dział Prawny** zakończył analizę SWZ. Sprawdź panel alertów.`;
+                    setRiskAlerts(prev => Array.from(new Set([...prev, ...data.riskAlerts])));
+                } else if (task.agentType === "ANALITYK_ZAKRESU" && data.summary) {
+                    msgContent = `🗺️ **Analityk Zakresu** pomyślnie wygenerował ScopeManifest (Tryb Fallback):\n` +
+                        `• Typ obiektu: **${data.summary.objectType?.toUpperCase()}**\n` +
                         `• Branże kosztorysu: **${data.summary.divisionsCount}**\n` +
-                        `• Wszystkich wymaganych elementów: **${data.summary.elementsCount}**\n` +
-                        `• Warunków technicznych z SWZ: **${data.summary.hardRequirementsCount}**\n` +
-                        `• Blokad decyzyjnych (ASK_USER): **${data.summary.askUserCount}**`
-                }]);
+                        `• Blokad decyzyjnych: **${data.summary.askUserCount}**`;
+                } else if (task.agentType === "GAP_FILLER") {
+                    if (data.usedBrain) setMessages(prev => [...prev, { role: "ai", content: `🧠 *W szacunkach luk użyto PESAM Brain.*` }]);
+                    msgContent = data.chatMessages ? data.chatMessages.join("\n") : msgContent;
+                } else if (task.agentType === "REWIDENT" && data.report) {
+                    msgContent = data.report.chatSummary;
+                    setRiskAlerts(prev => {
+                        const newAlerts = [
+                            ...data.report.deterministicAlerts.map((a: any) => a.message),
+                            ...data.report.coverageAlerts.map((a: any) => a.message)
+                        ];
+                        return Array.from(new Set([...prev, ...newAlerts]));
+                    });
+                } else if (data.reply) {
+                    msgContent = data.reply;
+                }
 
-                // 🧠 ODPYTANIE PESAM BRAIN O WIEDZĘ DLA TEGO TYPU OBIEKTU 🧠
-                const objectType = data.summary.objectType;
-                if (objectType && objectType !== 'inne') {
-                    fetch(`/api/kosztorysant/brain/context?objectType=${objectType}`)
-                        .then(res => res.json())
-                        .then(brainContext => {
-                            if (brainContext.hasLearned) {
-                                setMessages(prev => [...prev, {
-                                    role: "ai",
-                                    content: `🧠 **PESAM Brain Zintegrowany z Projektem!**\nZnalazłem w bazie wskaźniki na podstawie **${brainContext.sampleCount} historycznych kosztorysów** dla typu "${objectType}". Zamiast ogólnych norm z Eurokodu, mój Gap Filler użyje Twoich własnych, wyuczonych standardów zużycia i proporcji!`
-                                }]);
-                            } else {
-                                setMessages(prev => [...prev, {
-                                    role: "ai",
-                                    content: `⚠️ **PESAM Brain (Moduł Uczenia)**\nBrak wgranych przez Ciebie starych kosztorysów dla typu "${objectType}". Agenty (w tym Gap Filler) będą polegać na ogólnych, bezpiecznych normach inżynieryjnych (Eurokod/Sekocenbud).`
-                                }]);
-                            }
+                if (msgContent) {
+                    setMessages(prev => [...prev, { role: "ai", content: msgContent }]);
+                }
+            }
+
+            // Obsługa klasycznych agentów KNR i Normatywnych, dodających sekcje bezpośrednio
+            if (data.sections || data.generatedSections) {
+                const newSecs = data.sections || data.generatedSections;
+                if (task.agentType === "NORMATIVE_STEEL") {
+                    setSections(prev => [...prev, ...newSecs]);
+                } else {
+                    setSections(newSecs);
+                }
+            }
+
+            // Obsługa Brokera Cenowego
+            if (task.agentType === "BROKER" || task.agentType === "PRICING") {
+                if (data.pricedItems) {
+                    setSections(prev => prev.map(sec => ({
+                        ...sec,
+                        items: sec.items.map(item => {
+                            const priced = data.pricedItems.find((p: any) => p.itemId === item.id);
+                            if (!priced) return item;
+                            return {
+                                ...item,
+                                unitPrice: priced.recommendedPrice,
+                                complexity: priced.complexity?.level,
+                                priceConfidence: priced.confidence,
+                                priceRange: priced.priceRange
+                            };
                         })
-                        .catch(err => console.error("[PESAM Brain] Błąd połączenia z mózgiem:", err));
+                    })));
                 }
+                if (data.marketSummary) {
+                    setMessages(prev => [...prev, { role: "ai", content: `💰 [Broker Cenowy] ${data.marketSummary}` }]);
+                }
+            }
 
-            } else if (task.agentType === "GAP_FILLER" && data.success) {
-                // Info o użyciu mózgu przez Gap Fillera
-                if (data.usedBrain) {
-                    setMessages(prev => [...prev, { role: "ai", content: `🧠 *W szacunkach luk użyłem spersonalizowanej wiedzy z historycznych projektów PESAM Brain.*` }]);
-                }
-
-                for (const msg of data.chatMessages ?? []) {
-                    setMessages(prev => [...prev, { role: "ai", content: msg }]);
-                }
-                const freshTender = await getDocs(query(collection(db, "tenders"), where("id", "==", activeTenderId)));
-                if (!freshTender.empty) {
-                    setSections(freshTender.docs[0].data().sections || []);
-                }
-            } else if (task.agentType === "LEGAL" && data.riskAlerts) {
-                setMessages(prev => [...prev, { role: "ai", content: `⚖️ [Dział Prawny] Zakończono analizę SWZ. Wykryto klauzule ryzyka. Sprawdź panel alertów po lewej stronie.` }]);
-                setRiskAlerts(prev => Array.from(new Set([...prev, ...data.riskAlerts])));
-            } else if (task.agentType === "NORMATIVE_STEEL" && data.sections) {
-                setSections(prev => [...prev, ...data.sections]);
-                setMessages(prev => [...prev, { role: "ai", content: `🏗️ [Konstruktor Zbrojenia] Obliczono wymaganą ilość stali: ${data.sections[0]?.items?.reduce((sum: number, item: any) => sum + item.quantity, 0).toFixed(2)} ton. Dodano pozycje kosztorysowe.` }]);
-            } else if (task.agentType === "VISION" && data.elements) {
-                setMessages(prev => [...prev, { role: "ai", content: `👁️ [Analityk Rysunków] Odczytano rysunki (${data.drawingType}). Wykryto ${data.elements.length} elementów nośnych i określono złożoność techniczną projektu jako ${data.complexitySignals?.overall}.` }]);
-            } else if (task.agentType === "QUANTITY" && data.sections) {
-                setSections(data.sections);
-                setMessages(prev => [...prev, { role: "ai", content: `📐 [Przedmiarowanie] Zbudowano strukturę kosztorysu z poprawnymi kodami KNR. Wczytano ${data.sections.length} działów.` }]);
-            } else if (task.agentType === "PARAMETRIC_ESTIMATE" && data.sections) {
-                setSections(data.sections);
-                setMessages(prev => [...prev, { role: "ai", content: `📊 [Wycena Parametryczna] ${data.parametricComment}` }]);
-            } else if (task.agentType === "PRICING" && data.pricedItems) {
-                setSections(prev => prev.map(sec => ({
-                    ...sec,
-                    items: sec.items.map(item => {
-                        const priced = data.pricedItems.find((p: any) => p.itemId === item.id);
-                        if (!priced) return item;
-                        return {
-                            ...item,
-                            unitPrice: priced.recommendedPrice,
-                            complexity: priced.complexity.level,
-                            priceConfidence: priced.confidence,
-                            priceRange: priced.priceRange
-                        };
-                    })
-                })));
-                setMessages(prev => [...prev, { role: "ai", content: `💰 [Broker Cenowy] ${data.marketSummary} Korekta cen dla ${data.pricedItems.length} pozycji powiodła się.` }]);
-            } else if (task.agentType === "AUDIT" && data.report) {
-                setMessages(prev => [...prev, { role: "ai", content: data.report.chatSummary }]);
-                setRiskAlerts(prev => {
-                    const newAlerts = [
-                        ...data.report.deterministicAlerts.map((a: any) => a.message),
-                        ...data.report.coverageAlerts.map((a: any) => a.message)
-                    ];
-                    return Array.from(new Set([...prev, ...newAlerts]));
-                });
-            } else {
-                if (data.reply) setMessages(prev => [...prev, { role: "ai", content: data.reply }]);
-                if (data.generatedSections) setSections(prev => [...prev, ...data.generatedSections]);
+            // Zawsze na końcu odświeżamy dane z bazy, aby komponenty (np. ScopeHeatMap) zareagowały na nowe wpisy
+            const freshTender = await getDocs(query(collection(db, "tenders"), where("id", "==", activeTenderId)));
+            if (!freshTender.empty) {
+                const freshData = freshTender.docs[0].data();
+                if (freshData.sections) setSections(freshData.sections);
             }
 
         } catch (err: any) {

@@ -1,6 +1,11 @@
 // ============================================================
-// PESAM – Agent Gap Filler (Łatacz Luk) ZINTEGROWANY Z MÓZGIEM
+// PESAM 2.0 – Agent Gap Filler (Łatacz Luk) ZINTEGROWANY Z ILOŚCIOWCEM
 // POST /api/kosztorysant/agent-gap-filler
+//
+// FILOZOFIA PESAM 2.0:
+//   Jeśli Ilościowiec (QUANTITY_SURVEYOR) zdołał wyliczyć precyzyjną ilość (m², m³),
+//   Gap Filler nie szacuje wartości wskaźnikowo z powierzchni całkowitej, lecz używa
+//   tej wyliczonej ilości i mnoży ją przez twardą stawkę referencyjną.
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -27,38 +32,59 @@ interface GapCalcInput {
         totalCost_PLN: number | null;
     };
     brainIndicators: any | null;
+    preCalculatedQuantity: number | null; // 👈 NOWOŚĆ PESAM 2.0
 }
 
 function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
-    const { element, tenderData, brainIndicators } = input;
+    const { element, tenderData, brainIndicators, preCalculatedQuantity } = input;
     const area = tenderData.objectArea_m2;
     const roughCost = tenderData.totalRoughCost_PLN;
 
-    console.log(`[Gap Filler] [Przelicznik] Wyliczam pozycję: "${element.name}" | Strategia: ${element.gapFillerStrategy}`);
+    console.log(`[Gap Filler] [Kalkulator] Analizuję element: "${element.name}" | Strategia: ${element.gapFillerStrategy}`);
 
+    // KROK 0: PESAM 2.0 - Jeśli Ilościowiec wyliczył precyzyjną ilość, używamy jej wprost!
+    if (preCalculatedQuantity && preCalculatedQuantity > 0) {
+        let rate = 120; // Domyślna stawka referencyjna PLN za jednostkę (np. m2 malowania/tynków)
+        if (element.unit === 'm³') rate = 850; // Beton/wykopy
+        else if (element.unit === 't') rate = 5200; // Stal
+        else if (element.unit === 'szt.') rate = 3200; // Drzwi/okna średnio
+        else if (element.unit === 'kpl.') rate = 45000; // Centrale technologiczne
+
+        const cost = Math.round(preCalculatedQuantity * rate);
+        console.log(`[Gap Filler] [Kalkulator] Sukces (Precyzyjny obmiar): "${element.name}" -> ${preCalculatedQuantity.toFixed(2)} ${element.unit} * ${rate} PLN = ${cost} PLN.`);
+
+        return {
+            elementId: element.elementId,
+            divisionId: '',
+            strategy: element.gapFillerStrategy,
+            estimatedValue_PLN: cost,
+            note: `[PESAM 2.0] Wykorzystano precyzyjny obmiar od Ilościowca (${preCalculatedQuantity.toFixed(2)} ${element.unit}) pomnożony przez stawkę referencyjną ${rate} PLN/${element.unit}.`,
+            dataQuality: 'NORMATIVE',
+        };
+    }
+
+    // KROK 1: Klasyczny fallback wskaźnikowy (jeśli brak plików / obmiarów)
     switch (element.gapFillerStrategy) {
         case 'EUROKOD_NORM': {
             let quantity = 0;
             let unitCost_PLN = 0;
 
-            // FIX TS: Jawne przypisanie typu i pobranie wartości
             let usedMultiplier: number | undefined = element.gapFillerMultiplier;
             let noteSource = `Eurokod, mnożnik ${element.gapFillerMultiplier || 'domyślny'}`;
 
-            // 🧠 ZASTOSOWANIE PESAM BRAIN
+            // Zastosowanie bazy wiedzy Mózgu
             if (element.unit === 'm³' && element.name.toLowerCase().includes('fundament') && brainIndicators?.concretePerM2Floor?.avg) {
                 usedMultiplier = brainIndicators.concretePerM2Floor.avg;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił mnożnik dla Betonu: ${usedMultiplier!.toFixed(3)} m³/m²`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił mnożnik dla Betonu: ${usedMultiplier!.toFixed(3)} m³/m²`);
             } else if (element.unit === 'm²' && element.name.toLowerCase().includes('tynk') && brainIndicators?.plasterM2PerM2Floor?.avg) {
                 usedMultiplier = brainIndicators.plasterM2PerM2Floor.avg;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił mnożnik dla Tynków: ${usedMultiplier!.toFixed(3)} m²/m²`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił mnożnik dla Tynków: ${usedMultiplier!.toFixed(3)} m²/m²`);
             }
 
-            // FIX TS: Twarde sprawdzenie dla kompilatora przed matematyką
             if (!area || usedMultiplier === undefined || usedMultiplier <= 0) {
-                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Nie można doliczyć ${element.name} przez EUROKOD_NORM - brak powierzchni lub mnożnika.`);
+                console.warn(`[Gap Filler] [Kalkulator] ⚠️ Brak powierzchni lub mnożnika dla EUROKOD_NORM w: "${element.name}"`);
                 return null;
             }
 
@@ -76,7 +102,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
             if (quantity <= 0 || unitCost_PLN <= 0) return null;
 
             const cost = Math.round(quantity * unitCost_PLN);
-            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${quantity.toFixed(2)} ${element.unit} = ${cost} PLN.`);
+            console.log(`[Gap Filler] [Kalkulator] Sukces (Eurokod): "${element.name}" -> ${quantity.toFixed(2)} ${element.unit} = ${cost} PLN.`);
 
             return {
                 elementId: element.elementId,
@@ -90,7 +116,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
 
         case 'SEKOCENBUD_M2': {
             if (!area) {
-                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Brak powierzchni (objectArea_m2) dla SEKOCENBUD_M2 dla: "${element.name}"`);
+                console.warn(`[Gap Filler] [Kalkulator] ⚠️ Brak powierzchni dla SEKOCENBUD_M2 w: "${element.name}"`);
                 return null;
             }
 
@@ -105,7 +131,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
 
             const rate = detectRate(element.name, SEKOCENBUD_RATES);
             const cost = Math.round(area * rate);
-            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${area} m² x ${rate} PLN = ${cost} PLN.`);
+            console.log(`[Gap Filler] [Kalkulator] Sukces (Sekocenbud): "${element.name}" -> ${area} m² x ${rate} PLN = ${cost} PLN.`);
 
             return {
                 elementId: element.elementId,
@@ -119,7 +145,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
 
         case 'GUS_PERCENT': {
             if (!roughCost && !tenderData.totalCost_PLN) {
-                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Brak kosztów bazowych dla GUS_PERCENT w pozycji: "${element.name}"`);
+                console.warn(`[Gap Filler] [Kalkulator] ⚠️ Brak kosztów bazowych dla GUS_PERCENT w: "${element.name}"`);
                 return null;
             }
             const base = roughCost || tenderData.totalCost_PLN || 0;
@@ -128,27 +154,26 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
             let multiplier = element.gapFillerMultiplier || 0.08;
             let noteSource = `średnich wskaźników GUS`;
 
-            // 🧠 ZASTOSOWANIE PESAM BRAIN
+            // Zastosowanie bazy wiedzy Mózgu
             if (element.name.toLowerCase().includes('sanitarn') && brainIndicators?.proportions?.D5_sanitaryPercent?.avg) {
                 multiplier = brainIndicators.proportions.D5_sanitaryPercent.avg / 100;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił narzut Sanitarki: ${(multiplier * 100).toFixed(1)}%`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił narzut Sanitarki: ${(multiplier * 100).toFixed(1)}%`);
             } else if (element.name.toLowerCase().includes('elektrycz') && brainIndicators?.proportions?.D6_electricPercent?.avg) {
                 multiplier = brainIndicators.proportions.D6_electricPercent.avg / 100;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił narzut Elektryki: ${(multiplier * 100).toFixed(1)}%`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił narzut Elektryki: ${(multiplier * 100).toFixed(1)}%`);
             }
 
             const cost = Math.round(base * multiplier);
-
-            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${(multiplier * 100).toFixed(1)}% z bazy ${base} PLN = ${cost} PLN.`);
+            console.log(`[Gap Filler] [Kalkulator] Sukces (GUS): "${element.name}" -> ${(multiplier * 100).toFixed(1)}% z bazy ${base} PLN = ${cost} PLN.`);
 
             return {
                 elementId: element.elementId,
                 divisionId: '',
                 strategy: 'GUS_PERCENT',
                 estimatedValue_PLN: cost,
-                note: `${(multiplier * 100).toFixed(1)}% kosztu bazowego stanu surowego (${base.toLocaleString('pl-PL')} PLN) wg ${noteSource}`,
+                note: `${(multiplier * 100).toFixed(1)}% kosztu bazowego stanu surowego wg ${noteSource}`,
                 dataQuality: 'ESTIMATED',
             };
         }
@@ -170,7 +195,7 @@ function detectRate(name: string, rates: Record<string, number>): number {
 }
 
 // ============================================================
-// Pobieranie finansowych danych z Firestore
+// Pobieranie finansowych danych z kosztorysu
 // ============================================================
 
 async function extractTenderFinancials(tenderId: string): Promise<{
@@ -178,12 +203,12 @@ async function extractTenderFinancials(tenderId: string): Promise<{
     totalCost_PLN: number | null;
     concreteVolume_m3: number | null;
 }> {
-    console.log(`[Gap Filler] [Finanse] Przeszukuję dotychczas wyliczony kosztorys dla: ${tenderId}...`);
+    console.log(`[Gap Filler] [Finanse] Skanuję wyliczenia projektu: ${tenderId}...`);
     try {
         const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
         const data = tenderDoc.data();
         if (!data?.sections) {
-            console.log(`[Gap Filler] [Finanse] Brak sekcji (sections) w bazie.`);
+            console.log(`[Gap Filler] [Finanse] Brak sekcji kosztorysowych.`);
             return { totalRoughCost_PLN: null, totalCost_PLN: null, concreteVolume_m3: null };
         }
 
@@ -192,7 +217,6 @@ async function extractTenderFinancials(tenderId: string): Promise<{
         let concreteVolume = 0;
 
         for (const section of data.sections) {
-            // FIX TS: Wyeliminowano zbędne użycie ?? na korzyść standardowych if/else (ternary)
             const sectionTotal = section.items?.reduce(
                 (sum: number, item: any) => sum + (item.totalPrice ? item.totalPrice : ((item.unitPrice || 0) * (item.quantity || 1))),
                 0
@@ -200,7 +224,6 @@ async function extractTenderFinancials(tenderId: string): Promise<{
 
             totalCost += sectionTotal;
 
-            // Stan surowy = D1 (Zerowy) + D2 (Surowy)
             if (section.divisionId === 'D1' || section.divisionId === 'D2') {
                 totalRoughCost += sectionTotal;
             }
@@ -212,27 +235,25 @@ async function extractTenderFinancials(tenderId: string): Promise<{
             }
         }
 
-        console.log(`[Gap Filler] [Finanse] Podsumowanie: Koszt całkowity Roju = ${totalCost} PLN | Stan surowy = ${totalRoughCost} PLN`);
         return {
             totalRoughCost_PLN: totalRoughCost > 0 ? totalRoughCost : null,
             totalCost_PLN: totalCost > 0 ? totalCost : null,
             concreteVolume_m3: concreteVolume > 0 ? concreteVolume : null,
         };
     } catch (err) {
-        console.error(`[Gap Filler] [Finanse] Błąd odczytu danych kosztorysu:`, err);
+        console.error(`[Gap Filler] [Finanse] Błąd odczytu danych finansowych:`, err);
         return { totalRoughCost_PLN: null, totalCost_PLN: null, concreteVolume_m3: null };
     }
 }
 
 // ============================================================
-// Dopasowanie pozycji (Weryfikacja pokrycia)
+// Weryfikacja pokrycia (Co Rój zdołał wyliczyć)
 // ============================================================
 
 async function detectCoveredElements(
     tenderId: string,
     manifest: ScopeManifest
 ): Promise<Map<string, string>> {
-    console.log(`[Gap Filler] [Detekcja] Weryfikuję, co Rój zdołał wyliczyć w tym cyklu...`);
     const covered = new Map<string, string>();
 
     try {
@@ -244,7 +265,6 @@ async function detectCoveredElements(
                 for (const section of sections) {
                     if (section.divisionId === div.divisionId) {
                         if (section.sectionId?.startsWith('GAP-')) continue;
-                        // FIX TS: Zamiana operatora ?? na logiczny OR ||
                         covered.set(el.elementId, section.sectionId || section.divisionId);
                         break;
                     }
@@ -261,7 +281,6 @@ async function detectCoveredElements(
         console.error('[Gap Filler] [Detekcja] Błąd detekcji:', e);
     }
 
-    console.log(`[Gap Filler] [Detekcja] Wynik: ${covered.size} z ${manifest.coverageStatus.length} pozycji zostało już pokrytych przez Rój.`);
     return covered;
 }
 
@@ -275,7 +294,7 @@ function isNameMatch(sectionItemName: string, elementName: string): boolean {
 
 function buildAskUserQuestion(element: ScopeElement): string {
     const hint = element.gapFillerHint
-        ? `\n💡 Wskazówka systemowa: ${element.gapFillerHint}`
+        ? `\n💡 Wskazówka: ${element.gapFillerHint}`
         : '';
     return `Wycena pozycji **${element.name}** wymaga Twojej decyzji.${hint}\n\nPodaj mi oczekiwaną kwotę lub parametry ilościowe z jednostką, abym doliczył to do budżetu.`;
 }
@@ -299,24 +318,23 @@ export async function POST(req: NextRequest) {
         }
 
         const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
-        console.log(`[Gap Filler] Pobieram manifest projektu: "${manifestPath}"...`);
         const manifestDoc = await adminDb.doc(manifestPath).get();
 
         if (!manifestDoc.exists) {
-            console.error(`[Gap Filler] ❌ Błąd: Brak dokumentu ScopeManifest pod ścieżką "${manifestPath}"!`);
-            return NextResponse.json({ error: 'ScopeManifest nie istnieje dla tego projektu' }, { status: 404 });
+            console.error(`[Gap Filler] ❌ Błąd: Brak dokumentu ScopeManifest!`);
+            return NextResponse.json({ error: 'ScopeManifest nie istnieje' }, { status: 404 });
         }
 
         const manifest = manifestDoc.data() as ScopeManifest;
         const financials = await extractTenderFinancials(tenderId);
         const coveredMap = await detectCoveredElements(tenderId, manifest);
 
-        // 🧠 POBIERAMY WIEDZĘ MÓZGU DLA OBIEKTU
+        // Pobranie danych z PESAM Brain
         const objectType = manifest.meta.objectType;
         let brainIndicators: any = null;
 
         if (objectType && objectType !== 'inne') {
-            console.log(`[Gap Filler] 🧠 Odpytuję bazę PESAM Brain dla typu: ${objectType}...`);
+            console.log(`[Gap Filler] [Mózg] Odpytuję bazę PESAM Brain dla typu: ${objectType}...`);
             try {
                 const [indSnap, propSnap] = await Promise.all([
                     adminDb.doc(`settings/brainKnowledge/${objectType}/indicators`).get(),
@@ -328,12 +346,10 @@ export async function POST(req: NextRequest) {
                         ...indSnap.data(),
                         proportions: propSnap.exists ? propSnap.data() : null
                     };
-                    console.log(`[Gap Filler] ✅ Mózg pobrany poprawnie! Będzie wspierał szacowanie luk.`);
-                } else {
-                    console.log(`[Gap Filler] ⚠️ Mózg nie ma jeszcze danych dla tego typu obiektu.`);
+                    console.log(`[Gap Filler] [Mózg] Pobrano wskaźniki historyczne z Mózgu.`);
                 }
             } catch (e) {
-                console.error(`[Gap Filler] Błąd pobierania mózgu:`, e);
+                console.error(`[Gap Filler] Błąd pobierania Mózgu:`, e);
             }
         }
 
@@ -370,7 +386,7 @@ export async function POST(req: NextRequest) {
 
                 if (el.gapFillerStrategy === 'ASK_USER') {
                     const question = buildAskUserQuestion(el);
-                    console.log(`[Gap Filler] ⏸️ Pozycja "${el.name}" blokuje automatyczną wycenę (ASK_USER).`);
+                    console.log(`[Gap Filler] Pozycja "${el.name}" wymaga zapytania użytkownika (ASK_USER).`);
 
                     askUserQuestions.push({ elementId: el.elementId, question });
                     updatedCoverage.push({
@@ -388,7 +404,7 @@ export async function POST(req: NextRequest) {
                     continue;
                 }
 
-                // 🧠 Przeliczenie Z UŻYCIEM WIEDZY MÓZGU
+                // Kalkulacja z uwzględnieniem precyzyjnych ilości z PESAM 2.0 (Ilościowiec)
                 const result = calculateGapFill({
                     element: el,
                     tenderData: {
@@ -396,7 +412,9 @@ export async function POST(req: NextRequest) {
                         objectType: manifest.meta.objectType,
                         ...financials,
                     },
-                    brainIndicators
+                    brainIndicators,
+                    // Przekazujemy precyzyjny obmiar Ilościowca z bazy
+                    preCalculatedQuantity: existingCoverage?.quantityEstimated ?? el.quantity ?? null
                 });
 
                 if (result) {
@@ -452,7 +470,7 @@ export async function POST(req: NextRequest) {
         }
 
         const newScore = calculateNewConfidence(updatedCoverage, manifest.meta.confidenceScore);
-        console.log(`[Gap Filler] Aktualizuję ScopeManifest... Nowy ConfidenceScore: ${newScore}/100`);
+        console.log(`[Gap Filler] Aktualizuję manifest... Nowa pewność wyceny: ${newScore}%`);
 
         await adminDb.doc(`tenders/${tenderId}/scopeManifest/main`).update({
             coverageStatus: updatedCoverage,
@@ -461,7 +479,7 @@ export async function POST(req: NextRequest) {
         });
 
         if (gapFilledSections.length > 0) {
-            console.log(`[Gap Filler] Zapisuję ${gapFilledSections.length} wygenerowanych sekcji normowych w tenders/${tenderId}...`);
+            console.log(`[Gap Filler] Zapisuję ${gapFilledSections.length} wygenerowanych sekcji do kosztorysu...`);
             const tenderRef = adminDb.doc(`tenders/${tenderId}`);
             const tenderDoc = await tenderRef.get();
             const existingSections = tenderDoc.data()?.sections || [];
@@ -485,8 +503,7 @@ export async function POST(req: NextRequest) {
         };
 
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Gap Filler] ✅ Sukces: proces łatania zakończony w czasie ${duration} sek.`);
-        console.log("==================================================");
+        console.log(`[Gap Filler] ✅ Proces łatki zakończony pomyślnie w ${duration} sek.`);
 
         return NextResponse.json({
             success: true,
@@ -498,10 +515,7 @@ export async function POST(req: NextRequest) {
 
     } catch (error: any) {
         console.error('[Gap Filler] ❌ Krytyczny błąd podczas łatania kosztorysu:', error);
-        return NextResponse.json(
-            { error: 'Błąd Gap Fillera', details: String(error) },
-            { status: 500 }
-        );
+        return NextResponse.json({ error: 'Błąd Gap Fillera', details: String(error) }, { status: 500 });
     }
 }
 

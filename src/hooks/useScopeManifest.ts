@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================
-// PESAM – Hook: useScopeManifest (Real-Time Listener)
+// PESAM 2.0 – Hook: useScopeManifest (Real-Time Listener)
 // Odpowiada za pobieranie i synchronizację mapy ciepła na żywo.
 // ============================================================
 
@@ -15,7 +15,7 @@ import type {
     ObjectType,
 } from '../app/api/kosztorysant/_shared/scopeManifest.types';
 
-export type HeatMapColor = 'green' | 'yellow' | 'red' | 'gray';
+export type HeatMapColor = 'green' | 'yellow' | 'red' | 'gray' | 'blue' | 'purple';
 
 export interface HeatMapEntry {
     elementId: string;
@@ -29,6 +29,8 @@ export interface HeatMapEntry {
     gapFillerValue: number | null;
     isMandatoryByLaw: boolean;
     tooltipText: string;
+    mappedFileId?: string | null;
+    quantityEstimated?: number | null;
 }
 
 export interface PendingQuestion {
@@ -44,6 +46,8 @@ export interface CoverageStats {
     gapFilled: number;
     missing: number;
     waitingUser: number;
+    needsQuantity: number;
+    techRequired: number;
     coveragePercent: number;
     confidenceScore: number;
     objectType: ObjectType | null;
@@ -62,10 +66,13 @@ export interface UseScopeManifestReturn {
     answerQuestion: (elementId: string, value: number, unit: string) => Promise<void>;
 }
 
+// Kolorowanie logiki na podstawie nowych statusów PESAM 2.0
 function qualityToColor(quality: DataQuality, status: string): HeatMapColor {
     if (status === 'MISSING' || status === 'WAITING_USER') return 'red';
-    if (quality === 'MARKET_VERIFIED') return 'green';
-    if (quality === 'NORMATIVE' || quality === 'ESTIMATED') return 'yellow';
+    if (status === 'NEEDS_QUANTITY') return 'blue'; // Znalazł Detektyw, czeka na Ilościowca
+    if (status === 'TECH_REQUIRED') return 'purple'; // Wymóg dopisany przez Cichego Rewidenta
+    if (status === 'COVERED' && (quality === 'MARKET_VERIFIED' || quality === 'NORMATIVE')) return 'green';
+    if (status === 'GAP_FILLED' || quality === 'ESTIMATED') return 'yellow';
     return 'gray';
 }
 
@@ -74,18 +81,21 @@ function buildTooltip(entry: CoverageEntry, quality: DataQuality, status: string
         return '🔴 Blokada: Czeka na Twoje dane wejściowe. Podaj parametry w oknie czatu.';
     }
     if (status === 'MISSING') {
-        return '🔴 Brak: Pozycja nie została wyceniona. Gap Filler pominął ją.';
+        return '🔴 Brak danych: Projektant nie załączył dokumentacji dla tej pozycji.';
     }
-    if (quality === 'MARKET_VERIFIED') {
-        return '🟢 Rynkowe: Pozycja precyzyjnie wyliczona i wyceniona przez Rój.';
+    if (status === 'NEEDS_QUANTITY') {
+        return '🔵 Dokument zlokalizowany: Detektyw przypisał plik. Ilościowiec właśnie zlicza z niego wymiary...';
     }
-    if (quality === 'NORMATIVE') {
-        return `🟡 Normowe: Uzupełniono automatycznie: ${entry.gapFillerNote ?? 'brak opisu'}`;
+    if (status === 'TECH_REQUIRED') {
+        return `🟣 Pułapka technologiczna (Cichy Rewident): ${entry.gapFillerNote ?? 'Wymóg dodany bezpieczeństwa.'}`;
     }
-    if (quality === 'ESTIMATED') {
-        return `🟡 Szacunkowe: Wyliczono ze średnich GUS: ${entry.gapFillerNote ?? 'brak opisu'}`;
+    if (status === 'COVERED') {
+        return `🟢 Wyliczono precyzyjnie: ${entry.gapFillerNote ?? 'Z dokumentacji.'}`;
     }
-    return '⚪ Brak danych o wycenie.';
+    if (status === 'GAP_FILLED') {
+        return `🟡 Szacunek wskaźnikowy: ${entry.gapFillerNote ?? 'Uzupełniono przez normatywy/mózg.'}`;
+    }
+    return '⚪ Trwa przetwarzanie...';
 }
 
 export function useScopeManifest(tenderId: string | null): UseScopeManifestReturn {
@@ -99,76 +109,60 @@ export function useScopeManifest(tenderId: string | null): UseScopeManifestRetur
             return;
         }
 
-        console.log(`[useScopeManifest] [Real-time] Podpinam nasłuch Firestore dla: tenders/${tenderId}/scopeManifest/main...`);
-        setIsLoading(true);
-
         const manifestRef = doc(db, `tenders/${tenderId}/scopeManifest/main`);
-
         const unsubscribe = onSnapshot(
             manifestRef,
             (snap) => {
                 if (snap.exists()) {
                     setManifest(snap.data() as ScopeManifest);
-                    console.log(`[useScopeManifest] [Real-time] Dane zsynchronizowane pomyślnie.`);
                 } else {
-                    console.log(`[useScopeManifest] [Real-time] Brak ScopeManifestu w bazie.`);
                     setManifest(null);
                 }
                 setIsLoading(false);
                 setError(null);
             },
             (err) => {
-                console.error('[useScopeManifest] Błąd subskrypcji Firestore:', err);
+                console.error('[useScopeManifest] Błąd:', err);
                 setError(err.message);
                 setIsLoading(false);
             }
         );
 
-        return () => {
-            console.log(`[useScopeManifest] [Real-time] Zdejmuję nasłuch.`);
-            unsubscribe();
-        };
+        return () => unsubscribe();
     }, [tenderId]);
 
     const heatMap: HeatMapEntry[] = (() => {
         if (!manifest) return [];
-
         const entries: HeatMapEntry[] = [];
 
         for (const div of manifest.requiredDivisions) {
             for (const el of div.elements) {
-                const coverage = manifest.coverageStatus.find(
-                    (c) => c.elementId === el.elementId
-                );
-
+                const coverage = manifest.coverageStatus.find(c => c.elementId === el.elementId);
                 const quality: DataQuality = coverage?.dataQuality ?? 'MISSING';
                 const status = coverage?.status ?? 'MISSING';
-                const color = qualityToColor(quality, status);
 
                 entries.push({
                     elementId: el.elementId,
                     divisionId: div.divisionId,
                     divisionName: div.divisionName,
                     elementName: el.name,
-                    color,
+                    color: qualityToColor(quality, status),
                     dataQuality: quality,
                     status,
                     gapFillerNote: coverage?.gapFillerNote ?? null,
                     gapFillerValue: coverage?.gapFillerValue ?? null,
                     isMandatoryByLaw: el.isMandatoryByLaw,
-                    tooltipText: coverage
-                        ? buildTooltip(coverage, quality, status)
-                        : '⚪ Brak danych',
+                    tooltipText: coverage ? buildTooltip(coverage, quality, status) : '⚪ Brak danych',
+                    mappedFileId: coverage?.mappedFileId,
+                    quantityEstimated: coverage?.quantityEstimated,
                 });
             }
         }
-
         return entries;
     })();
 
     const pendingQuestions: PendingQuestion[] = (() => {
         if (!manifest) return [];
-
         return manifest.coverageStatus
             .filter((c) => c.status === 'WAITING_USER' && c.pendingQuestion)
             .map((c) => {
@@ -186,10 +180,9 @@ export function useScopeManifest(tenderId: string | null): UseScopeManifestRetur
     const coverageStats: CoverageStats = (() => {
         if (!manifest) {
             return {
-                total: 0, covered: 0, gapFilled: 0,
-                missing: 0, waitingUser: 0, coveragePercent: 0,
-                confidenceScore: 0, objectType: null,
-                objectArea_m2: null, riskBufferPercent: 0,
+                total: 0, covered: 0, gapFilled: 0, missing: 0, waitingUser: 0,
+                needsQuantity: 0, techRequired: 0, coveragePercent: 0, confidenceScore: 0,
+                objectType: null, objectArea_m2: null, riskBufferPercent: 0,
             };
         }
 
@@ -199,65 +192,44 @@ export function useScopeManifest(tenderId: string | null): UseScopeManifestRetur
         const gapFilled = cov.filter((c) => c.status === 'GAP_FILLED').length;
         const missing = cov.filter((c) => c.status === 'MISSING').length;
         const waitingUser = cov.filter((c) => c.status === 'WAITING_USER').length;
+        const needsQuantity = cov.filter((c) => c.status === 'NEEDS_QUANTITY').length;
+        const techRequired = cov.filter((c) => c.status === 'TECH_REQUIRED').length;
 
+        // Liczymy "sukcesy" (Covered = 100%, GapFilled = 70%, TechReq = 100% zabezpieczenia)
         const coveragePercent = total > 0
-            ? Math.round(((covered + gapFilled * 0.7) / total) * 100)
+            ? Math.round(((covered + techRequired + gapFilled * 0.7) / total) * 100)
             : 0;
 
-        const riskBufferPercent = manifest.missingDataRisks.reduce(
-            (sum, r) => sum + (r.userOverridePercent ?? r.costImpactPercent),
-            0
-        );
+        const riskBufferPercent = manifest.missingDataRisks.reduce((sum, r) => sum + (r.userOverridePercent ?? r.costImpactPercent), 0);
 
         return {
-            total, covered, gapFilled, missing, waitingUser, coveragePercent,
-            confidenceScore: manifest.meta.confidenceScore,
-            objectType: manifest.meta.objectType,
-            objectArea_m2: manifest.meta.objectArea_m2,
-            riskBufferPercent,
+            total, covered, gapFilled, missing, waitingUser, needsQuantity, techRequired,
+            coveragePercent, confidenceScore: manifest.meta.confidenceScore,
+            objectType: manifest.meta.objectType, objectArea_m2: manifest.meta.objectArea_m2, riskBufferPercent,
         };
     })();
 
     const markAsNeedsReview = useCallback(async (elementId: string) => {
         if (!tenderId || !manifest) return;
-        console.log(`[useScopeManifest] Akcja: Oznaczam "${elementId}" do weryfikacji manualnej...`);
         try {
             await fetch(`/api/kosztorysant/scope-manifest/update-coverage`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ tenderId, elementId, status: 'NEEDS_REVIEW' }),
             });
-        } catch (e) {
-            console.error('[useScopeManifest] Błąd markAsNeedsReview:', e);
-        }
+        } catch (e) { console.error(e); }
     }, [tenderId, manifest]);
 
-    const answerQuestion = useCallback(async (
-        elementId: string,
-        value: number,
-        unit: string
-    ) => {
+    const answerQuestion = useCallback(async (elementId: string, value: number, unit: string) => {
         if (!tenderId) return;
-        console.log(`[useScopeManifest] Akcja: Wysyłam odpowiedź użytkownika dla "${elementId}"...`);
         try {
             await fetch(`/api/kosztorysant/scope-manifest/answer-question`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ tenderId, elementId, value, unit }),
             });
-        } catch (e) {
-            console.error('[useScopeManifest] Błąd answerQuestion:', e);
-        }
+        } catch (e) { console.error(e); }
     }, [tenderId]);
 
-    return {
-        manifest,
-        isLoading,
-        error,
-        heatMap,
-        pendingQuestions,
-        coverageStats,
-        markAsNeedsReview,
-        answerQuestion,
-    };
+    return { manifest, isLoading, error, heatMap, pendingQuestions, coverageStats, markAsNeedsReview, answerQuestion };
 }

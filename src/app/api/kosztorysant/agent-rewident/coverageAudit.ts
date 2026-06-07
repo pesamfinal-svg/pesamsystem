@@ -61,8 +61,10 @@ export async function runCoverageAudit(
     const gapFilled = coverage.filter((c) => c.status === 'GAP_FILLED').length;
     const missing = coverage.filter((c) => c.status === 'MISSING').length;
     const waitingUser = coverage.filter((c) => c.status === 'WAITING_USER').length;
+    const needsQuantity = coverage.filter((c) => c.status === 'NEEDS_QUANTITY').length; // 👈 NOWOŚĆ
+    const techRequired = coverage.filter((c) => c.status === 'TECH_REQUIRED').length; // 👈 NOWOŚĆ
 
-    console.log(`[Coverage Audit] Dane pokrycia: Wyliczone=${covered} | Łatki=${gapFilled} | Brakujące=${missing} | Blokady=${waitingUser}`);
+    console.log(`[Coverage Audit] Dane pokrycia: Wyliczone=${covered} | Łatki=${gapFilled} | Wymogi Tech=${techRequired} | Brakujące=${missing + waitingUser + needsQuantity}`);
 
     // 1. Wykrywanie twardych braków (MISSING lub WAITING_USER)
     for (const entry of coverage.filter((c) => c.status === 'MISSING' || c.status === 'WAITING_USER')) {
@@ -164,7 +166,7 @@ export async function runCoverageAudit(
 
     // 5. Ostateczny wskaźnik pokrycia (Coverage Score)
     const weightedCoverage = total > 0
-        ? (covered * 1.0 + gapFilled * 0.7 + waitingUser * 0.3) / total
+        ? (covered * 1.0 + techRequired * 1.0 + gapFilled * 0.7 + waitingUser * 0.3) / total
         : 0;
     const coverageScore = Math.round(weightedCoverage * 100);
 
