@@ -1,13 +1,49 @@
 # Konfiguracja zasobów dla Firebase App Hosting
 runConfig:
-  # Zwiększamy pamięć do 2GB, aby obsłużyć rozpakowywanie dużych ZIPów
+  # Zwiększamy pamięć do 2GB, aby obsłużyć rozpakowywanie dużych ZIPów bez błędów 500
   memoryMiB: 2048
   cpu: 1
-  # Minimalna liczba instancji (0 oznacza oszczędność kosztów, gdy nikt nie używa)
   minInstances: 0
   maxInstances: 10
 
 env:
-  # Upewnij się, że masz tu ustawione zmienne środowiskowe, jeśli ich używasz
   - variable: STORAGE_BUCKET
     value: "pesam-system-81165.firebasestorage.app"
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # --- SEKRETY FIREBASE ADMIN (Niezbędne do poprawnej kompilacji i działania baz) ---
+  - variable: FIREBASE_ADMIN_PROJECT_ID
+    secret: projects/pesam-system-81165/secrets/FIREBASE_ADMIN_PROJECT_ID/versions/latest
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: FIREBASE_ADMIN_CLIENT_EMAIL
+    secret: projects/pesam-system-81165/secrets/FIREBASE_ADMIN_CLIENT_EMAIL/versions/latest
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: FIREBASE_ADMIN_PRIVATE_KEY
+    secret: projects/pesam-system-81165/secrets/FIREBASE_ADMIN_PRIVATE_KEY/versions/latest
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # --- SEKRETY DO WYSYŁKI E-MAILI ---
+  - variable: EMAIL_USER
+    secret: projects/pesam-system-81165/secrets/EMAIL_USER/versions/latest
+    availability:
+      - RUNTIME
+
+  - variable: EMAIL_PASS
+    secret: projects/pesam-system-81165/secrets/EMAIL_PASS/versions/latest
+    availability:
+      - RUNTIME
+
+  - variable: EMAIL_WAREHOUSE
+    secret: projects/pesam-system-81165/secrets/EMAIL_WAREHOUSE/versions/latest
+    availability:
+      - RUNTIME
