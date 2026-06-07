@@ -121,7 +121,7 @@ function buildTaskQueue(
     let order = 0;
 
     const swzFiles = fileList.filter((f) => ['SWZ', 'OPZ', 'PFU', 'UMOWA'].includes(f.category.toUpperCase()));
-    const drawingFiles = fileList.filter((f) => f.category.toUpperCase() === 'RYSUNEK');
+    const drawingFiles = fileList.filter((f) => f.category.toUpperCase() === 'DRAWING');
 
     console.log(`[Inicjalizator] [Kolejka] Buduję optymalny łańcuch zadań dla przetargu: ${tenderId}...`);
 

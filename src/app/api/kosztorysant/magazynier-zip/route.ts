@@ -203,14 +203,17 @@ export async function POST(req: NextRequest) {
         // 5. FINALIZACJA
         await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        // Wywołanie inicjalizatora w tle - POPRAWKA: Przekazujemy również fileList!
-        const initUrl = `${new URL(req.url).origin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
-        console.log(`[Magazynier ZIP] Odpalam inicjalizator: ${initUrl}`);
+        // Bezpieczne pobranie hosta i protokołu do wywołania wewnętrznego API
+        const host = req.headers.get("host") || "localhost:3000";
+        const protocol = host.startsWith("localhost") ? "http" : "https";
+        const initUrl = `${protocol}://${host}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
+
+        console.log(`[Magazynier ZIP] Odpalam inicjalizator pod adresem: ${initUrl}`);
 
         fetch(initUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, fileList: uploadedFilesList }) // <--- POPRAWKA TUTAJ!
+            body: JSON.stringify({ tenderId, fileList: uploadedFilesList })
         }).catch(e => console.error("[Magazynier ZIP] Błąd zapłonu:", e));
 
         console.log(`[Magazynier ZIP] ✅ SUKCES. Przetworzono ${filesToProcess.length} plików.`);

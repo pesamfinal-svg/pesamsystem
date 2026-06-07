@@ -384,21 +384,26 @@ export default function EstimatorPage() {
         const staleThreshold = new Date(Date.now() - 5 * 60 * 1000).toISOString();
         const tasksRef = collection(db, "tenders", tenderId, "tasks");
 
-        const staleSnap = await getDocs(
-            query(tasksRef,
-                where("status", "==", "IN_PROGRESS"),
-                where("updatedAt", "<", staleThreshold)
-            )
-        );
+        try {
+            const staleSnap = await getDocs(
+                query(tasksRef,
+                    where("status", "==", "IN_PROGRESS"),
+                    where("updatedAt", "<", staleThreshold)
+                )
+            );
 
-        const resets = staleSnap.docs.map(docSnap => {
-            console.warn(`[Watchdog] Resetuję zawieszone zadanie: ${docSnap.id}`);
-            return updateDoc(docSnap.ref, { status: "PENDING", claimedAt: null, updatedAt: new Date().toISOString() });
-        });
+            const resets = staleSnap.docs.map(docSnap => {
+                console.warn(`[Watchdog] Resetuję zawieszone zadanie: ${docSnap.id}`);
+                return updateDoc(docSnap.ref, { status: "PENDING", claimedAt: null, updatedAt: new Date().toISOString() });
+            });
 
-        await Promise.all(resets);
-        if (resets.length > 0) {
-            console.log(`[Watchdog] Odblokowano ${resets.length} zawieszonych procesów.`);
+            await Promise.all(resets);
+            if (resets.length > 0) {
+                console.log(`[Watchdog] Odblokowano ${resets.length} zawieszonych procesów.`);
+            }
+        } catch (indexErr) {
+            // Zabezpieczenie przed przerwaniem działania aplikacji przy braku indeksu w Firestore
+            console.warn("[Watchdog] Brak indeksu złożonego dla Watchdoga w bazie danych. Pomijam auto-reset zadań. Utwórz indeks za pomocą linku w konsoli.", indexErr);
         }
     };
 
