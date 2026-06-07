@@ -1,451 +1,218 @@
 // ============================================================
-// PESAM 2.1 – Agent "Ilościowiec (Quantity Surveyor)" z Google Search Grounding
-// POST /api/kosztorysant/agent-ilosciowiec
+// PESAM 2.2 – Agent "Detektyw Mapowania (Mapping Detective)"
+// POST /api/kosztorysant/agent-detektyw-mapowania
 //
-// ROLA W DAG: Faza 2 – po MAPPING_DETECTIVE, przed SILENT_AUDITOR
-// WEJŚCIE:   ScopeManifest z wypełnionymi mappedFileId (wynik Detektywa)
-// WYJŚCIE:   quantity + dataQuality na każdym elemencie,
-//            statusy COVERED / GAP_FILLED w coverageStatus
+// ROLA W DAG: Faza 1 – Most między WBS a dokumentami.
+// WEJŚCIE: ScopeManifest (DNA z WBS) + Lista wgranych plików
+// WYJŚCIE: Zaktualizowany ScopeManifest. Elementy pokryte plikami 
+//          dostają status NEEDS_QUANTITY. Reszta zostaje MISSING.
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb, adminStorage } from '@/lib/firebase/admin';
+import { adminDb } from '@/lib/firebase/admin';
 import { GoogleGenAI, Type } from '@google/genai';
 import type {
     ScopeManifest,
-    ScopeDivision,
-    ScopeElement,
-    CoverageEntry,
-    CoverageStatus,
-    DataQuality,
-    QuantityResult,
     AgentPhase,
-    ObjectType,
+    CoverageEntry,
+    ScopeDivision,
+    ScopeElement
 } from '../_shared/scopeManifest.types';
 
 export const dynamic = "force-dynamic";
 
 const MODEL_FLASH = "gemini-2.5-flash";
 
-const VISION_BATCH_SIZE = 5;
-const BRAIN_BATCH_SIZE = 15;
-
-// ================================================================
-// Typy wewnętrzne
-// ================================================================
-
-interface ElementWithContext {
-    elementId: string;
-    divisionId: string;
-    name: string;
-    unit: string;
-    gapFillerStrategy: string;
-    gapFillerHint?: string;
-    mappedFileId: string | null;
-    mappedStoragePath: string | null;
-    extractionHint: string | null;
-}
-
-interface BrainContextResponse {
-    indicators: Array<{
-        elementName: string;
-        valuePerM2: number | null;
-        valuePerM3: number | null;
-        unit: string;
-        sampleSize: number;
-        confidence: 'HIGH' | 'MEDIUM' | 'LOW';
-    }>;
-    objectType: ObjectType;
-    dataPoints: number;
-}
-
-// ================================================================
-// Response Schemas dla Gemini (bez problematycznych enums)
-// ================================================================
-
-const VISION_QUANTITY_SCHEMA = {
+const MAPPING_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        results: {
+        mappings: {
             type: Type.ARRAY,
             items: {
                 type: Type.OBJECT,
                 properties: {
                     elementId: { type: Type.STRING },
-                    quantity: { type: Type.NUMBER },
-                    unit: { type: Type.STRING },
-                    method: { type: Type.STRING },
-                    confidenceScore: { type: Type.INTEGER },
-                    note: { type: Type.STRING },
-                    extractionSuccess: { type: Type.BOOLEAN },
+                    mappedFileId: { type: Type.STRING, description: "ID przypisanego pliku. Jeśli żaden plik nie pasuje, zwróć słowo 'null'" },
+                    extractionHint: { type: Type.STRING, description: "Wskazówka dla Ilościowca, np. 'Szukaj w tabeli zestawienia stali na str. 3' lub 'null'" }
                 },
-                required: ['elementId', 'quantity', 'unit', 'confidenceScore', 'note', 'extractionSuccess'],
-            },
-        },
-    },
-    required: ['results'],
-};
-
-const BRAIN_QUANTITY_SCHEMA = {
-    type: Type.OBJECT,
-    properties: {
-        results: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    elementId: { type: Type.STRING },
-                    quantity: { type: Type.NUMBER },
-                    unit: { type: Type.STRING },
-                    indicatorUsed: { type: Type.STRING },
-                    calculationNote: { type: Type.STRING },
-                    confidenceScore: { type: Type.INTEGER },
-                },
-                required: ['elementId', 'quantity', 'unit', 'indicatorUsed', 'calculationNote', 'confidenceScore'],
-            },
-        },
-    },
-    required: ['results'],
-};
-
-// ================================================================
-// System Prompts
-// ================================================================
-
-const VISION_SYSTEM_INSTRUCTION = `
-Jesteś Ilościowcem w systemie PESAM – doświadczonym kosztorysantem.
-Twoje zadanie to precyzyjne odczytanie ilości geometrycznych z załączonych rysunków/dokumentów na podstawie wskazań "extractionHint".
-
-WYKORZYSTAJ narzędzie wyszukiwania Google Search, aby zweryfikować specyficzne przeliczniki i współczynniki konwersji (np. wagę pręta zbrojeniowego fi 12 w Polsce, typową grubość posypki dylatacyjnej itp.).
-
-ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
-`.trim();
-
-const BRAIN_SYSTEM_INSTRUCTION = `
-Jesteś Ilościowcem w systemie PESAM. Szacujesz ilości parametrycznie na podstawie wskaźników historycznych i powierzchni budynku.
-
-WYKORZYSTAJ narzędzie Google Search, aby znaleźć typowe normatywne zużycie materiałów (np. betonu, stali, tynków) na m2 powierzchni użytkowej dla wybranego typu budynku w polskim prawie budowlanym, jeśli w Mózgu brak Twoich własnych danych historycznych.
-
-ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
-`.trim();
-
-// ================================================================
-// Pobieranie plików i wskaźników z Mózgu (Lokalny Loopback)
-// ================================================================
-
-async function fetchFileAsBase64(storagePath: string): Promise<{ base64: string; mimeType: string } | null> {
-    try {
-        const bucket = adminStorage.bucket();
-        const file = bucket.file(storagePath);
-        const [exists] = await file.exists();
-        if (!exists) return null;
-        const [buffer] = await file.download();
-        const ext = storagePath.split('.').pop()?.toLowerCase() ?? '';
-        const mimeMap: Record<string, string> = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' };
-        return { base64: buffer.toString('base64'), mimeType: mimeMap[ext] || 'application/octet-stream' };
-    } catch { return null; }
-}
-
-async function fetchBrainIndicators(
-    req: NextRequest,
-    objectType: ObjectType
-): Promise<BrainContextResponse | null> {
-    try {
-        const port = process.env.PORT || "8080";
-        const url = `http://127.0.0.1:${port}/api/kosztorysant/brain/context?objectType=${objectType}`;
-        console.log(`[Ilościowiec] 🧠 Pobieram kontekst Mózgu lokalnie przez GET: ${url}`);
-
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                ...(req.headers.get("cookie") ? { "Cookie": req.headers.get("cookie") || "" } : {}),
-                ...(req.headers.get("authorization") ? { "Authorization": req.headers.get("authorization") || "" } : {})
+                required: ["elementId", "mappedFileId", "extractionHint"]
             }
-        });
+        }
+    },
+    required: ["mappings"]
+};
 
-        if (!response.ok) return null;
-        return await response.json();
-    } catch (err) {
-        console.warn(`[Ilościowiec] Błąd pobierania Mózgu:`, err);
-        return null;
-    }
-}
+const SYSTEM_INSTRUCTION = `
+Jesteś Detektywem Mapowania w systemie PESAM. Twoim zadaniem jest połączenie wymagań kosztorysowych (DNA budynku) z wgranymi przez użytkownika plikami.
 
-// ================================================================
-// Wywołania Gemini z Google Search Grounding
-// ================================================================
+Otrzymasz:
+1. Listę elementów do wyceny (wygenerowaną przez WBS).
+2. Listę plików wgranych do systemu (z ich nazwami i kategoriami).
 
-async function processVisionBatch(
-    ai: any,
-    elements: ElementWithContext[],
-    fileBase64: string,
-    mimeType: string,
-    fileName: string
-): Promise<QuantityResult[]> {
-    const prompt = `
-Analizujesz plik z dokumentacji projektowej: "${fileName}"
+Dla każdego elementu zadecyduj, czy można go wyliczyć na podstawie któregoś z podanych plików.
+- Jeśli tak: przypisz ID tego pliku do 'mappedFileId' i napisz krótką 'extractionHint' (jak to odczytać).
+- Jeśli nie ma odpowiedniego pliku (np. mamy tylko SWZ, a wyceniamy mury): ustaw 'mappedFileId' na "null". Element ten zostanie wyceniony później algorytmem wskaźnikowym przez Gap Fillera.
 
-Dla każdego elementu z poniższej listy odczytaj DOKŁADNĄ ILOŚĆ (obmiar) z rysunku na podstawie wskazanego extractionHint:
-${JSON.stringify(elements.map(el => ({ elementId: el.elementId, name: el.name, unit: el.unit, hint: el.extractionHint })), null, 2)}
-
-ZADANIE:
-1. Użyj wyszukiwarki Google Search do zweryfikowania specyficznych współczynników konwersji, jeśli są potrzebne (np. "ile kg waży 1 metr pręta fi 12 w Polsce", "typowa grubość podbudowy z chudego betonu", "współczynniki strat materiałowych w polskim kosztorysowaniu").
-2. Odczytaj wartości z rysunku i oblicz ostateczną ilość.
-3. Zwróć wyniki dla wszystkich elementów. Jeśli obmiar jest niemożliwy, ustaw extractionSuccess: false.
-    `.trim();
-
-    const result = await ai.models.generateContent({
-        model: MODEL_FLASH,
-        contents: [{
-            role: "user",
-            parts: [
-                { inlineData: { mimeType, data: fileBase64 } },
-                { text: prompt }
-            ]
-        }],
-        config: {
-            systemInstruction: VISION_SYSTEM_INSTRUCTION,
-            temperature: 0.0,
-            responseMimeType: "application/json",
-            responseSchema: VISION_QUANTITY_SCHEMA as any,
-            tools: [
-                { googleSearch: {} } // 👈 WŁĄCZENIE GROUNDINGU W LOCIE!
-            ]
-        },
-    });
-
-    const rawText = result.text ?? "{}";
-    const parsed = JSON.parse(rawText) as { results: any[] };
-
-    return parsed.results.map((r): QuantityResult => ({
-        elementId: r.elementId,
-        divisionId: elements.find(el => el.elementId === r.elementId)?.divisionId ?? 'D1',
-        quantity: r.quantity,
-        unit: r.unit,
-        source: 'VISION',
-        newStatus: r.extractionSuccess && r.quantity > 0 ? 'COVERED' : 'GAP_FILLED',
-        dataQuality: r.confidenceScore >= 70 ? 'NORMATIVE' : 'ESTIMATED',
-        note: `[VISION | ${r.method || 'odczyt'}] ${r.note}`,
-    }));
-}
-
-async function processBrainBatch(
-    ai: any,
-    elements: ElementWithContext[],
-    brainContext: BrainContextResponse | null,
-    objectType: ObjectType,
-    objectArea_m2: number | null
-): Promise<QuantityResult[]> {
-    const areaContext = objectArea_m2 ? `Powierzchnia budynku: ${objectArea_m2} m²` : 'Powierzchnia nieznana.';
-
-    const prompt = `
-Szacujesz parametrycznie ilości dla poniższych elementów przy braku rysunków:
-Typ obiektu: ${objectType}
-${areaContext}
-
-Wykorzystaj te wskaźniki historyczne z PESAM Brain (jeśli są dostępne):
-${JSON.stringify(brainContext?.indicators || [], null, 2)}
-
-ZADANIE:
-1. Użyj wyszukiwarki Google Search, aby znaleźć typowe normatywne zużycie materiałów i robocizny dla obiektów typu "${objectType}" w polskim budownictwie (np. "średnia ilość tynku na m2 powierzchni użytkowej", "zużycie betonu w stropach na m2").
-2. Oblicz ilości parametrycznie, mnożąc wskaźnik przez powierzchnię użytkową budynku.
-3. Pokaż obliczenie krok po kroku w "calculationNote".
-    `.trim();
-
-    const result = await ai.models.generateContent({
-        model: MODEL_FLASH,
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: {
-            systemInstruction: BRAIN_SYSTEM_INSTRUCTION,
-            temperature: 0.1,
-            responseMimeType: "application/json",
-            responseSchema: BRAIN_QUANTITY_SCHEMA as any,
-            tools: [
-                { googleSearch: {} } // 👈 WŁĄCZENIE GROUNDINGU W LOCIE!
-            ]
-        },
-    });
-
-    const rawText = result.text ?? "{}";
-    const parsed = JSON.parse(rawText) as { results: any[] };
-
-    return parsed.results.map((r): QuantityResult => ({
-        elementId: r.elementId,
-        divisionId: elements.find(el => el.elementId === r.elementId)?.divisionId ?? 'D1',
-        quantity: r.quantity,
-        unit: r.unit,
-        source: 'BRAIN_INDICATOR',
-        newStatus: 'GAP_FILLED',
-        dataQuality: 'ESTIMATED',
-        note: `[BRAIN | ${r.indicatorUsed}] ${r.calculationNote}`,
-    }));
-}
-
-// ================================================================
-// GŁÓWNY HANDLER POST
-// ================================================================
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
+`.trim();
 
 export async function POST(req: NextRequest) {
     const startTime = Date.now();
     console.log("==================================================");
-    console.log("[Ilościowiec] === ROZPOCZĘTO WYCENĘ PARAMETRYCZNĄ (v2.1) ===");
+    console.log("[Detektyw Mapowania] === FAZA 1: DOPASOWANIE PLIKÓW DO DNA ===");
     console.log("==================================================");
 
     try {
-        const body = await req.json() as { tenderId: string; useBrainFallback: boolean };
-        const { tenderId } = body;
+        const body = await req.json();
+        const { tenderId, fileList } = body as {
+            tenderId: string;
+            fileList: Array<{ fileId: string; fileName: string; category: string; storagePath: string }>;
+        };
 
         if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
 
+        console.log(`[Detektyw Mapowania] Analizuję projekt: ${tenderId}. Liczba dostępnych plików: ${fileList?.length || 0}`);
+
+        // 1. Pobranie ScopeManifest z bazy (wygenerowanego przez WBS)
         const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
         const manifestSnap = await adminDb.doc(manifestPath).get();
-        if (!manifestSnap.exists) throw new Error("Manifest nie istnieje.");
+
+        if (!manifestSnap.exists) {
+            throw new Error("ScopeManifest nie istnieje. WBS_ARCHITECT nie zakończył pracy poprawnie.");
+        }
 
         const manifest = manifestSnap.data() as ScopeManifest;
-        const { objectType, objectArea_m2 } = manifest.meta;
-
-        const filesSnap = await adminDb.collection(`tenders/${tenderId}/files`).get();
-        const fileStorageMap = new Map<string, string>();
-        filesSnap.docs.forEach(doc => fileStorageMap.set(doc.id, doc.data().storagePath ?? ''));
-
-        const allElements: ElementWithContext[] = manifest.requiredDivisions.flatMap(div =>
-            div.elements.map(el => ({
-                elementId: el.elementId,
-                divisionId: div.divisionId,
-                name: el.name,
-                unit: el.unit,
-                gapFillerStrategy: el.gapFillerStrategy,
-                gapFillerHint: el.gapFillerHint,
-                mappedFileId: el.mappedFileId ?? null,
-                mappedStoragePath: el.mappedFileId ? (fileStorageMap.get(el.mappedFileId) ?? null) : null,
-                extractionHint: manifest.coverageStatus.find(c => c.elementId === el.elementId)?.gapFillerNote ?? null,
-            }))
+        
+        // Ekstrakcja elementów do zmapowania
+        const elementsToMap = manifest.requiredDivisions.flatMap(div => 
+            div.elements.map(el => ({ id: el.elementId, name: el.name, unit: el.unit }))
         );
 
-        // Rozdział na ścieżki (Wizyjna oraz Szacunkowa)
-        const visionElements = allElements.filter(el => el.mappedFileId !== null && el.mappedStoragePath !== null);
-        const brainElements = allElements.filter(el => el.mappedFileId === null);
+        console.log(`[Detektyw Mapowania] Liczba elementów do zmapowania: ${elementsToMap.length}`);
 
-        const ai = new GoogleGenAI({
-            vertexai: true,
-            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-            location: "global",
-        });
+        // Jeśli nie ma plików (np. ktoś wgrał pusty projekt / tylko SWZ bez PDFów z rysunkami)
+        const usableFiles = fileList?.filter(f => f.category !== 'SWZ' && f.category !== 'UMOWA') || [];
+        
+        let mappings: any[] = [];
 
-        const allResults: QuantityResult[] = [];
+        if (usableFiles.length === 0) {
+            console.log(`[Detektyw Mapowania] Brak plików projektowych (rysunków/przedmiarów). Wszystko przechodzi do Gap Fillera.`);
+            // Zwracamy pustą tablicę mapowań, wszystko zostanie MISSING
+            mappings = elementsToMap.map(el => ({ elementId: el.id, mappedFileId: "null", extractionHint: "null" }));
+        } else {
+            // Pytamy AI o dopasowanie
+            const ai = new GoogleGenAI({
+                vertexai: true,
+                project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+                location: "global",
+            });
 
-        // 1. ŚCIEŻKA VISION
-        if (visionElements.length > 0) {
-            const byFile = new Map<string, ElementWithContext[]>();
-            for (const el of visionElements) {
-                const key = el.mappedFileId!;
-                if (!byFile.has(key)) byFile.set(key, []);
-                byFile.get(key)!.push(el);
-            }
+            const prompt = `
+Zmapuj te elementy do odpowiednich plików.
 
-            for (const [fileId, fileElements] of byFile) {
-                const storagePath = fileElements[0].mappedStoragePath!;
-                const fileName = storagePath.split('/').pop() ?? fileId;
-                const fileData = await fetchFileAsBase64(storagePath);
+LISTA DOSTĘPNYCH PLIKÓW:
+${JSON.stringify(usableFiles.map(f => ({ id: f.fileId, name: f.fileName, category: f.category })), null, 2)}
 
-                if (!fileData) {
-                    brainElements.push(...fileElements);
-                    continue;
-                }
+LISTA ELEMENTÓW KOSZTORYSU:
+${JSON.stringify(elementsToMap, null, 2)}
+            `.trim();
 
-                for (let i = 0; i < fileElements.length; i += VISION_BATCH_SIZE) {
-                    const batch = fileElements.slice(i, i + VISION_BATCH_SIZE);
-                    try {
-                        const batchResults = await processVisionBatch(ai, batch, fileData.base64, fileData.mimeType, fileName);
-                        allResults.push(...batchResults);
+            const response = await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
+                config: {
+                    systemInstruction: SYSTEM_INSTRUCTION,
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: MAPPING_SCHEMA as any,
+                },
+            });
 
-                        const failed = batchResults
-                            .filter(r => r.newStatus === 'GAP_FILLED')
-                            .map(r => fileElements.find(el => el.elementId === r.elementId)!)
-                            .filter(Boolean);
-
-                        brainElements.push(...failed);
-                    } catch {
-                        brainElements.push(...batch);
-                    }
-                }
-            }
+            const parsed = JSON.parse(response.text ?? "{}");
+            mappings = parsed.mappings || [];
         }
 
-        // 2. ŚCIEŻKA BRAIN
-        if (brainElements.length > 0) {
-            const brainContext = await fetchBrainIndicators(req, objectType);
+        // 2. Aktualizacja ScopeManifest (requiredDivisions i coverageStatus)
+        let mappedCount = 0;
+        const now = new Date().toISOString();
 
-            for (let i = 0; i < brainElements.length; i += BRAIN_BATCH_SIZE) {
-                const batch = brainElements.slice(i, i + BRAIN_BATCH_SIZE);
-                try {
-                    const batchResults = await processBrainBatch(ai, batch, brainContext, objectType, objectArea_m2);
-                    allResults.push(...batchResults);
-                } catch {
-                    for (const el of batch) {
-                        allResults.push({
-                            elementId: el.elementId,
-                            divisionId: el.divisionId,
-                            quantity: 0,
-                            unit: el.unit,
-                            source: 'BRAIN_INDICATOR',
-                            newStatus: 'GAP_FILLED',
-                            dataQuality: 'ESTIMATED',
-                            note: `[BRAIN] Awaryjny brak danych – wymagana weryfikacja.`,
-                        });
-                    }
-                }
-            }
-        }
-
-        // POPRAWKA OBRONNA: Filtrujemy nieistniejące ID (odrzucamy halucynacje z Gemini)
-        const validResults = allResults.filter(r => allElements.some(el => el.elementId === r.elementId));
-
-        // Aplikowanie wyników
-        const updatedDivisions = manifest.requiredDivisions.map(div => ({
+        const updatedDivisions: ScopeDivision[] = manifest.requiredDivisions.map(div => ({
             ...div,
             elements: div.elements.map(el => {
-                const r = validResults.find(res => res.elementId === el.elementId);
-                return r ? { ...el, quantity: r.quantity, quantitySource: r.source } : el;
+                const mapData = mappings.find(m => m.elementId === el.elementId);
+                const fileId = mapData && mapData.mappedFileId !== "null" ? mapData.mappedFileId : null;
+                return { ...el, mappedFileId: fileId };
             })
         }));
 
-        const updatedCoverage = manifest.coverageStatus.map(entry => {
-            const r = validResults.find(res => res.elementId === entry.elementId);
-            if (!r) return entry;
+        const updatedCoverage: CoverageEntry[] = manifest.coverageStatus.map(entry => {
+            const mapData = mappings.find(m => m.elementId === entry.elementId);
+            const isMapped = mapData && mapData.mappedFileId !== "null";
+            
+            if (isMapped) mappedCount++;
+
+            // Jeśli AI znalazło rysunek dla elementu, ustawiamy status na NEEDS_QUANTITY dla Ilościowca.
+            // Jeśli nie znalazło, zostawiamy MISSING. Jeśli element wymaga odpytania usera, dajemy WAITING_USER.
+            let newStatus = entry.status;
+            
+            if (isMapped) {
+                newStatus = 'NEEDS_QUANTITY';
+            } else {
+                const elDef = updatedDivisions.flatMap(d => d.elements).find(e => e.elementId === entry.elementId);
+                if (elDef?.gapFillerStrategy === 'ASK_USER') {
+                    newStatus = 'WAITING_USER';
+                }
+            }
+
             return {
                 ...entry,
-                status: r.newStatus,
-                dataQuality: r.dataQuality,
-                quantityEstimated: r.quantity,
-                quantitySource: r.source,
-                gapFillerNote: r.note,
-                lastUpdatedBy: 'agent-ilosciowiec',
-                lastUpdatedAt: new Date().toISOString()
+                status: newStatus,
+                mappedFileId: isMapped ? mapData.mappedFileId : null,
+                gapFillerNote: isMapped ? mapData.extractionHint : entry.gapFillerNote,
+                lastUpdatedBy: 'agent-detektyw-mapowania',
+                lastUpdatedAt: now
             };
         });
 
-        const now = new Date().toISOString();
+        // 3. Zapis do Firestore
         await adminDb.doc(manifestPath).update({
             requiredDivisions: updatedDivisions,
             coverageStatus: updatedCoverage,
             'meta.updatedAt': now,
-            'meta.completedPhases': [...(manifest.meta.completedPhases ?? []), 'QUANTITY_SURVEYOR'],
+            'meta.completedPhases': [...(manifest.meta.completedPhases ?? []), 'MAPPING_DETECTIVE'],
         });
 
-        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-QUANTITY_SURVEYOR`).update({
+        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-MAPPING_DETECTIVE`).update({
             status: 'DONE',
-            result: { processed: validResults.length },
+            result: { mappedCount, totalElements: elementsToMap.length },
             updatedAt: now,
         });
 
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Ilościowiec] ✅ Faza 2 zakończona w ${duration} sek.`);
+        console.log(`[Detektyw Mapowania] ✅ Faza 1 zakończona w ${duration}s. Zmapowano ${mappedCount}/${elementsToMap.length} elementów.`);
+        console.log("==================================================");
 
-        return NextResponse.json({ success: true, phase: 'QUANTITY_SURVEYOR', summary: { processed: validResults.length } });
+        return NextResponse.json({
+            success: true,
+            phase: 'MAPPING_DETECTIVE',
+            summary: { mappedCount, totalElements: elementsToMap.length }
+        });
 
     } catch (error: any) {
-        console.error('[Ilościowiec] ❌ BŁĄD AGENTA:', error.message);
+        console.error('[Detektyw Mapowania] ❌ BŁĄD AGENTA:', error.message);
+        
+        // Próba zapisania błędu w tasku
+        try {
+            const body = await req.json().catch(() => ({})) as { tenderId?: string };
+            if (body?.tenderId) {
+                await adminDb.doc(`tenders/${body.tenderId}/tasks/${body.tenderId}-MAPPING_DETECTIVE`).update({
+                    status: 'ERROR',
+                    error: error.message,
+                    updatedAt: new Date().toISOString(),
+                });
+            }
+        } catch (_) {}
+
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
