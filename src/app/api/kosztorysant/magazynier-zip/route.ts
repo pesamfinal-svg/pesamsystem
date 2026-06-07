@@ -208,11 +208,19 @@ export async function POST(req: NextRequest) {
         const protocol = host.startsWith("localhost") ? "http" : "https";
         const initUrl = `${protocol}://${host}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
 
+        // POPRAWKA: Przekazanie ciasteczek i nagłówków autoryzacyjnych zalogowanego użytkownika
+        const cookieHeader = req.headers.get("cookie") || "";
+        const authHeader = req.headers.get("authorization") || "";
+
         console.log(`[Magazynier ZIP] Odpalam inicjalizator pod adresem: ${initUrl}`);
 
         fetch(initUrl, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+                "Content-Type": "application/json",
+                ...(cookieHeader ? { "Cookie": cookieHeader } : {}),
+                ...(authHeader ? { "Authorization": authHeader } : {})
+            },
             body: JSON.stringify({ tenderId, fileList: uploadedFilesList })
         }).catch(e => console.error("[Magazynier ZIP] Błąd zapłonu:", e));
 
