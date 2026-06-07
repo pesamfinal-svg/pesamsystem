@@ -316,7 +316,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         fileType = fileRes.headers.get("content-type") || "application/pdf";
       } else {
         console.log(`[Czytacz Dokumentów] Pobieram plik bezpośrednio z Firebase Storage: ${fileUrl}...`);
-        const bucket = adminStorage.bucket();
+        const bucket = adminStorage.bucket(process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
         const fileObj = bucket.file(fileUrl);
         const [downloadedBuffer] = await fileObj.download();
         // Czysta konwersja Node.js Buffer -> ArrayBuffer

@@ -141,7 +141,7 @@ ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
 
 async function fetchFileAsBase64(storagePath: string): Promise<{ base64: string; mimeType: string } | null> {
     try {
-        const bucket = adminStorage.bucket();
+        const bucket = adminStorage.bucket(process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
         const file = bucket.file(storagePath);
         const [exists] = await file.exists();
         if (!exists) return null;
