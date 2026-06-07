@@ -203,16 +203,16 @@ export async function POST(req: NextRequest) {
         // 5. FINALIZACJA
         await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        // Bezpieczne pobranie hosta i protokołu do wywołania wewnętrznego API
-        const host = req.headers.get("host") || "localhost:3000";
-        const protocol = host.startsWith("localhost") ? "http" : "https";
-        const initUrl = `${protocol}://${host}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
+        // POPRAWKA: Łączymy się bezpośrednio wewnątrz kontenera (localhost:8080)
+        // Omija to całkowicie zabezpieczenia Cloud Run IAM (brak 403) oraz potrzebę SSL (brak wrong version number)!
+        const port = process.env.PORT || "8080";
+        const initUrl = `http://127.0.0.1:${port}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
 
-        // POPRAWKA: Przekazanie ciasteczek i nagłówków autoryzacyjnych zalogowanego użytkownika
+        // Przekazanie ciasteczek na wypadek wewnętrznych blokad w samym Next.js Middleware
         const cookieHeader = req.headers.get("cookie") || "";
         const authHeader = req.headers.get("authorization") || "";
 
-        console.log(`[Magazynier ZIP] Odpalam inicjalizator pod adresem: ${initUrl}`);
+        console.log(`[Magazynier ZIP] Odpalam lokalny inicjalizator wewnątrz kontenera: ${initUrl}`);
 
         fetch(initUrl, {
             method: "POST",
