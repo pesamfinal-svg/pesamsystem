@@ -57,14 +57,15 @@ interface MarketTrends {
 }
 
 interface SwarmTask {
-    id: string;
-    agentType: "ANALITYK_ZAKRESU" | "LEGAL" | "QUANTITY" | "CONSTRUCTION" | "PRICING" | "VISION" | "AUDIT" | "NORMATIVE_STEEL" | "PARAMETRIC_ESTIMATE" | "GAP_FILLER";
+    id: string; // Traktujemy to tożsamo z taskId
+    agentType: string; // Przepięte na string, żeby przyjmować wszelkie nowe agenty od Claude'a
     description: string;
     status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
     inputFiles: string[];
     result: any;
     taskKeywords?: string[];
-    payload?: any; // 👈 DODANA WŁAŚCIWOŚĆ DLA TS
+    payload?: any;
+    dependsOn?: string[]; // 👈 KLUCZOWE DLA DAG: lista ID zadań, które muszą być DONE
 }
 
 interface TenderMetadata {
@@ -285,8 +286,20 @@ export default function EstimatorPage() {
         const tasksRef = collection(db, "tenders", activeTenderId, "tasks");
         const unsubscribe = onSnapshot(tasksRef, (snapshot) => {
             const updatedTasks: SwarmTask[] = [];
-            snapshot.forEach((doc) => {
-                updatedTasks.push(doc.data() as SwarmTask);
+            snapshot.forEach((docSnap) => {
+                const data = docSnap.data();
+
+                // Bezpieczne mapowanie danych z bazy (Firestore schema) na model oczekiwany przez frontend
+                updatedTasks.push({
+                    id: data.taskId || data.id || docSnap.id,
+                    agentType: data.type || data.agentType || "ANALITYK_ZAKRESU",
+                    description: data.description || `Uruchomienie procesu ${data.type || "analizy"}`,
+                    status: data.status || "PENDING",
+                    inputFiles: data.inputFiles || [],
+                    result: data.result || null,
+                    taskKeywords: data.taskKeywords || [],
+                    payload: data.payload || null
+                });
             });
 
             // Generowanie komunikatów na czacie w momencie, gdy jakiś Agent rozpoczyna pracę lub wywali błąd
@@ -316,58 +329,24 @@ export default function EstimatorPage() {
         return () => unsubscribe();
     }, [activeTenderId]);
 
-    // ── KROK 3: AUTOMATYCZNY SILNIK WYKONYWANIA ZADAŃ ROJU (WSPÓŁBIEŻNY - PROMISE.ALL) ──
+
+    // ── KROK 3: AUTOMATYCZNY SILNIK WYKONYWANIA ZADAŃ ROJU (WSPÓŁBIEŻNY DAG) ──
 
     const runningTasksRef = useRef<Set<string>>(new Set());
 
+    // UNIWERSALNA LOGIKA DAG: Zero hardkodowania! Czyta zależności wprost z bazy danych
     const isTaskReady = (task: SwarmTask, allTasks: SwarmTask[]): boolean => {
         if (task.status !== "PENDING") return false;
         if (runningTasksRef.current.has(task.id)) return false;
 
-        const getTaskStatus = (type: string) => allTasks.find(t => t.agentType === type)?.status;
+        // Jeśli agent nie ma zależności, jest gotowy do startu
+        if (!task.dependsOn || task.dependsOn.length === 0) return true;
 
-        switch (task.agentType) {
-            case "ANALITYK_ZAKRESU":
-                return true;
-
-            case "LEGAL":
-            case "VISION":
-            case "PARAMETRIC_ESTIMATE": {
-                const analitykStatus = getTaskStatus("ANALITYK_ZAKRESU");
-                return analitykStatus === "DONE" || !analitykStatus;
-            }
-
-            case "QUANTITY":
-            case "NORMATIVE_STEEL": {
-                const visionStatus = getTaskStatus("VISION");
-                return visionStatus === "DONE";
-            }
-
-            case "PRICING": {
-                const knrStatus = getTaskStatus("QUANTITY");
-                const parametricStatus = getTaskStatus("PARAMETRIC_ESTIMATE");
-                const knrReady = knrStatus ? knrStatus === "DONE" : true;
-                const parametricReady = parametricStatus ? parametricStatus === "DONE" : true;
-                return knrReady && parametricReady;
-            }
-
-            case "GAP_FILLER": {
-                const pricingStatus = getTaskStatus("PRICING");
-                return pricingStatus === "DONE";
-            }
-
-            case "AUDIT": {
-                const gapFillerStatus = getTaskStatus("GAP_FILLER");
-                const legalStatus = getTaskStatus("LEGAL");
-
-                const gapReady = gapFillerStatus ? gapFillerStatus === "DONE" : true;
-                const legalReady = legalStatus ? legalStatus === "DONE" : true;
-                return gapReady && legalReady;
-            }
-
-            default:
-                return false;
-        }
+        // Jeśli ma zależności, wszystkie muszą mieć status "DONE"
+        return task.dependsOn.every(depId => {
+            const depTask = allTasks.find(t => t.id === depId || t.id.includes(depId));
+            return depTask && depTask.status === "DONE";
+        });
     };
 
     useEffect(() => {
@@ -376,7 +355,7 @@ export default function EstimatorPage() {
         const readyTasks = tasks.filter(t => isTaskReady(t, tasks));
 
         if (readyTasks.length > 0) {
-            console.log(`%c[Rój PESAM] [Współbieżność] Wykryto ${readyTasks.length} zadań gotowych do równoległego uruchomienia: [${readyTasks.map(t => t.agentType).join(", ")}]`, "color: #10b981; font-weight: bold;");
+            console.log(`%c[Rój PESAM 2.0] [Współbieżność] Wykryto ${readyTasks.length} zadań gotowych do uruchomienia wg drzewa DAG: [${readyTasks.map(t => t.agentType).join(", ")}]`, "color: #10b981; font-weight: bold;");
             Promise.all(readyTasks.map(t => executeSwarmTask(t)));
         }
     }, [tasks, activeTenderId]);
@@ -386,21 +365,25 @@ export default function EstimatorPage() {
         const staleThreshold = new Date(Date.now() - 5 * 60 * 1000).toISOString();
         const tasksRef = collection(db, "tenders", tenderId, "tasks");
 
-        const staleSnap = await getDocs(
-            query(tasksRef,
-                where("status", "==", "IN_PROGRESS"),
-                where("updatedAt", "<", staleThreshold)
-            )
-        );
+        try {
+            const staleSnap = await getDocs(
+                query(tasksRef,
+                    where("status", "==", "IN_PROGRESS"),
+                    where("updatedAt", "<", staleThreshold)
+                )
+            );
 
-        const resets = staleSnap.docs.map(docSnap => {
-            console.warn(`[Watchdog] Resetuję zawieszone zadanie: ${docSnap.id}`);
-            return updateDoc(docSnap.ref, { status: "PENDING", claimedAt: null, updatedAt: new Date().toISOString() });
-        });
+            const resets = staleSnap.docs.map(docSnap => {
+                console.warn(`[Watchdog] Resetuję zawieszone zadanie: ${docSnap.id}`);
+                return updateDoc(docSnap.ref, { status: "PENDING", claimedAt: null, updatedAt: new Date().toISOString() });
+            });
 
-        await Promise.all(resets);
-        if (resets.length > 0) {
-            console.log(`[Watchdog] Odblokowano ${resets.length} zawieszonych procesów.`);
+            await Promise.all(resets);
+            if (resets.length > 0) {
+                console.log(`[Watchdog] Odblokowano ${resets.length} zawieszonych procesów.`);
+            }
+        } catch (indexErr) {
+            console.warn("[Watchdog] Brak indeksu złożonego dla Watchdoga w bazie danych. Pomijam auto-reset zadań. Utwórz indeks za pomocą linku w konsoli.", indexErr);
         }
     };
 
@@ -440,72 +423,58 @@ export default function EstimatorPage() {
         }
 
         try {
-            let endpoint = "";
-            let payload: any = {};
+            // Słownik Endpointów (Obsługuje nowe Agenty Progresywne i stare kompatybilne)
+            const endpointMap: Record<string, string> = {
+                "WBS_ARCHITECT": "/api/kosztorysant/agent-wbs-architekt",
+                "MAPPING_DETECTIVE": "/api/kosztorysant/agent-detektyw-mapowania",
+                "QUANTITY_SURVEYOR": "/api/kosztorysant/agent-ilosciowiec",
+                "SILENT_AUDITOR": "/api/kosztorysant/agent-cichy-rewident",
+                "ANALITYK_ZAKRESU": "/api/kosztorysant/agent-analityk-zakresu",
+                "GAP_FILLER": "/api/kosztorysant/agent-gap-filler",
+                "LEGAL": "/api/kosztorysant/czytacz-dokumentow",
+                "KNR": "/api/kosztorysant/agent-knr",
+                "QUANTITY": "/api/kosztorysant/agent-knr",
+                "VISION": "/api/kosztorysant/agent-vision-konstruktor",
+                "NORMATIVE_STEEL": "/api/kosztorysant/agent-normatywne-zbrojenie",
+                "PARAMETRIC": "/api/kosztorysant/agent-wycena-wskaznikowa",
+                "PARAMETRIC_ESTIMATE": "/api/kosztorysant/agent-wycena-wskaznikowa",
+                "BROKER": "/api/kosztorysant/broker-cenowy",
+                "PRICING": "/api/kosztorysant/broker-cenowy",
+                "REWIDENT": "/api/kosztorysant/agent-rewident",
+                "AUDIT": "/api/kosztorysant/agent-rewident"
+            };
 
+            const endpoint = endpointMap[task.agentType];
+            if (!endpoint) throw new Error(`Brak zdefiniowanego endpointu dla Agenta: ${task.agentType}`);
+
+            // Przygotowanie payloadu (Nowe agenty mają wszystko we własnym `task.payload`)
+            let payload = task.payload || { tenderId: activeTenderId };
+
+            // Utrzymanie kompatybilności wstecznej dla starszych agentów
             if (task.agentType === "ANALITYK_ZAKRESU") {
                 const fileContents = await fetchTextFileContents(activeTenderId!);
-                endpoint = "/api/kosztorysant/agent-analityk-zakresu";
                 payload = {
-                    tenderId: activeTenderId,
+                    ...payload,
                     fileContents,
-                    docLevel: task.payload.docLevel,
-                    estimationMethod: task.payload.estimationMethod,
-                    sourceDocuments: task.payload.sourceDocuments,
+                    docLevel: task.payload?.docLevel || 0,
+                    estimationMethod: task.payload?.estimationMethod || "PARAMETRIC",
+                    sourceDocuments: task.payload?.sourceDocuments || [],
                 };
-            }
-            else if (task.agentType === "GAP_FILLER") {
-                endpoint = "/api/kosztorysant/agent-gap-filler";
-                payload = { tenderId: activeTenderId };
-            }
-            else if (task.agentType === "LEGAL") {
-                endpoint = "/api/kosztorysant/czytacz-dokumentow";
-                payload = { fileUrl: task.inputFiles[0], trends, taskKeywords: task.taskKeywords || [] };
-            } else if (task.agentType === "QUANTITY") {
-                endpoint = "/api/kosztorysant/agent-knr";
-                payload = { request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
+            } else if (task.agentType === "LEGAL") {
+                payload = { ...payload, fileUrl: task.inputFiles?.[0] || "", trends, taskKeywords: task.taskKeywords || [] };
+            } else if (task.agentType === "KNR" || task.agentType === "QUANTITY") {
+                payload = { ...payload, request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
             } else if (task.agentType === "VISION") {
-                endpoint = "/api/kosztorysant/agent-vision-konstruktor";
-                payload = { fileUrl: task.inputFiles[0], drawingHints: task.description };
+                payload = { ...payload, fileUrl: task.inputFiles?.[0] || "", drawingHints: task.description };
             } else if (task.agentType === "NORMATIVE_STEEL") {
                 const visionResult = tasks.find(t => t.agentType === "VISION" && t.status === "DONE")?.result;
-                endpoint = "/api/kosztorysant/agent-normatywne-zbrojenie";
-                payload = {
-                    concreteElements: visionResult?.elements || [],
-                    projectContext: project.name
-                };
-            } else if (task.agentType === "PARAMETRIC_ESTIMATE") {
-                endpoint = "/api/kosztorysant/agent-wycena-wskaznikowa";
-                payload = { request: task.description, region: project.soilType.includes("Rzeszów") ? "Podkarpackie" : "Polska" };
-            } else if (task.agentType === "PRICING") {
-                const quantityDone = tasks.find(t => t.agentType === "QUANTITY" && t.status === "DONE");
-                const parametricDone = tasks.find(t => t.agentType === "PARAMETRIC_ESTIMATE" && t.status === "DONE");
-
-                if (!quantityDone && !parametricDone) {
-                    await updateDoc(taskDocRef, { status: "PENDING", claimedAt: null });
-                    setIsLoading(false);
-                    return;
-                }
+                payload = { ...payload, concreteElements: visionResult?.elements || [], projectContext: project.name };
+            } else if (task.agentType === "PARAMETRIC" || task.agentType === "PARAMETRIC_ESTIMATE") {
+                payload = { ...payload, request: task.description, region: project.soilType.includes("Rzeszów") ? "Podkarpackie" : "Polska" };
+            } else if (task.agentType === "BROKER" || task.agentType === "PRICING") {
                 const visionTask = tasks.find(t => t.agentType === "VISION" && t.status === "DONE");
-                endpoint = "/api/kosztorysant/agent-broker-cenowy";
-                payload = {
-                    sections: sections,
-                    region: "Polska",
-                    projectContext: project.name,
-                    visionSignals: visionTask?.result?.complexitySignals ?? null
-                };
-            } else if (task.agentType === "AUDIT") {
-                const pendingTasks = tasks.filter(t => t.agentType !== "AUDIT" && t.status !== "DONE" && t.status !== "ERROR");
-                if (pendingTasks.length > 0) {
-                    await updateDoc(taskDocRef, { status: "PENDING", claimedAt: null });
-                    setIsLoading(false);
-                    return;
-                }
-                endpoint = "/api/kosztorysant/agent-rewident";
-                payload = { tenderId: activeTenderId };
+                payload = { ...payload, sections, region: "Polska", projectContext: project.name, visionSignals: visionTask?.result?.complexitySignals ?? null };
             }
-
-            if (!endpoint) throw new Error(`Nieobsługiwany typ agenta: ${task.agentType}`);
 
             const res = await fetch(endpoint, {
                 method: "POST",
@@ -523,93 +492,85 @@ export default function EstimatorPage() {
             });
 
             // ── STRATEGICZNA AKTUALIZACJA CZATU I KOSZTORYSU NA FRONTENDZIE ──
-            if (task.agentType === "ANALITYK_ZAKRESU" && data.success) {
-                setMessages(prev => [...prev, {
-                    role: "ai",
-                    content: `🗺️ **Analityk Zakresu** pomyślnie wygenerował ScopeManifest:\n` +
-                        `• Typ obiektu: **${data.summary.objectType.toUpperCase()}**\n` +
+            if (data.summary || data.chatMessages || data.reply) {
+                // Generowanie dynamicznych komunikatów na podstawie typu Agenta
+                let msgContent = `🤖 **Agent ${task.agentType}** zakończył pracę.`;
+
+                if (task.agentType === "WBS_ARCHITECT") {
+                    msgContent = `🏗️ **Architekt WBS** zbudował szkielet projektu. Wykryto ${data.summary?.elementsCount || 0} wymaganych elementów.`;
+                } else if (task.agentType === "MAPPING_DETECTIVE") {
+                    msgContent = `🕵️ **Detektyw Mapowania** dopasował pliki. Elementy pokryte dokumentacją: ${data.summary?.mappedCount || 0}/${data.summary?.totalElements || 0}.`;
+                } else if (task.agentType === "QUANTITY_SURVEYOR") {
+                    msgContent = `📐 **Ilościowiec** zliczył wartości. Zebrano dane z projektów: ${data.summary?.coveredByVision || 0}, uzupełniono wskaźnikowo: ${data.summary?.gapFilledByBrain || 0}.`;
+                } else if (task.agentType === "SILENT_AUDITOR") {
+                    msgContent = `🛡️ **Cichy Rewident** zabezpieczył projekt. Wykryte pułapki technologiczne (dodano do wyceny): ${data.alertsGenerated || 0}.`;
+                } else if (task.agentType === "LEGAL" && data.riskAlerts) {
+                    msgContent = `⚖️ **Dział Prawny** zakończył analizę SWZ. Sprawdź panel alertów.`;
+                    setRiskAlerts(prev => Array.from(new Set([...prev, ...data.riskAlerts])));
+                } else if (task.agentType === "ANALITYK_ZAKRESU" && data.summary) {
+                    msgContent = `🗺️ **Analityk Zakresu** pomyślnie wygenerował ScopeManifest (Tryb Fallback):\n` +
+                        `• Typ obiektu: **${data.summary.objectType?.toUpperCase()}**\n` +
                         `• Branże kosztorysu: **${data.summary.divisionsCount}**\n` +
-                        `• Wszystkich wymaganych elementów: **${data.summary.elementsCount}**\n` +
-                        `• Warunków technicznych z SWZ: **${data.summary.hardRequirementsCount}**\n` +
-                        `• Blokad decyzyjnych (ASK_USER): **${data.summary.askUserCount}**`
-                }]);
+                        `• Blokad decyzyjnych: **${data.summary.askUserCount}**`;
+                } else if (task.agentType === "GAP_FILLER") {
+                    if (data.usedBrain) setMessages(prev => [...prev, { role: "ai", content: `🧠 *W szacunkach luk użyto PESAM Brain.*` }]);
+                    msgContent = data.chatMessages ? data.chatMessages.join("\n") : msgContent;
+                } else if (task.agentType === "REWIDENT" && data.report) {
+                    msgContent = data.report.chatSummary;
+                    setRiskAlerts(prev => {
+                        const newAlerts = [
+                            ...data.report.deterministicAlerts.map((a: any) => a.message),
+                            ...data.report.coverageAlerts.map((a: any) => a.message)
+                        ];
+                        return Array.from(new Set([...prev, ...newAlerts]));
+                    });
+                } else if (data.reply) {
+                    msgContent = data.reply;
+                }
 
-                // 🧠 ODPYTANIE PESAM BRAIN O WIEDZĘ DLA TEGO TYPU OBIEKTU 🧠
-                const objectType = data.summary.objectType;
-                if (objectType && objectType !== 'inne') {
-                    fetch(`/api/kosztorysant/brain/context?objectType=${objectType}`)
-                        .then(res => res.json())
-                        .then(brainContext => {
-                            if (brainContext.hasLearned) {
-                                setMessages(prev => [...prev, {
-                                    role: "ai",
-                                    content: `🧠 **PESAM Brain Zintegrowany z Projektem!**\nZnalazłem w bazie wskaźniki na podstawie **${brainContext.sampleCount} historycznych kosztorysów** dla typu "${objectType}". Zamiast ogólnych norm z Eurokodu, mój Gap Filler użyje Twoich własnych, wyuczonych standardów zużycia i proporcji!`
-                                }]);
-                            } else {
-                                setMessages(prev => [...prev, {
-                                    role: "ai",
-                                    content: `⚠️ **PESAM Brain (Moduł Uczenia)**\nBrak wgranych przez Ciebie starych kosztorysów dla typu "${objectType}". Agenty (w tym Gap Filler) będą polegać na ogólnych, bezpiecznych normach inżynieryjnych (Eurokod/Sekocenbud).`
-                                }]);
-                            }
+                if (msgContent) {
+                    setMessages(prev => [...prev, { role: "ai", content: msgContent }]);
+                }
+            }
+
+            // Obsługa klasycznych agentów KNR i Normatywnych, dodających sekcje bezpośrednio
+            if (data.sections || data.generatedSections) {
+                const newSecs = data.sections || data.generatedSections;
+                if (task.agentType === "NORMATIVE_STEEL") {
+                    setSections(prev => [...prev, ...newSecs]);
+                } else {
+                    setSections(newSecs);
+                }
+            }
+
+            // Obsługa Brokera Cenowego
+            if (task.agentType === "BROKER" || task.agentType === "PRICING") {
+                if (data.pricedItems) {
+                    setSections(prev => prev.map(sec => ({
+                        ...sec,
+                        items: sec.items.map(item => {
+                            const priced = data.pricedItems.find((p: any) => p.itemId === item.id);
+                            if (!priced) return item;
+                            return {
+                                ...item,
+                                unitPrice: priced.recommendedPrice,
+                                complexity: priced.complexity?.level,
+                                priceConfidence: priced.confidence,
+                                priceRange: priced.priceRange
+                            };
                         })
-                        .catch(err => console.error("[PESAM Brain] Błąd połączenia z mózgiem:", err));
+                    })));
                 }
+                if (data.marketSummary) {
+                    setMessages(prev => [...prev, { role: "ai", content: `💰 [Broker Cenowy] ${data.marketSummary}` }]);
+                }
+            }
 
-            } else if (task.agentType === "GAP_FILLER" && data.success) {
-                // Info o użyciu mózgu przez Gap Fillera
-                if (data.usedBrain) {
-                    setMessages(prev => [...prev, { role: "ai", content: `🧠 *W szacunkach luk użyłem spersonalizowanej wiedzy z historycznych projektów PESAM Brain.*` }]);
-                }
-
-                for (const msg of data.chatMessages ?? []) {
-                    setMessages(prev => [...prev, { role: "ai", content: msg }]);
-                }
-                const freshTender = await getDocs(query(collection(db, "tenders"), where("id", "==", activeTenderId)));
-                if (!freshTender.empty) {
-                    setSections(freshTender.docs[0].data().sections || []);
-                }
-            } else if (task.agentType === "LEGAL" && data.riskAlerts) {
-                setMessages(prev => [...prev, { role: "ai", content: `⚖️ [Dział Prawny] Zakończono analizę SWZ. Wykryto klauzule ryzyka. Sprawdź panel alertów po lewej stronie.` }]);
-                setRiskAlerts(prev => Array.from(new Set([...prev, ...data.riskAlerts])));
-            } else if (task.agentType === "NORMATIVE_STEEL" && data.sections) {
-                setSections(prev => [...prev, ...data.sections]);
-                setMessages(prev => [...prev, { role: "ai", content: `🏗️ [Konstruktor Zbrojenia] Obliczono wymaganą ilość stali: ${data.sections[0]?.items?.reduce((sum: number, item: any) => sum + item.quantity, 0).toFixed(2)} ton. Dodano pozycje kosztorysowe.` }]);
-            } else if (task.agentType === "VISION" && data.elements) {
-                setMessages(prev => [...prev, { role: "ai", content: `👁️ [Analityk Rysunków] Odczytano rysunki (${data.drawingType}). Wykryto ${data.elements.length} elementów nośnych i określono złożoność techniczną projektu jako ${data.complexitySignals?.overall}.` }]);
-            } else if (task.agentType === "QUANTITY" && data.sections) {
-                setSections(data.sections);
-                setMessages(prev => [...prev, { role: "ai", content: `📐 [Przedmiarowanie] Zbudowano strukturę kosztorysu z poprawnymi kodami KNR. Wczytano ${data.sections.length} działów.` }]);
-            } else if (task.agentType === "PARAMETRIC_ESTIMATE" && data.sections) {
-                setSections(data.sections);
-                setMessages(prev => [...prev, { role: "ai", content: `📊 [Wycena Parametryczna] ${data.parametricComment}` }]);
-            } else if (task.agentType === "PRICING" && data.pricedItems) {
-                setSections(prev => prev.map(sec => ({
-                    ...sec,
-                    items: sec.items.map(item => {
-                        const priced = data.pricedItems.find((p: any) => p.itemId === item.id);
-                        if (!priced) return item;
-                        return {
-                            ...item,
-                            unitPrice: priced.recommendedPrice,
-                            complexity: priced.complexity.level,
-                            priceConfidence: priced.confidence,
-                            priceRange: priced.priceRange
-                        };
-                    })
-                })));
-                setMessages(prev => [...prev, { role: "ai", content: `💰 [Broker Cenowy] ${data.marketSummary} Korekta cen dla ${data.pricedItems.length} pozycji powiodła się.` }]);
-            } else if (task.agentType === "AUDIT" && data.report) {
-                setMessages(prev => [...prev, { role: "ai", content: data.report.chatSummary }]);
-                setRiskAlerts(prev => {
-                    const newAlerts = [
-                        ...data.report.deterministicAlerts.map((a: any) => a.message),
-                        ...data.report.coverageAlerts.map((a: any) => a.message)
-                    ];
-                    return Array.from(new Set([...prev, ...newAlerts]));
-                });
-            } else {
-                if (data.reply) setMessages(prev => [...prev, { role: "ai", content: data.reply }]);
-                if (data.generatedSections) setSections(prev => [...prev, ...data.generatedSections]);
+            // Zawsze na końcu odświeżamy dane z bazy, aby komponenty (np. ScopeHeatMap) zareagowały na nowe wpisy
+            const freshTender = await getDocs(query(collection(db, "tenders"), where("id", "==", activeTenderId)));
+            if (!freshTender.empty) {
+                const freshData = freshTender.docs[0].data();
+                if (freshData.sections) setSections(freshData.sections);
             }
 
         } catch (err: any) {
@@ -645,8 +606,9 @@ export default function EstimatorPage() {
                 }
             });
 
+            // Poprawka typowania dla kompilatora Next.js
             if (result.reply) {
-                setMessages(prev => [...prev, { role: "ai", content: result.reply }]);
+                setMessages(prev => [...prev, { role: "ai", content: result.reply || "" }]);
             }
 
             if (result.generatedSections && result.generatedSections.length > 0) {
@@ -695,7 +657,6 @@ export default function EstimatorPage() {
             setUploadMsg("");
         }
     };
-
     // ── METODY OBLICZANIA KOSZTORYSU (TRENDY I NARZUTY) ──────────────────────
 
     const calculateRowValue = (item: EstimateItem) => {
@@ -1355,7 +1316,7 @@ export default function BrainPage() {
 'use client';
 
 // ============================================================
-// PESAM – Hook: useScopeManifest (Real-Time Listener)
+// PESAM 2.0 – Hook: useScopeManifest (Real-Time Listener)
 // Odpowiada za pobieranie i synchronizację mapy ciepła na żywo.
 // ============================================================
 
@@ -1369,7 +1330,7 @@ import type {
     ObjectType,
 } from '../app/api/kosztorysant/_shared/scopeManifest.types';
 
-export type HeatMapColor = 'green' | 'yellow' | 'red' | 'gray';
+export type HeatMapColor = 'green' | 'yellow' | 'red' | 'gray' | 'blue' | 'purple';
 
 export interface HeatMapEntry {
     elementId: string;
@@ -1383,6 +1344,8 @@ export interface HeatMapEntry {
     gapFillerValue: number | null;
     isMandatoryByLaw: boolean;
     tooltipText: string;
+    mappedFileId?: string | null;
+    quantityEstimated?: number | null;
 }
 
 export interface PendingQuestion {
@@ -1398,6 +1361,8 @@ export interface CoverageStats {
     gapFilled: number;
     missing: number;
     waitingUser: number;
+    needsQuantity: number;
+    techRequired: number;
     coveragePercent: number;
     confidenceScore: number;
     objectType: ObjectType | null;
@@ -1416,10 +1381,13 @@ export interface UseScopeManifestReturn {
     answerQuestion: (elementId: string, value: number, unit: string) => Promise<void>;
 }
 
+// Kolorowanie logiki na podstawie nowych statusów PESAM 2.0
 function qualityToColor(quality: DataQuality, status: string): HeatMapColor {
     if (status === 'MISSING' || status === 'WAITING_USER') return 'red';
-    if (quality === 'MARKET_VERIFIED') return 'green';
-    if (quality === 'NORMATIVE' || quality === 'ESTIMATED') return 'yellow';
+    if (status === 'NEEDS_QUANTITY') return 'blue'; // Znalazł Detektyw, czeka na Ilościowca
+    if (status === 'TECH_REQUIRED') return 'purple'; // Wymóg dopisany przez Cichego Rewidenta
+    if (status === 'COVERED' && (quality === 'MARKET_VERIFIED' || quality === 'NORMATIVE')) return 'green';
+    if (status === 'GAP_FILLED' || quality === 'ESTIMATED') return 'yellow';
     return 'gray';
 }
 
@@ -1428,18 +1396,21 @@ function buildTooltip(entry: CoverageEntry, quality: DataQuality, status: string
         return '🔴 Blokada: Czeka na Twoje dane wejściowe. Podaj parametry w oknie czatu.';
     }
     if (status === 'MISSING') {
-        return '🔴 Brak: Pozycja nie została wyceniona. Gap Filler pominął ją.';
+        return '🔴 Brak danych: Projektant nie załączył dokumentacji dla tej pozycji.';
     }
-    if (quality === 'MARKET_VERIFIED') {
-        return '🟢 Rynkowe: Pozycja precyzyjnie wyliczona i wyceniona przez Rój.';
+    if (status === 'NEEDS_QUANTITY') {
+        return '🔵 Dokument zlokalizowany: Detektyw przypisał plik. Ilościowiec właśnie zlicza z niego wymiary...';
     }
-    if (quality === 'NORMATIVE') {
-        return `🟡 Normowe: Uzupełniono automatycznie: ${entry.gapFillerNote ?? 'brak opisu'}`;
+    if (status === 'TECH_REQUIRED') {
+        return `🟣 Pułapka technologiczna (Cichy Rewident): ${entry.gapFillerNote ?? 'Wymóg dodany bezpieczeństwa.'}`;
     }
-    if (quality === 'ESTIMATED') {
-        return `🟡 Szacunkowe: Wyliczono ze średnich GUS: ${entry.gapFillerNote ?? 'brak opisu'}`;
+    if (status === 'COVERED') {
+        return `🟢 Wyliczono precyzyjnie: ${entry.gapFillerNote ?? 'Z dokumentacji.'}`;
     }
-    return '⚪ Brak danych o wycenie.';
+    if (status === 'GAP_FILLED') {
+        return `🟡 Szacunek wskaźnikowy: ${entry.gapFillerNote ?? 'Uzupełniono przez normatywy/mózg.'}`;
+    }
+    return '⚪ Trwa przetwarzanie...';
 }
 
 export function useScopeManifest(tenderId: string | null): UseScopeManifestReturn {
@@ -1453,76 +1424,60 @@ export function useScopeManifest(tenderId: string | null): UseScopeManifestRetur
             return;
         }
 
-        console.log(`[useScopeManifest] [Real-time] Podpinam nasłuch Firestore dla: tenders/${tenderId}/scopeManifest/main...`);
-        setIsLoading(true);
-
         const manifestRef = doc(db, `tenders/${tenderId}/scopeManifest/main`);
-
         const unsubscribe = onSnapshot(
             manifestRef,
             (snap) => {
                 if (snap.exists()) {
                     setManifest(snap.data() as ScopeManifest);
-                    console.log(`[useScopeManifest] [Real-time] Dane zsynchronizowane pomyślnie.`);
                 } else {
-                    console.log(`[useScopeManifest] [Real-time] Brak ScopeManifestu w bazie.`);
                     setManifest(null);
                 }
                 setIsLoading(false);
                 setError(null);
             },
             (err) => {
-                console.error('[useScopeManifest] Błąd subskrypcji Firestore:', err);
+                console.error('[useScopeManifest] Błąd:', err);
                 setError(err.message);
                 setIsLoading(false);
             }
         );
 
-        return () => {
-            console.log(`[useScopeManifest] [Real-time] Zdejmuję nasłuch.`);
-            unsubscribe();
-        };
+        return () => unsubscribe();
     }, [tenderId]);
 
     const heatMap: HeatMapEntry[] = (() => {
         if (!manifest) return [];
-
         const entries: HeatMapEntry[] = [];
 
         for (const div of manifest.requiredDivisions) {
             for (const el of div.elements) {
-                const coverage = manifest.coverageStatus.find(
-                    (c) => c.elementId === el.elementId
-                );
-
+                const coverage = manifest.coverageStatus.find(c => c.elementId === el.elementId);
                 const quality: DataQuality = coverage?.dataQuality ?? 'MISSING';
                 const status = coverage?.status ?? 'MISSING';
-                const color = qualityToColor(quality, status);
 
                 entries.push({
                     elementId: el.elementId,
                     divisionId: div.divisionId,
                     divisionName: div.divisionName,
                     elementName: el.name,
-                    color,
+                    color: qualityToColor(quality, status),
                     dataQuality: quality,
                     status,
                     gapFillerNote: coverage?.gapFillerNote ?? null,
                     gapFillerValue: coverage?.gapFillerValue ?? null,
                     isMandatoryByLaw: el.isMandatoryByLaw,
-                    tooltipText: coverage
-                        ? buildTooltip(coverage, quality, status)
-                        : '⚪ Brak danych',
+                    tooltipText: coverage ? buildTooltip(coverage, quality, status) : '⚪ Brak danych',
+                    mappedFileId: coverage?.mappedFileId,
+                    quantityEstimated: coverage?.quantityEstimated,
                 });
             }
         }
-
         return entries;
     })();
 
     const pendingQuestions: PendingQuestion[] = (() => {
         if (!manifest) return [];
-
         return manifest.coverageStatus
             .filter((c) => c.status === 'WAITING_USER' && c.pendingQuestion)
             .map((c) => {
@@ -1540,10 +1495,9 @@ export function useScopeManifest(tenderId: string | null): UseScopeManifestRetur
     const coverageStats: CoverageStats = (() => {
         if (!manifest) {
             return {
-                total: 0, covered: 0, gapFilled: 0,
-                missing: 0, waitingUser: 0, coveragePercent: 0,
-                confidenceScore: 0, objectType: null,
-                objectArea_m2: null, riskBufferPercent: 0,
+                total: 0, covered: 0, gapFilled: 0, missing: 0, waitingUser: 0,
+                needsQuantity: 0, techRequired: 0, coveragePercent: 0, confidenceScore: 0,
+                objectType: null, objectArea_m2: null, riskBufferPercent: 0,
             };
         }
 
@@ -1553,67 +1507,46 @@ export function useScopeManifest(tenderId: string | null): UseScopeManifestRetur
         const gapFilled = cov.filter((c) => c.status === 'GAP_FILLED').length;
         const missing = cov.filter((c) => c.status === 'MISSING').length;
         const waitingUser = cov.filter((c) => c.status === 'WAITING_USER').length;
+        const needsQuantity = cov.filter((c) => c.status === 'NEEDS_QUANTITY').length;
+        const techRequired = cov.filter((c) => c.status === 'TECH_REQUIRED').length;
 
+        // Liczymy "sukcesy" (Covered = 100%, GapFilled = 70%, TechReq = 100% zabezpieczenia)
         const coveragePercent = total > 0
-            ? Math.round(((covered + gapFilled * 0.7) / total) * 100)
+            ? Math.round(((covered + techRequired + gapFilled * 0.7) / total) * 100)
             : 0;
 
-        const riskBufferPercent = manifest.missingDataRisks.reduce(
-            (sum, r) => sum + (r.userOverridePercent ?? r.costImpactPercent),
-            0
-        );
+        const riskBufferPercent = manifest.missingDataRisks.reduce((sum, r) => sum + (r.userOverridePercent ?? r.costImpactPercent), 0);
 
         return {
-            total, covered, gapFilled, missing, waitingUser, coveragePercent,
-            confidenceScore: manifest.meta.confidenceScore,
-            objectType: manifest.meta.objectType,
-            objectArea_m2: manifest.meta.objectArea_m2,
-            riskBufferPercent,
+            total, covered, gapFilled, missing, waitingUser, needsQuantity, techRequired,
+            coveragePercent, confidenceScore: manifest.meta.confidenceScore,
+            objectType: manifest.meta.objectType, objectArea_m2: manifest.meta.objectArea_m2, riskBufferPercent,
         };
     })();
 
     const markAsNeedsReview = useCallback(async (elementId: string) => {
         if (!tenderId || !manifest) return;
-        console.log(`[useScopeManifest] Akcja: Oznaczam "${elementId}" do weryfikacji manualnej...`);
         try {
             await fetch(`/api/kosztorysant/scope-manifest/update-coverage`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ tenderId, elementId, status: 'NEEDS_REVIEW' }),
             });
-        } catch (e) {
-            console.error('[useScopeManifest] Błąd markAsNeedsReview:', e);
-        }
+        } catch (e) { console.error(e); }
     }, [tenderId, manifest]);
 
-    const answerQuestion = useCallback(async (
-        elementId: string,
-        value: number,
-        unit: string
-    ) => {
+    const answerQuestion = useCallback(async (elementId: string, value: number, unit: string) => {
         if (!tenderId) return;
-        console.log(`[useScopeManifest] Akcja: Wysyłam odpowiedź użytkownika dla "${elementId}"...`);
         try {
             await fetch(`/api/kosztorysant/scope-manifest/answer-question`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ tenderId, elementId, value, unit }),
             });
-        } catch (e) {
-            console.error('[useScopeManifest] Błąd answerQuestion:', e);
-        }
+        } catch (e) { console.error(e); }
     }, [tenderId]);
 
-    return {
-        manifest,
-        isLoading,
-        error,
-        heatMap,
-        pendingQuestions,
-        coverageStats,
-        markAsNeedsReview,
-        answerQuestion,
-    };
+    return { manifest, isLoading, error, heatMap, pendingQuestions, coverageStats, markAsNeedsReview, answerQuestion };
 }
 
 --- END OF FILE src/hooks/useScopeManifest.ts ---
@@ -1765,17 +1698,20 @@ function computeStats(uploads: BrainUploadWithId[]): BrainStats {
 
 'use client';
 
-// ============================================================
-// PESAM – Komponent: ScopeHeatMap
-// Odpowiada za renderowanie mapy ciepła w lewym panelu
-// ============================================================
-
 import React, { useState } from 'react';
 import { useScopeManifest, type HeatMapEntry, type HeatMapColor } from '@/hooks/useScopeManifest';
 
+// Jawny interfejs dla grup działów - rozwiązuje błędy typowania 'unknown'
+interface DivisionGroup {
+    name: string;
+    entries: HeatMapEntry[];
+}
+
 const COLOR_STYLES: Record<HeatMapColor, { bg: string; border: string; dot: string; label: string }> = {
-    green: { bg: 'bg-emerald-50/50', border: 'border-emerald-200', dot: 'bg-emerald-500', label: 'Rynkowe (Rój)' },
-    yellow: { bg: 'bg-amber-50/50', border: 'border-amber-200', dot: 'bg-amber-400', label: 'Normowe (Łatacz)' },
+    green: { bg: 'bg-emerald-50/50', border: 'border-emerald-200', dot: 'bg-emerald-500', label: 'Rynkowe' },
+    yellow: { bg: 'bg-amber-50/50', border: 'border-amber-200', dot: 'bg-amber-400', label: 'Normowe' },
+    blue: { bg: 'bg-blue-50/50', border: 'border-blue-200', dot: 'bg-blue-500', label: 'Czytanie z rysunków' },
+    purple: { bg: 'bg-purple-50/50', border: 'border-purple-200', dot: 'bg-purple-500', label: 'Wymóg Technologiczny' },
     red: { bg: 'bg-red-50/50', border: 'border-red-200', dot: 'bg-red-500', label: 'Brak danych' },
     gray: { bg: 'bg-gray-50', border: 'border-gray-200', dot: 'bg-gray-300', label: 'Nieznane' },
 };
@@ -1783,15 +1719,13 @@ const COLOR_STYLES: Record<HeatMapColor, { bg: string; border: string; dot: stri
 function CoverageBar({ percent, color }: { percent: number; color: string }) {
     return (
         <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-            <div
-                className={`h-1.5 rounded-full transition-all duration-500 ${color}`}
-                style={{ width: `${Math.min(100, percent)}%` }}
-            />
+            <div className={`h-1.5 rounded-full transition-all duration-500 ${color}`} style={{ width: `${Math.min(100, percent)}%` }} />
         </div>
     );
 }
 
 function StatPill({ label, value, color }: { label: string; value: number; color: string }) {
+    if (value === 0) return null;
     return (
         <div className="flex items-center gap-1.5 text-[10px]">
             <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
@@ -1801,172 +1735,73 @@ function StatPill({ label, value, color }: { label: string; value: number; color
     );
 }
 
-function HeatMapCell({ entry, onMarkReview }: {
-    entry: HeatMapEntry;
-    onMarkReview: (id: string) => void;
-}) {
+function HeatMapCell({ entry, onMarkReview }: { entry: HeatMapEntry; onMarkReview: (id: string) => void }) {
     const [showTooltip, setShowTooltip] = useState(false);
     const style = COLOR_STYLES[entry.color];
 
     return (
         <div
-            className={`relative flex items-start gap-1.5 p-1.5 rounded-xl border ${style.bg} ${style.border} 
-        cursor-default transition-all hover:shadow-xs group`}
+            className={`relative flex items-start gap-1.5 p-1.5 rounded-xl border ${style.bg} ${style.border} cursor-default transition-all hover:shadow-xs group`}
             onMouseEnter={() => setShowTooltip(true)}
             onMouseLeave={() => setShowTooltip(false)}
         >
-            <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${style.dot} 
-        ${entry.isMandatoryByLaw ? 'ring-2 ring-offset-1 ring-red-400' : ''}`}
-            />
+            <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${style.dot} ${entry.isMandatoryByLaw ? 'ring-2 ring-offset-1 ring-red-400' : ''}`} />
 
             <div className="flex-1 min-w-0">
                 <p className="text-[10px] font-bold text-slate-700 truncate leading-tight uppercase">
                     {entry.elementName}
-                    {entry.isMandatoryByLaw && (
-                        <span className="ml-1 text-red-500 text-[9px]" title="Wymagane przez Prawo Budowlane">⚖️</span>
-                    )}
+                    {entry.isMandatoryByLaw && <span className="ml-1 text-red-500 text-[9px]" title="Wymagane przez Prawo Budowlane">⚖️</span>}
+                    {entry.color === 'purple' && <span className="ml-1 text-purple-600 text-[9px]" title="Dodano ze względów technologicznych">🛡️</span>}
                 </p>
+                {entry.quantityEstimated !== null && entry.quantityEstimated !== undefined && (
+                    <p className="text-[9px] text-slate-500 font-bold mt-0.5">Wyliczono: <span className="text-blue-600 font-black">{entry.quantityEstimated.toFixed(2)}</span></p>
+                )}
                 {entry.gapFillerValue !== null && (
-                    <p className="text-[9px] text-amber-600 font-black font-mono">
-                        ~{entry.gapFillerValue.toLocaleString('pl-PL')} PLN
-                    </p>
+                    <p className="text-[9px] text-amber-600 font-black font-mono">~{entry.gapFillerValue.toLocaleString('pl-PL')} PLN</p>
                 )}
             </div>
 
-            {(entry.color === 'yellow' || entry.color === 'red') && (
-                <button
-                    onClick={() => onMarkReview(entry.elementId)}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] 
-            text-slate-400 hover:text-amber-600 flex-shrink-0 font-bold"
-                    title="Oznacz jako zweryfikowane"
-                >
-                    ✓
-                </button>
-            )}
-
             {showTooltip && (
-                <div className="absolute z-50 bottom-full left-0 mb-1 w-56 bg-slate-900 text-white 
-          text-[9px] rounded-lg p-2 shadow-xl leading-normal pointer-events-none font-semibold">
+                <div className="absolute z-50 bottom-full left-0 mb-1 w-64 bg-slate-900 text-white text-[9px] rounded-lg p-2 shadow-xl leading-normal pointer-events-none font-semibold">
                     {entry.tooltipText}
-                    <div className="absolute top-full left-3 w-0 h-0 
-            border-l-4 border-r-4 border-t-4 
-            border-l-transparent border-r-transparent border-t-slate-900" />
+                    <div className="absolute top-full left-3 w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-slate-900" />
                 </div>
             )}
         </div>
     );
 }
 
-function PendingQuestionCard({ elementId, elementName, question, onAnswer }: {
-    elementId: string;
-    elementName: string;
-    question: string;
-    onAnswer: (id: string, value: number, unit: string) => void;
-}) {
+function PendingQuestionCard({ elementId, elementName, question, onAnswer }: any) {
     const [inputValue, setInputValue] = useState('');
     const [unit, setUnit] = useState('PLN');
 
     return (
         <div className="border border-red-200 bg-red-50/50 rounded-2xl p-2.5 mb-1.5">
             <p className="text-[10px] font-black text-red-700 mb-0.5 uppercase">⏸️ {elementName}</p>
-            <p className="text-[9px] text-slate-600 mb-2 leading-tight whitespace-pre-line font-bold">
-                {question}
-            </p>
+            <p className="text-[9px] text-slate-600 mb-2 leading-tight whitespace-pre-line font-bold">{question}</p>
             <div className="flex gap-1">
-                <input
-                    type="number"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    placeholder="Wartość..."
-                    className="flex-1 text-[10px] border border-slate-200 rounded-lg px-2 py-1 
-            focus:outline-none focus:border-blue-400 bg-white font-black text-center"
-                />
-                <select
-                    value={unit}
-                    onChange={(e) => setUnit(e.target.value)}
-                    className="text-[9px] font-bold border border-slate-200 rounded-lg px-1 py-1 bg-white outline-none"
-                >
-                    <option>PLN</option>
-                    <option>m²</option>
-                    <option>m³</option>
-                    <option>kpl.</option>
-                    <option>szt.</option>
-                    <option>mb</option>
-                    <option>t</option>
+                <input type="number" value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Wartość..." className="flex-1 text-[10px] border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:border-blue-400 bg-white font-black text-center" />
+                <select value={unit} onChange={(e) => setUnit(e.target.value)} className="text-[9px] font-bold border border-slate-200 rounded-lg px-1 py-1 bg-white outline-none">
+                    <option>PLN</option><option>m²</option><option>m³</option><option>kpl.</option><option>szt.</option><option>mb</option><option>t</option>
                 </select>
-                <button
-                    onClick={() => {
-                        const v = parseFloat(inputValue);
-                        if (!isNaN(v)) onAnswer(elementId, v, unit);
-                    }}
-                    className="text-[10px] bg-red-600 text-white px-2.5 py-1 rounded-lg hover:bg-red-700 
-            transition-colors font-black"
-                >
-                    ✓
-                </button>
+                <button onClick={() => { const v = parseFloat(inputValue); if (!isNaN(v)) onAnswer(elementId, v, unit); }} className="text-[10px] bg-red-600 text-white px-2.5 py-1 rounded-lg hover:bg-red-700 transition-colors font-black">✓</button>
             </div>
         </div>
     );
 }
 
-interface ScopeHeatMapProps {
-    tenderId: string | null;
-    className?: string;
-}
-
-export function ScopeHeatMap({ tenderId, className = '' }: ScopeHeatMapProps) {
-    const {
-        manifest,
-        isLoading,
-        error,
-        heatMap,
-        pendingQuestions,
-        coverageStats,
-        markAsNeedsReview,
-        answerQuestion,
-    } = useScopeManifest(tenderId);
-
+export function ScopeHeatMap({ tenderId, className = '' }: { tenderId: string | null; className?: string }) {
+    const { manifest, isLoading, error, heatMap, pendingQuestions, coverageStats, markAsNeedsReview, answerQuestion } = useScopeManifest(tenderId);
     const [activeDiv, setActiveDiv] = useState<string | null>(null);
     const [showOnlyProblems, setShowOnlyProblems] = useState(false);
 
-    if (!tenderId) {
-        return (
-            <div className={`p-4 text-center text-slate-400 text-xs font-semibold ${className}`}>
-                Wgraj paczkę przetargową ZIP, aby zobaczyć mapę zakresu
-            </div>
-        );
-    }
+    if (!tenderId) return <div className={`p-4 text-center text-slate-400 text-xs font-semibold ${className}`}>Wgraj paczkę przetargową, aby zobaczyć mapę zakresu</div>;
+    if (isLoading) return <div className={`p-4 ${className}`}><div className="animate-pulse space-y-2">{[...Array(5)].map((_, i) => (<div key={i} className="h-6 bg-slate-100 rounded-xl" />))}</div></div>;
+    if (error) return <div className={`p-4 text-red-500 text-[10px] font-bold ${className}`}>Błąd: {error}</div>;
+    if (!manifest) return <div className={`p-4 text-slate-400 text-xs text-center font-semibold ${className}`}>Czekam na zbudowanie DNA budynku...</div>;
 
-    if (isLoading) {
-        return (
-            <div className={`p-4 ${className}`}>
-                <div className="animate-pulse space-y-2">
-                    {[...Array(5)].map((_, i) => (
-                        <div key={i} className="h-6 bg-slate-100 rounded-xl" />
-                    ))}
-                </div>
-            </div>
-        );
-    }
-
-    if (error) {
-        return (
-            <div className={`p-4 text-red-500 text-[10px] font-bold ${className}`}>
-                Błąd ładowania mapy: {error}
-            </div>
-        );
-    }
-
-    if (!manifest) {
-        return (
-            <div className={`p-4 text-slate-400 text-xs text-center font-semibold ${className}`}>
-                Czekam na uruchomienie Analityka Zakresu...
-            </div>
-        );
-    }
-
-    // Grupuj mapę ciepła po działach
-    const byDivision = new Map<string, { name: string; entries: HeatMapEntry[] }>();
+    // Grupowanie ze ścisłym typowaniem DivisionGroup
+    const byDivision = new Map<string, DivisionGroup>();
     for (const entry of heatMap) {
         if (!byDivision.has(entry.divisionId)) {
             byDivision.set(entry.divisionId, { name: entry.divisionName, entries: [] });
@@ -1974,142 +1809,81 @@ export function ScopeHeatMap({ tenderId, className = '' }: ScopeHeatMapProps) {
         byDivision.get(entry.divisionId)!.entries.push(entry);
     }
 
-    // Filtry z jawnym rzutowaniem typów dla kompilatora
-    const filteredMap = showOnlyProblems
-        ? new Map<string, { name: string; entries: HeatMapEntry[] }>(
-            [...byDivision.entries()]
-                .map(([id, div]) => [
-                    id,
-                    { ...div, entries: div.entries.filter((e) => e.color !== 'green') },
-                ] as [string, { name: string; entries: HeatMapEntry[] }])
-                .filter(([, div]) => div.entries.length > 0)
-        )
-        : byDivision;
+    // Bezpieczne i wydajne filtrowanie bez rzutowania na "any"
+    const filteredMap = new Map<string, DivisionGroup>();
+    if (showOnlyProblems) {
+        for (const [id, div] of byDivision.entries()) {
+            const problematic = div.entries.filter(e => e.color !== 'green');
+            if (problematic.length > 0) {
+                filteredMap.set(id, { name: div.name, entries: problematic });
+            }
+        }
+    } else {
+        for (const [id, div] of byDivision.entries()) {
+            filteredMap.set(id, div);
+        }
+    }
 
-    const barColor =
-        coverageStats.coveragePercent >= 80 ? 'bg-emerald-500'
-            : coverageStats.coveragePercent >= 50 ? 'bg-amber-400'
-                : 'bg-red-500';
+    const barColor = coverageStats.coveragePercent >= 80 ? 'bg-emerald-500' : coverageStats.coveragePercent >= 50 ? 'bg-amber-400' : 'bg-red-500';
 
     return (
         <div className={`flex flex-col h-full overflow-hidden ${className}`}>
-
-            {/* Nagłówek */}
             <div className="p-3 border-b border-slate-100 bg-white flex-shrink-0">
                 <div className="flex items-center justify-between mb-1.5">
-                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-tight">Szczelność Zakresu</h3>
-                    <div className="flex items-center gap-1">
-                        <span className="text-[9px] font-black text-slate-400 uppercase">pewność:</span>
-                        <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded-full">
-                            {coverageStats.confidenceScore}%
-                        </span>
-                    </div>
+                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-tight">Szczelność Zakresu (PESAM 2.0)</h3>
+                    <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded-full">{coverageStats.confidenceScore}%</span>
                 </div>
-
-                <div className="mb-1.5">
-                    <CoverageBar percent={coverageStats.coveragePercent} color={barColor} />
-                </div>
+                <div className="mb-1.5"><CoverageBar percent={coverageStats.coveragePercent} color={barColor} /></div>
                 <p className="text-[9px] text-slate-400 font-bold mb-2">
                     Pokrycie: <span className="font-extrabold text-slate-700">{coverageStats.coveragePercent}%</span>
-                    {coverageStats.objectType && (
-                        <span className="ml-1 capitalize text-blue-600 font-black">• {coverageStats.objectType.replace('_', ' ')}</span>
-                    )}
-                    {coverageStats.objectArea_m2 && (
-                        <span className="ml-1 font-black text-slate-600">• {coverageStats.objectArea_m2} m²</span>
-                    )}
+                    {coverageStats.objectType && <span className="ml-1 capitalize text-blue-600 font-black">• {coverageStats.objectType.replace('_', ' ')}</span>}
                 </p>
-
-                {/* Mini statystyki */}
                 <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 mb-1.5 border-t pt-2 border-slate-50">
-                    <StatPill label="Rynkowe" value={coverageStats.covered} color="bg-emerald-500" />
+                    <StatPill label="Precyzyjne" value={coverageStats.covered} color="bg-emerald-500" />
+                    <StatPill label="Zlokalizowane" value={coverageStats.needsQuantity} color="bg-blue-500" />
                     <StatPill label="Szacowane" value={coverageStats.gapFilled} color="bg-amber-400" />
+                    <StatPill label="Pułapki Tech" value={coverageStats.techRequired} color="bg-purple-500" />
                     <StatPill label="Brak" value={coverageStats.missing} color="bg-red-500" />
-                    <StatPill label="Czeka" value={coverageStats.waitingUser} color="bg-red-400" />
                 </div>
-
-                {coverageStats.riskBufferPercent > 0 && (
-                    <div className="text-[9px] bg-amber-50 border border-amber-200 rounded-xl px-2 py-1 text-amber-700 font-black uppercase text-center">
-                        ⚠️ Rezerwa ryzyka dokumentacyjnego: <strong>+{coverageStats.riskBufferPercent}%</strong>
-                    </div>
-                )}
             </div>
 
-            {/* Bloki pytań */}
             {pendingQuestions.length > 0 && (
                 <div className="p-2.5 border-b border-red-100 bg-red-50/20 flex-shrink-0">
-                    <p className="text-[9px] font-black text-red-700 mb-1.5 uppercase tracking-wide">
-                        ⏸️ Odpowiedz na pytania Roju ({pendingQuestions.length})
-                    </p>
-                    {pendingQuestions.map((q) => (
-                        <PendingQuestionCard
-                            key={q.elementId}
-                            {...q}
-                            onAnswer={answerQuestion}
-                        />
-                    ))}
+                    <p className="text-[9px] font-black text-red-700 mb-1.5 uppercase tracking-wide">⏸️ Pytania od Roju ({pendingQuestions.length})</p>
+                    {pendingQuestions.map((q) => <PendingQuestionCard key={q.elementId} {...q} onAnswer={answerQuestion} />)}
                 </div>
             )}
 
-            {/* Filtr */}
             <div className="px-3 py-1.5 border-b border-slate-100 bg-slate-50 flex-shrink-0">
                 <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                        type="checkbox"
-                        checked={showOnlyProblems}
-                        onChange={(e) => setShowOnlyProblems(e.target.checked)}
-                        className="rounded text-blue-600 outline-none"
-                    />
-                    <span className="text-[10px] text-slate-500 font-black uppercase">Pokaż tylko luki</span>
+                    <input type="checkbox" checked={showOnlyProblems} onChange={(e) => setShowOnlyProblems(e.target.checked)} className="rounded text-blue-600 outline-none" />
+                    <span className="text-[10px] text-slate-500 font-black uppercase">Ukryj pozycje "OK"</span>
                 </label>
             </div>
 
-            {/* Zawartość Mapy Ciepła */}
             <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
-                {[...filteredMap.entries()].map(([divId, { name, entries }]) => {
+                {[...filteredMap.entries()].map(([divId, div]) => {
                     const isExpanded = activeDiv === null || activeDiv === divId;
-                    const problemCount = entries.filter((e) => e.color !== 'green').length;
+                    const problemCount = div.entries.filter((e: HeatMapEntry) => e.color !== 'green').length;
 
                     return (
                         <div key={divId} className="border border-slate-100 p-1.5 rounded-2xl bg-white shadow-xs">
-                            <button
-                                onClick={() => setActiveDiv(activeDiv === divId ? null : divId)}
-                                className="w-full flex items-center justify-between mb-1.5 group text-left outline-none"
-                            >
-                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-tight truncate max-w-[170px]">
-                                    {divId} · {name}
-                                </span>
+                            <button onClick={() => setActiveDiv(activeDiv === divId ? null : divId)} className="w-full flex items-center justify-between mb-1.5 group text-left outline-none">
+                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-tight truncate max-w-[170px]">{divId} · {div.name}</span>
                                 <div className="flex items-center gap-1 flex-shrink-0">
-                                    {problemCount > 0 && (
-                                        <span className="text-[8px] font-black bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">
-                                            {problemCount}
-                                        </span>
-                                    )}
-                                    <span className="text-slate-300 text-[8px] group-hover:text-slate-500">
-                                        {activeDiv === divId ? '▲' : '▼'}
-                                    </span>
+                                    {problemCount > 0 && <span className="text-[8px] font-black bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">{problemCount}</span>}
                                 </div>
                             </button>
-
                             {isExpanded && (
                                 <div className="space-y-1">
-                                    {entries.map((entry) => (
-                                        <HeatMapCell
-                                            key={entry.elementId}
-                                            entry={entry}
-                                            onMarkReview={markAsNeedsReview}
-                                        />
+                                    {div.entries.map((entry: HeatMapEntry) => (
+                                        <HeatMapCell key={entry.elementId} entry={entry} onMarkReview={markAsNeedsReview} />
                                     ))}
                                 </div>
                             )}
                         </div>
                     );
                 })}
-
-                {filteredMap.size === 0 && (
-                    <p className="text-center text-[10px] font-bold text-slate-400 py-6">
-                        {showOnlyProblems ? '✅ Wszystkie pozycje są kompletne!' : 'Brak danych'}
-                    </p>
-                )}
             </div>
         </div>
     );
@@ -2493,8 +2267,17 @@ function countExtractedIndicators(upload: BrainUploadWithId): string {
 --- START OF FILE src/app/api/kosztorysant/_shared/scopeManifest.types.ts ---
 
 // ============================================================
-// PESAM – ScopeManifest Types
+// PESAM 2.0 – ScopeManifest Types
 // Kręgosłup systemu. Każdy agent czyta stąd swoje zadanie.
+//
+// ZMIANY v2.0:
+//   + CoverageStatus: dodano NEEDS_QUANTITY, TECH_REQUIRED
+//   + DataSource: dodano AI_WBS_HEURISTIC, TECH_AUDIT
+//   + Nowe interfejsy outputów dla 4 agentów progresywnych
+//   + AgentPhase – kolejność faz DAG
+//   + MappingResult – wynik Detektywa Mapowania
+//   + QuantityResult – wynik Ilościowca
+//   + TechAlert – wynik Cichego Rewidenta
 // ============================================================
 
 export type DocLevel = 0 | 1 | 2 | 3 | 4;
@@ -2515,11 +2298,16 @@ export type EstimationMethod =
     | 'ELEMENT_BASED'
     | 'DETAILED_KNR';
 
+// ----------------------------------------------------------------
+// DataSource – rozszerzone o źródła z nowych agentów
+// ----------------------------------------------------------------
 export type DataSource =
-    | 'AI_FROM_PFU'
-    | 'AI_FROM_SWZ'
-    | 'AI_HEURISTIC'
-    | 'HARDCODED_NORM';
+    | 'AI_FROM_PFU'          // Analityk Zakresu – z treści PFU
+    | 'AI_FROM_SWZ'          // Analityk Zakresu – z treści SWZ
+    | 'AI_HEURISTIC'         // Analityk Zakresu – heurystyka ogólna
+    | 'HARDCODED_NORM'       // Twarda norma (zawsze wymagana)
+    | 'AI_WBS_HEURISTIC'     // [NOWE] Architekt WBS – DNA budynku bez dokumentów
+    | 'TECH_AUDIT';          // [NOWE] Cichy Rewident – pułapka technologiczna
 
 export type GapFillerStrategy =
     | 'SEKOCENBUD_M2'
@@ -2527,12 +2315,17 @@ export type GapFillerStrategy =
     | 'GUS_PERCENT'
     | 'ASK_USER';
 
+// ----------------------------------------------------------------
+// CoverageStatus – rozszerzony o statusy nowych agentów
+// ----------------------------------------------------------------
 export type CoverageStatus =
-    | 'COVERED'
-    | 'GAP_FILLED'
-    | 'MISSING'
-    | 'NEEDS_REVIEW'
-    | 'WAITING_USER';
+    | 'COVERED'          // Ilościowiec lub KNR wyliczył wartość z dokumentów
+    | 'GAP_FILLED'       // Gap Filler uzupełnił wskaźnikowo
+    | 'MISSING'          // Nikt jeszcze tego nie dotknął
+    | 'NEEDS_REVIEW'     // Rewident zgłosił wątpliwość
+    | 'WAITING_USER'     // Czeka na odpowiedź użytkownika (ASK_USER)
+    | 'NEEDS_QUANTITY'   // [NOWE] Detektyw zmapował plik, ale Ilościowiec jeszcze nie przeliczył
+    | 'TECH_REQUIRED';   // [NOWE] Cichy Rewident dodał pozycję wymaganą technologicznie
 
 export type DataQuality =
     | 'MARKET_VERIFIED'
@@ -2542,7 +2335,30 @@ export type DataQuality =
 
 export type RiskSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
-// --- Poziom 1: Nagłówek manifestu ---
+// ----------------------------------------------------------------
+// AgentPhase – fazy DAG (kolejność uruchamiania agentów)
+// Używane przez inicjalizator do budowania kolejki i przez frontend
+// do wizualizacji postępu.
+// ----------------------------------------------------------------
+export type AgentPhase =
+    | 'WBS_ARCHITECT'       // Faza 0: DNA budynku (zawsze pierwszy)
+    | 'MAPPING_DETECTIVE'   // Faza 1: dopasowanie plików do szkieletu
+    | 'QUANTITY_SURVEYOR'   // Faza 2: zamiana nazw w liczby
+    | 'SILENT_AUDITOR'      // Faza 3: ukryte pułapki technologiczne
+    | 'LEGAL'               // Faza 4: analiza prawna SWZ/umowy
+    | 'VISION'              // Faza 4b: analiza rysunków (Vision API)
+    | 'KNR'                 // Faza 5: przedmiarowanie z normatywów
+    | 'NORMATIVE_STEEL'     // Faza 5b: stal zbrojeniowa wskaźnikowo
+    | 'PARAMETRIC'          // Faza 5c: wycena wskaźnikowa m2 (niski DocLevel)
+    | 'BROKER'              // Faza 6: wycena rynkowa i weryfikacja cen
+    | 'GAP_FILLER'          // Faza 7: łatanie pozostałych luk
+    | 'REWIDENT'            // Faza 8: końcowy audytor (zawsze ostatni)
+    // Zachowany dla kompatybilności wstecznej
+    | 'ANALITYK_ZAKRESU';
+
+// ================================================================
+// Nagłówek manifestu
+// ================================================================
 export interface ScopeManifestMeta {
     tenderId: string;
     generatedAt: string;
@@ -2554,9 +2370,13 @@ export interface ScopeManifestMeta {
     confidenceScore: number;
     sourceDocuments: string[];
     isLocked: boolean;
+    // [NOWE] Ślad faz – które agenty już ukończyły pracę
+    completedPhases?: AgentPhase[];
 }
 
-// --- Poziom 2: Wymagania twarde z SWZ/OPZ ---
+// ================================================================
+// Wymagania twarde z SWZ/OPZ
+// ================================================================
 export interface HardRequirement {
     id: string;
     description: string;
@@ -2566,7 +2386,9 @@ export interface HardRequirement {
     addedBy: 'AI' | 'USER';
 }
 
-// --- Poziom 3: Wymagane działy (serce manifestu) ---
+// ================================================================
+// Wymagane działy (serce manifestu)
+// ================================================================
 export interface ScopeElement {
     elementId: string;
     name: string;
@@ -2578,6 +2400,13 @@ export interface ScopeElement {
     gapFillerStrategy: GapFillerStrategy;
     gapFillerHint?: string;
     gapFillerMultiplier?: number;
+    // [NOWE] Wynik Detektywa – który plik (fileId) pokrywa ten element
+    mappedFileId?: string | null;
+    // [NOWE] Wynik Ilościowca – wyliczona ilość i jednostka
+    quantity?: number | null;
+    quantitySource?: 'VISION' | 'BRAIN_INDICATOR' | 'MANUAL' | null;
+    // [NOWE] Alert Cichego Rewidenta – opis pułapki technologicznej
+    techAuditNote?: string | null;
 }
 
 export interface ScopeDivision {
@@ -2587,7 +2416,9 @@ export interface ScopeDivision {
     elements: ScopeElement[];
 }
 
-// --- Poziom 4: Ryzyka ---
+// ================================================================
+// Ryzyka
+// ================================================================
 export interface MissingDataRisk {
     riskId: string;
     description: string;
@@ -2598,7 +2429,9 @@ export interface MissingDataRisk {
     userOverridePercent?: number;
 }
 
-// --- Poziom 5: Status pokrycia (żywy dokument) ---
+// ================================================================
+// Status pokrycia (żywy dokument – aktualizowany przez każdy agent)
+// ================================================================
 export interface CoverageEntry {
     elementId: string;
     divisionId: string;
@@ -2610,18 +2443,79 @@ export interface CoverageEntry {
     lastUpdatedBy: string;
     lastUpdatedAt: string;
     pendingQuestion?: string;
+    // [NOWE] Który plik (fileId) Detektyw przypisał do tego elementu
+    mappedFileId?: string | null;
+    // [NOWE] Wyliczona ilość przez Ilościowca (przed wyceną)
+    quantityEstimated?: number | null;
+    quantitySource?: 'VISION' | 'BRAIN_INDICATOR' | 'MANUAL' | null;
 }
 
-// --- Kompletny dokument ScopeManifest ---
+// ================================================================
+// Kompletny dokument ScopeManifest
+// ================================================================
 export interface ScopeManifest {
     meta: ScopeManifestMeta;
     hardRequirements: HardRequirement[];
     requiredDivisions: ScopeDivision[];
     missingDataRisks: MissingDataRisk[];
     coverageStatus: CoverageEntry[];
+    // [NOWE] Alerty technologiczne od Cichego Rewidenta
+    techAlerts?: TechAlert[];
 }
 
-// --- Typy pomocnicze dla agentów ---
+// ================================================================
+// Typy pomocnicze – OUTPUT każdego z nowych agentów
+// ================================================================
+
+// --- Output Architekta WBS (Faza 0) ---
+export interface WbsArchitectOutput {
+    objectType: ObjectType;
+    objectArea_m2: number | null;
+    confidenceScore: number;
+    requiredDivisions: Array<{
+        divisionId: string;
+        divisionName: string;
+        displayOrder: number;
+        elements: Array<Omit<ScopeElement, 'isMandatoryByLaw' | 'applicableObjectTypes' | 'minDocLevel' | 'mappedFileId' | 'quantity' | 'quantitySource' | 'techAuditNote'>>;
+    }>;
+    initialRisks: Omit<MissingDataRisk, 'addedBy' | 'userOverridePercent'>[];
+}
+
+// --- Output Detektywa Mapowania (Faza 1) ---
+export interface MappingResult {
+    elementId: string;
+    divisionId: string;
+    mappedFileId: string | null;
+    mappedFileName: string | null;
+    newStatus: 'NEEDS_QUANTITY' | 'MISSING';
+    extractionHint?: string;
+}
+
+// --- Output Ilościowca (Faza 2) ---
+export interface QuantityResult {
+    elementId: string;
+    divisionId: string;
+    quantity: number;
+    unit: string;
+    source: 'VISION' | 'BRAIN_INDICATOR';
+    newStatus: 'COVERED' | 'GAP_FILLED';
+    dataQuality: DataQuality;
+    note: string;
+}
+
+// --- Alert technologiczny od Cichego Rewidenta (Faza 3) ---
+export interface TechAlert {
+    alertId: string;
+    itemName: string;
+    targetDivisionId: string;
+    reason: string;
+    severity: RiskSeverity;
+    suggestedStrategy: GapFillerStrategy;
+    suggestedUnit: string;
+    autoAdded: boolean;
+}
+
+// --- Zachowany dla kompatybilności wstecznej ---
 export interface AnalitykZakresuGeminiOutput {
     objectType: ObjectType;
     objectArea_m2: number | null;
@@ -3470,6 +3364,1500 @@ export function extractAllJSONObjects(text: string): unknown[] {
 --- END OF FILE src/app/api/kosztorysant/_shared/types.ts ---
 
 
+--- START OF FILE src/app/api/kosztorysant/agent-wbs-architekt/route.ts ---
+
+// ============================================================
+// PESAM 2.0 – Agent "Architekt Struktury (WBS)" z Google Search Grounding
+// POST /api/kosztorysant/agent-wbs-architekt
+//
+// ROLA W DAG: Faza 0 – zawsze pierwszy
+// WEJŚCIE:   objectTypeHint, objectAreaHint_m2, docLevel
+// WYJŚCIE:   Szkielet ScopeManifest w Firestore (wszystko MISSING)
+//
+// FILOZOFIA PESAM 2.0:
+//   Ten agent nie zgaduje na ślepo ani nie korzysta ze sztywnego kodu.
+//   Jeśli otrzyma nietypowy typ obiektu (np. "szpital" lub "hala"),
+//   wykorzystuje narzędzie Google Search Grounding do przeszukania polskiego
+//   prawa budowlanego (WT 2021) w locie i buduje DNA na żywych faktach.
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import { GoogleGenAI, Type } from '@google/genai';
+import { buildMandatoryMinimum } from '../_shared/heurystyki';
+import type {
+    ScopeManifest,
+    ScopeManifestMeta,
+    ScopeDivision,
+    ScopeElement,
+    MissingDataRisk,
+    CoverageEntry,
+    ObjectType,
+    DocLevel,
+    WbsArchitectOutput,
+    AgentPhase,
+} from '../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+// ================================================================
+// Response Schema – DNA budynku dla Gemini (bez problematycznych enums)
+// ================================================================
+
+const WBS_RESPONSE_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        objectType: {
+            type: Type.STRING,
+            description: "Typ obiektu: Musi być dokładnie jednym ze słów: przedszkole, szkola, biurowiec, hala_sportowa, hala_produkcyjna, budynek_mieszkalny, szpital, inne",
+        },
+        objectArea_m2: { type: Type.NUMBER },
+        confidenceScore: { type: Type.INTEGER },
+        requiredDivisions: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    divisionId: { type: Type.STRING },
+                    divisionName: { type: Type.STRING },
+                    displayOrder: { type: Type.INTEGER },
+                    elements: {
+                        type: Type.ARRAY,
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                elementId: { type: Type.STRING },
+                                name: { type: Type.STRING },
+                                unit: { type: Type.STRING },
+                                source: {
+                                    type: Type.STRING,
+                                    description: "Zapisz dokładnie: AI_WBS_HEURISTIC",
+                                },
+                                gapFillerStrategy: {
+                                    type: Type.STRING,
+                                    description: "Musi być dokładnie jednym ze słów: SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, ASK_USER",
+                                },
+                                gapFillerHint: { type: Type.STRING },
+                            },
+                            required: ['elementId', 'name', 'unit', 'source', 'gapFillerStrategy'],
+                        },
+                    },
+                },
+                required: ['divisionId', 'divisionName', 'displayOrder', 'elements'],
+            },
+        },
+        initialRisks: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    riskId: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    costImpactPercent: { type: Type.NUMBER },
+                    affectedDivisionIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    severity: {
+                        type: Type.STRING,
+                        description: "Musi być dokładnie jednym ze słów: LOW, MEDIUM, HIGH, CRITICAL",
+                    },
+                },
+                required: ['riskId', 'description', 'costImpactPercent', 'affectedDivisionIds', 'severity'],
+            },
+        },
+    },
+    required: ['objectType', 'confidenceScore', 'requiredDivisions', 'initialRisks'],
+};
+
+// ================================================================
+// System Prompt – Architekt Struktury WBS
+// ================================================================
+
+const WBS_SYSTEM_INSTRUCTION = `
+Jesteś Architektem Struktury w systemie PESAM – AI kosztorysanta budowlanego.
+Twoje zadanie to wygenerowanie kompletnego "DNA technologicznego" budynku
+na podstawie jego typu i norm prawnych. 
+
+WYKORZYSTAJ narzędzie wyszukiwania Google Search, aby sprawdzić i zweryfikować:
+- Polskie przepisy prawa budowlanego (WT 2021) dla wybranego typu obiektu.
+- Wymagania ppoż i ewakuacyjne (np. czy wymagany jest system oddymiania lub hydranty wewnętrzne).
+- Standardy instalacji sanitarnych, klimatyzacyjnych, IT i technologicznych.
+
+Pamiętaj: Pytasz siebie "Co musi BYĆ, żeby budynek działał?" – nie "Co jest w dostarczonych dokumentach?".
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM, POPRAWNYM JSON. Bez komentarzy, bez markdown.
+`.trim();
+
+// ================================================================
+// Pomocnicze funkcje mapowania
+// ================================================================
+
+function getDivisionName(id: string): string {
+    const names: Record<string, string> = {
+        D1: 'Stan Zerowy', D2: 'Stan Surowy', D3: 'Stan Wykończeniowy Wewnętrzny',
+        D4: 'Elewacja i zagospodarowanie terenu', D5: 'Instalacje Sanitarne',
+        D6: 'Instalacje Elektryczne', D7: 'Instalacje Specjalne i Wyposażenie',
+        D8: 'Wyposażenie Technologiczne',
+    };
+    return names[id] ?? `Dział ${id}`;
+}
+
+function getDivisionOrder(id: string): number {
+    return parseInt(id.replace('D', ''), 10) || 99;
+}
+
+function isSimilarElement(name1: string, name2: string): boolean {
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-ząćęłńóśźż\s]/g, ' ').trim();
+    const n1 = normalize(name1);
+    const n2 = normalize(name2);
+    const keywords = n2.split(' ').filter((w) => w.length > 4);
+    return keywords.filter((kw) => n1.includes(kw)).length >= 2;
+}
+
+function resolveDivisionForElement(elementId: string): string {
+    if (elementId.startsWith('UNIV-E1') || elementId.startsWith('UNIV-E2') || elementId.startsWith('UNIV-E3')) return 'D1';
+    if (elementId.startsWith('UNIV-E4') || elementId.startsWith('UNIV-E5') || elementId.startsWith('UNIV-E6')) return 'D2';
+    if (elementId.startsWith('UNIV-E7') || elementId.startsWith('UNIV-E8') || elementId.startsWith('UNIV-E9')) return 'D3';
+    if (elementId.startsWith('UNIV-E10') || elementId.startsWith('UNIV-E13')) return 'D6';
+    if (elementId.startsWith('UNIV-E11') || elementId.startsWith('UNIV-E12')) return 'D5';
+    if (elementId.startsWith('UNIV-E14')) return 'D4';
+    return 'D7';
+}
+
+async function mergeWithMandatoryMinimum(
+    aiOutput: WbsArchitectOutput,
+    docLevel: DocLevel
+): Promise<ScopeDivision[]> {
+    const mandatory = await buildMandatoryMinimum(aiOutput.objectType, docLevel);
+    const divisionMap = new Map<string, ScopeDivision>();
+
+    for (const div of aiOutput.requiredDivisions) {
+        divisionMap.set(div.divisionId, {
+            ...div,
+            elements: div.elements.map((el) => ({
+                ...el,
+                isMandatoryByLaw: false,
+                applicableObjectTypes: 'ALL' as const,
+                minDocLevel: docLevel,
+                mappedFileId: null,
+                quantity: null,
+                quantitySource: null,
+                techAuditNote: null,
+            })),
+        });
+    }
+
+    for (const mandatoryEl of mandatory) {
+        const targetDivisionId = resolveDivisionForElement(mandatoryEl.elementId);
+        let alreadyCovered = false;
+
+        for (const [, div] of divisionMap) {
+            if (div.elements.some((el) => isSimilarElement(el.name, mandatoryEl.name))) {
+                alreadyCovered = true;
+                break;
+            }
+        }
+
+        if (!alreadyCovered) {
+            if (!divisionMap.has(targetDivisionId)) {
+                divisionMap.set(targetDivisionId, {
+                    divisionId: targetDivisionId,
+                    divisionName: getDivisionName(targetDivisionId),
+                    displayOrder: getDivisionOrder(targetDivisionId),
+                    elements: [],
+                });
+            }
+
+            divisionMap.get(targetDivisionId)!.elements.push({
+                ...mandatoryEl,
+                mappedFileId: null,
+                quantity: null,
+                quantitySource: null,
+                techAuditNote: null,
+            });
+        }
+    }
+
+    return Array.from(divisionMap.values()).sort((a, b) => a.displayOrder - b.displayOrder);
+}
+
+// ================================================================
+// GŁÓWNY HANDLER POST
+// ================================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[WBS Architekt] === FAZA 0: BUDOWANIE DNA BUDYNKU (v2.1) ===");
+    console.log("==================================================");
+
+    try {
+        const body = await req.json() as {
+            tenderId: string;
+            objectTypeHint: string;
+            objectAreaHint_m2: number | null;
+            docLevel: DocLevel;
+            estimationMethod: string;
+            fileNamesContext: string[];
+        };
+
+        const { tenderId, objectTypeHint, objectAreaHint_m2, docLevel, estimationMethod, fileNamesContext } = body;
+
+        if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
+
+        console.log(`[WBS Architekt] Projekt: "${tenderId}" | Typ: "${objectTypeHint}" | Powierzchnia: ${objectAreaHint_m2 ?? 'nieznana'} m²`);
+
+        // 1. Inicjalizacja AI z wbudowanym Google Search Grounding
+        console.log("[WBS Architekt] Inicjalizuję klienta GoogleGenAI (Vertex AI Grounding)...");
+        const ai = new GoogleGenAI({
+            vertexai: true,
+            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+            location: "global",
+        });
+
+        const areaContext = objectAreaHint_m2
+            ? `Szacowana powierzchnia użytkowa: ${objectAreaHint_m2} m².`
+            : 'Powierzchnia nieznana – przyjmij typową dla tego typu.';
+
+        const prompt = `
+Wygeneruj kompletne DNA technologiczne (szkielet kosztorysu) dla obiektu o parametrach:
+TYP BUDYNKU: ${objectTypeHint}
+${areaContext}
+POZIOM DOKUMENTACJI: Level ${docLevel}/4
+
+ZADANIE:
+1. Użyj wyszukiwarki Google Search, aby odnaleźć i zweryfikować polskie przepisy prawa budowlanego (WT 2021), standardy ppoż, oraz wymogi wentylacji mechanicznej i instalacji dla typu budynku: "${objectTypeHint}".
+2. Na podstawie zebranych danych z internetu stwórz kompletną listę działów i elementów scalonych, które musimy wycenić w kosztorysie, by budynek bez przeszkód przeszedł odbiory techniczne.
+        `.trim();
+
+        console.log("[WBS Architekt] Wysyłam zapytanie do Gemini z włączonym uziemieniem Google Search...");
+
+        const result = await ai.models.generateContent({
+            model: MODEL_FLASH,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                systemInstruction: WBS_SYSTEM_INSTRUCTION,
+                temperature: 0.1,
+                responseMimeType: "application/json",
+                responseSchema: WBS_RESPONSE_SCHEMA as any,
+                tools: [
+                    { googleSearch: {} } // 👈 WŁĄCZENIE GROUNDINGU W LOCIE!
+                ]
+            },
+        });
+
+        const rawText = result.text ?? "{}";
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[WBS Architekt] Odebrano DNA budynku z chmury i zsyntetyzowano z wynikami Google Search w ${duration}s.`);
+
+        const aiOutput: WbsArchitectOutput = JSON.parse(rawText);
+        const mergedDivisions = await mergeWithMandatoryMinimum(aiOutput, docLevel);
+
+        const initialCoverage = mergedDivisions.flatMap((div) =>
+            div.elements.map((el) => ({
+                elementId: el.elementId,
+                divisionId: div.divisionId,
+                status: 'MISSING' as const,
+                coveredBySectionId: null,
+                dataQuality: 'MISSING' as const,
+                gapFillerNote: null,
+                gapFillerValue: null,
+                lastUpdatedBy: 'agent-wbs-architekt',
+                lastUpdatedAt: new Date().toISOString(),
+                mappedFileId: null,
+                quantityEstimated: null,
+                quantitySource: null,
+            }))
+        );
+
+        const now = new Date().toISOString();
+        const manifest: ScopeManifest = {
+            meta: {
+                tenderId, generatedAt: now, updatedAt: now, docLevel,
+                objectType: aiOutput.objectType,
+                objectArea_m2: aiOutput.objectArea_m2 || objectAreaHint_m2 || null,
+                estimationMethod: estimationMethod as any,
+                confidenceScore: aiOutput.confidenceScore,
+                sourceDocuments: fileNamesContext,
+                isLocked: false,
+                completedPhases: ['WBS_ARCHITECT'],
+            },
+            hardRequirements: [],
+            requiredDivisions: mergedDivisions,
+            missingDataRisks: aiOutput.initialRisks.map((r) => ({ ...r, addedBy: 'AI' as const })),
+            coverageStatus: initialCoverage,
+        };
+
+        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
+        console.log(`[WBS Architekt] Zapisuję dynamiczny manifest do Firestore: "${manifestPath}"...`);
+        await adminDb.doc(manifestPath).set(manifest);
+
+        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-WBS_ARCHITECT`).update({
+            status: 'DONE',
+            result: { objectType: aiOutput.objectType, elementsCount: initialCoverage.length },
+            updatedAt: now,
+        });
+
+        console.log(`[WBS Architekt] ✅ Faza 0 zakończona sukcesem. Spis treści gotowy.`);
+        console.log("==================================================");
+
+        return NextResponse.json({
+            success: true,
+            phase: 'WBS_ARCHITECT' as AgentPhase,
+            summary: {
+                objectType: manifest.meta.objectType,
+                objectArea_m2: manifest.meta.objectArea_m2,
+                confidenceScore: manifest.meta.confidenceScore,
+                divisionsCount: mergedDivisions.length,
+                elementsCount: initialCoverage.length,
+            },
+        });
+
+    } catch (error: any) {
+        console.error('[WBS Architekt] ❌ KRYTYCZNY BŁĄD AGENTA:', error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-wbs-architekt/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-detektyw-mapowania/route.ts ---
+
+// ============================================================
+// PESAM 2.1 – Agent "Ilościowiec (Quantity Surveyor)" z Google Search Grounding
+// POST /api/kosztorysant/agent-ilosciowiec
+//
+// ROLA W DAG: Faza 2 – po MAPPING_DETECTIVE, przed SILENT_AUDITOR
+// WEJŚCIE:   ScopeManifest z wypełnionymi mappedFileId (wynik Detektywa)
+// WYJŚCIE:   quantity + dataQuality na każdym elemencie,
+//            statusy COVERED / GAP_FILLED w coverageStatus
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb, adminStorage } from '@/lib/firebase/admin';
+import { GoogleGenAI, Type } from '@google/genai';
+import type {
+    ScopeManifest,
+    ScopeDivision,
+    ScopeElement,
+    CoverageEntry,
+    CoverageStatus,
+    DataQuality,
+    QuantityResult,
+    AgentPhase,
+    ObjectType,
+} from '../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+const VISION_BATCH_SIZE = 5;
+const BRAIN_BATCH_SIZE = 15;
+
+// ================================================================
+// Typy wewnętrzne
+// ================================================================
+
+interface ElementWithContext {
+    elementId: string;
+    divisionId: string;
+    name: string;
+    unit: string;
+    gapFillerStrategy: string;
+    gapFillerHint?: string;
+    mappedFileId: string | null;
+    mappedStoragePath: string | null;
+    extractionHint: string | null;
+}
+
+interface BrainContextResponse {
+    indicators: Array<{
+        elementName: string;
+        valuePerM2: number | null;
+        valuePerM3: number | null;
+        unit: string;
+        sampleSize: number;
+        confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+    }>;
+    objectType: ObjectType;
+    dataPoints: number;
+}
+
+// ================================================================
+// Response Schemas dla Gemini (bez problematycznych enums)
+// ================================================================
+
+const VISION_QUANTITY_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        results: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    elementId: { type: Type.STRING },
+                    quantity: { type: Type.NUMBER },
+                    unit: { type: Type.STRING },
+                    method: { type: Type.STRING },
+                    confidenceScore: { type: Type.INTEGER },
+                    note: { type: Type.STRING },
+                    extractionSuccess: { type: Type.BOOLEAN },
+                },
+                required: ['elementId', 'quantity', 'unit', 'confidenceScore', 'note', 'extractionSuccess'],
+            },
+        },
+    },
+    required: ['results'],
+};
+
+const BRAIN_QUANTITY_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        results: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    elementId: { type: Type.STRING },
+                    quantity: { type: Type.NUMBER },
+                    unit: { type: Type.STRING },
+                    indicatorUsed: { type: Type.STRING },
+                    calculationNote: { type: Type.STRING },
+                    confidenceScore: { type: Type.INTEGER },
+                },
+                required: ['elementId', 'quantity', 'unit', 'indicatorUsed', 'calculationNote', 'confidenceScore'],
+            },
+        },
+    },
+    required: ['results'],
+};
+
+// ================================================================
+// System Prompts
+// ================================================================
+
+const VISION_SYSTEM_INSTRUCTION = `
+Jesteś Ilościowcem w systemie PESAM – doświadczonym kosztorysantem.
+Twoje zadanie to precyzyjne odczytanie ilości geometrycznych z załączonych rysunków/dokumentów na podstawie wskazań "extractionHint".
+
+WYKORZYSTAJ narzędzie wyszukiwania Google Search, aby zweryfikować specyficzne przeliczniki i współczynniki konwersji (np. wagę pręta zbrojeniowego fi 12 w Polsce, typową grubość posypki dylatacyjnej itp.).
+
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
+`.trim();
+
+const BRAIN_SYSTEM_INSTRUCTION = `
+Jesteś Ilościowcem w systemie PESAM. Szacujesz ilości parametrycznie na podstawie wskaźników historycznych i powierzchni budynku.
+
+WYKORZYSTAJ narzędzie Google Search, aby znaleźć typowe normatywne zużycie materiałów (np. betonu, stali, tynków) na m2 powierzchni użytkowej dla wybranego typu budynku w polskim prawie budowlanym, jeśli w Mózgu brak Twoich własnych danych historycznych.
+
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
+`.trim();
+
+// ================================================================
+// Pobieranie plików i wskaźników z Mózgu (Lokalny Loopback)
+// ================================================================
+
+async function fetchFileAsBase64(storagePath: string): Promise<{ base64: string; mimeType: string } | null> {
+    try {
+        const bucket = adminStorage.bucket();
+        const file = bucket.file(storagePath);
+        const [exists] = await file.exists();
+        if (!exists) return null;
+        const [buffer] = await file.download();
+        const ext = storagePath.split('.').pop()?.toLowerCase() ?? '';
+        const mimeMap: Record<string, string> = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' };
+        return { base64: buffer.toString('base64'), mimeType: mimeMap[ext] || 'application/octet-stream' };
+    } catch { return null; }
+}
+
+async function fetchBrainIndicators(
+    req: NextRequest,
+    objectType: ObjectType
+): Promise<BrainContextResponse | null> {
+    try {
+        const port = process.env.PORT || "8080";
+        const url = `http://127.0.0.1:${port}/api/kosztorysant/brain/context?objectType=${objectType}`;
+        console.log(`[Ilościowiec] 🧠 Pobieram kontekst Mózgu lokalnie przez GET: ${url}`);
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                ...(req.headers.get("cookie") ? { "Cookie": req.headers.get("cookie") || "" } : {}),
+                ...(req.headers.get("authorization") ? { "Authorization": req.headers.get("authorization") || "" } : {})
+            }
+        });
+
+        if (!response.ok) return null;
+        return await response.json();
+    } catch (err) {
+        console.warn(`[Ilościowiec] Błąd pobierania Mózgu:`, err);
+        return null;
+    }
+}
+
+// ================================================================
+// Wywołania Gemini z Google Search Grounding
+// ================================================================
+
+async function processVisionBatch(
+    ai: any,
+    elements: ElementWithContext[],
+    fileBase64: string,
+    mimeType: string,
+    fileName: string
+): Promise<QuantityResult[]> {
+    const prompt = `
+Analizujesz plik z dokumentacji projektowej: "${fileName}"
+
+Dla każdego elementu z poniższej listy odczytaj DOKŁADNĄ ILOŚĆ (obmiar) z rysunku na podstawie wskazanego extractionHint:
+${JSON.stringify(elements.map(el => ({ elementId: el.elementId, name: el.name, unit: el.unit, hint: el.extractionHint })), null, 2)}
+
+ZADANIE:
+1. Użyj wyszukiwarki Google Search do zweryfikowania specyficznych współczynników konwersji, jeśli są potrzebne (np. "ile kg waży 1 metr pręta fi 12 w Polsce", "typowa grubość podbudowy z chudego betonu", "współczynniki strat materiałowych w polskim kosztorysowaniu").
+2. Odczytaj wartości z rysunku i oblicz ostateczną ilość.
+3. Zwróć wyniki dla wszystkich elementów. Jeśli obmiar jest niemożliwy, ustaw extractionSuccess: false.
+    `.trim();
+
+    const result = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{
+            role: "user",
+            parts: [
+                { inlineData: { mimeType, data: fileBase64 } },
+                { text: prompt }
+            ]
+        }],
+        config: {
+            systemInstruction: VISION_SYSTEM_INSTRUCTION,
+            temperature: 0.0,
+            responseMimeType: "application/json",
+            responseSchema: VISION_QUANTITY_SCHEMA as any,
+            tools: [
+                { googleSearch: {} } // 👈 WŁĄCZENIE GROUNDINGU W LOCIE!
+            ]
+        },
+    });
+
+    const rawText = result.text ?? "{}";
+    const parsed = JSON.parse(rawText) as { results: any[] };
+
+    return parsed.results.map((r): QuantityResult => ({
+        elementId: r.elementId,
+        divisionId: elements.find(el => el.elementId === r.elementId)?.divisionId ?? 'D1',
+        quantity: r.quantity,
+        unit: r.unit,
+        source: 'VISION',
+        newStatus: r.extractionSuccess && r.quantity > 0 ? 'COVERED' : 'GAP_FILLED',
+        dataQuality: r.confidenceScore >= 70 ? 'NORMATIVE' : 'ESTIMATED',
+        note: `[VISION | ${r.method || 'odczyt'}] ${r.note}`,
+    }));
+}
+
+async function processBrainBatch(
+    ai: any,
+    elements: ElementWithContext[],
+    brainContext: BrainContextResponse | null,
+    objectType: ObjectType,
+    objectArea_m2: number | null
+): Promise<QuantityResult[]> {
+    const areaContext = objectArea_m2 ? `Powierzchnia budynku: ${objectArea_m2} m²` : 'Powierzchnia nieznana.';
+
+    const prompt = `
+Szacujesz parametrycznie ilości dla poniższych elementów przy braku rysunków:
+Typ obiektu: ${objectType}
+${areaContext}
+
+Wykorzystaj te wskaźniki historyczne z PESAM Brain (jeśli są dostępne):
+${JSON.stringify(brainContext?.indicators || [], null, 2)}
+
+ZADANIE:
+1. Użyj wyszukiwarki Google Search, aby znaleźć typowe normatywne zużycie materiałów i robocizny dla obiektów typu "${objectType}" w polskim budownictwie (np. "średnia ilość tynku na m2 powierzchni użytkowej", "zużycie betonu w stropach na m2").
+2. Oblicz ilości parametrycznie, mnożąc wskaźnik przez powierzchnię użytkową budynku.
+3. Pokaż obliczenie krok po kroku w "calculationNote".
+    `.trim();
+
+    const result = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+            systemInstruction: BRAIN_SYSTEM_INSTRUCTION,
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: BRAIN_QUANTITY_SCHEMA as any,
+            tools: [
+                { googleSearch: {} } // 👈 WŁĄCZENIE GROUNDINGU W LOCIE!
+            ]
+        },
+    });
+
+    const rawText = result.text ?? "{}";
+    const parsed = JSON.parse(rawText) as { results: any[] };
+
+    return parsed.results.map((r): QuantityResult => ({
+        elementId: r.elementId,
+        divisionId: elements.find(el => el.elementId === r.elementId)?.divisionId ?? 'D1',
+        quantity: r.quantity,
+        unit: r.unit,
+        source: 'BRAIN_INDICATOR',
+        newStatus: 'GAP_FILLED',
+        dataQuality: 'ESTIMATED',
+        note: `[BRAIN | ${r.indicatorUsed}] ${r.calculationNote}`,
+    }));
+}
+
+// ================================================================
+// GŁÓWNY HANDLER POST
+// ================================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Ilościowiec] === ROZPOCZĘTO WYCENĘ PARAMETRYCZNĄ (v2.1) ===");
+    console.log("==================================================");
+
+    try {
+        const body = await req.json() as { tenderId: string; useBrainFallback: boolean };
+        const { tenderId } = body;
+
+        if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
+
+        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
+        const manifestSnap = await adminDb.doc(manifestPath).get();
+        if (!manifestSnap.exists) throw new Error("Manifest nie istnieje.");
+
+        const manifest = manifestSnap.data() as ScopeManifest;
+        const { objectType, objectArea_m2 } = manifest.meta;
+
+        const filesSnap = await adminDb.collection(`tenders/${tenderId}/files`).get();
+        const fileStorageMap = new Map<string, string>();
+        filesSnap.docs.forEach(doc => fileStorageMap.set(doc.id, doc.data().storagePath ?? ''));
+
+        const allElements: ElementWithContext[] = manifest.requiredDivisions.flatMap(div =>
+            div.elements.map(el => ({
+                elementId: el.elementId,
+                divisionId: div.divisionId,
+                name: el.name,
+                unit: el.unit,
+                gapFillerStrategy: el.gapFillerStrategy,
+                gapFillerHint: el.gapFillerHint,
+                mappedFileId: el.mappedFileId ?? null,
+                mappedStoragePath: el.mappedFileId ? (fileStorageMap.get(el.mappedFileId) ?? null) : null,
+                extractionHint: manifest.coverageStatus.find(c => c.elementId === el.elementId)?.gapFillerNote ?? null,
+            }))
+        );
+
+        // Rozdział na ścieżki (Wizyjna oraz Szacunkowa)
+        const visionElements = allElements.filter(el => el.mappedFileId !== null && el.mappedStoragePath !== null);
+        const brainElements = allElements.filter(el => el.mappedFileId === null);
+
+        const ai = new GoogleGenAI({
+            vertexai: true,
+            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+            location: "global",
+        });
+
+        const allResults: QuantityResult[] = [];
+
+        // 1. ŚCIEŻKA VISION
+        if (visionElements.length > 0) {
+            const byFile = new Map<string, ElementWithContext[]>();
+            for (const el of visionElements) {
+                const key = el.mappedFileId!;
+                if (!byFile.has(key)) byFile.set(key, []);
+                byFile.get(key)!.push(el);
+            }
+
+            for (const [fileId, fileElements] of byFile) {
+                const storagePath = fileElements[0].mappedStoragePath!;
+                const fileName = storagePath.split('/').pop() ?? fileId;
+                const fileData = await fetchFileAsBase64(storagePath);
+
+                if (!fileData) {
+                    brainElements.push(...fileElements);
+                    continue;
+                }
+
+                for (let i = 0; i < fileElements.length; i += VISION_BATCH_SIZE) {
+                    const batch = fileElements.slice(i, i + VISION_BATCH_SIZE);
+                    try {
+                        const batchResults = await processVisionBatch(ai, batch, fileData.base64, fileData.mimeType, fileName);
+                        allResults.push(...batchResults);
+
+                        const failed = batchResults
+                            .filter(r => r.newStatus === 'GAP_FILLED')
+                            .map(r => fileElements.find(el => el.elementId === r.elementId)!)
+                            .filter(Boolean);
+
+                        brainElements.push(...failed);
+                    } catch {
+                        brainElements.push(...batch);
+                    }
+                }
+            }
+        }
+
+        // 2. ŚCIEŻKA BRAIN
+        if (brainElements.length > 0) {
+            const brainContext = await fetchBrainIndicators(req, objectType);
+
+            for (let i = 0; i < brainElements.length; i += BRAIN_BATCH_SIZE) {
+                const batch = brainElements.slice(i, i + BRAIN_BATCH_SIZE);
+                try {
+                    const batchResults = await processBrainBatch(ai, batch, brainContext, objectType, objectArea_m2);
+                    allResults.push(...batchResults);
+                } catch {
+                    for (const el of batch) {
+                        allResults.push({
+                            elementId: el.elementId,
+                            divisionId: el.divisionId,
+                            quantity: 0,
+                            unit: el.unit,
+                            source: 'BRAIN_INDICATOR',
+                            newStatus: 'GAP_FILLED',
+                            dataQuality: 'ESTIMATED',
+                            note: `[BRAIN] Awaryjny brak danych – wymagana weryfikacja.`,
+                        });
+                    }
+                }
+            }
+        }
+
+        // POPRAWKA OBRONNA: Filtrujemy nieistniejące ID (odrzucamy halucynacje z Gemini)
+        const validResults = allResults.filter(r => allElements.some(el => el.elementId === r.elementId));
+
+        // Aplikowanie wyników
+        const updatedDivisions = manifest.requiredDivisions.map(div => ({
+            ...div,
+            elements: div.elements.map(el => {
+                const r = validResults.find(res => res.elementId === el.elementId);
+                return r ? { ...el, quantity: r.quantity, quantitySource: r.source } : el;
+            })
+        }));
+
+        const updatedCoverage = manifest.coverageStatus.map(entry => {
+            const r = validResults.find(res => res.elementId === entry.elementId);
+            if (!r) return entry;
+            return {
+                ...entry,
+                status: r.newStatus,
+                dataQuality: r.dataQuality,
+                quantityEstimated: r.quantity,
+                quantitySource: r.source,
+                gapFillerNote: r.note,
+                lastUpdatedBy: 'agent-ilosciowiec',
+                lastUpdatedAt: new Date().toISOString()
+            };
+        });
+
+        const now = new Date().toISOString();
+        await adminDb.doc(manifestPath).update({
+            requiredDivisions: updatedDivisions,
+            coverageStatus: updatedCoverage,
+            'meta.updatedAt': now,
+            'meta.completedPhases': [...(manifest.meta.completedPhases ?? []), 'QUANTITY_SURVEYOR'],
+        });
+
+        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-QUANTITY_SURVEYOR`).update({
+            status: 'DONE',
+            result: { processed: validResults.length },
+            updatedAt: now,
+        });
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Ilościowiec] ✅ Faza 2 zakończona w ${duration} sek.`);
+
+        return NextResponse.json({ success: true, phase: 'QUANTITY_SURVEYOR', summary: { processed: validResults.length } });
+
+    } catch (error: any) {
+        console.error('[Ilościowiec] ❌ BŁĄD AGENTA:', error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-detektyw-mapowania/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-ilosciowiec/route.ts ---
+
+// ============================================================
+// PESAM 2.0 – Agent "Ilościowiec (Quantity Surveyor)"
+// POST /api/kosztorysant/agent-ilosciowiec
+//
+// ROLA W DAG: Faza 2 – po MAPPING_DETECTIVE, przed SILENT_AUDITOR
+// WEJŚCIE:   ScopeManifest z wypełnionymi mappedFileId (wynik Detektywa)
+// WYJŚCIE:   quantity + dataQuality na każdym elemencie,
+//            statusy COVERED / GAP_FILLED w coverageStatus
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb, adminStorage } from '@/lib/firebase/admin';
+import { GoogleGenAI, Type } from '@google/genai';
+import type {
+    ScopeManifest,
+    ScopeDivision,
+    ScopeElement,
+    CoverageEntry,
+    CoverageStatus,
+    DataQuality,
+    QuantityResult,
+    AgentPhase,
+    ObjectType,
+} from '../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+const VISION_BATCH_SIZE = 5;
+const BRAIN_BATCH_SIZE = 15;
+
+// ================================================================
+// Typy wewnętrzne
+// ================================================================
+
+interface ElementWithContext {
+    elementId: string;
+    divisionId: string;
+    name: string;
+    unit: string;
+    gapFillerStrategy: string;
+    gapFillerHint?: string;
+    mappedFileId: string | null;
+    mappedStoragePath: string | null;
+    extractionHint: string | null;
+}
+
+interface BrainContextResponse {
+    indicators: Array<{
+        elementName: string;
+        valuePerM2: number | null;
+        valuePerM3: number | null;
+        unit: string;
+        sampleSize: number;
+        confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+    }>;
+    objectType: ObjectType;
+    dataPoints: number;
+}
+
+// ================================================================
+// Response Schemas dla Gemini
+// ================================================================
+
+const VISION_QUANTITY_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        results: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    elementId: { type: Type.STRING },
+                    quantity: { type: Type.NUMBER },
+                    unit: { type: Type.STRING },
+                    method: { type: Type.STRING },
+                    confidenceScore: { type: Type.INTEGER },
+                    note: { type: Type.STRING },
+                    extractionSuccess: { type: Type.BOOLEAN },
+                },
+                required: ['elementId', 'quantity', 'unit', 'confidenceScore', 'note', 'extractionSuccess'],
+            },
+        },
+    },
+    required: ['results'],
+};
+
+const BRAIN_QUANTITY_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        results: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    elementId: { type: Type.STRING },
+                    quantity: { type: Type.NUMBER },
+                    unit: { type: Type.STRING },
+                    indicatorUsed: { type: Type.STRING },
+                    calculationNote: { type: Type.STRING },
+                    confidenceScore: { type: Type.INTEGER },
+                },
+                required: ['elementId', 'quantity', 'unit', 'indicatorUsed', 'calculationNote', 'confidenceScore'],
+            },
+        },
+    },
+    required: ['results'],
+};
+
+// ================================================================
+// System Prompts
+// ================================================================
+
+const VISION_SYSTEM_INSTRUCTION = `
+Jesteś Ilościowcem w systemie PESAM – doświadczonym kosztorysantem.
+Twoje zadanie to precyzyjne odczytanie ilości geometrycznych z załączonych rysunków/dokumentów na podstawie wskazań "extractionHint".
+
+ZASADY:
+1. Dla każdego elementu z listy odczytaj ilość zgodnie z podanym "extractionHint".
+2. Jeśli nie możesz odczytać liczby – ustaw extractionSuccess: false i quantity: 0.
+3. Podaj wynik w jednostce zgodnej z kosztorysem (m², m³, mb, szt., kpl., kg).
+
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
+`.trim();
+
+const BRAIN_SYSTEM_INSTRUCTION = `
+Jesteś Ilościowcem w systemie PESAM. Szacujesz ilości parametrycznie na podstawie wskaźników historycznych i powierzchni budynku.
+
+ZASADY:
+1. Dla każdego elementu zastosuj wskaźnik z dostarczonego kontekstu Brain lub własnej wiedzy inżynierskiej.
+2. Podstawa obliczeń to powierzchnia budynku podana w kontekście.
+3. Pokazuj obliczenie krok po kroku w "calculationNote".
+
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
+`.trim();
+
+// ================================================================
+// Pobieranie plików i wskaźników z Mózgu (Loopback)
+// ================================================================
+
+async function fetchFileAsBase64(storagePath: string): Promise<{ base64: string; mimeType: string } | null> {
+    try {
+        const bucket = adminStorage.bucket();
+        const file = bucket.file(storagePath);
+        const [exists] = await file.exists();
+        if (!exists) return null;
+        const [buffer] = await file.download();
+        const ext = storagePath.split('.').pop()?.toLowerCase() ?? '';
+        const mimeMap: Record<string, string> = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' };
+        return { base64: buffer.toString('base64'), mimeType: mimeMap[ext] || 'application/octet-stream' };
+    } catch { return null; }
+}
+
+async function fetchBrainIndicators(
+    req: NextRequest,
+    objectType: ObjectType
+): Promise<BrainContextResponse | null> {
+    try {
+        const port = process.env.PORT || "8080";
+        const url = `http://127.0.0.1:${port}/api/kosztorysant/brain/context?objectType=${objectType}`;
+        console.log(`[Ilościowiec] 🧠 Pobieram kontekst Mózgu lokalnie przez GET: ${url}`);
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                ...(req.headers.get("cookie") ? { "Cookie": req.headers.get("cookie") || "" } : {}),
+                ...(req.headers.get("authorization") ? { "Authorization": req.headers.get("authorization") || "" } : {})
+            }
+        });
+
+        if (!response.ok) return null;
+        return await response.json();
+    } catch (err) {
+        console.warn(`[Ilościowiec] Błąd pobierania Mózgu:`, err);
+        return null;
+    }
+}
+
+// ================================================================
+// Wywołania Gemini (Vision oraz Brain)
+// ================================================================
+
+async function processVisionBatch(
+    ai: any,
+    elements: ElementWithContext[],
+    fileBase64: string,
+    mimeType: string,
+    fileName: string
+): Promise<QuantityResult[]> {
+    const prompt = `
+Analizujesz plik: "${fileName}"
+Dla każdego elementu z poniższej listy odczytaj DOKŁADNĄ ILOŚĆ z rysunku:
+${JSON.stringify(elements.map(el => ({ elementId: el.elementId, name: el.name, unit: el.unit, hint: el.extractionHint })), null, 2)}
+    `.trim();
+
+    const result = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{
+            role: "user",
+            parts: [
+                { inlineData: { mimeType, data: fileBase64 } },
+                { text: prompt }
+            ]
+        }],
+        config: {
+            systemInstruction: VISION_SYSTEM_INSTRUCTION,
+            temperature: 0.0,
+            responseMimeType: "application/json",
+            responseSchema: VISION_QUANTITY_SCHEMA as any,
+        },
+    });
+
+    const rawText = result.text ?? "{}";
+    const parsed = JSON.parse(rawText) as { results: any[] };
+
+    return parsed.results.map((r): QuantityResult => ({
+        elementId: r.elementId,
+        divisionId: elements.find(el => el.elementId === r.elementId)?.divisionId ?? 'D1',
+        quantity: r.quantity,
+        unit: r.unit,
+        source: 'VISION',
+        newStatus: r.extractionSuccess && r.quantity > 0 ? 'COVERED' : 'GAP_FILLED',
+        dataQuality: r.confidenceScore >= 70 ? 'NORMATIVE' : 'ESTIMATED',
+        note: `[VISION | ${r.method || 'odczyt'}] ${r.note}`,
+    }));
+}
+
+async function processBrainBatch(
+    ai: any,
+    elements: ElementWithContext[],
+    brainContext: BrainContextResponse | null,
+    objectType: ObjectType,
+    objectArea_m2: number | null
+): Promise<QuantityResult[]> {
+    const areaContext = objectArea_m2 ? `Powierzchnia budynku: ${objectArea_m2} m²` : 'Powierzchnia nieznana.';
+    const prompt = `
+Typ obiektu: ${objectType}
+${areaContext}
+WSKAŹNIKI MÓZGU: ${JSON.stringify(brainContext?.indicators || [], null, 2)}
+ELEMENTY DO OSZACOWANIA: ${JSON.stringify(elements.map(el => ({ elementId: el.elementId, name: el.name, unit: el.unit })), null, 2)}
+    `.trim();
+
+    const result = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+            systemInstruction: BRAIN_SYSTEM_INSTRUCTION,
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: BRAIN_QUANTITY_SCHEMA as any,
+        },
+    });
+
+    const rawText = result.text ?? "{}";
+    const parsed = JSON.parse(rawText) as { results: any[] };
+
+    return parsed.results.map((r): QuantityResult => ({
+        elementId: r.elementId,
+        divisionId: elements.find(el => el.elementId === r.elementId)?.divisionId ?? 'D1',
+        quantity: r.quantity,
+        unit: r.unit,
+        source: 'BRAIN_INDICATOR',
+        newStatus: 'GAP_FILLED',
+        dataQuality: 'ESTIMATED',
+        note: `[BRAIN | ${r.indicatorUsed}] ${r.calculationNote}`,
+    }));
+}
+
+// ================================================================
+// GŁÓWNY HANDLER POST
+// ================================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Ilościowiec] === FAZA 2: ZAMIANA NAZW W LICZBY ===");
+    console.log("==================================================");
+
+    try {
+        const body = await req.json() as { tenderId: string; useBrainFallback: boolean };
+        const { tenderId } = body;
+
+        if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
+
+        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
+        const manifestSnap = await adminDb.doc(manifestPath).get();
+        if (!manifestSnap.exists) throw new Error("Manifest nie istnieje.");
+
+        const manifest = manifestSnap.data() as ScopeManifest;
+        const { objectType, objectArea_m2 } = manifest.meta;
+
+        const filesSnap = await adminDb.collection(`tenders/${tenderId}/files`).get();
+        const fileStorageMap = new Map<string, string>();
+        filesSnap.docs.forEach(doc => fileStorageMap.set(doc.id, doc.data().storagePath ?? ''));
+
+        const allElements: ElementWithContext[] = manifest.requiredDivisions.flatMap(div =>
+            div.elements.map(el => ({
+                elementId: el.elementId,
+                divisionId: div.divisionId,
+                name: el.name,
+                unit: el.unit,
+                gapFillerStrategy: el.gapFillerStrategy,
+                gapFillerHint: el.gapFillerHint,
+                mappedFileId: el.mappedFileId ?? null,
+                mappedStoragePath: el.mappedFileId ? (fileStorageMap.get(el.mappedFileId) ?? null) : null,
+                extractionHint: manifest.coverageStatus.find(c => c.elementId === el.elementId)?.gapFillerNote ?? null,
+            }))
+        );
+
+        // Rozdział na ścieżki
+        const visionElements = allElements.filter(el => el.mappedFileId !== null && el.mappedStoragePath !== null);
+        const brainElements = allElements.filter(el => el.mappedFileId === null);
+
+        const ai = new GoogleGenAI({
+            vertexai: true,
+            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+            location: "global",
+        });
+
+        const allResults: QuantityResult[] = [];
+
+        // 1. Ścieżka VISION
+        if (visionElements.length > 0) {
+            const byFile = new Map<string, ElementWithContext[]>();
+            for (const el of visionElements) {
+                const key = el.mappedFileId!;
+                if (!byFile.has(key)) byFile.set(key, []);
+                byFile.get(key)!.push(el);
+            }
+
+            for (const [fileId, fileElements] of byFile) {
+                const storagePath = fileElements[0].mappedStoragePath!;
+                const fileName = storagePath.split('/').pop() ?? fileId;
+                const fileData = await fetchFileAsBase64(storagePath);
+
+                if (!fileData) {
+                    brainElements.push(...fileElements);
+                    continue;
+                }
+
+                for (let i = 0; i < fileElements.length; i += VISION_BATCH_SIZE) {
+                    const batch = fileElements.slice(i, i + VISION_BATCH_SIZE);
+                    try {
+                        const batchResults = await processVisionBatch(ai, batch, fileData.base64, fileData.mimeType, fileName);
+                        allResults.push(...batchResults);
+
+                        // Elementy, których nie udało się odczytać z wizji -> przekieruj do Mózgu
+                        const failed = batchResults
+                            .filter(r => r.newStatus === 'GAP_FILLED')
+                            .map(r => fileElements.find(el => el.elementId === r.elementId)!)
+                            .filter(Boolean);
+
+                        brainElements.push(...failed);
+                    } catch {
+                        brainElements.push(...batch);
+                    }
+                }
+            }
+        }
+
+        // 2. Ścieżka BRAIN
+        if (brainElements.length > 0) {
+            const brainContext = await fetchBrainIndicators(req, objectType);
+
+            for (let i = 0; i < brainElements.length; i += BRAIN_BATCH_SIZE) {
+                const batch = brainElements.slice(i, i + BRAIN_BATCH_SIZE);
+                try {
+                    const batchResults = await processBrainBatch(ai, batch, brainContext, objectType, objectArea_m2);
+                    allResults.push(...batchResults);
+                } catch {
+                    for (const el of batch) {
+                        allResults.push({
+                            elementId: el.elementId,
+                            divisionId: el.divisionId,
+                            quantity: 0,
+                            unit: el.unit,
+                            source: 'BRAIN_INDICATOR',
+                            newStatus: 'GAP_FILLED',
+                            dataQuality: 'ESTIMATED',
+                            note: `[BRAIN] Awaryjny brak danych – wymagana weryfikacja.`,
+                        });
+                    }
+                }
+            }
+        }
+
+        // POPRAWKA OBRONNA: Filtrujemy nieistniejące ID (odrzucamy halucynacje z Gemini)
+        const validResults = allResults.filter(r => allElements.some(el => el.elementId === r.elementId));
+
+        // Aplikowanie wyników
+        const updatedDivisions = manifest.requiredDivisions.map(div => ({
+            ...div,
+            elements: div.elements.map(el => {
+                const r = validResults.find(res => res.elementId === el.elementId);
+                return r ? { ...el, quantity: r.quantity, quantitySource: r.source } : el;
+            })
+        }));
+
+        const updatedCoverage = manifest.coverageStatus.map(entry => {
+            const r = validResults.find(res => res.elementId === entry.elementId);
+            if (!r) return entry;
+            return {
+                ...entry,
+                status: r.newStatus,
+                dataQuality: r.dataQuality,
+                quantityEstimated: r.quantity,
+                quantitySource: r.source,
+                gapFillerNote: r.note,
+                lastUpdatedBy: 'agent-ilosciowiec',
+                lastUpdatedAt: new Date().toISOString()
+            };
+        });
+
+        const now = new Date().toISOString();
+        await adminDb.doc(manifestPath).update({
+            requiredDivisions: updatedDivisions,
+            coverageStatus: updatedCoverage,
+            'meta.updatedAt': now,
+            'meta.completedPhases': [...(manifest.meta.completedPhases ?? []), 'QUANTITY_SURVEYOR'],
+        });
+
+        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-QUANTITY_SURVEYOR`).update({
+            status: 'DONE',
+            result: { processed: validResults.length },
+            updatedAt: now,
+        });
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Ilościowiec] ✅ Faza 2 zakończona w ${duration} sek.`);
+
+        return NextResponse.json({ success: true, phase: 'QUANTITY_SURVEYOR', summary: { processed: validResults.length } });
+
+    } catch (error: any) {
+        console.error('[Ilościowiec] ❌ BŁĄD AGENTA:', error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-ilosciowiec/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-cichy-rewident/route.ts ---
+
+// ============================================================
+// PESAM 2.1 – Agent "Cichy Rewident (Silent Auditor)" z Google Search Grounding
+// POST /api/kosztorysant/agent-cichy-rewident
+//
+// ROLA W DAG: Faza 3 – po QUANTITY_SURVEYOR, przed LEGAL / BROKER
+// WEJŚCIE:   ScopeManifest (z ilościami wyliczonymi przez Ilościowca)
+// WYJŚCIE:   Nowe pozycje (TECH_REQUIRED) dodane do manifestu oraz Alerty
+//
+// FILOZOFIA PESAM 2.1:
+//   Nawet jeśli Detektyw i Ilościowiec wyciągnęli wszystko z rysunków,
+//   inżynier projektowy mógł zapomnieć o kluczowych instalacjach prawnych.
+//   Silent Auditor korzysta z Google Search, by przeszukać polskie przepisy (np. WT 2021)
+//   dla danego typu budynku i automatycznie doliczyć brakujące pozycje technologiczne.
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import { GoogleGenAI, Type } from '@google/genai';
+import { buildMandatoryMinimum } from '../_shared/heurystyki';
+import type {
+    ScopeManifest,
+    TechAlert,
+    AgentPhase,
+    CoverageEntry,
+    ScopeDivision
+} from '../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+const MODEL_FLASH = "gemini-2.5-flash";
+
+// POPRAWKA: Usunięcie problematycznych "enum" ze schematu odpowiedzi, by uniknąć błędu payloadu Google API
+const AUDITOR_RESPONSE_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        alerts: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    itemName: { type: Type.STRING },
+                    targetDivisionId: { type: Type.STRING },
+                    reason: { type: Type.STRING },
+                    severity: {
+                        type: Type.STRING,
+                        description: "Musi przyjąć dokładnie jedną z wartości: LOW, MEDIUM, HIGH, lub CRITICAL"
+                    },
+                    suggestedStrategy: {
+                        type: Type.STRING,
+                        description: "Musi przyjąć dokładnie jedną z wartości: SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, lub ASK_USER"
+                    },
+                    suggestedUnit: { type: Type.STRING }
+                },
+                required: ['itemName', 'targetDivisionId', 'reason', 'severity', 'suggestedStrategy', 'suggestedUnit']
+            }
+        },
+        auditorSummary: { type: Type.STRING }
+    },
+    required: ['alerts', 'auditorSummary']
+};
+
+const AUDITOR_SYSTEM_INSTRUCTION = `
+Jesteś Cichym Rewidentem Technologicznym w systemie PESAM. Jesteś doświadczonym Inżynierem Kontraktu.
+Twoje zadanie to znalezienie braków technologicznych w kosztorysie, o których zapomniał projektant.
+
+WYKORZYSTAJ narzędzie wyszukiwania Google Search, aby zweryfikować polskie warunki techniczne (WT 2021) oraz prawo budowlane dla wybranego typu obiektu (np. "wymagania separatora tłuszczu w kuchniach zbiorowych", "klapy dymowe klatki schodowej przepisy", "agregat prądotwórczy szpital normy").
+
+ZASADA: W kosztorysowaniu lepiej doliczyć element bezpieczeństwa i go później usunąć, niż zapomnieć i ponieść stratę.
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM JSON.
+`.trim();
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Cichy Rewident] === FAZA 3: ANALIZA PUŁAPEK TECHNOLOGICZNYCH (v2.1) ===");
+    console.log("==================================================");
+
+    try {
+        const body = await req.json();
+        const { tenderId, objectTypeHint } = body;
+
+        if (!tenderId) {
+            console.error("[Cichy Rewident] ❌ Błąd: Brak parametru tenderId.");
+            return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
+        }
+
+        console.log(`[Cichy Rewident] Odczytuję manifest dla projektu: "${tenderId}"...`);
+        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
+        const manifestSnap = await adminDb.doc(manifestPath).get();
+        if (!manifestSnap.exists) throw new Error("ScopeManifest nie istnieje.");
+
+        const manifest = manifestSnap.data() as ScopeManifest;
+
+        // Zbieramy listę tego, co już mamy w kosztorysie
+        const currentElements = manifest.requiredDivisions.flatMap(d => d.elements.map(e => e.name));
+        console.log(`[Cichy Rewident] Liczba aktualnych pozycji w wycenie: ${currentElements.length}`);
+
+        console.log("[Cichy Rewident] Inicjalizuję klienta GoogleGenAI (Vertex AI Grounding)...");
+        const ai = new GoogleGenAI({
+            vertexai: true,
+            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+            location: "global",
+        });
+
+        const prompt = `
+TYP OBIEKTU: ${objectTypeHint}
+
+AKTUALNY ZAKRES KOSZTORYSU:
+${JSON.stringify(currentElements, null, 2)}
+
+ZADANIE:
+1. Przeszukaj internet za pomocą Google Search pod kątem polskich norm technicznych i przepisów ppoż/budowlanych dla budynków typu: "${objectTypeHint}".
+2. Wyryj krytyczne instalacje, systemy lub urządzenia, o których zapomniał projektant, a które są bezwzględnie wymagane do odbioru technicznego budynku.
+3. Wylistuj maksymalnie 5 najważniejszych braków. Jeśli kosztorys jest kompletny, zwróć pustą tablicę "alerts".
+        `.trim();
+
+        console.log("[Cichy Rewident] Wysyłam zapytanie do Gemini z włączonym uziemieniem wyszukiwarki Google...");
+
+        const result = await ai.models.generateContent({
+            model: MODEL_FLASH,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                systemInstruction: AUDITOR_SYSTEM_INSTRUCTION,
+                temperature: 0.1,
+                responseMimeType: "application/json",
+                responseSchema: AUDITOR_RESPONSE_SCHEMA as any,
+                tools: [
+                    { googleSearch: {} } // 👈 GROUNDING Z GOOGLE SEARCH WŁĄCZONE!
+                ]
+            },
+        });
+
+        const rawText = result.text ?? "{}";
+        const parsed = JSON.parse(rawText) as { alerts: any[], auditorSummary: string };
+
+        const techAlerts: TechAlert[] = [];
+        const newCoverage: CoverageEntry[] = [...manifest.coverageStatus];
+        const newDivisions: ScopeDivision[] = JSON.parse(JSON.stringify(manifest.requiredDivisions)); // Kopia struktury
+
+        const now = new Date().toISOString();
+
+        console.log(`[Cichy Rewident] Interpretuję ${parsed.alerts.length} braków technologicznych wykrytych przez AI...`);
+
+        for (const alert of parsed.alerts) {
+            const elementId = `TECH-REQ-${Math.floor(10000 + Math.random() * 90000)}`;
+            console.log(`[Cichy Rewident] Dodaję automatycznie brakującą pozycję: "${alert.itemName}" do działu ${alert.targetDivisionId}`);
+
+            techAlerts.push({
+                alertId: elementId,
+                itemName: alert.itemName,
+                targetDivisionId: alert.targetDivisionId,
+                reason: alert.reason,
+                severity: alert.severity,
+                suggestedStrategy: alert.suggestedStrategy,
+                suggestedUnit: alert.suggestedUnit,
+                autoAdded: true
+            });
+
+            // Dopisywanie brakującej pozycji technologicznej do działu WBS
+            let division = newDivisions.find(d => d.divisionId === alert.targetDivisionId);
+            if (!division) {
+                division = {
+                    divisionId: alert.targetDivisionId,
+                    divisionName: `Dział ${alert.targetDivisionId}`,
+                    displayOrder: 99,
+                    elements: []
+                };
+                newDivisions.push(division);
+            }
+
+            division.elements.push({
+                elementId,
+                name: `[Wymóg Tech] ${alert.itemName}`,
+                unit: alert.suggestedUnit,
+                source: 'TECH_AUDIT',
+                isMandatoryByLaw: true,
+                applicableObjectTypes: 'ALL',
+                minDocLevel: 0,
+                gapFillerStrategy: alert.suggestedStrategy,
+                techAuditNote: alert.reason,
+                mappedFileId: null,
+                quantity: null,
+            });
+
+            // Rejestracja w CoverageStatus jako TECH_REQUIRED
+            newCoverage.push({
+                elementId,
+                divisionId: alert.targetDivisionId,
+                status: 'TECH_REQUIRED',
+                coveredBySectionId: null,
+                dataQuality: 'MISSING',
+                gapFillerNote: `Wymóg dodany bezpieczeństwa kosztorysu: ${alert.reason}`,
+                gapFillerValue: null,
+                lastUpdatedBy: 'agent-cichy-rewident',
+                lastUpdatedAt: now
+            });
+        }
+
+        console.log(`[Cichy Rewident] Aktualizuję ScopeManifest w Firestore o wykryte pułapki...`);
+        const completedPhases: AgentPhase[] = [...(manifest.meta.completedPhases ?? []), 'SILENT_AUDITOR'];
+
+        await adminDb.doc(manifestPath).update({
+            requiredDivisions: newDivisions,
+            coverageStatus: newCoverage,
+            techAlerts: [...(manifest.techAlerts || []), ...techAlerts],
+            'meta.updatedAt': now,
+            'meta.completedPhases': completedPhases,
+        });
+
+        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-SILENT_AUDITOR`).update({
+            status: 'DONE',
+            result: { alertsFound: techAlerts.length, summary: parsed.auditorSummary },
+            updatedAt: now,
+        });
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Cichy Rewident] ✅ Faza 3 zakończona sukcesem w ${duration} sek.`);
+        console.log("==================================================");
+
+        return NextResponse.json({
+            success: true,
+            phase: 'SILENT_AUDITOR',
+            alertsGenerated: techAlerts.length,
+            summary: { alertsFound: techAlerts.length, comment: parsed.auditorSummary }
+        });
+
+    } catch (error: any) {
+        console.error('[Cichy Rewident] ❌ BŁĄD AGENTA:', error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-cichy-rewident/route.ts ---
+
+
 --- START OF FILE src/app/api/kosztorysant/agent-analityk-zakresu/route.ts ---
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -3885,8 +5273,13 @@ Pamiętaj: Skup się na 20-45 pozycjach elementów scalonych.
 --- START OF FILE src/app/api/kosztorysant/agent-gap-filler/route.ts ---
 
 // ============================================================
-// PESAM – Agent Gap Filler (Łatacz Luk) ZINTEGROWANY Z MÓZGIEM
+// PESAM 2.0 – Agent Gap Filler (Łatacz Luk) ZINTEGROWANY Z ILOŚCIOWCEM
 // POST /api/kosztorysant/agent-gap-filler
+//
+// FILOZOFIA PESAM 2.0:
+//   Jeśli Ilościowiec (QUANTITY_SURVEYOR) zdołał wyliczyć precyzyjną ilość (m², m³),
+//   Gap Filler nie szacuje wartości wskaźnikowo z powierzchni całkowitej, lecz używa
+//   tej wyliczonej ilości i mnoży ją przez twardą stawkę referencyjną.
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -3913,38 +5306,59 @@ interface GapCalcInput {
         totalCost_PLN: number | null;
     };
     brainIndicators: any | null;
+    preCalculatedQuantity: number | null; // 👈 NOWOŚĆ PESAM 2.0
 }
 
 function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
-    const { element, tenderData, brainIndicators } = input;
+    const { element, tenderData, brainIndicators, preCalculatedQuantity } = input;
     const area = tenderData.objectArea_m2;
     const roughCost = tenderData.totalRoughCost_PLN;
 
-    console.log(`[Gap Filler] [Przelicznik] Wyliczam pozycję: "${element.name}" | Strategia: ${element.gapFillerStrategy}`);
+    console.log(`[Gap Filler] [Kalkulator] Analizuję element: "${element.name}" | Strategia: ${element.gapFillerStrategy}`);
 
+    // KROK 0: PESAM 2.0 - Jeśli Ilościowiec wyliczył precyzyjną ilość, używamy jej wprost!
+    if (preCalculatedQuantity && preCalculatedQuantity > 0) {
+        let rate = 120; // Domyślna stawka referencyjna PLN za jednostkę (np. m2 malowania/tynków)
+        if (element.unit === 'm³') rate = 850; // Beton/wykopy
+        else if (element.unit === 't') rate = 5200; // Stal
+        else if (element.unit === 'szt.') rate = 3200; // Drzwi/okna średnio
+        else if (element.unit === 'kpl.') rate = 45000; // Centrale technologiczne
+
+        const cost = Math.round(preCalculatedQuantity * rate);
+        console.log(`[Gap Filler] [Kalkulator] Sukces (Precyzyjny obmiar): "${element.name}" -> ${preCalculatedQuantity.toFixed(2)} ${element.unit} * ${rate} PLN = ${cost} PLN.`);
+
+        return {
+            elementId: element.elementId,
+            divisionId: '',
+            strategy: element.gapFillerStrategy,
+            estimatedValue_PLN: cost,
+            note: `[PESAM 2.0] Wykorzystano precyzyjny obmiar od Ilościowca (${preCalculatedQuantity.toFixed(2)} ${element.unit}) pomnożony przez stawkę referencyjną ${rate} PLN/${element.unit}.`,
+            dataQuality: 'NORMATIVE',
+        };
+    }
+
+    // KROK 1: Klasyczny fallback wskaźnikowy (jeśli brak plików / obmiarów)
     switch (element.gapFillerStrategy) {
         case 'EUROKOD_NORM': {
             let quantity = 0;
             let unitCost_PLN = 0;
 
-            // FIX TS: Jawne przypisanie typu i pobranie wartości
             let usedMultiplier: number | undefined = element.gapFillerMultiplier;
             let noteSource = `Eurokod, mnożnik ${element.gapFillerMultiplier || 'domyślny'}`;
 
-            // 🧠 ZASTOSOWANIE PESAM BRAIN
+            // Zastosowanie bazy wiedzy Mózgu
             if (element.unit === 'm³' && element.name.toLowerCase().includes('fundament') && brainIndicators?.concretePerM2Floor?.avg) {
                 usedMultiplier = brainIndicators.concretePerM2Floor.avg;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił mnożnik dla Betonu: ${usedMultiplier!.toFixed(3)} m³/m²`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił mnożnik dla Betonu: ${usedMultiplier!.toFixed(3)} m³/m²`);
             } else if (element.unit === 'm²' && element.name.toLowerCase().includes('tynk') && brainIndicators?.plasterM2PerM2Floor?.avg) {
                 usedMultiplier = brainIndicators.plasterM2PerM2Floor.avg;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił mnożnik dla Tynków: ${usedMultiplier!.toFixed(3)} m²/m²`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił mnożnik dla Tynków: ${usedMultiplier!.toFixed(3)} m²/m²`);
             }
 
-            // FIX TS: Twarde sprawdzenie dla kompilatora przed matematyką
             if (!area || usedMultiplier === undefined || usedMultiplier <= 0) {
-                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Nie można doliczyć ${element.name} przez EUROKOD_NORM - brak powierzchni lub mnożnika.`);
+                console.warn(`[Gap Filler] [Kalkulator] ⚠️ Brak powierzchni lub mnożnika dla EUROKOD_NORM w: "${element.name}"`);
                 return null;
             }
 
@@ -3962,7 +5376,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
             if (quantity <= 0 || unitCost_PLN <= 0) return null;
 
             const cost = Math.round(quantity * unitCost_PLN);
-            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${quantity.toFixed(2)} ${element.unit} = ${cost} PLN.`);
+            console.log(`[Gap Filler] [Kalkulator] Sukces (Eurokod): "${element.name}" -> ${quantity.toFixed(2)} ${element.unit} = ${cost} PLN.`);
 
             return {
                 elementId: element.elementId,
@@ -3976,7 +5390,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
 
         case 'SEKOCENBUD_M2': {
             if (!area) {
-                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Brak powierzchni (objectArea_m2) dla SEKOCENBUD_M2 dla: "${element.name}"`);
+                console.warn(`[Gap Filler] [Kalkulator] ⚠️ Brak powierzchni dla SEKOCENBUD_M2 w: "${element.name}"`);
                 return null;
             }
 
@@ -3991,7 +5405,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
 
             const rate = detectRate(element.name, SEKOCENBUD_RATES);
             const cost = Math.round(area * rate);
-            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${area} m² x ${rate} PLN = ${cost} PLN.`);
+            console.log(`[Gap Filler] [Kalkulator] Sukces (Sekocenbud): "${element.name}" -> ${area} m² x ${rate} PLN = ${cost} PLN.`);
 
             return {
                 elementId: element.elementId,
@@ -4005,7 +5419,7 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
 
         case 'GUS_PERCENT': {
             if (!roughCost && !tenderData.totalCost_PLN) {
-                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Brak kosztów bazowych dla GUS_PERCENT w pozycji: "${element.name}"`);
+                console.warn(`[Gap Filler] [Kalkulator] ⚠️ Brak kosztów bazowych dla GUS_PERCENT w: "${element.name}"`);
                 return null;
             }
             const base = roughCost || tenderData.totalCost_PLN || 0;
@@ -4014,27 +5428,26 @@ function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
             let multiplier = element.gapFillerMultiplier || 0.08;
             let noteSource = `średnich wskaźników GUS`;
 
-            // 🧠 ZASTOSOWANIE PESAM BRAIN
+            // Zastosowanie bazy wiedzy Mózgu
             if (element.name.toLowerCase().includes('sanitarn') && brainIndicators?.proportions?.D5_sanitaryPercent?.avg) {
                 multiplier = brainIndicators.proportions.D5_sanitaryPercent.avg / 100;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił narzut Sanitarki: ${(multiplier * 100).toFixed(1)}%`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił narzut Sanitarki: ${(multiplier * 100).toFixed(1)}%`);
             } else if (element.name.toLowerCase().includes('elektrycz') && brainIndicators?.proportions?.D6_electricPercent?.avg) {
                 multiplier = brainIndicators.proportions.D6_electricPercent.avg / 100;
                 noteSource = `PESAM Brain (wiedza z historycznych projektów)`;
-                console.log(`[Gap Filler] 🧠 Mózg zastąpił narzut Elektryki: ${(multiplier * 100).toFixed(1)}%`);
+                console.log(`[Gap Filler] [Mózg] Mózg zastąpił narzut Elektryki: ${(multiplier * 100).toFixed(1)}%`);
             }
 
             const cost = Math.round(base * multiplier);
-
-            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${(multiplier * 100).toFixed(1)}% z bazy ${base} PLN = ${cost} PLN.`);
+            console.log(`[Gap Filler] [Kalkulator] Sukces (GUS): "${element.name}" -> ${(multiplier * 100).toFixed(1)}% z bazy ${base} PLN = ${cost} PLN.`);
 
             return {
                 elementId: element.elementId,
                 divisionId: '',
                 strategy: 'GUS_PERCENT',
                 estimatedValue_PLN: cost,
-                note: `${(multiplier * 100).toFixed(1)}% kosztu bazowego stanu surowego (${base.toLocaleString('pl-PL')} PLN) wg ${noteSource}`,
+                note: `${(multiplier * 100).toFixed(1)}% kosztu bazowego stanu surowego wg ${noteSource}`,
                 dataQuality: 'ESTIMATED',
             };
         }
@@ -4056,7 +5469,7 @@ function detectRate(name: string, rates: Record<string, number>): number {
 }
 
 // ============================================================
-// Pobieranie finansowych danych z Firestore
+// Pobieranie finansowych danych z kosztorysu
 // ============================================================
 
 async function extractTenderFinancials(tenderId: string): Promise<{
@@ -4064,12 +5477,12 @@ async function extractTenderFinancials(tenderId: string): Promise<{
     totalCost_PLN: number | null;
     concreteVolume_m3: number | null;
 }> {
-    console.log(`[Gap Filler] [Finanse] Przeszukuję dotychczas wyliczony kosztorys dla: ${tenderId}...`);
+    console.log(`[Gap Filler] [Finanse] Skanuję wyliczenia projektu: ${tenderId}...`);
     try {
         const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
         const data = tenderDoc.data();
         if (!data?.sections) {
-            console.log(`[Gap Filler] [Finanse] Brak sekcji (sections) w bazie.`);
+            console.log(`[Gap Filler] [Finanse] Brak sekcji kosztorysowych.`);
             return { totalRoughCost_PLN: null, totalCost_PLN: null, concreteVolume_m3: null };
         }
 
@@ -4078,7 +5491,6 @@ async function extractTenderFinancials(tenderId: string): Promise<{
         let concreteVolume = 0;
 
         for (const section of data.sections) {
-            // FIX TS: Wyeliminowano zbędne użycie ?? na korzyść standardowych if/else (ternary)
             const sectionTotal = section.items?.reduce(
                 (sum: number, item: any) => sum + (item.totalPrice ? item.totalPrice : ((item.unitPrice || 0) * (item.quantity || 1))),
                 0
@@ -4086,7 +5498,6 @@ async function extractTenderFinancials(tenderId: string): Promise<{
 
             totalCost += sectionTotal;
 
-            // Stan surowy = D1 (Zerowy) + D2 (Surowy)
             if (section.divisionId === 'D1' || section.divisionId === 'D2') {
                 totalRoughCost += sectionTotal;
             }
@@ -4098,27 +5509,25 @@ async function extractTenderFinancials(tenderId: string): Promise<{
             }
         }
 
-        console.log(`[Gap Filler] [Finanse] Podsumowanie: Koszt całkowity Roju = ${totalCost} PLN | Stan surowy = ${totalRoughCost} PLN`);
         return {
             totalRoughCost_PLN: totalRoughCost > 0 ? totalRoughCost : null,
             totalCost_PLN: totalCost > 0 ? totalCost : null,
             concreteVolume_m3: concreteVolume > 0 ? concreteVolume : null,
         };
     } catch (err) {
-        console.error(`[Gap Filler] [Finanse] Błąd odczytu danych kosztorysu:`, err);
+        console.error(`[Gap Filler] [Finanse] Błąd odczytu danych finansowych:`, err);
         return { totalRoughCost_PLN: null, totalCost_PLN: null, concreteVolume_m3: null };
     }
 }
 
 // ============================================================
-// Dopasowanie pozycji (Weryfikacja pokrycia)
+// Weryfikacja pokrycia (Co Rój zdołał wyliczyć)
 // ============================================================
 
 async function detectCoveredElements(
     tenderId: string,
     manifest: ScopeManifest
 ): Promise<Map<string, string>> {
-    console.log(`[Gap Filler] [Detekcja] Weryfikuję, co Rój zdołał wyliczyć w tym cyklu...`);
     const covered = new Map<string, string>();
 
     try {
@@ -4130,7 +5539,6 @@ async function detectCoveredElements(
                 for (const section of sections) {
                     if (section.divisionId === div.divisionId) {
                         if (section.sectionId?.startsWith('GAP-')) continue;
-                        // FIX TS: Zamiana operatora ?? na logiczny OR ||
                         covered.set(el.elementId, section.sectionId || section.divisionId);
                         break;
                     }
@@ -4147,7 +5555,6 @@ async function detectCoveredElements(
         console.error('[Gap Filler] [Detekcja] Błąd detekcji:', e);
     }
 
-    console.log(`[Gap Filler] [Detekcja] Wynik: ${covered.size} z ${manifest.coverageStatus.length} pozycji zostało już pokrytych przez Rój.`);
     return covered;
 }
 
@@ -4161,7 +5568,7 @@ function isNameMatch(sectionItemName: string, elementName: string): boolean {
 
 function buildAskUserQuestion(element: ScopeElement): string {
     const hint = element.gapFillerHint
-        ? `\n💡 Wskazówka systemowa: ${element.gapFillerHint}`
+        ? `\n💡 Wskazówka: ${element.gapFillerHint}`
         : '';
     return `Wycena pozycji **${element.name}** wymaga Twojej decyzji.${hint}\n\nPodaj mi oczekiwaną kwotę lub parametry ilościowe z jednostką, abym doliczył to do budżetu.`;
 }
@@ -4185,24 +5592,23 @@ export async function POST(req: NextRequest) {
         }
 
         const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
-        console.log(`[Gap Filler] Pobieram manifest projektu: "${manifestPath}"...`);
         const manifestDoc = await adminDb.doc(manifestPath).get();
 
         if (!manifestDoc.exists) {
-            console.error(`[Gap Filler] ❌ Błąd: Brak dokumentu ScopeManifest pod ścieżką "${manifestPath}"!`);
-            return NextResponse.json({ error: 'ScopeManifest nie istnieje dla tego projektu' }, { status: 404 });
+            console.error(`[Gap Filler] ❌ Błąd: Brak dokumentu ScopeManifest!`);
+            return NextResponse.json({ error: 'ScopeManifest nie istnieje' }, { status: 404 });
         }
 
         const manifest = manifestDoc.data() as ScopeManifest;
         const financials = await extractTenderFinancials(tenderId);
         const coveredMap = await detectCoveredElements(tenderId, manifest);
 
-        // 🧠 POBIERAMY WIEDZĘ MÓZGU DLA OBIEKTU
+        // Pobranie danych z PESAM Brain
         const objectType = manifest.meta.objectType;
         let brainIndicators: any = null;
 
         if (objectType && objectType !== 'inne') {
-            console.log(`[Gap Filler] 🧠 Odpytuję bazę PESAM Brain dla typu: ${objectType}...`);
+            console.log(`[Gap Filler] [Mózg] Odpytuję bazę PESAM Brain dla typu: ${objectType}...`);
             try {
                 const [indSnap, propSnap] = await Promise.all([
                     adminDb.doc(`settings/brainKnowledge/${objectType}/indicators`).get(),
@@ -4214,12 +5620,10 @@ export async function POST(req: NextRequest) {
                         ...indSnap.data(),
                         proportions: propSnap.exists ? propSnap.data() : null
                     };
-                    console.log(`[Gap Filler] ✅ Mózg pobrany poprawnie! Będzie wspierał szacowanie luk.`);
-                } else {
-                    console.log(`[Gap Filler] ⚠️ Mózg nie ma jeszcze danych dla tego typu obiektu.`);
+                    console.log(`[Gap Filler] [Mózg] Pobrano wskaźniki historyczne z Mózgu.`);
                 }
             } catch (e) {
-                console.error(`[Gap Filler] Błąd pobierania mózgu:`, e);
+                console.error(`[Gap Filler] Błąd pobierania Mózgu:`, e);
             }
         }
 
@@ -4256,7 +5660,7 @@ export async function POST(req: NextRequest) {
 
                 if (el.gapFillerStrategy === 'ASK_USER') {
                     const question = buildAskUserQuestion(el);
-                    console.log(`[Gap Filler] ⏸️ Pozycja "${el.name}" blokuje automatyczną wycenę (ASK_USER).`);
+                    console.log(`[Gap Filler] Pozycja "${el.name}" wymaga zapytania użytkownika (ASK_USER).`);
 
                     askUserQuestions.push({ elementId: el.elementId, question });
                     updatedCoverage.push({
@@ -4274,7 +5678,7 @@ export async function POST(req: NextRequest) {
                     continue;
                 }
 
-                // 🧠 Przeliczenie Z UŻYCIEM WIEDZY MÓZGU
+                // Kalkulacja z uwzględnieniem precyzyjnych ilości z PESAM 2.0 (Ilościowiec)
                 const result = calculateGapFill({
                     element: el,
                     tenderData: {
@@ -4282,7 +5686,9 @@ export async function POST(req: NextRequest) {
                         objectType: manifest.meta.objectType,
                         ...financials,
                     },
-                    brainIndicators
+                    brainIndicators,
+                    // Przekazujemy precyzyjny obmiar Ilościowca z bazy
+                    preCalculatedQuantity: existingCoverage?.quantityEstimated ?? el.quantity ?? null
                 });
 
                 if (result) {
@@ -4338,7 +5744,7 @@ export async function POST(req: NextRequest) {
         }
 
         const newScore = calculateNewConfidence(updatedCoverage, manifest.meta.confidenceScore);
-        console.log(`[Gap Filler] Aktualizuję ScopeManifest... Nowy ConfidenceScore: ${newScore}/100`);
+        console.log(`[Gap Filler] Aktualizuję manifest... Nowa pewność wyceny: ${newScore}%`);
 
         await adminDb.doc(`tenders/${tenderId}/scopeManifest/main`).update({
             coverageStatus: updatedCoverage,
@@ -4347,7 +5753,7 @@ export async function POST(req: NextRequest) {
         });
 
         if (gapFilledSections.length > 0) {
-            console.log(`[Gap Filler] Zapisuję ${gapFilledSections.length} wygenerowanych sekcji normowych w tenders/${tenderId}...`);
+            console.log(`[Gap Filler] Zapisuję ${gapFilledSections.length} wygenerowanych sekcji do kosztorysu...`);
             const tenderRef = adminDb.doc(`tenders/${tenderId}`);
             const tenderDoc = await tenderRef.get();
             const existingSections = tenderDoc.data()?.sections || [];
@@ -4371,8 +5777,7 @@ export async function POST(req: NextRequest) {
         };
 
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Gap Filler] ✅ Sukces: proces łatania zakończony w czasie ${duration} sek.`);
-        console.log("==================================================");
+        console.log(`[Gap Filler] ✅ Proces łatki zakończony pomyślnie w ${duration} sek.`);
 
         return NextResponse.json({
             success: true,
@@ -4384,10 +5789,7 @@ export async function POST(req: NextRequest) {
 
     } catch (error: any) {
         console.error('[Gap Filler] ❌ Krytyczny błąd podczas łatania kosztorysu:', error);
-        return NextResponse.json(
-            { error: 'Błąd Gap Fillera', details: String(error) },
-            { status: 500 }
-        );
+        return NextResponse.json({ error: 'Błąd Gap Fillera', details: String(error) }, { status: 500 });
     }
 }
 
@@ -5503,8 +6905,10 @@ export async function runCoverageAudit(
     const gapFilled = coverage.filter((c) => c.status === 'GAP_FILLED').length;
     const missing = coverage.filter((c) => c.status === 'MISSING').length;
     const waitingUser = coverage.filter((c) => c.status === 'WAITING_USER').length;
+    const needsQuantity = coverage.filter((c) => c.status === 'NEEDS_QUANTITY').length; // 👈 NOWOŚĆ
+    const techRequired = coverage.filter((c) => c.status === 'TECH_REQUIRED').length; // 👈 NOWOŚĆ
 
-    console.log(`[Coverage Audit] Dane pokrycia: Wyliczone=${covered} | Łatki=${gapFilled} | Brakujące=${missing} | Blokady=${waitingUser}`);
+    console.log(`[Coverage Audit] Dane pokrycia: Wyliczone=${covered} | Łatki=${gapFilled} | Wymogi Tech=${techRequired} | Brakujące=${missing + waitingUser + needsQuantity}`);
 
     // 1. Wykrywanie twardych braków (MISSING lub WAITING_USER)
     for (const entry of coverage.filter((c) => c.status === 'MISSING' || c.status === 'WAITING_USER')) {
@@ -5606,7 +7010,7 @@ export async function runCoverageAudit(
 
     // 5. Ostateczny wskaźnik pokrycia (Coverage Score)
     const weightedCoverage = total > 0
-        ? (covered * 1.0 + gapFilled * 0.7 + waitingUser * 0.3) / total
+        ? (covered * 1.0 + techRequired * 1.0 + gapFilled * 0.7 + waitingUser * 0.3) / total
         : 0;
     const coverageScore = Math.round(weightedCoverage * 100);
 
@@ -7411,43 +8815,30 @@ export async function GET(): Promise<NextResponse> {
 --- START OF FILE src/app/api/kosztorysant/glowny-kosztorysant/inicjalizuj/route.ts ---
 
 // ============================================================
-// PESAM – Inicjalizator Zadań (rozszerzony o Analizę Zakresu)
+// PESAM 2.0 – Inicjalizator Zadań (Dynamiczny odczyt SWZ / PFU)
 // POST /api/kosztorysant/glowny-kosztorysant/inicjalizuj
-//
-// ZMIANY:
-//   + Dynamiczne tworzenie kolejki zadań z nowymi Agentami
-//   + Dodany task ANALITYK_ZAKRESU jako inicjator Roju
-//   + Dodany task GAP_FILLER przed Rewidentem
-//   + Integracja ze zunifikowaną biblioteką @google/genai
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/admin';
 import { GoogleGenAI, Type } from '@google/genai';
+import type { AgentPhase } from '../../_shared/scopeManifest.types';
 
 export const dynamic = "force-dynamic";
 
 const MODEL_FLASH = "gemini-2.5-flash";
 
-type TaskType =
-    | 'ANALITYK_ZAKRESU'   // Twórca wzorca
-    | 'LEGAL'
-    | 'VISION'
-    | 'KNR'
-    | 'NORMATIVE_STEEL'
-    | 'PARAMETRIC'
-    | 'BROKER'
-    | 'GAP_FILLER'         // Łatacz luk
-    | 'REWIDENT';          // Audytor końcowy
+type TaskType = AgentPhase;
 
 interface Task {
     taskId: string;
     type: TaskType;
     status: 'PENDING' | 'IN_PROGRESS' | 'DONE' | 'ERROR';
     createdAt: string;
-    order: number;         // Kolejność w pętli roju
-    payload: Record<string, any>;
-    result?: any;
+    order: number;
+    dependsOn: string[];
+    payload: Record<string, unknown>;
+    result?: unknown;
     error?: string;
 }
 
@@ -7460,16 +8851,18 @@ interface ClassifierOutput {
     hasReinforcementDetails: boolean;
     hasGeotechnics: boolean;
     missingData: string[];
+    objectTypeHint: string;
+    objectAreaHint_m2: number | null; // 👈 Prawdziwa powierzchnia wyciągnięta z tekstu
 }
 
-// ============================================================
-// Szybki Klasyfikator Dokumentacji (Gemini)
-// ============================================================
-
+// ================================================================
+// Klasyfikator czytający rzeczywistą treść dokumentów przetargowych
+// ================================================================
 async function classifyDocuments(
-    fileList: Array<{ fileName: string; category: string; storagePath: string }>
+    fileList: any[],
+    documentTexts: Array<{ fileName: string; content: string }>
 ): Promise<ClassifierOutput> {
-    console.log(`[Inicjalizator] [Klasyfikacja] Analizuję strukturę ${fileList.length} plików wejściowych...`);
+    console.log(`[Inicjalizator] [Klasyfikacja] Analizuję strukturę i treść dokumentów (SWZ/PFU)...`);
 
     const ai = new GoogleGenAI({
         vertexai: true,
@@ -7477,25 +8870,34 @@ async function classifyDocuments(
         location: "global",
     });
 
+    // Budujemy kontekst tekstowy z przesłanych plików SWZ/PFU/OPZ
+    const textContext = documentTexts.length > 0
+        ? documentTexts.map(t => `=== PLIK: "${t.fileName}" ===\n${t.content.slice(0, 12000)}`).join("\n\n")
+        : "BRAK TREŚCI DOKUMENTÓW TEKSTOWYCH.";
+
     const prompt = `
-Oceń poziom dokumentacji i kompletność na podstawie następującej listy zaimportowanych plików:
+Oceń poziom dokumentacji, typ budynku i jego dokładną powierzchnię na podstawie załączonych plików.
+
+TREŚCI DOKUMENTÓW TEKSTOWYCH (SWZ/PFU/OPZ):
+${textContext}
+
+LISTA WSZYSTKICH PLIKÓW W PACZCE:
 ${JSON.stringify(fileList, null, 2)}
 
-Przypisz docLevel (0-4) oraz metodę wyceny:
-- LEVEL 0 -> PARAMETRIC (tylko ogólny opis / brak projektów)
-- LEVEL 1-2 -> ANALOGICAL (PFU / koncepcje)
-- LEVEL 3 -> ELEMENT_BASED (są rzuty architektoniczne, brak zbrojenia i instalacji)
-- LEVEL 4 -> DETAILED_KNR (pełny projekt wykonawczy ze specyfikacją)
+ZADANIE:
+Przeanalizuj treść dokumentów i znajdź:
+- objectAreaHint_m2: Dokładną powierzchnię użytkową (PUM) lub zabudowy zapisaną w tych dokumentach (np. "powierzchnia użytkowa budynku wynosi 1240 m2"). Zwróć jako liczbę. Jeśli nie ma jej w tekście, zwróć null.
+- objectTypeHint: Dokładny typ budynku (przedszkole / szkoła / biurowiec / hala_sportowa / hala_produkcyjna / budynek_mieszkalny / szpital / inne).
 
 Zwróć wynik jako czysty obiekt JSON.
-  `.trim();
+    `.trim();
 
     const response = await ai.models.generateContent({
         model: MODEL_FLASH,
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         config: {
-            systemInstruction: "Klasyfikuj dokumentację budowlaną pod kątem prawnym i technicznym. Odpowiadaj wyłącznie poprawnym JSON-em.",
-            temperature: 0.0,
+            systemInstruction: "Jesteś Głównym Analitykiem Przetargowym. Wyciągasz rzeczywiste dane liczbowe i typy z dokumentów. Odpowiadaj wyłącznie JSON-em.",
+            temperature: 0.0, // Maksymalny determinizm
             responseMimeType: "application/json",
             responseSchema: {
                 type: Type.OBJECT,
@@ -7507,54 +8909,150 @@ Zwróć wynik jako czysty obiekt JSON.
                     hasPFU: { type: Type.BOOLEAN },
                     hasReinforcementDetails: { type: Type.BOOLEAN },
                     hasGeotechnics: { type: Type.BOOLEAN },
-                    missingData: { type: Type.ARRAY, items: { type: Type.STRING } }
+                    missingData: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    objectTypeHint: { type: Type.STRING },
+                    objectAreaHint_m2: { type: Type.NUMBER }, // Wyciągamy rzeczywistą wartość
                 },
-                required: ['docLevel', 'estimationMethod', 'hasDrawings', 'hasSWZ', 'hasPFU', 'hasReinforcementDetails', 'hasGeotechnics', 'missingData']
-            }
-        }
+                required: [
+                    'docLevel', 'estimationMethod', 'hasDrawings', 'hasSWZ', 'hasPFU',
+                    'hasReinforcementDetails', 'hasGeotechnics', 'missingData', 'objectTypeHint', 'objectAreaHint_m2'
+                ],
+            },
+        },
     });
 
     const parsed: ClassifierOutput = JSON.parse(response.text ?? "{}");
-    console.log(`[Inicjalizator] [Klasyfikacja] Wynik: Level = ${parsed.docLevel} (${parsed.estimationMethod}). Wykryte rysunki: ${parsed.hasDrawings}`);
+
+    console.log(
+        `[Inicjalizator] [Klasyfikacja] Odczytano z dokumentów: ` +
+        `Typ = "${parsed.objectTypeHint}", Powierzchnia = ${parsed.objectAreaHint_m2 ?? "NIEZNANA"} m².`
+    );
+
     return parsed;
 }
 
-// ============================================================
-// Budowanie kolejki zadań dla Roju
-// ============================================================
-
+// ================================================================
+// Budowanie kolejki zadań DAG (Progressive Estimating)
+// ================================================================
 function buildTaskQueue(
     tenderId: string,
     classification: ClassifierOutput,
-    fileList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }>
+    fileList: any[]
 ): Task[] {
     const now = new Date().toISOString();
     const tasks: Task[] = [];
     let order = 0;
 
-    const swzFiles = fileList.filter((f) => ['SWZ', 'OPZ', 'PFU', 'UMOWA'].includes(f.category.toUpperCase()));
-    const drawingFiles = fileList.filter((f) => f.category.toUpperCase() === 'RYSUNEK');
+    const swzFiles = fileList.filter(f => ['SWZ', 'PFU', 'OPZ', 'UMOWA'].includes(f.category?.toUpperCase()));
+    const drawingFiles = fileList.filter(f => f.category?.toUpperCase() === 'DRAWING' || f.category?.toUpperCase() === 'RYSUNEK');
+    const hasAnyFiles = fileList.length > 0;
 
-    console.log(`[Inicjalizator] [Kolejka] Buduję optymalny łańcuch zadań dla przetargu: ${tenderId}...`);
+    console.log(`[Inicjalizator] Buduję optymalny łańcuch zadań (DAG) dla przetargu: ${tenderId}...`);
 
-    // 1. ANALITYK ZAKRESU – Zawsze na pierwszym miejscu (Tworzy ScopeManifest)
-    tasks.push({
-        taskId: `${tenderId}-ANALITYK_ZAKRESU`,
-        type: 'ANALITYK_ZAKRESU',
-        status: 'PENDING',
-        createdAt: now,
-        order: order++,
-        payload: {
-            tenderId,
-            docLevel: classification.docLevel,
-            estimationMethod: classification.estimationMethod,
-            sourceDocuments: fileList.map((f) => f.fileName),
-            swzFileIds: swzFiles.map((f) => f.fileId),
-        },
-    });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [0] ANALITYK_ZAKRESU (Budowa kryteriów i manifestu)`);
+    if (hasAnyFiles) {
+        // [0] WBS_ARCHITECT – DNA budynku
+        const wbsTaskId = `${tenderId}-WBS_ARCHITECT`;
+        tasks.push({
+            taskId: wbsTaskId,
+            type: 'WBS_ARCHITECT',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [],
+            payload: {
+                tenderId,
+                objectTypeHint: classification.objectTypeHint,
+                objectAreaHint_m2: classification.objectAreaHint_m2 ?? null,
+                docLevel: classification.docLevel,
+                estimationMethod: classification.estimationMethod,
+                fileNamesContext: fileList.map((f) => `${f.fileName} [${f.category}]`),
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [0] WBS_ARCHITECT`);
 
-    // 2. LEGAL – Analiza prawna umowy i SWZ
+        // [1] MAPPING_DETECTIVE – dopasowanie plików
+        const detectiveTaskId = `${tenderId}-MAPPING_DETECTIVE`;
+        tasks.push({
+            taskId: detectiveTaskId,
+            type: 'MAPPING_DETECTIVE',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [wbsTaskId],
+            payload: {
+                tenderId,
+                fileList: fileList.map((f) => ({
+                    fileId: f.fileId,
+                    fileName: f.fileName,
+                    category: f.category,
+                    storagePath: f.storagePath,
+                })),
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [1] MAPPING_DETECTIVE`);
+
+        // [2] QUANTITY_SURVEYOR – zamiana nazw w liczby (Vision lub Brain)
+        const surveyorTaskId = `${tenderId}-QUANTITY_SURVEYOR`;
+        tasks.push({
+            taskId: surveyorTaskId,
+            type: 'QUANTITY_SURVEYOR',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [detectiveTaskId],
+            payload: {
+                tenderId,
+                hasDrawings: classification.hasDrawings,
+                docLevel: classification.docLevel,
+                drawingFileIds: drawingFiles.map((f) => f.fileId),
+                useBrainFallback: !classification.hasDrawings || classification.docLevel <= 1,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [2] QUANTITY_SURVEYOR`);
+
+        // [3] SILENT_AUDITOR – ukryte pułapki technologiczne
+        const auditorTaskId = `${tenderId}-SILENT_AUDITOR`;
+        tasks.push({
+            taskId: auditorTaskId,
+            type: 'SILENT_AUDITOR',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [surveyorTaskId],
+            payload: {
+                tenderId,
+                objectTypeHint: classification.objectTypeHint,
+                hasGeotechnics: classification.hasGeotechnics,
+                hasSWZ: classification.hasSWZ,
+                missingDataReport: classification.missingData,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [3] SILENT_AUDITOR`);
+
+    } else {
+        // FALLBACK: Brak plików → stary ANALITYK_ZAKRESU
+        console.log(`[Inicjalizator] [Kolejka] ⚠️ Brak plików wejściowych. Uruchamiam tryb awaryjny.`);
+        const analitykTaskId = `${tenderId}-ANALITYK_ZAKRESU`;
+        tasks.push({
+            taskId: analitykTaskId,
+            type: 'ANALITYK_ZAKRESU',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [],
+            payload: {
+                tenderId,
+                docLevel: classification.docLevel,
+                estimationMethod: classification.estimationMethod,
+                sourceDocuments: fileList.map((f) => f.fileName),
+                swzFileIds: swzFiles.map((f) => f.fileId),
+            },
+        });
+    }
+
+    const lastCoreTaskId = tasks[tasks.length - 1].taskId;
+
+    // [4] LEGAL – Analiza prawna umowy i SWZ
     if (classification.hasSWZ || swzFiles.length > 0) {
         tasks.push({
             taskId: `${tenderId}-LEGAL`,
@@ -7562,175 +9060,115 @@ function buildTaskQueue(
             status: 'PENDING',
             createdAt: now,
             order: order++,
-            payload: {
-                tenderId,
-                fileIds: swzFiles.map((f) => f.fileId),
-            },
+            dependsOn: [tasks[0].taskId],
+            payload: { tenderId, fileIds: swzFiles.map((f) => f.fileId) },
         });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] LEGAL (Przegląd kar, ryzyk i gwarancji)`);
     }
 
-    // 3. VISION – Analiza rysunków technicznych (Jeśli wgrano i poziom to koncepcja/projekt)
-    if (classification.hasDrawings && classification.docLevel >= 2) {
-        tasks.push({
-            taskId: `${tenderId}-VISION`,
-            type: 'VISION',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: {
-                tenderId,
-                fileIds: drawingFiles.map((f) => f.fileId),
-                docLevel: classification.docLevel,
-            },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] VISION (Zliczanie kubatur, rzuty, elewacje)`);
-    }
-
-    // 4. KNR (Przedmiarowanie) – Tylko dla projektów budowlanych/wykonawczych (Level 3+)
-    if (classification.docLevel >= 3) {
-        tasks.push({
-            taskId: `${tenderId}-KNR`,
-            type: 'KNR',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: { tenderId, docLevel: classification.docLevel },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] KNR (Generowanie kosztorysu z normatywów)`);
-    }
-
-    // 5. NORMATIVE_STEEL – Jeśli to projekt budowlany (brak detali zbrojenia) – doliczamy stal wskaźnikowo
-    if (classification.docLevel === 3 && !classification.hasReinforcementDetails) {
-        tasks.push({
-            taskId: `${tenderId}-NORMATIVE_STEEL`,
-            type: 'NORMATIVE_STEEL',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: {
-                tenderId,
-                note: 'Dedykowany moduł szacowania stali konstrukcyjnej ze wskaźnika kg/m3 betonu',
-            },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] NORMATIVE_STEEL (Szacowanie stali zbrojeniowej)`);
-    }
-
-    // 6. PARAMETRIC – Wycena wskaźnikowa (Tylko dla niskich poziomów PFU/opis słowny)
-    if (classification.docLevel <= 1) {
-        tasks.push({
-            taskId: `${tenderId}-PARAMETRIC`,
-            type: 'PARAMETRIC',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: {
-                tenderId,
-                docLevel: classification.docLevel,
-                hasPFU: classification.hasPFU,
-            },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] PARAMETRIC (Wycena wskaźnikowa m2)`);
-    }
-
-    // 7. BROKER – Wycena rynkowa i weryfikacja cen w Google (Zawsze wywoływana)
+    // [5] BROKER – Wycena rynkowa (Zawsze)
+    const brokerTaskId = `${tenderId}-BROKER`;
     tasks.push({
-        taskId: `${tenderId}-BROKER`,
+        taskId: brokerTaskId,
         type: 'BROKER',
         status: 'PENDING',
         createdAt: now,
         order: order++,
+        dependsOn: [lastCoreTaskId],
         payload: { tenderId },
     });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] BROKER (Wyszukiwanie cen online + marże)`);
 
-    // 8. GAP_FILLER – Łatacz luk (Zawsze przed Rewidentem)
+    // [6] GAP_FILLER – Łatanie luk (Zawsze przed rewidentem)
+    const gapFillerTaskId = `${tenderId}-GAP_FILLER`;
     tasks.push({
-        taskId: `${tenderId}-GAP_FILLER`,
+        taskId: gapFillerTaskId,
         type: 'GAP_FILLER',
         status: 'PENDING',
         createdAt: now,
         order: order++,
-        payload: {
-            tenderId,
-            note: 'Analizuje luki w ScopeManifest i uzupełnia brakujące pozycje wycenami scalonymi',
-        },
+        dependsOn: [brokerTaskId],
+        payload: { tenderId, note: 'Łatanie brakujących pozycji kosztorysowych' },
     });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] GAP_FILLER (Automatyczny łatacz braków)`);
 
-    // 9. REWIDENT – Końcowa weryfikacja (Zawsze ostatni)
+    // [7] REWIDENT – Końcowy audyt (Zawsze ostatni)
     tasks.push({
         taskId: `${tenderId}-REWIDENT`,
         type: 'REWIDENT',
         status: 'PENDING',
         createdAt: now,
         order: order++,
+        dependsOn: [gapFillerTaskId],
         payload: { tenderId },
     });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] REWIDENT (Końcowy audytor i bezpiecznik)`);
 
     return tasks;
 }
 
-// ============================================================
+// ================================================================
 // GŁÓWNY HANDLER POST
-// ============================================================
-
+// ================================================================
 export async function POST(req: NextRequest) {
     const startTime = Date.now();
     console.log("==================================================");
-    console.log("[Inicjalizator] === ROZPOCZĘTO INICJALIZACJĘ ROJU AGENTÓW ===");
+    console.log("[Inicjalizator] === PESAM 2.1 – PROGRESSIVE ESTIMATING DAG ===");
     console.log("==================================================");
 
     try {
         const { tenderId, fileList } = await req.json() as {
             tenderId: string;
-            fileList: Array<{
-                fileName: string;
-                category: string;
-                storagePath: string;
-                fileId: string;
-            }>;
+            fileList: any[];
         };
 
-        if (!tenderId || !fileList?.length) {
-            console.error("[Inicjalizator] ❌ Błąd: Brak tenderId lub pusty fileList.");
-            return NextResponse.json({ error: 'Brak parametrów wejściowych tenderId lub fileList' }, { status: 400 });
+        if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
+
+        const safeFileList = fileList ?? [];
+
+        // Pobieramy rzeczywistą treść dokumentacji tekstowej (SWZ/PFU) z Firestore
+        console.log(`[Inicjalizator] Wyciągam treść dokumentów z Firestore w celu dynamicznej klasyfikacji...`);
+        const filesSnap = await adminDb.collection(`tenders/${tenderId}/files`).get();
+        const documentTexts: Array<{ fileName: string; content: string }> = [];
+
+        for (const doc of filesSnap.docs) {
+            const data = doc.data();
+            const cat = data.category?.toUpperCase() || "";
+            if (['SWZ', 'PFU', 'OPZ', 'UMOWA'].includes(cat) && data.extractedText) {
+                console.log(`[Inicjalizator] Pobrano tekst z pliku: "${data.fileName}"`);
+                documentTexts.push({
+                    fileName: data.fileName,
+                    content: data.extractedText
+                });
+            }
         }
 
-        // 1. Klasyfikacja plików wejściowych
-        const classification = await classifyDocuments(fileList);
+        // 1. Klasyfikacja na podstawie rzeczywistych tekstów z dokumentów
+        const classification = await classifyDocuments(safeFileList, documentTexts);
 
-        // 2. Generowanie dynamicznej kolejki zadań
-        const tasks = buildTaskQueue(tenderId, classification, fileList);
+        // 2. Budowanie dynamicznej kolejki DAG
+        const tasks = buildTaskQueue(tenderId, classification, safeFileList);
 
-        // 3. Masowy zapis w ramach paczki (Firestore Batch)
-        console.log(`[Inicjalizator] Zapisuję ${tasks.length} zadań do podkolekcji Firestore w ramach transakcji Batch...`);
+        // 3. Zapis Firestore Batch
         const batch = adminDb.batch();
-
         for (const task of tasks) {
-            const ref = adminDb
-                .collection(`tenders/${tenderId}/tasks`)
-                .doc(task.taskId);
+            const ref = adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId);
             batch.set(ref, task);
         }
 
-        // Aktualizacja statusu głównego rekordu przetargu
-        console.log(`[Inicjalizator] Aktualizuję rekord główny przetargu: tenders/${tenderId}...`);
+        // 4. Aktualizacja rekordu głównego
         batch.update(adminDb.doc(`tenders/${tenderId}`), {
             status: 'INITIALIZED',
             docLevel: classification.docLevel,
             estimationMethod: classification.estimationMethod,
+            objectTypeHint: classification.objectTypeHint,
+            objectAreaHint_m2: classification.objectAreaHint_m2 ?? null,
             missingDataReport: classification.missingData,
             tasksCount: tasks.length,
-            tasksOrder: tasks.map((t) => ({ taskId: t.taskId, type: t.type, order: t.order })),
+            tasksOrder: tasks.map(t => ({ taskId: t.taskId, type: t.type, order: t.order, dependsOn: t.dependsOn })),
             updatedAt: new Date().toISOString(),
         });
 
         await batch.commit();
 
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Inicjalizator] ✅ Sukces: Rój zainicjowany w ${duration} sek. Kolejka jest aktywna.`);
+        console.log(`[Inicjalizator] ✅ Sukces: Rój zainicjowany w ${duration} sek.`);
         console.log("==================================================");
 
         return NextResponse.json({
@@ -7738,19 +9176,14 @@ export async function POST(req: NextRequest) {
             tenderId,
             docLevel: classification.docLevel,
             estimationMethod: classification.estimationMethod,
-            tasksQueue: tasks.map((t) => ({
-                type: t.type,
-                order: t.order,
-                status: t.status,
-            })),
+            objectTypeHint: classification.objectTypeHint,
+            objectAreaHint_m2: classification.objectAreaHint_m2,
+            tasksQueue: tasks.map(t => ({ taskId: t.taskId, type: t.type, status: t.status, dependsOn: t.dependsOn }))
         });
 
     } catch (error: any) {
-        console.error('[Inicjalizator] ❌ KRYTYCZNY BŁĄD PODCZAS ZAPŁONU ROJU:', error);
-        return NextResponse.json(
-            { error: 'Krytyczny błąd inicjalizacji zadań roju', details: String(error) },
-            { status: 500 }
-        );
+        console.error('[Inicjalizator] ❌ KRYTYCZNY BŁĄD PODCZAS ZAPŁONU ROJU:', error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
 
@@ -7766,7 +9199,6 @@ import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { PDFDocument } from "pdf-lib";
 
 export const dynamic = "force-dynamic";
-// Ustawienie czasu wykonania na 5 minut (dla dużych plików)
 export const maxDuration = 300;
 
 const MODEL_FLASH = "gemini-3.5-flash";
@@ -7780,10 +9212,6 @@ const SYSTEM_INSTRUCTION = `
   }
 `;
 
-/**
- * POMOCNIK: Przetwarzanie tablicy w małych paczkach (Batching), 
- * aby nie zapchać pamięci RAM przy Promise.all
- */
 async function processInBatches<T>(
     items: T[],
     batchSize: number,
@@ -7796,9 +9224,6 @@ async function processInBatches<T>(
     }
 }
 
-/**
- * POMOCNIK: Wykrywanie MIME typu na podstawie rozszerzenia
- */
 function getMimeType(fileName: string): string {
     const ext = fileName.toLowerCase().split('.').pop();
     switch (ext) {
@@ -7816,7 +9241,7 @@ function getMimeType(fileName: string): string {
 
 export async function POST(req: NextRequest) {
     console.log("==================================================");
-    console.log("[Magazynier ZIP] === ROZPOCZĘTO IMPORT DUŻEJ PACZKI ===");
+    console.log("[Magazynier ZIP] === ROZPOCZĘTO IMPORT PLIKÓW PROJEKTU ===");
     console.log("==================================================");
 
     try {
@@ -7824,54 +9249,59 @@ export async function POST(req: NextRequest) {
         const file = formData.get("file") as File | null;
 
         if (!file) {
-            console.error("[Magazynier ZIP] Błąd: Brak pliku ZIP.");
-            return NextResponse.json({ error: "Brak pliku ZIP w żądaniu." }, { status: 400 });
+            console.error("[Magazynier ZIP] Błąd: Brak pliku.");
+            return NextResponse.json({ error: "Brak pliku w żądaniu." }, { status: 400 });
         }
 
         console.log(`[Magazynier ZIP] Plik: "${file.name}" | Wielkość: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
 
         const tenderId = `TND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-        const bucket = adminStorage.bucket();
+        const bucket = adminStorage.bucket(process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
 
-        // 1. ROZPAKOWYWANIE DO PAMIĘCI
         const arrayBuffer = await file.arrayBuffer();
-        const zip = await JSZip.loadAsync(arrayBuffer);
-
         const filesToProcess: { name: string; buffer: Buffer; type: string }[] = [];
 
-        for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
-            if (zipEntry.dir || relativePath.includes("__MACOSX") || relativePath.includes(".DS_Store")) continue;
+        if (file.name.toLowerCase().endsWith(".zip")) {
+            const zip = await JSZip.loadAsync(arrayBuffer);
+            for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
+                if (zipEntry.dir || relativePath.includes("__MACOSX") || relativePath.includes(".DS_Store")) continue;
 
-            const buffer = await zipEntry.async("nodebuffer");
-            const fileName = relativePath.split("/").pop() || relativePath;
+                const buffer = await zipEntry.async("nodebuffer");
+                const fileName = relativePath.split("/").pop() || relativePath;
+                filesToProcess.push({
+                    name: fileName,
+                    buffer,
+                    type: getMimeType(fileName)
+                });
+            }
+            (zip as any) = null;
+            console.log(`[Magazynier ZIP] Rozpakowano archiwum ZIP. Liczba plików: ${filesToProcess.length}`);
+        } else {
             filesToProcess.push({
-                name: fileName,
-                buffer,
-                type: getMimeType(fileName)
+                name: file.name,
+                buffer: Buffer.from(arrayBuffer),
+                type: file.type || getMimeType(file.name)
             });
+            console.log(`[Magazynier ZIP] Przyjęto plik bez kompresji (PDF/Excel). Przetwarzam jako projekt.`);
         }
 
-        // CZYSZCZENIE PAMIĘCI: Usuwamy obiekt ZIP, gdy mamy już wyciągnięte bufory plików
-        (zip as any) = null;
-
-        console.log(`[Magazynier ZIP] Rozpakowano ${filesToProcess.length} plików.`);
-
-        // 2. TWORZENIE REKORDU W FIRESTORE
+        // TWORZENIE REKORDU W FIRESTORE
         await adminDb.collection("tenders").doc(tenderId).set({
             id: tenderId,
-            name: file.name.replace(".zip", ""),
+            name: file.name.replace(/\.zip|\.pdf|\.xlsx/gi, ""),
             status: "ANALYZING",
             createdAt: new Date().toISOString(),
         });
 
-        // 3. INICJALIZACJA AI
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
             location: "global",
         });
 
-        // 4. PRZETWARZANIE PARTIAMI (Batch Size = 2 dla maksymalnego bezpieczeństwa RAM)
+        // Dynamiczna lista, którą przekażemy do inicjalizatora Roju
+        const uploadedFilesList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }> = [];
+
         await processInBatches(filesToProcess, 2, async (item) => {
             const storagePath = `kosztorysy/${tenderId}/${item.name}`;
             const storageFile = bucket.file(storagePath);
@@ -7887,8 +9317,6 @@ export async function POST(req: NextRequest) {
             try {
                 let classificationParts: any[] = [];
 
-                // OPTYMALIZACJA: Tylko jeśli PDF jest mniejszy niż 15MB, próbujemy wyciąć stronę (Vision)
-                // Większe PDF-y klasyfikujemy tylko po nazwie, by nie wywalić RAM-u
                 if (item.type === "application/pdf" && item.buffer.length < 15 * 1024 * 1024) {
                     try {
                         const pdf = await PDFDocument.load(item.buffer);
@@ -7908,7 +9336,6 @@ export async function POST(req: NextRequest) {
                     classificationParts = [{ text: `Sklasyfikuj dokument na podstawie nazwy pliku: ${item.name}` }];
                 }
 
-                // POPRAWKA: Wywołanie przy użyciu bezpośredniej metody generateContent
                 const result = await ai.models.generateContent({
                     model: MODEL_FLASH,
                     contents: [{ role: "user", parts: classificationParts }],
@@ -7941,28 +9368,43 @@ export async function POST(req: NextRequest) {
                 sizeBytes: item.buffer.length,
             });
 
-            // RĘCZNE CZYSZCZENIE BUFORA (Pomaga Garbage Collectorowi)
+            // Dodanie do listy plików wejściowych
+            uploadedFilesList.push({
+                fileId,
+                fileName: item.name,
+                category: fileCategory,
+                storagePath
+            });
+
             (item as any).buffer = null;
         });
 
-        // 5. FINALIZACJA
         await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        // Wywołanie inicjalizatora w tle (nie blokujemy odpowiedzi do klienta)
-        const initUrl = `${new URL(req.url).origin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
-        console.log(`[Magazynier ZIP] Odpalam inicjalizator: ${initUrl}`);
+        // Wywołanie inicjalizatora z pełną listą plików ( fileList: uploadedFilesList )
+        const port = process.env.PORT || "8080";
+        const initUrl = `http://127.0.0.1:${port}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
+
+        const cookieHeader = req.headers.get("cookie") || "";
+        const authHeader = req.headers.get("authorization") || "";
+
+        console.log(`[Magazynier ZIP] Odpalam lokalny inicjalizator wewnątrz kontenera: ${initUrl}`);
 
         fetch(initUrl, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId })
+            headers: {
+                "Content-Type": "application/json",
+                ...(cookieHeader ? { "Cookie": cookieHeader } : {}),
+                ...(authHeader ? { "Authorization": authHeader } : {})
+            },
+            body: JSON.stringify({ tenderId, fileList: uploadedFilesList }) // 👈 POPRAWKA
         }).catch(e => console.error("[Magazynier ZIP] Błąd zapłonu:", e));
 
         console.log(`[Magazynier ZIP] ✅ SUKCES. Przetworzono ${filesToProcess.length} plików.`);
 
         return NextResponse.json({
             tenderId,
-            projectName: file.name.replace(".zip", ""),
+            projectName: file.name.replace(/\.zip|\.pdf|\.xlsx/gi, ""),
             filesCount: filesToProcess.length,
         }, { status: 200 });
 
@@ -8494,7 +9936,7 @@ Odpowiadaj wyłącznie czystym, rygorystycznym JSON.
 --- START OF FILE src/app/api/kosztorysant/brain/uczacy/route.ts ---
 
 // ============================================================
-// PESAM Brain – Agent Uczący
+// PESAM Brain – Agent Uczący (PESAM 2.0)
 // POST /api/kosztorysant/brain/uczacy
 //
 // Wywoływany przez UI po kliknięciu "Zatwierdź i naucz mózg".
@@ -8549,7 +9991,8 @@ export async function POST(req: NextRequest) {
         const { objectType } = record;
         console.log(`[Brain Uczący] 🏗️ Rozpoznany typ obiektu: "${objectType}". Rozpoczynam nadpisywanie wiedzy.`);
 
-        const brainBase = `settings/brainKnowledge/${objectType}`;
+        // POPRAWKA: Zmiana ścieżki głównej Mózgu dla PESAM 2.0
+        const brainBase = `brain_knowledge/${objectType}`;
 
         // 1. Zapis wskaźników ilościowych (ZAWSZE)
         console.log(`[Brain Uczący] 📊 Aktualizacja wskaźników ilościowych...`);
@@ -8596,7 +10039,8 @@ export async function POST(req: NextRequest) {
 // ---- Funkcje Pomocnicze (Transakcje Firestore) ----
 
 async function updateIndicators(brainBase: string, record: BrainUploadRecord): Promise<void> {
-    const ref = adminDb.doc(`${brainBase}/indicators`);
+    // POPRAWKA: Przeniesienie dokumentu do podkolekcji stats (poprawia segmentację ścieżki)
+    const ref = adminDb.doc(`${brainBase}/stats/indicators`);
 
     await adminDb.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -8629,7 +10073,8 @@ async function updateIndicators(brainBase: string, record: BrainUploadRecord): P
 }
 
 async function updateProportions(brainBase: string, record: BrainUploadRecord): Promise<void> {
-    const ref = adminDb.doc(`${brainBase}/proportions`);
+    // POPRAWKA: Przeniesienie dokumentu do podkolekcji stats (poprawia segmentację ścieżki)
+    const ref = adminDb.doc(`${brainBase}/stats/proportions`);
 
     await adminDb.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -8672,6 +10117,7 @@ async function savePriceHistory(brainBase: string, record: BrainUploadRecord): P
 
     for (const doc of priceItemsSnap.docs) {
         const item = doc.data();
+        // Ta ścieżka ma teraz 4 segmenty (Document), co jest w 100% poprawne dla adminDb.doc()
         const historyRef = adminDb.doc(`${brainBase}/priceHistory/${item.itemKey}`);
         const historySnap = await historyRef.get();
         const existing = historySnap.exists ? (historySnap.data() as PriceHistoryEntry) : null;
@@ -8773,19 +10219,24 @@ export async function GET(req: NextRequest) {
     console.log(`[Brain Context] 🧠 Agenci Roju odpytują mózg o wiedzę dla: "${objectType}"...`);
 
     try {
-        const base = `settings/brainKnowledge/${objectType}`;
+        // NOWA STRUKTURA ŚCIEŻEK (PESAM 2.0):
+        // 1. brain_knowledge (Kolekcja)
+        // 2. {objectType} (Dokument)
+        // 3. priceHistory (Podkolekcja - NIEPARZYSTA = OK)
+        const baseDocPath = `brain_knowledge/${objectType}`;
+        const priceHistoryCollPath = `${baseDocPath}/priceHistory`;
 
         const [indicatorsSnap, proportionsSnap, priceHistorySnap] = await Promise.all([
-            adminDb.doc(`${base}/indicators`).get(),
-            adminDb.doc(`${base}/proportions`).get(),
-            adminDb.collection(`${base}/priceHistory`).where('freshness', '==', 'FRESH').limit(100).get(),
+            adminDb.doc(`${baseDocPath}/stats/indicators`).get(), // Dokument (4 segmenty)
+            adminDb.doc(`${baseDocPath}/stats/proportions`).get(), // Dokument (4 segmenty)
+            adminDb.collection(priceHistoryCollPath).where('freshness', '==', 'FRESH').limit(100).get(), // Kolekcja (3 segmenty)
         ]);
 
         const indicators = indicatorsSnap.exists ? (indicatorsSnap.data() as QuantityIndicators) : null;
         const proportions = proportionsSnap.exists ? (proportionsSnap.data() as BranchProportions) : null;
         const sampleCount = indicators?.sampleCount ?? 0;
 
-        console.log(`[Brain Context] 📈 Pobrano: Wskaźniki=${!!indicators}, Proporcje=${!!proportions}, Świeże Ceny=${priceHistorySnap.docs.length}. Baza oparta na ${sampleCount} kosztorysach.`);
+        console.log(`[Brain Context] 📈 Pobrano dane dla "${objectType}": Wskaźniki=${!!indicators}, Proporcje=${!!proportions}, Świeże Ceny=${priceHistorySnap.docs.length}.`);
 
         const freshPriceHints = priceHistorySnap.docs.map((doc) => {
             const entry = doc.data() as PriceHistoryEntry;
@@ -8807,8 +10258,8 @@ export async function GET(req: NextRequest) {
             proportions,
             freshPriceHints,
             learningNotes: sampleCount > 0
-                ? [`🧠 PESAM wyciągnął lekcje z ${sampleCount} wgranych kosztorysów dla tego typu obiektu.`]
-                : [`⚠️ Brak wyuczonych danych dla "${objectType}". System użyje bezpiecznych norm z Eurokodu/Sekocenbudu.`],
+                ? [`🧠 PESAM Brain: Dane oparte na ${sampleCount} Twoich zweryfikowanych projektach.`]
+                : [`⚠️ Brak Twoich danych historycznych dla "${objectType}". System użyje norm inżynieryjnych.`],
         };
 
         return NextResponse.json(context);

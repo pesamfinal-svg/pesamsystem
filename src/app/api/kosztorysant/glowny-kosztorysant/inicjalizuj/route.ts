@@ -1,41 +1,28 @@
 // ============================================================
-// PESAM – Inicjalizator Zadań (rozszerzony o Analizę Zakresu)
+// PESAM 2.0 – Inicjalizator Zadań (Dynamiczny odczyt SWZ / PFU)
 // POST /api/kosztorysant/glowny-kosztorysant/inicjalizuj
-//
-// ZMIANY:
-//   + Dynamiczne tworzenie kolejki zadań z nowymi Agentami
-//   + Dodany task ANALITYK_ZAKRESU jako inicjator Roju
-//   + Dodany task GAP_FILLER przed Rewidentem
-//   + Integracja ze zunifikowaną biblioteką @google/genai
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/admin';
 import { GoogleGenAI, Type } from '@google/genai';
+import type { AgentPhase } from '../../_shared/scopeManifest.types';
 
 export const dynamic = "force-dynamic";
 
 const MODEL_FLASH = "gemini-2.5-flash";
 
-type TaskType =
-    | 'ANALITYK_ZAKRESU'   // Twórca wzorca
-    | 'LEGAL'
-    | 'VISION'
-    | 'KNR'
-    | 'NORMATIVE_STEEL'
-    | 'PARAMETRIC'
-    | 'BROKER'
-    | 'GAP_FILLER'         // Łatacz luk
-    | 'REWIDENT';          // Audytor końcowy
+type TaskType = AgentPhase;
 
 interface Task {
     taskId: string;
     type: TaskType;
     status: 'PENDING' | 'IN_PROGRESS' | 'DONE' | 'ERROR';
     createdAt: string;
-    order: number;         // Kolejność w pętli roju
-    payload: Record<string, any>;
-    result?: any;
+    order: number;
+    dependsOn: string[];
+    payload: Record<string, unknown>;
+    result?: unknown;
     error?: string;
 }
 
@@ -48,16 +35,18 @@ interface ClassifierOutput {
     hasReinforcementDetails: boolean;
     hasGeotechnics: boolean;
     missingData: string[];
+    objectTypeHint: string;
+    objectAreaHint_m2: number | null; // 👈 Prawdziwa powierzchnia wyciągnięta z tekstu
 }
 
-// ============================================================
-// Szybki Klasyfikator Dokumentacji (Gemini)
-// ============================================================
-
+// ================================================================
+// Klasyfikator czytający rzeczywistą treść dokumentów przetargowych
+// ================================================================
 async function classifyDocuments(
-    fileList: Array<{ fileName: string; category: string; storagePath: string }>
+    fileList: any[],
+    documentTexts: Array<{ fileName: string; content: string }>
 ): Promise<ClassifierOutput> {
-    console.log(`[Inicjalizator] [Klasyfikacja] Analizuję strukturę ${fileList.length} plików wejściowych...`);
+    console.log(`[Inicjalizator] [Klasyfikacja] Analizuję strukturę i treść dokumentów (SWZ/PFU)...`);
 
     const ai = new GoogleGenAI({
         vertexai: true,
@@ -65,25 +54,34 @@ async function classifyDocuments(
         location: "global",
     });
 
+    // Budujemy kontekst tekstowy z przesłanych plików SWZ/PFU/OPZ
+    const textContext = documentTexts.length > 0
+        ? documentTexts.map(t => `=== PLIK: "${t.fileName}" ===\n${t.content.slice(0, 12000)}`).join("\n\n")
+        : "BRAK TREŚCI DOKUMENTÓW TEKSTOWYCH.";
+
     const prompt = `
-Oceń poziom dokumentacji i kompletność na podstawie następującej listy zaimportowanych plików:
+Oceń poziom dokumentacji, typ budynku i jego dokładną powierzchnię na podstawie załączonych plików.
+
+TREŚCI DOKUMENTÓW TEKSTOWYCH (SWZ/PFU/OPZ):
+${textContext}
+
+LISTA WSZYSTKICH PLIKÓW W PACZCE:
 ${JSON.stringify(fileList, null, 2)}
 
-Przypisz docLevel (0-4) oraz metodę wyceny:
-- LEVEL 0 -> PARAMETRIC (tylko ogólny opis / brak projektów)
-- LEVEL 1-2 -> ANALOGICAL (PFU / koncepcje)
-- LEVEL 3 -> ELEMENT_BASED (są rzuty architektoniczne, brak zbrojenia i instalacji)
-- LEVEL 4 -> DETAILED_KNR (pełny projekt wykonawczy ze specyfikacją)
+ZADANIE:
+Przeanalizuj treść dokumentów i znajdź:
+- objectAreaHint_m2: Dokładną powierzchnię użytkową (PUM) lub zabudowy zapisaną w tych dokumentach (np. "powierzchnia użytkowa budynku wynosi 1240 m2"). Zwróć jako liczbę. Jeśli nie ma jej w tekście, zwróć null.
+- objectTypeHint: Dokładny typ budynku (przedszkole / szkoła / biurowiec / hala_sportowa / hala_produkcyjna / budynek_mieszkalny / szpital / inne).
 
 Zwróć wynik jako czysty obiekt JSON.
-  `.trim();
+    `.trim();
 
     const response = await ai.models.generateContent({
         model: MODEL_FLASH,
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         config: {
-            systemInstruction: "Klasyfikuj dokumentację budowlaną pod kątem prawnym i technicznym. Odpowiadaj wyłącznie poprawnym JSON-em.",
-            temperature: 0.0,
+            systemInstruction: "Jesteś Głównym Analitykiem Przetargowym. Wyciągasz rzeczywiste dane liczbowe i typy z dokumentów. Odpowiadaj wyłącznie JSON-em.",
+            temperature: 0.0, // Maksymalny determinizm
             responseMimeType: "application/json",
             responseSchema: {
                 type: Type.OBJECT,
@@ -95,54 +93,150 @@ Zwróć wynik jako czysty obiekt JSON.
                     hasPFU: { type: Type.BOOLEAN },
                     hasReinforcementDetails: { type: Type.BOOLEAN },
                     hasGeotechnics: { type: Type.BOOLEAN },
-                    missingData: { type: Type.ARRAY, items: { type: Type.STRING } }
+                    missingData: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    objectTypeHint: { type: Type.STRING },
+                    objectAreaHint_m2: { type: Type.NUMBER }, // Wyciągamy rzeczywistą wartość
                 },
-                required: ['docLevel', 'estimationMethod', 'hasDrawings', 'hasSWZ', 'hasPFU', 'hasReinforcementDetails', 'hasGeotechnics', 'missingData']
-            }
-        }
+                required: [
+                    'docLevel', 'estimationMethod', 'hasDrawings', 'hasSWZ', 'hasPFU',
+                    'hasReinforcementDetails', 'hasGeotechnics', 'missingData', 'objectTypeHint', 'objectAreaHint_m2'
+                ],
+            },
+        },
     });
 
     const parsed: ClassifierOutput = JSON.parse(response.text ?? "{}");
-    console.log(`[Inicjalizator] [Klasyfikacja] Wynik: Level = ${parsed.docLevel} (${parsed.estimationMethod}). Wykryte rysunki: ${parsed.hasDrawings}`);
+
+    console.log(
+        `[Inicjalizator] [Klasyfikacja] Odczytano z dokumentów: ` +
+        `Typ = "${parsed.objectTypeHint}", Powierzchnia = ${parsed.objectAreaHint_m2 ?? "NIEZNANA"} m².`
+    );
+
     return parsed;
 }
 
-// ============================================================
-// Budowanie kolejki zadań dla Roju
-// ============================================================
-
+// ================================================================
+// Budowanie kolejki zadań DAG (Progressive Estimating)
+// ================================================================
 function buildTaskQueue(
     tenderId: string,
     classification: ClassifierOutput,
-    fileList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }>
+    fileList: any[]
 ): Task[] {
     const now = new Date().toISOString();
     const tasks: Task[] = [];
     let order = 0;
 
-    const swzFiles = fileList.filter((f) => ['SWZ', 'OPZ', 'PFU', 'UMOWA'].includes(f.category.toUpperCase()));
-    const drawingFiles = fileList.filter((f) => f.category.toUpperCase() === 'DRAWING');
+    const swzFiles = fileList.filter(f => ['SWZ', 'PFU', 'OPZ', 'UMOWA'].includes(f.category?.toUpperCase()));
+    const drawingFiles = fileList.filter(f => f.category?.toUpperCase() === 'DRAWING' || f.category?.toUpperCase() === 'RYSUNEK');
+    const hasAnyFiles = fileList.length > 0;
 
-    console.log(`[Inicjalizator] [Kolejka] Buduję optymalny łańcuch zadań dla przetargu: ${tenderId}...`);
+    console.log(`[Inicjalizator] Buduję optymalny łańcuch zadań (DAG) dla przetargu: ${tenderId}...`);
 
-    // 1. ANALITYK ZAKRESU – Zawsze na pierwszym miejscu (Tworzy ScopeManifest)
-    tasks.push({
-        taskId: `${tenderId}-ANALITYK_ZAKRESU`,
-        type: 'ANALITYK_ZAKRESU',
-        status: 'PENDING',
-        createdAt: now,
-        order: order++,
-        payload: {
-            tenderId,
-            docLevel: classification.docLevel,
-            estimationMethod: classification.estimationMethod,
-            sourceDocuments: fileList.map((f) => f.fileName),
-            swzFileIds: swzFiles.map((f) => f.fileId),
-        },
-    });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [0] ANALITYK_ZAKRESU (Budowa kryteriów i manifestu)`);
+    if (hasAnyFiles) {
+        // [0] WBS_ARCHITECT – DNA budynku
+        const wbsTaskId = `${tenderId}-WBS_ARCHITECT`;
+        tasks.push({
+            taskId: wbsTaskId,
+            type: 'WBS_ARCHITECT',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [],
+            payload: {
+                tenderId,
+                objectTypeHint: classification.objectTypeHint,
+                objectAreaHint_m2: classification.objectAreaHint_m2 ?? null,
+                docLevel: classification.docLevel,
+                estimationMethod: classification.estimationMethod,
+                fileNamesContext: fileList.map((f) => `${f.fileName} [${f.category}]`),
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [0] WBS_ARCHITECT`);
 
-    // 2. LEGAL – Analiza prawna umowy i SWZ
+        // [1] MAPPING_DETECTIVE – dopasowanie plików
+        const detectiveTaskId = `${tenderId}-MAPPING_DETECTIVE`;
+        tasks.push({
+            taskId: detectiveTaskId,
+            type: 'MAPPING_DETECTIVE',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [wbsTaskId],
+            payload: {
+                tenderId,
+                fileList: fileList.map((f) => ({
+                    fileId: f.fileId,
+                    fileName: f.fileName,
+                    category: f.category,
+                    storagePath: f.storagePath,
+                })),
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [1] MAPPING_DETECTIVE`);
+
+        // [2] QUANTITY_SURVEYOR – zamiana nazw w liczby (Vision lub Brain)
+        const surveyorTaskId = `${tenderId}-QUANTITY_SURVEYOR`;
+        tasks.push({
+            taskId: surveyorTaskId,
+            type: 'QUANTITY_SURVEYOR',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [detectiveTaskId],
+            payload: {
+                tenderId,
+                hasDrawings: classification.hasDrawings,
+                docLevel: classification.docLevel,
+                drawingFileIds: drawingFiles.map((f) => f.fileId),
+                useBrainFallback: !classification.hasDrawings || classification.docLevel <= 1,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [2] QUANTITY_SURVEYOR`);
+
+        // [3] SILENT_AUDITOR – ukryte pułapki technologiczne
+        const auditorTaskId = `${tenderId}-SILENT_AUDITOR`;
+        tasks.push({
+            taskId: auditorTaskId,
+            type: 'SILENT_AUDITOR',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [surveyorTaskId],
+            payload: {
+                tenderId,
+                objectTypeHint: classification.objectTypeHint,
+                hasGeotechnics: classification.hasGeotechnics,
+                hasSWZ: classification.hasSWZ,
+                missingDataReport: classification.missingData,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano [3] SILENT_AUDITOR`);
+
+    } else {
+        // FALLBACK: Brak plików → stary ANALITYK_ZAKRESU
+        console.log(`[Inicjalizator] [Kolejka] ⚠️ Brak plików wejściowych. Uruchamiam tryb awaryjny.`);
+        const analitykTaskId = `${tenderId}-ANALITYK_ZAKRESU`;
+        tasks.push({
+            taskId: analitykTaskId,
+            type: 'ANALITYK_ZAKRESU',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            dependsOn: [],
+            payload: {
+                tenderId,
+                docLevel: classification.docLevel,
+                estimationMethod: classification.estimationMethod,
+                sourceDocuments: fileList.map((f) => f.fileName),
+                swzFileIds: swzFiles.map((f) => f.fileId),
+            },
+        });
+    }
+
+    const lastCoreTaskId = tasks[tasks.length - 1].taskId;
+
+    // [4] LEGAL – Analiza prawna umowy i SWZ
     if (classification.hasSWZ || swzFiles.length > 0) {
         tasks.push({
             taskId: `${tenderId}-LEGAL`,
@@ -150,175 +244,115 @@ function buildTaskQueue(
             status: 'PENDING',
             createdAt: now,
             order: order++,
-            payload: {
-                tenderId,
-                fileIds: swzFiles.map((f) => f.fileId),
-            },
+            dependsOn: [tasks[0].taskId],
+            payload: { tenderId, fileIds: swzFiles.map((f) => f.fileId) },
         });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] LEGAL (Przegląd kar, ryzyk i gwarancji)`);
     }
 
-    // 3. VISION – Analiza rysunków technicznych (Jeśli wgrano i poziom to koncepcja/projekt)
-    if (classification.hasDrawings && classification.docLevel >= 2) {
-        tasks.push({
-            taskId: `${tenderId}-VISION`,
-            type: 'VISION',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: {
-                tenderId,
-                fileIds: drawingFiles.map((f) => f.fileId),
-                docLevel: classification.docLevel,
-            },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] VISION (Zliczanie kubatur, rzuty, elewacje)`);
-    }
-
-    // 4. KNR (Przedmiarowanie) – Tylko dla projektów budowlanych/wykonawczych (Level 3+)
-    if (classification.docLevel >= 3) {
-        tasks.push({
-            taskId: `${tenderId}-KNR`,
-            type: 'KNR',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: { tenderId, docLevel: classification.docLevel },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] KNR (Generowanie kosztorysu z normatywów)`);
-    }
-
-    // 5. NORMATIVE_STEEL – Jeśli to projekt budowlany (brak detali zbrojenia) – doliczamy stal wskaźnikowo
-    if (classification.docLevel === 3 && !classification.hasReinforcementDetails) {
-        tasks.push({
-            taskId: `${tenderId}-NORMATIVE_STEEL`,
-            type: 'NORMATIVE_STEEL',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: {
-                tenderId,
-                note: 'Dedykowany moduł szacowania stali konstrukcyjnej ze wskaźnika kg/m3 betonu',
-            },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] NORMATIVE_STEEL (Szacowanie stali zbrojeniowej)`);
-    }
-
-    // 6. PARAMETRIC – Wycena wskaźnikowa (Tylko dla niskich poziomów PFU/opis słowny)
-    if (classification.docLevel <= 1) {
-        tasks.push({
-            taskId: `${tenderId}-PARAMETRIC`,
-            type: 'PARAMETRIC',
-            status: 'PENDING',
-            createdAt: now,
-            order: order++,
-            payload: {
-                tenderId,
-                docLevel: classification.docLevel,
-                hasPFU: classification.hasPFU,
-            },
-        });
-        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] PARAMETRIC (Wycena wskaźnikowa m2)`);
-    }
-
-    // 7. BROKER – Wycena rynkowa i weryfikacja cen w Google (Zawsze wywoływana)
+    // [5] BROKER – Wycena rynkowa (Zawsze)
+    const brokerTaskId = `${tenderId}-BROKER`;
     tasks.push({
-        taskId: `${tenderId}-BROKER`,
+        taskId: brokerTaskId,
         type: 'BROKER',
         status: 'PENDING',
         createdAt: now,
         order: order++,
+        dependsOn: [lastCoreTaskId],
         payload: { tenderId },
     });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] BROKER (Wyszukiwanie cen online + marże)`);
 
-    // 8. GAP_FILLER – Łatacz luk (Zawsze przed Rewidentem)
+    // [6] GAP_FILLER – Łatanie luk (Zawsze przed rewidentem)
+    const gapFillerTaskId = `${tenderId}-GAP_FILLER`;
     tasks.push({
-        taskId: `${tenderId}-GAP_FILLER`,
+        taskId: gapFillerTaskId,
         type: 'GAP_FILLER',
         status: 'PENDING',
         createdAt: now,
         order: order++,
-        payload: {
-            tenderId,
-            note: 'Analizuje luki w ScopeManifest i uzupełnia brakujące pozycje wycenami scalonymi',
-        },
+        dependsOn: [brokerTaskId],
+        payload: { tenderId, note: 'Łatanie brakujących pozycji kosztorysowych' },
     });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] GAP_FILLER (Automatyczny łatacz braków)`);
 
-    // 9. REWIDENT – Końcowa weryfikacja (Zawsze ostatni)
+    // [7] REWIDENT – Końcowy audyt (Zawsze ostatni)
     tasks.push({
         taskId: `${tenderId}-REWIDENT`,
         type: 'REWIDENT',
         status: 'PENDING',
         createdAt: now,
         order: order++,
+        dependsOn: [gapFillerTaskId],
         payload: { tenderId },
     });
-    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] REWIDENT (Końcowy audytor i bezpiecznik)`);
 
     return tasks;
 }
 
-// ============================================================
+// ================================================================
 // GŁÓWNY HANDLER POST
-// ============================================================
-
+// ================================================================
 export async function POST(req: NextRequest) {
     const startTime = Date.now();
     console.log("==================================================");
-    console.log("[Inicjalizator] === ROZPOCZĘTO INICJALIZACJĘ ROJU AGENTÓW ===");
+    console.log("[Inicjalizator] === PESAM 2.1 – PROGRESSIVE ESTIMATING DAG ===");
     console.log("==================================================");
 
     try {
         const { tenderId, fileList } = await req.json() as {
             tenderId: string;
-            fileList: Array<{
-                fileName: string;
-                category: string;
-                storagePath: string;
-                fileId: string;
-            }>;
+            fileList: any[];
         };
 
-        if (!tenderId || !fileList?.length) {
-            console.error("[Inicjalizator] ❌ Błąd: Brak tenderId lub pusty fileList.");
-            return NextResponse.json({ error: 'Brak parametrów wejściowych tenderId lub fileList' }, { status: 400 });
+        if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
+
+        const safeFileList = fileList ?? [];
+
+        // Pobieramy rzeczywistą treść dokumentacji tekstowej (SWZ/PFU) z Firestore
+        console.log(`[Inicjalizator] Wyciągam treść dokumentów z Firestore w celu dynamicznej klasyfikacji...`);
+        const filesSnap = await adminDb.collection(`tenders/${tenderId}/files`).get();
+        const documentTexts: Array<{ fileName: string; content: string }> = [];
+
+        for (const doc of filesSnap.docs) {
+            const data = doc.data();
+            const cat = data.category?.toUpperCase() || "";
+            if (['SWZ', 'PFU', 'OPZ', 'UMOWA'].includes(cat) && data.extractedText) {
+                console.log(`[Inicjalizator] Pobrano tekst z pliku: "${data.fileName}"`);
+                documentTexts.push({
+                    fileName: data.fileName,
+                    content: data.extractedText
+                });
+            }
         }
 
-        // 1. Klasyfikacja plików wejściowych
-        const classification = await classifyDocuments(fileList);
+        // 1. Klasyfikacja na podstawie rzeczywistych tekstów z dokumentów
+        const classification = await classifyDocuments(safeFileList, documentTexts);
 
-        // 2. Generowanie dynamicznej kolejki zadań
-        const tasks = buildTaskQueue(tenderId, classification, fileList);
+        // 2. Budowanie dynamicznej kolejki DAG
+        const tasks = buildTaskQueue(tenderId, classification, safeFileList);
 
-        // 3. Masowy zapis w ramach paczki (Firestore Batch)
-        console.log(`[Inicjalizator] Zapisuję ${tasks.length} zadań do podkolekcji Firestore w ramach transakcji Batch...`);
+        // 3. Zapis Firestore Batch
         const batch = adminDb.batch();
-
         for (const task of tasks) {
-            const ref = adminDb
-                .collection(`tenders/${tenderId}/tasks`)
-                .doc(task.taskId);
+            const ref = adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId);
             batch.set(ref, task);
         }
 
-        // Aktualizacja statusu głównego rekordu przetargu
-        console.log(`[Inicjalizator] Aktualizuję rekord główny przetargu: tenders/${tenderId}...`);
+        // 4. Aktualizacja rekordu głównego
         batch.update(adminDb.doc(`tenders/${tenderId}`), {
             status: 'INITIALIZED',
             docLevel: classification.docLevel,
             estimationMethod: classification.estimationMethod,
+            objectTypeHint: classification.objectTypeHint,
+            objectAreaHint_m2: classification.objectAreaHint_m2 ?? null,
             missingDataReport: classification.missingData,
             tasksCount: tasks.length,
-            tasksOrder: tasks.map((t) => ({ taskId: t.taskId, type: t.type, order: t.order })),
+            tasksOrder: tasks.map(t => ({ taskId: t.taskId, type: t.type, order: t.order, dependsOn: t.dependsOn })),
             updatedAt: new Date().toISOString(),
         });
 
         await batch.commit();
 
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Inicjalizator] ✅ Sukces: Rój zainicjowany w ${duration} sek. Kolejka jest aktywna.`);
+        console.log(`[Inicjalizator] ✅ Sukces: Rój zainicjowany w ${duration} sek.`);
         console.log("==================================================");
 
         return NextResponse.json({
@@ -326,18 +360,13 @@ export async function POST(req: NextRequest) {
             tenderId,
             docLevel: classification.docLevel,
             estimationMethod: classification.estimationMethod,
-            tasksQueue: tasks.map((t) => ({
-                type: t.type,
-                order: t.order,
-                status: t.status,
-            })),
+            objectTypeHint: classification.objectTypeHint,
+            objectAreaHint_m2: classification.objectAreaHint_m2,
+            tasksQueue: tasks.map(t => ({ taskId: t.taskId, type: t.type, status: t.status, dependsOn: t.dependsOn }))
         });
 
     } catch (error: any) {
-        console.error('[Inicjalizator] ❌ KRYTYCZNY BŁĄD PODCZAS ZAPŁONU ROJU:', error);
-        return NextResponse.json(
-            { error: 'Krytyczny błąd inicjalizacji zadań roju', details: String(error) },
-            { status: 500 }
-        );
+        console.error('[Inicjalizator] ❌ KRYTYCZNY BŁĄD PODCZAS ZAPŁONU ROJU:', error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
