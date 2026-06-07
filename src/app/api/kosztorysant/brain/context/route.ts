@@ -10,19 +10,24 @@ export async function GET(req: NextRequest) {
     console.log(`[Brain Context] 🧠 Agenci Roju odpytują mózg o wiedzę dla: "${objectType}"...`);
 
     try {
-        const base = `settings/brainKnowledge/${objectType}`;
+        // NOWA STRUKTURA ŚCIEŻEK (PESAM 2.0):
+        // 1. brain_knowledge (Kolekcja)
+        // 2. {objectType} (Dokument)
+        // 3. priceHistory (Podkolekcja - NIEPARZYSTA = OK)
+        const baseDocPath = `brain_knowledge/${objectType}`;
+        const priceHistoryCollPath = `${baseDocPath}/priceHistory`;
 
         const [indicatorsSnap, proportionsSnap, priceHistorySnap] = await Promise.all([
-            adminDb.doc(`${base}/indicators`).get(),
-            adminDb.doc(`${base}/proportions`).get(),
-            adminDb.collection(`${base}/priceHistory`).where('freshness', '==', 'FRESH').limit(100).get(),
+            adminDb.doc(`${baseDocPath}/stats/indicators`).get(), // Dokument (4 segmenty)
+            adminDb.doc(`${baseDocPath}/stats/proportions`).get(), // Dokument (4 segmenty)
+            adminDb.collection(priceHistoryCollPath).where('freshness', '==', 'FRESH').limit(100).get(), // Kolekcja (3 segmenty)
         ]);
 
         const indicators = indicatorsSnap.exists ? (indicatorsSnap.data() as QuantityIndicators) : null;
         const proportions = proportionsSnap.exists ? (proportionsSnap.data() as BranchProportions) : null;
         const sampleCount = indicators?.sampleCount ?? 0;
 
-        console.log(`[Brain Context] 📈 Pobrano: Wskaźniki=${!!indicators}, Proporcje=${!!proportions}, Świeże Ceny=${priceHistorySnap.docs.length}. Baza oparta na ${sampleCount} kosztorysach.`);
+        console.log(`[Brain Context] 📈 Pobrano dane dla "${objectType}": Wskaźniki=${!!indicators}, Proporcje=${!!proportions}, Świeże Ceny=${priceHistorySnap.docs.length}.`);
 
         const freshPriceHints = priceHistorySnap.docs.map((doc) => {
             const entry = doc.data() as PriceHistoryEntry;
@@ -44,8 +49,8 @@ export async function GET(req: NextRequest) {
             proportions,
             freshPriceHints,
             learningNotes: sampleCount > 0
-                ? [`🧠 PESAM wyciągnął lekcje z ${sampleCount} wgranych kosztorysów dla tego typu obiektu.`]
-                : [`⚠️ Brak wyuczonych danych dla "${objectType}". System użyje bezpiecznych norm z Eurokodu/Sekocenbudu.`],
+                ? [`🧠 PESAM Brain: Dane oparte na ${sampleCount} Twoich zweryfikowanych projektach.`]
+                : [`⚠️ Brak Twoich danych historycznych dla "${objectType}". System użyje norm inżynieryjnych.`],
         };
 
         return NextResponse.json(context);

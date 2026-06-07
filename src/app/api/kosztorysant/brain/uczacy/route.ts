@@ -1,5 +1,5 @@
 // ============================================================
-// PESAM Brain – Agent Uczący
+// PESAM Brain – Agent Uczący (PESAM 2.0)
 // POST /api/kosztorysant/brain/uczacy
 //
 // Wywoływany przez UI po kliknięciu "Zatwierdź i naucz mózg".
@@ -54,7 +54,8 @@ export async function POST(req: NextRequest) {
         const { objectType } = record;
         console.log(`[Brain Uczący] 🏗️ Rozpoznany typ obiektu: "${objectType}". Rozpoczynam nadpisywanie wiedzy.`);
 
-        const brainBase = `settings/brainKnowledge/${objectType}`;
+        // POPRAWKA: Zmiana ścieżki głównej Mózgu dla PESAM 2.0
+        const brainBase = `brain_knowledge/${objectType}`;
 
         // 1. Zapis wskaźników ilościowych (ZAWSZE)
         console.log(`[Brain Uczący] 📊 Aktualizacja wskaźników ilościowych...`);
@@ -101,7 +102,8 @@ export async function POST(req: NextRequest) {
 // ---- Funkcje Pomocnicze (Transakcje Firestore) ----
 
 async function updateIndicators(brainBase: string, record: BrainUploadRecord): Promise<void> {
-    const ref = adminDb.doc(`${brainBase}/indicators`);
+    // POPRAWKA: Przeniesienie dokumentu do podkolekcji stats (poprawia segmentację ścieżki)
+    const ref = adminDb.doc(`${brainBase}/stats/indicators`);
 
     await adminDb.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -134,7 +136,8 @@ async function updateIndicators(brainBase: string, record: BrainUploadRecord): P
 }
 
 async function updateProportions(brainBase: string, record: BrainUploadRecord): Promise<void> {
-    const ref = adminDb.doc(`${brainBase}/proportions`);
+    // POPRAWKA: Przeniesienie dokumentu do podkolekcji stats (poprawia segmentację ścieżki)
+    const ref = adminDb.doc(`${brainBase}/stats/proportions`);
 
     await adminDb.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -177,6 +180,7 @@ async function savePriceHistory(brainBase: string, record: BrainUploadRecord): P
 
     for (const doc of priceItemsSnap.docs) {
         const item = doc.data();
+        // Ta ścieżka ma teraz 4 segmenty (Document), co jest w 100% poprawne dla adminDb.doc()
         const historyRef = adminDb.doc(`${brainBase}/priceHistory/${item.itemKey}`);
         const historySnap = await historyRef.get();
         const existing = historySnap.exists ? (historySnap.data() as PriceHistoryEntry) : null;

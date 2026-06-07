@@ -5,7 +5,6 @@ import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { PDFDocument } from "pdf-lib";
 
 export const dynamic = "force-dynamic";
-// Ustawienie czasu wykonania na 5 minut (dla dużych plików)
 export const maxDuration = 300;
 
 const MODEL_FLASH = "gemini-3.5-flash";
@@ -19,10 +18,6 @@ const SYSTEM_INSTRUCTION = `
   }
 `;
 
-/**
- * POMOCNIK: Przetwarzanie tablicy w małych paczkach (Batching), 
- * aby nie zapchać pamięci RAM przy Promise.all
- */
 async function processInBatches<T>(
     items: T[],
     batchSize: number,
@@ -35,9 +30,6 @@ async function processInBatches<T>(
     }
 }
 
-/**
- * POMOCNIK: Wykrywanie MIME typu na podstawie rozszerzenia
- */
 function getMimeType(fileName: string): string {
     const ext = fileName.toLowerCase().split('.').pop();
     switch (ext) {
@@ -70,14 +62,11 @@ export async function POST(req: NextRequest) {
         console.log(`[Magazynier ZIP] Plik: "${file.name}" | Wielkość: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
 
         const tenderId = `TND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-
-        // POPRAWKA: Jawne wskazanie nazwy bucket'u
         const bucket = adminStorage.bucket(process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
 
         const arrayBuffer = await file.arrayBuffer();
         const filesToProcess: { name: string; buffer: Buffer; type: string }[] = [];
 
-        // 1. ROZPOZNAWANIE: CZY TO ARCHIWUM ZIP CZY POJEDYNCZY PLIK
         if (file.name.toLowerCase().endsWith(".zip")) {
             const zip = await JSZip.loadAsync(arrayBuffer);
             for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
@@ -91,10 +80,9 @@ export async function POST(req: NextRequest) {
                     type: getMimeType(fileName)
                 });
             }
-            (zip as any) = null; // Czyszczenie
+            (zip as any) = null;
             console.log(`[Magazynier ZIP] Rozpakowano archiwum ZIP. Liczba plików: ${filesToProcess.length}`);
         } else {
-            // Traktujemy pojedynczy plik (np. PDF, Excel) jako jednoelementową paczkę
             filesToProcess.push({
                 name: file.name,
                 buffer: Buffer.from(arrayBuffer),
@@ -103,7 +91,7 @@ export async function POST(req: NextRequest) {
             console.log(`[Magazynier ZIP] Przyjęto plik bez kompresji (PDF/Excel). Przetwarzam jako projekt.`);
         }
 
-        // 2. TWORZENIE REKORDU W FIRESTORE
+        // TWORZENIE REKORDU W FIRESTORE
         await adminDb.collection("tenders").doc(tenderId).set({
             id: tenderId,
             name: file.name.replace(/\.zip|\.pdf|\.xlsx/gi, ""),
@@ -111,17 +99,15 @@ export async function POST(req: NextRequest) {
             createdAt: new Date().toISOString(),
         });
 
-        // 3. INICJALIZACJA AI - PŁASKA STRUKTURA (zgodna z Twoimi typami TypeScript)
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
             location: "global",
         });
 
-        // Dynamiczna lista plików, którą przekażemy do inicjalizatora Roju
+        // Dynamiczna lista, którą przekażemy do inicjalizatora Roju
         const uploadedFilesList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }> = [];
 
-        // 4. PRZETWARZANIE PARTIAMI (Batch Size = 2 dla maksymalnego bezpieczeństwa RAM)
         await processInBatches(filesToProcess, 2, async (item) => {
             const storagePath = `kosztorysy/${tenderId}/${item.name}`;
             const storageFile = bucket.file(storagePath);
@@ -188,7 +174,7 @@ export async function POST(req: NextRequest) {
                 sizeBytes: item.buffer.length,
             });
 
-            // Dodaj metadane pliku do listy
+            // Dodanie do listy plików wejściowych
             uploadedFilesList.push({
                 fileId,
                 fileName: item.name,
@@ -196,19 +182,15 @@ export async function POST(req: NextRequest) {
                 storagePath
             });
 
-            // RĘCZNE CZYSZCZENIE BUFORA (Pomaga Garbage Collectorowi)
             (item as any).buffer = null;
         });
 
-        // 5. FINALIZACJA
         await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        // POPRAWKA: Łączymy się bezpośrednio wewnątrz kontenera (localhost:8080)
-        // Omija to całkowicie zabezpieczenia Cloud Run IAM (brak 403) oraz potrzebę SSL (brak wrong version number)!
+        // Wywołanie inicjalizatora z pełną listą plików ( fileList: uploadedFilesList )
         const port = process.env.PORT || "8080";
         const initUrl = `http://127.0.0.1:${port}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
 
-        // Przekazanie ciasteczek na wypadek wewnętrznych blokad w samym Next.js Middleware
         const cookieHeader = req.headers.get("cookie") || "";
         const authHeader = req.headers.get("authorization") || "";
 
@@ -221,7 +203,7 @@ export async function POST(req: NextRequest) {
                 ...(cookieHeader ? { "Cookie": cookieHeader } : {}),
                 ...(authHeader ? { "Authorization": authHeader } : {})
             },
-            body: JSON.stringify({ tenderId, fileList: uploadedFilesList })
+            body: JSON.stringify({ tenderId, fileList: uploadedFilesList }) // 👈 POPRAWKA
         }).catch(e => console.error("[Magazynier ZIP] Błąd zapłonu:", e));
 
         console.log(`[Magazynier ZIP] ✅ SUKCES. Przetworzono ${filesToProcess.length} plików.`);

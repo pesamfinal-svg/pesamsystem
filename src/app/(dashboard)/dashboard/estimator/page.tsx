@@ -449,7 +449,16 @@ export default function EstimatorPage() {
             let payload = task.payload || { tenderId: activeTenderId };
 
             // Utrzymanie kompatybilności wstecznej dla starszych agentów
-            if (task.agentType === "LEGAL") {
+            if (task.agentType === "ANALITYK_ZAKRESU") {
+                const fileContents = await fetchTextFileContents(activeTenderId!);
+                payload = {
+                    ...payload,
+                    fileContents,
+                    docLevel: task.payload?.docLevel || 0,
+                    estimationMethod: task.payload?.estimationMethod || "PARAMETRIC",
+                    sourceDocuments: task.payload?.sourceDocuments || [],
+                };
+            } else if (task.agentType === "LEGAL") {
                 payload = { ...payload, fileUrl: task.inputFiles?.[0] || "", trends, taskKeywords: task.taskKeywords || [] };
             } else if (task.agentType === "KNR" || task.agentType === "QUANTITY") {
                 payload = { ...payload, request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
