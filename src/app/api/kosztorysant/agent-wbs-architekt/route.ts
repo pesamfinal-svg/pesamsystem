@@ -1,16 +1,16 @@
 // ============================================================
-// PESAM 2.0 – Agent "Architekt Struktury (WBS)" z Google Search Grounding
+// PESAM 2.0 – Agent "Architekt Struktury (WBS)"
 // POST /api/kosztorysant/agent-wbs-architekt
 //
-// ROLA W DAG: Faza 0 – zawsze pierwszy
-// WEJŚCIE:   objectTypeHint, objectAreaHint_m2, docLevel
+// ROLA W DAG: Faza 0 – zawsze pierwszy, równolegle z document-based agentami
+// WEJŚCIE:   objectTypeHint, objectAreaHint_m2, docLevel, fileNamesContext
 // WYJŚCIE:   Szkielet ScopeManifest w Firestore (wszystko MISSING)
 //
-// FILOZOFIA PESAM 2.0:
-//   Ten agent nie zgaduje na ślepo ani nie korzysta ze sztywnego kodu.
-//   Jeśli otrzyma nietypowy typ obiektu (np. "szpital" lub "hala"),
-//   wykorzystuje narzędzie Google Search Grounding do przeszukania polskiego
-//   prawa budowlanego (WT 2021) w locie i buduje DNA na żywych faktach.
+// NAPRAWKA v2.2:
+//   Google Search i responseSchema NIE mogą być w jednym wywołaniu (Vertex AI).
+//   Rozwiązanie: dwa wywołania:
+//     Krok 1 – Google Search → zbiera fakty z przepisów (bez schema)
+//     Krok 2 – Structured output → buduje DNA na podstawie faktów (bez Search)
 // ============================================================
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -19,10 +19,8 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { buildMandatoryMinimum } from '../_shared/heurystyki';
 import type {
     ScopeManifest,
-    ScopeManifestMeta,
     ScopeDivision,
     ScopeElement,
-    MissingDataRisk,
     CoverageEntry,
     ObjectType,
     DocLevel,
@@ -32,10 +30,10 @@ import type {
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_FLASH = "gemini-2.0-flash-001";
 
 // ================================================================
-// Response Schema – DNA budynku dla Gemini (bez problematycznych enums)
+// Response Schema – DNA budynku (używane TYLKO w Kroku 2, bez Search)
 // ================================================================
 
 const WBS_RESPONSE_SCHEMA = {
@@ -43,7 +41,7 @@ const WBS_RESPONSE_SCHEMA = {
     properties: {
         objectType: {
             type: Type.STRING,
-            description: "Typ obiektu: Musi być dokładnie jednym ze słów: przedszkole, szkola, biurowiec, hala_sportowa, hala_produkcyjna, budynek_mieszkalny, szpital, inne",
+            description: "Typ obiektu: dokładnie jeden z: przedszkole, szkola, biurowiec, hala_sportowa, hala_produkcyjna, budynek_mieszkalny, szpital, inne",
         },
         objectArea_m2: { type: Type.NUMBER },
         confidenceScore: { type: Type.INTEGER },
@@ -69,7 +67,7 @@ const WBS_RESPONSE_SCHEMA = {
                                 },
                                 gapFillerStrategy: {
                                     type: Type.STRING,
-                                    description: "Musi być dokładnie jednym ze słów: SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, ASK_USER",
+                                    description: "Dokładnie jeden z: SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, ASK_USER",
                                 },
                                 gapFillerHint: { type: Type.STRING },
                             },
@@ -91,36 +89,22 @@ const WBS_RESPONSE_SCHEMA = {
                     affectedDivisionIds: { type: Type.ARRAY, items: { type: Type.STRING } },
                     severity: {
                         type: Type.STRING,
-                        description: "Musi być dokładnie jednym ze słów: LOW, MEDIUM, HIGH, CRITICAL",
+                        description: "Dokładnie jeden z: LOW, MEDIUM, HIGH, CRITICAL",
                     },
                 },
                 required: ['riskId', 'description', 'costImpactPercent', 'affectedDivisionIds', 'severity'],
             },
+        },
+        areaEstimateNote: {
+            type: Type.STRING,
+            description: "Krótka notatka skąd pochodzi szacunek powierzchni jeśli objectAreaHint_m2 był null",
         },
     },
     required: ['objectType', 'confidenceScore', 'requiredDivisions', 'initialRisks'],
 };
 
 // ================================================================
-// System Prompt – Architekt Struktury WBS
-// ================================================================
-
-const WBS_SYSTEM_INSTRUCTION = `
-Jesteś Architektem Struktury w systemie PESAM – AI kosztorysanta budowlanego.
-Twoje zadanie to wygenerowanie kompletnego "DNA technologicznego" budynku
-na podstawie jego typu i norm prawnych. 
-
-WYKORZYSTAJ narzędzie wyszukiwania Google Search, aby sprawdzić i zweryfikować:
-- Polskie przepisy prawa budowlanego (WT 2021) dla wybranego typu obiektu.
-- Wymagania ppoż i ewakuacyjne (np. czy wymagany jest system oddymiania lub hydranty wewnętrzne).
-- Standardy instalacji sanitarnych, klimatyzacyjnych, IT i technologicznych.
-
-Pamiętaj: Pytasz siebie "Co musi BYĆ, żeby budynek działał?" – nie "Co jest w dostarczonych dokumentach?".
-ODPOWIADAJ WYŁĄCZNIE CZYSTYM, POPRAWNYM JSON. Bez komentarzy, bez markdown.
-`.trim();
-
-// ================================================================
-// Pomocnicze funkcje mapowania
+// Pomocnicze funkcje mapowania (bez zmian)
 // ================================================================
 
 function getDivisionName(id: string): string {
@@ -213,13 +197,133 @@ async function mergeWithMandatoryMinimum(
 }
 
 // ================================================================
+// KROK 1: Google Search – zbieranie faktów z przepisów
+// Osobne wywołanie BEZ responseSchema (Vertex AI tego wymaga)
+// ================================================================
+
+async function fetchGroundedFacts(
+    ai: GoogleGenAI,
+    objectTypeHint: string,
+    areaContext: string,
+    fileNamesContext: string[]
+): Promise<string> {
+    console.log("[WBS Architekt] [Krok 1] Szukam przepisów w Google Search...");
+
+    const filesInfo = fileNamesContext.length > 0
+        ? `Dostępne dokumenty projektu: ${fileNamesContext.join(', ')}`
+        : 'Brak wrzuconych dokumentów – działam w trybie heurystycznym.';
+
+    const searchPrompt = `
+Przeszukaj polskie przepisy budowlane i znajdź wymagania dla budynku typu: "${objectTypeHint}".
+${areaContext}
+${filesInfo}
+
+Znajdź i podaj konkretne wymagania:
+1. Wymagania WT 2021 (Warunki Techniczne) – jakie instalacje są obowiązkowe?
+2. Wymagania ppoż – czy wymagany system oddymiania, hydranty wewnętrzne, SUG?
+3. Wymagania sanitarne – wentylacja mechaniczna, klimatyzacja, technologia kuchni (jeśli dotyczy)?
+4. Wymagania dostępności (art. 100 Pzp) – windy, podjazdy, łazienki przystosowane?
+5. Typowa powierzchnia użytkowa i kubatura dla tego typu obiektu w Polsce?
+6. Typowe wskaźniki kosztów budowy (zł/m²) według Sekocenbud dla tego typu?
+
+Odpowiedz jako zwykły tekst z konkretnymi faktami. Będę używał tej wiedzy do zbudowania kosztorysu.
+`.trim();
+
+    try {
+        const searchResult = await ai.models.generateContent({
+            model: MODEL_FLASH,
+            contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
+            config: {
+                tools: [{ googleSearch: {} }],
+                temperature: 0.1,
+            },
+        });
+
+        const facts = searchResult.text ?? "";
+        console.log(`[WBS Architekt] [Krok 1] Zebrano ${facts.length} znaków faktów z Google Search.`);
+        return facts;
+    } catch (searchError: any) {
+        // Google Search może nie być dostępne w każdym regionie/projekcie
+        // Fallback: kontynuuj bez groundingu
+        console.warn(`[WBS Architekt] [Krok 1] Google Search niedostępny: ${searchError.message}. Kontynuuję bez groundingu.`);
+        return `Brak danych z Google Search. Używam wiedzy wbudowanej dla typu: "${objectTypeHint}".`;
+    }
+}
+
+// ================================================================
+// KROK 2: Structured Output – budowanie DNA na podstawie faktów
+// Osobne wywołanie BEZ tools (Vertex AI tego wymaga)
+// ================================================================
+
+async function buildDnaFromFacts(
+    ai: GoogleGenAI,
+    objectTypeHint: string,
+    objectAreaHint_m2: number | null,
+    docLevel: DocLevel,
+    groundedFacts: string
+): Promise<WbsArchitectOutput> {
+    console.log("[WBS Architekt] [Krok 2] Buduję strukturę DNA na podstawie zebranych faktów...");
+
+    const areaInstruction = objectAreaHint_m2
+        ? `Powierzchnia użytkowa z dokumentów: ${objectAreaHint_m2} m². Użyj tej wartości.`
+        : `Powierzchnia nieznana – oszacuj typową dla "${objectTypeHint}" na podstawie zebranych faktów i podaj w polu objectArea_m2.`;
+
+    const dnaPrompt = `
+Na podstawie poniższych faktów z przepisów prawa budowlanego, zbuduj kompletne DNA kosztorysowe budynku.
+
+TYP OBIEKTU: ${objectTypeHint}
+${areaInstruction}
+POZIOM DOKUMENTACJI: ${docLevel}/4 (0=brak doc, 4=pełny projekt)
+
+FAKTY Z PRZEPISÓW I NORM:
+${groundedFacts}
+
+ZADANIE:
+Wygeneruj listę wszystkich działów kosztorysowych i elementów scalonych które muszą być wycenione,
+żeby budynek uzyskał pozwolenie na użytkowanie. Dla każdego elementu podaj:
+- jednostkę miary (m², m³, szt., kpl., t)
+- strategię szacowania gdy brak danych (SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, ASK_USER)
+- krótką wskazówkę jak szacować (gapFillerHint)
+
+Pamiętaj o elementach specyficznych dla "${objectTypeHint}" wykrytych w przepisach
+(np. technologia kuchni dla przedszkola, oddymianie klatek dla budynku >2 kondygnacji, itp.).
+
+Odpowiedz WYŁĄCZNIE czystym JSON bez komentarzy.
+`.trim();
+
+    const dnaResult = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{ role: "user", parts: [{ text: dnaPrompt }] }],
+        config: {
+            systemInstruction: "Jesteś Architektem Kosztorysowym PESAM. Budujesz DNA budynku jako strukturę JSON. Odpowiadasz WYŁĄCZNIE poprawnym JSON-em bez markdown.",
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: WBS_RESPONSE_SCHEMA as any,
+            // Celowo BEZ tools: [] – Vertex AI nie pozwala łączyć Search z responseSchema
+        },
+    });
+
+    const rawText = dnaResult.text ?? "{}";
+    console.log(`[WBS Architekt] [Krok 2] Odebrano DNA: ${rawText.length} znaków.`);
+
+    const parsed: WbsArchitectOutput = JSON.parse(rawText);
+
+    // Jeśli AI nie wypełniło powierzchni a mieliśmy hint – przywróć
+    if (!parsed.objectArea_m2 && objectAreaHint_m2) {
+        parsed.objectArea_m2 = objectAreaHint_m2;
+    }
+
+    return parsed;
+}
+
+// ================================================================
 // GŁÓWNY HANDLER POST
 // ================================================================
 
 export async function POST(req: NextRequest) {
     const startTime = Date.now();
     console.log("==================================================");
-    console.log("[WBS Architekt] === FAZA 0: BUDOWANIE DNA BUDYNKU (v2.1) ===");
+    console.log("[WBS Architekt] === FAZA 0: BUDOWANIE DNA BUDYNKU (v2.2) ===");
     console.log("==================================================");
 
     try {
@@ -238,8 +342,6 @@ export async function POST(req: NextRequest) {
 
         console.log(`[WBS Architekt] Projekt: "${tenderId}" | Typ: "${objectTypeHint}" | Powierzchnia: ${objectAreaHint_m2 ?? 'nieznana'} m²`);
 
-        // 1. Inicjalizacja AI z wbudowanym Google Search Grounding
-        console.log("[WBS Architekt] Inicjalizuję klienta GoogleGenAI (Vertex AI Grounding)...");
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
@@ -247,48 +349,27 @@ export async function POST(req: NextRequest) {
         });
 
         const areaContext = objectAreaHint_m2
-            ? `Szacowana powierzchnia użytkowa: ${objectAreaHint_m2} m².`
-            : 'Powierzchnia nieznana – przyjmij typową dla tego typu.';
+            ? `Szacowana powierzchnia użytkowa z dokumentów: ${objectAreaHint_m2} m².`
+            : `Powierzchnia nieznana – przyjmij typową dla "${objectTypeHint}".`;
 
-        const prompt = `
-Wygeneruj kompletne DNA technologiczne (szkielet kosztorysu) dla obiektu o parametrach:
-TYP BUDYNKU: ${objectTypeHint}
-${areaContext}
-POZIOM DOKUMENTACJI: Level ${docLevel}/4
+        // ── KROK 1: Google Search (bez responseSchema) ──────────────────
+        const groundedFacts = await fetchGroundedFacts(ai, objectTypeHint, areaContext, fileNamesContext);
 
-ZADANIE:
-1. Użyj wyszukiwarki Google Search, aby odnaleźć i zweryfikować polskie przepisy prawa budowlanego (WT 2021), standardy ppoż, oraz wymogi wentylacji mechanicznej i instalacji dla typu budynku: "${objectTypeHint}".
-2. Na podstawie zebranych danych z internetu stwórz kompletną listę działów i elementów scalonych, które musimy wycenić w kosztorysie, by budynek bez przeszkód przeszedł odbiory techniczne.
-        `.trim();
+        // ── KROK 2: Structured Output (bez Search) ────────────────────────
+        const aiOutput = await buildDnaFromFacts(ai, objectTypeHint, objectAreaHint_m2, docLevel, groundedFacts);
 
-        console.log("[WBS Architekt] Wysyłam zapytanie do Gemini z włączonym uziemieniem Google Search...");
+        const duration1 = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[WBS Architekt] Oba kroki ukończone w ${duration1}s. Mergowanie z minimum obowiązkowym...`);
 
-        const result = await ai.models.generateContent({
-            model: MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            config: {
-                systemInstruction: WBS_SYSTEM_INSTRUCTION,
-                temperature: 0.1,
-                responseMimeType: "application/json",
-                responseSchema: WBS_RESPONSE_SCHEMA as any,
-                tools: [
-                    { googleSearch: {} } // 👈 WŁĄCZENIE GROUNDINGU W LOCIE!
-                ]
-            },
-        });
-
-        const rawText = result.text ?? "{}";
-        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[WBS Architekt] Odebrano DNA budynku z chmury i zsyntetyzowano z wynikami Google Search w ${duration}s.`);
-
-        const aiOutput: WbsArchitectOutput = JSON.parse(rawText);
+        // ── Merge z hardcoded minimum ─────────────────────────────────────
         const mergedDivisions = await mergeWithMandatoryMinimum(aiOutput, docLevel);
 
-        const initialCoverage = mergedDivisions.flatMap((div) =>
+        const initialCoverage: CoverageEntry[] = mergedDivisions.flatMap((div) =>
             div.elements.map((el) => ({
                 elementId: el.elementId,
                 divisionId: div.divisionId,
                 status: 'MISSING' as const,
+                dataSource: 'AI_WBS_HEURISTIC' as const,  // ← kluczowe: oznaczamy że to szacunek WBS
                 coveredBySectionId: null,
                 dataQuality: 'MISSING' as const,
                 gapFillerNote: null,
@@ -304,9 +385,13 @@ ZADANIE:
         const now = new Date().toISOString();
         const manifest: ScopeManifest = {
             meta: {
-                tenderId, generatedAt: now, updatedAt: now, docLevel,
+                tenderId,
+                generatedAt: now,
+                updatedAt: now,
+                docLevel,
                 objectType: aiOutput.objectType,
                 objectArea_m2: aiOutput.objectArea_m2 || objectAreaHint_m2 || null,
+                areaIsEstimated: !objectAreaHint_m2,  // ← oznaczamy czy powierzchnia jest szacunkowa
                 estimationMethod: estimationMethod as any,
                 confidenceScore: aiOutput.confidenceScore,
                 sourceDocuments: fileNamesContext,
@@ -319,17 +404,26 @@ ZADANIE:
             coverageStatus: initialCoverage,
         };
 
+        // ── Zapis do Firestore ─────────────────────────────────────────────
         const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
-        console.log(`[WBS Architekt] Zapisuję dynamiczny manifest do Firestore: "${manifestPath}"...`);
+        console.log(`[WBS Architekt] Zapisuję manifest do Firestore: "${manifestPath}"...`);
         await adminDb.doc(manifestPath).set(manifest);
 
         await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-WBS_ARCHITECT`).update({
             status: 'DONE',
-            result: { objectType: aiOutput.objectType, elementsCount: initialCoverage.length },
+            result: {
+                objectType: aiOutput.objectType,
+                objectArea_m2: manifest.meta.objectArea_m2,
+                areaIsEstimated: manifest.meta.areaIsEstimated,
+                elementsCount: initialCoverage.length,
+                divisionsCount: mergedDivisions.length,
+                groundedFactsLength: groundedFacts.length,
+            },
             updatedAt: now,
         });
 
-        console.log(`[WBS Architekt] ✅ Faza 0 zakończona sukcesem. Spis treści gotowy.`);
+        const totalDuration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[WBS Architekt] ✅ Faza 0 zakończona sukcesem w ${totalDuration}s. ${initialCoverage.length} elementów w ${mergedDivisions.length} działach.`);
         console.log("==================================================");
 
         return NextResponse.json({
@@ -338,6 +432,7 @@ ZADANIE:
             summary: {
                 objectType: manifest.meta.objectType,
                 objectArea_m2: manifest.meta.objectArea_m2,
+                areaIsEstimated: manifest.meta.areaIsEstimated,
                 confidenceScore: manifest.meta.confidenceScore,
                 divisionsCount: mergedDivisions.length,
                 elementsCount: initialCoverage.length,
@@ -345,7 +440,20 @@ ZADANIE:
         });
 
     } catch (error: any) {
-        console.error('[WBS Architekt] ❌ KRYTYCZNY BŁĄD AGENTA:', error.message);
+        console.error('[WBS Architekt] ❌ KRYTYCZNY BŁĄD AGENTA:', JSON.stringify(error?.message ?? error));
+
+        // Próba oznaczenia taska jako ERROR w Firestore
+        try {
+            const body = await req.json().catch(() => ({})) as { tenderId?: string };
+            if (body?.tenderId) {
+                await adminDb.doc(`tenders/${body.tenderId}/tasks/${body.tenderId}-WBS_ARCHITECT`).update({
+                    status: 'ERROR',
+                    error: error.message,
+                    updatedAt: new Date().toISOString(),
+                });
+            }
+        } catch (_) { /* ignoruj błąd zapisu statusu */ }
+
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
