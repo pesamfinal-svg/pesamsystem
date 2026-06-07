@@ -118,6 +118,9 @@ export async function POST(req: NextRequest) {
             location: "global",
         });
 
+        // Dynamiczna lista plików, którą przekażemy do inicjalizatora Roju
+        const uploadedFilesList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }> = [];
+
         // 4. PRZETWARZANIE PARTIAMI (Batch Size = 2 dla maksymalnego bezpieczeństwa RAM)
         await processInBatches(filesToProcess, 2, async (item) => {
             const storagePath = `kosztorysy/${tenderId}/${item.name}`;
@@ -185,6 +188,14 @@ export async function POST(req: NextRequest) {
                 sizeBytes: item.buffer.length,
             });
 
+            // Dodaj metadane pliku do listy
+            uploadedFilesList.push({
+                fileId,
+                fileName: item.name,
+                category: fileCategory,
+                storagePath
+            });
+
             // RĘCZNE CZYSZCZENIE BUFORA (Pomaga Garbage Collectorowi)
             (item as any).buffer = null;
         });
@@ -192,14 +203,14 @@ export async function POST(req: NextRequest) {
         // 5. FINALIZACJA
         await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        // Wywołanie inicjalizatora w tle
+        // Wywołanie inicjalizatora w tle - POPRAWKA: Przekazujemy również fileList!
         const initUrl = `${new URL(req.url).origin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
         console.log(`[Magazynier ZIP] Odpalam inicjalizator: ${initUrl}`);
 
         fetch(initUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId })
+            body: JSON.stringify({ tenderId, fileList: uploadedFilesList }) // <--- POPRAWKA TUTAJ!
         }).catch(e => console.error("[Magazynier ZIP] Błąd zapłonu:", e));
 
         console.log(`[Magazynier ZIP] ✅ SUKCES. Przetworzono ${filesToProcess.length} plików.`);
