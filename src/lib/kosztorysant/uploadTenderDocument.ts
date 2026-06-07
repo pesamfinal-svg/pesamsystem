@@ -32,11 +32,11 @@ const ENDPOINT_PDF = "/api/kosztorysant/upload-parser";
 const ENDPOINT_ZIP = "/api/kosztorysant/magazynier-zip";
 
 /** Limit po stronie klienta – Gemini przyjmuje do 19 MB, ale odrzucamy wcześniej */
-export const MAX_UPLOAD_SIZE_BYTES = 19 * 1024 * 1024;
+export const MAX_UPLOAD_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB
 
 export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "application/pdf": ".pdf",
-  "application/zip": ".zip", // <--- DODANY ZIP DO AKCEPTOWANYCH TYPÓW
+  "application/zip": ".zip",
   "application/x-zip-compressed": ".zip",
   "application/vnd.ms-excel": ".xls",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
@@ -47,17 +47,24 @@ export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "image/webp": ".webp",
 };
 
+
 // ── Walidacja po stronie klienta (przed fetch) ────────────────────────────────
 
 export function validateFileClient(file: File): string | null {
   if (file.size === 0) {
     return "Plik jest pusty.";
   }
-  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+
+  // Osobny limit: 250 MB dla ZIP, 19 MB dla reszty (np. pojedynczych PDF)
+  const isZip = file.name.endsWith(".zip");
+  const limitBytes = isZip ? MAX_UPLOAD_SIZE_BYTES : 19 * 1024 * 1024;
+
+  if (file.size > limitBytes) {
     const sizeMB = (file.size / 1024 / 1024).toFixed(1);
-    return `Plik jest za duży (${sizeMB} MB). Maksimum to 19 MB.`;
+    const limitMB = (limitBytes / 1024 / 1024).toFixed(1);
+    return `Plik jest za duży (${sizeMB} MB). Maksimum dla tego formatu to ${limitMB} MB.`;
   }
-  if (!ACCEPTED_MIME_TYPES[file.type] && !file.name.endsWith(".zip")) {
+  if (!ACCEPTED_MIME_TYPES[file.type] && !isZip) {
     return `Nieobsługiwany format pliku "${file.name}". Prześlij ZIP, PDF, Excel, Word lub obraz.`;
   }
   return null; // OK

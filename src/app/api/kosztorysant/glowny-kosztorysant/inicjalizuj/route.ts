@@ -1,184 +1,343 @@
-import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase/admin";
-import { getFileUrl } from "../../../../../lib/storage";
-import { DocumentationAssessment } from "../../agent-klasyfikator/route"; // Importujemy typy
+// ============================================================
+// PESAM – Inicjalizator Zadań (rozszerzony o Analizę Zakresu)
+// POST /api/kosztorysant/glowny-kosztorysant/inicjalizuj
+//
+// ZMIANY:
+//   + Dynamiczne tworzenie kolejki zadań z nowymi Agentami
+//   + Dodany task ANALITYK_ZAKRESU jako inicjator Roju
+//   + Dodany task GAP_FILLER przed Rewidentem
+//   + Integracja ze zunifikowaną biblioteką @google/genai
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import { GoogleGenAI, Type } from '@google/genai';
 
 export const dynamic = "force-dynamic";
 
-// Budowanie bezpiecznego URL dla wywołań wewnętrznych
-function internalUrl(req: NextRequest, path: string): string {
-    const url = new URL(req.url);
-    if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-        url.protocol = "http:";
-    }
-    return `${url.origin}${path}`;
+const MODEL_FLASH = "gemini-2.5-flash";
+
+type TaskType =
+    | 'ANALITYK_ZAKRESU'   // Twórca wzorca
+    | 'LEGAL'
+    | 'VISION'
+    | 'KNR'
+    | 'NORMATIVE_STEEL'
+    | 'PARAMETRIC'
+    | 'BROKER'
+    | 'GAP_FILLER'         // Łatacz luk
+    | 'REWIDENT';          // Audytor końcowy
+
+interface Task {
+    taskId: string;
+    type: TaskType;
+    status: 'PENDING' | 'IN_PROGRESS' | 'DONE' | 'ERROR';
+    createdAt: string;
+    order: number;         // Kolejność w pętli roju
+    payload: Record<string, any>;
+    result?: any;
+    error?: string;
 }
 
-interface TaskTemplate {
-    agentType: string;
-    description: string;
-    categoryFilter: string | null;
-    taskKeywords: string[];
+interface ClassifierOutput {
+    docLevel: 0 | 1 | 2 | 3 | 4;
+    estimationMethod: string;
+    hasDrawings: boolean;
+    hasSWZ: boolean;
+    hasPFU: boolean;
+    hasReinforcementDetails: boolean;
+    hasGeotechnics: boolean;
+    missingData: string[];
 }
 
-// ── LOGIKA DOBORU ZADAŃ WG STRATEGII ─────────────────────────────────────────
+// ============================================================
+// Szybki Klasyfikator Dokumentacji (Gemini)
+// ============================================================
 
-function buildTasksByStrategy(assessment: DocumentationAssessment): TaskTemplate[] {
-    const tasks: TaskTemplate[] = [];
+async function classifyDocuments(
+    fileList: Array<{ fileName: string; category: string; storagePath: string }>
+): Promise<ClassifierOutput> {
+    console.log(`[Inicjalizator] [Klasyfikacja] Analizuję strukturę ${fileList.length} plików wejściowych...`);
 
-    // ZAWSZE dodajemy analizę prawną (LEGAL)
-    tasks.push({
-        agentType: "LEGAL",
-        description: "Przeanalizuj SWZ/PFU pod kątem kar, terminów i ryzyk kontraktowych.",
-        categoryFilter: "SWZ",
-        taskKeywords: ["kara", "gwarancja", "termin", "płatność"],
+    const ai = new GoogleGenAI({
+        vertexai: true,
+        project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+        location: "global",
     });
 
-    switch (assessment.estimationMethod) {
-        case "PARAMETRIC":
-            console.log("[Inicjalizator] Wybrano strategię: PARAMETRYCZNĄ (Brak rysunków)");
-            tasks.push({
-                agentType: "PARAMETRIC_ESTIMATE",
-                description: `Brak rysunków. Wykonaj wycenę wskaźnikową PLN/m2 na podstawie opisu: ${assessment.executiveSummary}`,
-                categoryFilter: null,
-                taskKeywords: ["powierzchnia", "standard", "wskaźnik"],
-            });
-            break;
+    const prompt = `
+Oceń poziom dokumentacji i kompletność na podstawie następującej listy zaimportowanych plików:
+${JSON.stringify(fileList, null, 2)}
 
-        case "ANALOGICAL":
-            console.log("[Inicjalizator] Wybrano strategię: ANALOGICZNĄ (PFU)");
-            tasks.push({
-                agentType: "ANALOGICAL_ESTIMATE",
-                description: "Wycena przez analogię na podstawie PFU. Rozbij koszt na główne stany budowy.",
-                categoryFilter: "SWZ",
-                taskKeywords: ["kubatura", "program funkcjonalny", "standard"],
-            });
-            break;
+Przypisz docLevel (0-4) oraz metodę wyceny:
+- LEVEL 0 -> PARAMETRIC (tylko ogólny opis / brak projektów)
+- LEVEL 1-2 -> ANALOGICAL (PFU / koncepcje)
+- LEVEL 3 -> ELEMENT_BASED (są rzuty architektoniczne, brak zbrojenia i instalacji)
+- LEVEL 4 -> DETAILED_KNR (pełny projekt wykonawczy ze specyfikacją)
 
-        case "ELEMENT_BASED":
-            console.log("[Inicjalizator] Wybrano strategię: ELEMENTOWĄ (Projekt Budowlany)");
-            tasks.push({
-                agentType: "VISION",
-                description: "Odczytaj geometrię z rzutów i przekrojów Projektu Budowlanego.",
-                categoryFilter: "DRAWING",
-                taskKeywords: ["rzut", "przekrój", "fundamenty"],
-            });
-            tasks.push({
-                agentType: "QUANTITY",
-                description: "Zbuduj strukturę kosztorysu KNR na podstawie dostępnych rzutów.",
-                categoryFilter: "ESTIMATE",
-                taskKeywords: ["przedmiar", "kosztorys"],
-            });
-            // Jeśli AI wykryło brak detali zbrojenia – dodajemy agenta od zgadywania stali!
-            if (!assessment.availableData.hasReinforcementDetails) {
-                console.log("[Inicjalizator] BRAK ZBROJENIA: Dodaję agenta NORMATIVE_STEEL.");
-                tasks.push({
-                    agentType: "NORMATIVE_STEEL",
-                    description: "Oszacuj zużycie stali zbrojeniowej na podstawie wskaźników normatywnych dla m3 betonu.",
-                    categoryFilter: "DRAWING",
-                    taskKeywords: ["zbrojenie", "stal", "pręt"],
-                });
+Zwróć wynik jako czysty obiekt JSON.
+  `.trim();
+
+    const response = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+            systemInstruction: "Klasyfikuj dokumentację budowlaną pod kątem prawnym i technicznym. Odpowiadaj wyłącznie poprawnym JSON-em.",
+            temperature: 0.0,
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    docLevel: { type: Type.INTEGER },
+                    estimationMethod: { type: Type.STRING },
+                    hasDrawings: { type: Type.BOOLEAN },
+                    hasSWZ: { type: Type.BOOLEAN },
+                    hasPFU: { type: Type.BOOLEAN },
+                    hasReinforcementDetails: { type: Type.BOOLEAN },
+                    hasGeotechnics: { type: Type.BOOLEAN },
+                    missingData: { type: Type.ARRAY, items: { type: Type.STRING } }
+                },
+                required: ['docLevel', 'estimationMethod', 'hasDrawings', 'hasSWZ', 'hasPFU', 'hasReinforcementDetails', 'hasGeotechnics', 'missingData']
             }
-            break;
+        }
+    });
 
-        case "DETAILED_KNR":
-            console.log("[Inicjalizator] Wybrano strategię: SZCZEGÓŁOWĄ (Projekt Wykonawczy)");
-            tasks.push({ agentType: "VISION", description: "Pełna analiza rysunków wykonawczych.", categoryFilter: "DRAWING", taskKeywords: ["zbrojenie", "detal"] });
-            tasks.push({ agentType: "QUANTITY", description: "Szczegółowy przedmiar KNR.", categoryFilter: "ESTIMATE", taskKeywords: ["kosztorys"] });
-            break;
+    const parsed: ClassifierOutput = JSON.parse(response.text ?? "{}");
+    console.log(`[Inicjalizator] [Klasyfikacja] Wynik: Level = ${parsed.docLevel} (${parsed.estimationMethod}). Wykryte rysunki: ${parsed.hasDrawings}`);
+    return parsed;
+}
+
+// ============================================================
+// Budowanie kolejki zadań dla Roju
+// ============================================================
+
+function buildTaskQueue(
+    tenderId: string,
+    classification: ClassifierOutput,
+    fileList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }>
+): Task[] {
+    const now = new Date().toISOString();
+    const tasks: Task[] = [];
+    let order = 0;
+
+    const swzFiles = fileList.filter((f) => ['SWZ', 'OPZ', 'PFU', 'UMOWA'].includes(f.category.toUpperCase()));
+    const drawingFiles = fileList.filter((f) => f.category.toUpperCase() === 'RYSUNEK');
+
+    console.log(`[Inicjalizator] [Kolejka] Buduję optymalny łańcuch zadań dla przetargu: ${tenderId}...`);
+
+    // 1. ANALITYK ZAKRESU – Zawsze na pierwszym miejscu (Tworzy ScopeManifest)
+    tasks.push({
+        taskId: `${tenderId}-ANALITYK_ZAKRESU`,
+        type: 'ANALITYK_ZAKRESU',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: {
+            tenderId,
+            docLevel: classification.docLevel,
+            estimationMethod: classification.estimationMethod,
+            sourceDocuments: fileList.map((f) => f.fileName),
+            swzFileIds: swzFiles.map((f) => f.fileId),
+        },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [0] ANALITYK_ZAKRESU (Budowa kryteriów i manifestu)`);
+
+    // 2. LEGAL – Analiza prawna umowy i SWZ
+    if (classification.hasSWZ || swzFiles.length > 0) {
+        tasks.push({
+            taskId: `${tenderId}-LEGAL`,
+            type: 'LEGAL',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                fileIds: swzFiles.map((f) => f.fileId),
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] LEGAL (Przegląd kar, ryzyk i gwarancji)`);
     }
 
-    // Na końcu każdej strategii (oprócz czysto wskaźnikowej) dodajemy Brokera i Rewidenta
-    if (assessment.estimationMethod !== "PARAMETRIC") {
-        tasks.push({ agentType: "PRICING", description: "Weryfikacja cen rynkowych.", categoryFilter: null, taskKeywords: [] });
-        tasks.push({ agentType: "AUDIT", description: "Audyt końcowy kosztorysu.", categoryFilter: null, taskKeywords: [] });
+    // 3. VISION – Analiza rysunków technicznych (Jeśli wgrano i poziom to koncepcja/projekt)
+    if (classification.hasDrawings && classification.docLevel >= 2) {
+        tasks.push({
+            taskId: `${tenderId}-VISION`,
+            type: 'VISION',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                fileIds: drawingFiles.map((f) => f.fileId),
+                docLevel: classification.docLevel,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] VISION (Zliczanie kubatur, rzuty, elewacje)`);
     }
+
+    // 4. KNR (Przedmiarowanie) – Tylko dla projektów budowlanych/wykonawczych (Level 3+)
+    if (classification.docLevel >= 3) {
+        tasks.push({
+            taskId: `${tenderId}-KNR`,
+            type: 'KNR',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: { tenderId, docLevel: classification.docLevel },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] KNR (Generowanie kosztorysu z normatywów)`);
+    }
+
+    // 5. NORMATIVE_STEEL – Jeśli to projekt budowlany (brak detali zbrojenia) – doliczamy stal wskaźnikowo
+    if (classification.docLevel === 3 && !classification.hasReinforcementDetails) {
+        tasks.push({
+            taskId: `${tenderId}-NORMATIVE_STEEL`,
+            type: 'NORMATIVE_STEEL',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                note: 'Dedykowany moduł szacowania stali konstrukcyjnej ze wskaźnika kg/m3 betonu',
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] NORMATIVE_STEEL (Szacowanie stali zbrojeniowej)`);
+    }
+
+    // 6. PARAMETRIC – Wycena wskaźnikowa (Tylko dla niskich poziomów PFU/opis słowny)
+    if (classification.docLevel <= 1) {
+        tasks.push({
+            taskId: `${tenderId}-PARAMETRIC`,
+            type: 'PARAMETRIC',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                docLevel: classification.docLevel,
+                hasPFU: classification.hasPFU,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] PARAMETRIC (Wycena wskaźnikowa m2)`);
+    }
+
+    // 7. BROKER – Wycena rynkowa i weryfikacja cen w Google (Zawsze wywoływana)
+    tasks.push({
+        taskId: `${tenderId}-BROKER`,
+        type: 'BROKER',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: { tenderId },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] BROKER (Wyszukiwanie cen online + marże)`);
+
+    // 8. GAP_FILLER – Łatacz luk (Zawsze przed Rewidentem)
+    tasks.push({
+        taskId: `${tenderId}-GAP_FILLER`,
+        type: 'GAP_FILLER',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: {
+            tenderId,
+            note: 'Analizuje luki w ScopeManifest i uzupełnia brakujące pozycje wycenami scalonymi',
+        },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] GAP_FILLER (Automatyczny łatacz braków)`);
+
+    // 9. REWIDENT – Końcowa weryfikacja (Zawsze ostatni)
+    tasks.push({
+        taskId: `${tenderId}-REWIDENT`,
+        type: 'REWIDENT',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: { tenderId },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] REWIDENT (Końcowy audytor i bezpiecznik)`);
 
     return tasks;
 }
 
-// ── GŁÓWNY HANDLER ────────────────────────────────────────────────────────────
+// ============================================================
+// GŁÓWNY HANDLER POST
+// ============================================================
 
 export async function POST(req: NextRequest) {
+    const startTime = Date.now();
     console.log("==================================================");
-    console.log("[Inicjalizator] === ROZPOCZĘTO PROCES INTELIGENTNY ===");
+    console.log("[Inicjalizator] === ROZPOCZĘTO INICJALIZACJĘ ROJU AGENTÓW ===");
     console.log("==================================================");
 
     try {
-        const { tenderId } = await req.json();
-        if (!tenderId) return NextResponse.json({ error: "Brak tenderId." }, { status: 400 });
+        const { tenderId, fileList } = await req.json() as {
+            tenderId: string;
+            fileList: Array<{
+                fileName: string;
+                category: string;
+                storagePath: string;
+                fileId: string;
+            }>;
+        };
 
-        // 1. Pobieramy pliki z bazy
-        console.log(`[Inicjalizator] Pobieram pliki dla przetargu: ${tenderId}...`);
-        const filesSnap = await adminDb.collection("tenders").doc(tenderId).collection("files").get();
-        const filesList = filesSnap.docs.map(doc => doc.data());
-
-        if (filesList.length === 0) {
-            console.error("[Inicjalizator] Błąd: Brak plików w bazie.");
-            return NextResponse.json({ error: "Brak plików." }, { status: 422 });
+        if (!tenderId || !fileList?.length) {
+            console.error("[Inicjalizator] ❌ Błąd: Brak tenderId lub pusty fileList.");
+            return NextResponse.json({ error: 'Brak parametrów wejściowych tenderId lub fileList' }, { status: 400 });
         }
 
-        // 2. WYWOŁANIE KLASYFIKATORA (KROK 1)
-        console.log("[Inicjalizator] Wywołuję Agenta Klasyfikatora...");
-        const classifyRes = await fetch(internalUrl(req, "/api/kosztorysant/agent-klasyfikator"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filesList, projectName: tenderId })
-        });
+        // 1. Klasyfikacja plików wejściowych
+        const classification = await classifyDocuments(fileList);
 
-        if (!classifyRes.ok) throw new Error("Błąd podczas klasyfikacji dokumentacji.");
-        const assessment: DocumentationAssessment = await classifyRes.json();
+        // 2. Generowanie dynamicznej kolejki zadań
+        const tasks = buildTaskQueue(tenderId, classification, fileList);
 
-        // 3. Zapisujemy wynik klasyfikacji w głównym dokumencie przetargu
-        console.log(`[Inicjalizator] Zapisuję ocenę dokumentacji (Level: ${assessment.docLevel}) w Firestore...`);
-        await adminDb.collection("tenders").doc(tenderId).update({
-            docLevel: assessment.docLevel,
-            estimationMethod: assessment.estimationMethod,
-            uncertaintyPercent: assessment.uncertaintyPercent,
-            missingDataReport: assessment.missingData,
-            status: "CALCULATING",
-            updatedAt: new Date().toISOString()
-        });
+        // 3. Masowy zapis w ramach paczki (Firestore Batch)
+        console.log(`[Inicjalizator] Zapisuję ${tasks.length} zadań do podkolekcji Firestore w ramach transakcji Batch...`);
+        const batch = adminDb.batch();
 
-        // 4. GENEROWANIE ZADAŃ WG STRATEGII
-        const tasksToCreate = buildTasksByStrategy(assessment);
-        let tasksCreatedCount = 0;
-
-        for (const template of tasksToCreate) {
-            console.log(`[Inicjalizator] Tworzę zadanie: ${template.agentType}...`);
-
-            let fileUrls: string[] = [];
-            if (template.categoryFilter) {
-                const matchingFiles = filesList.filter(f => f.category === template.categoryFilter);
-                const finalFiles = matchingFiles.length > 0 ? matchingFiles : filesList.filter(f => f.type === "application/pdf").slice(0, 1);
-
-                if (finalFiles.length > 0) {
-                    fileUrls = await Promise.all(finalFiles.map(f => getFileUrl(f.storagePath)));
-                }
-            }
-
-            const taskId = `task-${Math.random().toString(36).slice(2, 9)}`;
-            await adminDb.collection("tenders").doc(tenderId).collection("tasks").doc(taskId).set({
-                id: taskId,
-                agentType: template.agentType,
-                description: template.description,
-                inputFiles: fileUrls,
-                taskKeywords: template.taskKeywords,
-                status: "PENDING",
-                result: null,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString()
-            });
-            tasksCreatedCount++;
+        for (const task of tasks) {
+            const ref = adminDb
+                .collection(`tenders/${tenderId}/tasks`)
+                .doc(task.taskId);
+            batch.set(ref, task);
         }
 
-        console.log(`[Inicjalizator] Sukces. Stworzono ${tasksCreatedCount} zadań wg strategii ${assessment.estimationMethod}.`);
+        // Aktualizacja statusu głównego rekordu przetargu
+        console.log(`[Inicjalizator] Aktualizuję rekord główny przetargu: tenders/${tenderId}...`);
+        batch.update(adminDb.doc(`tenders/${tenderId}`), {
+            status: 'INITIALIZED',
+            docLevel: classification.docLevel,
+            estimationMethod: classification.estimationMethod,
+            missingDataReport: classification.missingData,
+            tasksCount: tasks.length,
+            tasksOrder: tasks.map((t) => ({ taskId: t.taskId, type: t.type, order: t.order })),
+            updatedAt: new Date().toISOString(),
+        });
+
+        await batch.commit();
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Inicjalizator] ✅ Sukces: Rój zainicjowany w ${duration} sek. Kolejka jest aktywna.`);
         console.log("==================================================");
 
-        return NextResponse.json({ success: true, estimationMethod: assessment.estimationMethod, tasksCreated: tasksCreatedCount }, { status: 200 });
+        return NextResponse.json({
+            success: true,
+            tenderId,
+            docLevel: classification.docLevel,
+            estimationMethod: classification.estimationMethod,
+            tasksQueue: tasks.map((t) => ({
+                type: t.type,
+                order: t.order,
+                status: t.status,
+            })),
+        });
 
     } catch (error: any) {
-        console.error("[Inicjalizator] KRYTYCZNY BŁĄD:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        console.error('[Inicjalizator] ❌ KRYTYCZNY BŁĄD PODCZAS ZAPŁONU ROJU:', error);
+        return NextResponse.json(
+            { error: 'Krytyczny błąd inicjalizacji zadań roju', details: String(error) },
+            { status: 500 }
+        );
     }
 }

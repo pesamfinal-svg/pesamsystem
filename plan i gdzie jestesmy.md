@@ -177,3 +177,4 @@ Możemy teraz:
 Wdrożyć Agenta Wyceny Rynkowej (market-pricing) bezpośrednio do pętli orkiestratora na zapleczu, aby pozycje generowane przez agent-knr były automatycznie wyceniane na bazie rzeczywistych danych z wyszukiwarki Google Search.
 Zająć się kolejnymi branżami (np. projektowaniem instalacji sanitarnych lub elektrycznych).
 Zrobiliśmy niesamowity przełom architektoniczny. Jakie są Twoje odczucia i od czego chcesz zacząć kolejny krok rozbudowy?
+![alt text](image.png)

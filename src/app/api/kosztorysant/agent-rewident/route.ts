@@ -1,321 +1,372 @@
-/**
- * PESAM – Agent Rewident (Audytor Logiczny Kosztorysu)
- *
- * Ścieżka: src/app/api/kosztorysant/agent-rewident/route.ts
- *
- * Odpowiedzialność:
- *  - Ostatnie ogniwo w łańcuchu Roju – uruchamiany po wycenie rynkowej.
- *  - Sprawdza wewnętrzną spójność kosztorysu (logika budowlana, proporcje branż).
- *  - Używa Gemini 2.5 Pro do zaawansowanego wnioskowania inżynierskiego.
- *  - Zwraca listę alertów (CRITICAL / WARNING / INFO) i ogólny score jakości kosztorysu.
- */
+// ============================================================
+// PESAM – Agent Rewident (Rozszerzony o Audyt Zakresu)
+// POST /api/kosztorysant/agent-rewident
+//
+// Zapisuje: tenders/{tenderId} (rewidentReport, finalScore, status)
+// ============================================================
 
-import { GoogleGenAI } from "@google/genai";
-import { NextRequest, NextResponse } from "next/server";
-import { EstimateSection } from "../_shared/types";
+import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenAI, Type } from '@google/genai';
+import { adminDb } from '@/lib/firebase/admin';
+import { runCoverageAudit, type CoverageAuditResult } from './coverageAudit';
 
 export const dynamic = "force-dynamic";
 
 const MODEL_PRO = "gemini-2.5-pro";
 
-// ── Typy ─────────────────────────────────────────────────────────────────────
+interface Section {
+    sectionId: string;
+    divisionId: string;
+    divisionName: string;
+    items: Array<{
+        itemId: string;
+        name: string;
+        unit: string;
+        quantity: number | null;
+        unitPrice: number | null;
+        totalPrice: number;
+        dataQuality?: string;
+    }>;
+    totalPrice: number;
+}
 
-type AlertSeverity = "CRITICAL" | "WARNING" | "INFO";
-
-interface AuditAlert {
-    severity: AlertSeverity;
-    category: "QUANTITY_MISMATCH" | "PRICE_ANOMALY" | "MISSING_POSITION" | "RATIO_VIOLATION" | "UNIT_ERROR" | "COMPLETENESS";
-    position?: string;
+interface DeterministicAlert {
+    severity: 'CRITICAL' | 'WARNING' | 'INFO';
+    code: string;
     message: string;
-    expectedValue?: string;
-    actualValue?: string;
-    suggestedAction?: string;
+    value?: number;
 }
-
-interface RevidentResponse {
-    passed: boolean;
-    score: number; // 0-100
-    totalValuePln: number;
-    alerts: AuditAlert[];
-    branchRatios: {
-        earthworks: number;
-        construction: number;
-        finishing: number;
-        installations: number;
-        other: number;
-    };
-    executiveSummary: string;
-}
-
-// ── Polskie Normy i Standardy Kosztorysowe (2025/2026) ───────────────────────
 
 const BRANCH_NORMS = {
-    earthworks: { min: 2, max: 12 },      // Roboty ziemne: 2-12% wartości kosztorysu
-    construction: { min: 30, max: 55 },   // Stan surowy: 30-55%
-    finishing: { min: 15, max: 35 },      // Wykończeniówka: 15-35%
-    installations: { min: 15, max: 35 },  // Instalacje: 15-35%
+    D1_ZERO_PERCENT: { min: 8, max: 20, label: 'Stan Zerowy (Roboty ziemne / fundamenty)' },
+    D2_ROUGH_PERCENT: { min: 30, max: 55, label: 'Stan Surowy (Ściany / strop / dach)' },
+    D3_FINISH_PERCENT: { min: 15, max: 35, label: 'Wykończenie wewnętrzne' },
+    D5_SANITARY_PERCENT: { min: 8, max: 18, label: 'Instalacje Sanitarne' },
+    D6_ELECTRIC_PERCENT: { min: 6, max: 14, label: 'Instalacje Elektryczne' },
+    LABOR_RATE_MIN: 35,
+    LABOR_RATE_MAX: 85,
 };
 
-const PRICE_NORMS: Record<string, { min: number; max: number; unit: string }> = {
-    "r-g": { min: 35, max: 65, unit: "r-g" },
-    "m3_beton_c2530": { min: 350, max: 480, unit: "m³" },
-    "m3_wykop": { min: 18, max: 55, unit: "m³" },
-    "m2_tynk": { min: 25, max: 80, unit: "m²" },
-    "kg_stal": { min: 3.5, max: 6.5, unit: "kg" },
-};
+// ============================================================
+// ETAP 1: Audyt deterministyczny (TypeScript)
+// ============================================================
 
-// ── Pomocnik: Klasyfikacja sekcji do odpowiedniej branży ─────────────────────
+function runDeterministicAudit(sections: Section[]): DeterministicAlert[] {
+    console.log(`[Rewident] [Etap 1] Uruchamiam matematyczne testy walidacyjne kosztorysu...`);
+    const alerts: DeterministicAlert[] = [];
 
-function classifySection(sectionName: string): keyof typeof BRANCH_NORMS | "other" {
-    const name = sectionName.toLowerCase();
-    if (name.includes("ziem") || name.includes("wykop") || name.includes("niwelac")) return "earthworks";
-    if (name.includes("beton") || name.includes("mur") || name.includes("konstruk") ||
-        name.includes("żelbeton") || name.includes("fundament") || name.includes("strop")) return "construction";
-    if (name.includes("tynk") || name.includes("wykończ") || name.includes("podłog") ||
-        name.includes("płytk") || name.includes("malars") || name.includes("stolark")) return "finishing";
-    if (name.includes("install") || name.includes("elektr") || name.includes("sanitar") ||
-        name.includes("wod-kan") || name.includes("c.o.") || name.includes("wentyl")) return "installations";
-    return "other";
-}
+    const totalCost = sections.reduce((s, sec) => s + sec.totalPrice, 0);
+    if (totalCost === 0) {
+        alerts.push({
+            severity: 'CRITICAL',
+            code: 'ZERO_TOTAL_COST',
+            message: '❗ KATASTROFA FINANSOWA: Łączny budżet wyceny wynosi 0 PLN. Sprawdź czy pozycje zostały poprawnie zaimportowane.',
+        });
+        return alerts;
+    }
 
-// ── ETAP 1: Lokalny pre-audit (deterministyczny, bez AI) ────────────────────
-
-function runLocalAudit(sections: EstimateSection[]): {
-    alerts: AuditAlert[];
-    totalValue: number;
-    branchValues: Record<string, number>;
-} {
-    const alerts: AuditAlert[] = [];
-    let totalValue = 0;
-    const branchValues: Record<string, number> = {
-        earthworks: 0, construction: 0, finishing: 0, installations: 0, other: 0,
-    };
-
+    // Wyszukiwanie zerowych cen w pozycjach wycenionych
     for (const section of sections) {
-        const branch = classifySection(section.name);
-
         for (const item of section.items) {
-            // Cena rynkowa to unitPrice (od brokera) lub basePrice
-            const price = item.unitPrice || item.basePrice;
-            const lineValue = item.quantity * price;
-            totalValue += lineValue;
-            branchValues[branch] += lineValue;
+            if (item.totalPrice === 0 && item.quantity !== 0) {
+                alerts.push({
+                    severity: 'CRITICAL',
+                    code: 'ZERO_PRICE_ITEM',
+                    message: `❗ LUKA CENOWA: Pozycja **"${item.name}"** (${section.divisionName}) posiada wycenę rynkową wynoszącą 0.00 PLN. Sprawdź i uzupełnij cenę.`,
+                    value: 0,
+                });
+            }
+        }
+    }
 
-            // 1. Sprawdzenie stawek r-g (robocizna)
-            if (item.unit === "r-g" && price > 0) {
-                const norm = PRICE_NORMS["r-g"];
-                if (price < norm.min || price > norm.max) {
+    // Analiza wskaźników procentowych branż
+    const divisionTotals: Record<string, number> = {};
+    for (const sec of sections) {
+        divisionTotals[sec.divisionId] = (divisionTotals[sec.divisionId] ?? 0) + sec.totalPrice;
+    }
+
+    function checkPercent(divId: string, norm: { min: number; max: number; label: string }) {
+        const divTotal = divisionTotals[divId] ?? 0;
+        const percent = (divTotal / totalCost) * 100;
+        if (divTotal === 0) {
+            alerts.push({
+                severity: 'WARNING',
+                code: `MISSING_DIVISION_${divId}`,
+                message: `⚠️ POMINIĘTY DZIAŁ: Kosztorys nie zawiera żadnej pozycji dla branży **"${norm.label}"** (ID: ${divId}).`,
+            });
+        } else if (percent < norm.min) {
+            alerts.push({
+                severity: 'WARNING',
+                code: `LOW_PROPORTION_${divId}`,
+                message: `⚠️ ANOMALIA PROPORCJI: Branża **"${norm.label}"** stanowi zaledwie ${percent.toFixed(1)}% kosztorysu (średni wskaźnik rynkowy: ${norm.min}-${norm.max}%).`,
+                value: percent,
+            });
+        } else if (percent > norm.max) {
+            alerts.push({
+                severity: 'WARNING',
+                code: `HIGH_PROPORTION_${divId}`,
+                message: `⚠️ ANOMALIA PROPORCJI: Branża **"${norm.label}"** pochłania aż ${percent.toFixed(1)}% całego budżetu (średni wskaźnik rynkowy: ${norm.min}-${norm.max}%).`,
+                value: percent,
+            });
+        }
+    }
+
+    checkPercent('D1', BRANCH_NORMS.D1_ZERO_PERCENT);
+    checkPercent('D2', BRANCH_NORMS.D2_ROUGH_PERCENT);
+    checkPercent('D3', BRANCH_NORMS.D3_FINISH_PERCENT);
+    checkPercent('D5', BRANCH_NORMS.D5_SANITARY_PERCENT);
+    checkPercent('D6', BRANCH_NORMS.D6_ELECTRIC_PERCENT);
+
+    // Walidacja rynkowych stawek roboczogodziny (r-g)
+    for (const section of sections) {
+        for (const item of section.items) {
+            if (item.unit === 'r-g' && item.unitPrice !== null) {
+                if (item.unitPrice < BRANCH_NORMS.LABOR_RATE_MIN) {
                     alerts.push({
-                        severity: price < 20 || price > 100 ? "CRITICAL" : "WARNING",
-                        category: "PRICE_ANOMALY",
-                        position: item.name,
-                        message: `Stawka robocizny (r-g) budowlanej poza normą krajową (2025/2026).`,
-                        expectedValue: `${norm.min}–${norm.max} PLN/r-g`,
-                        actualValue: `${price} PLN/r-g`,
-                        suggestedAction: "Zweryfikuj stawkę roboczogodziny dla wybranego regionu Polski.",
+                        severity: 'CRITICAL',
+                        code: 'LOW_LABOR_RATE',
+                        message: `❗ STAWKA DEFICYTOWA: Roboczogodzina r-g w pozycji **"${item.name}"** wynosi tylko ${item.unitPrice} PLN. Spadek poniżej progu ${BRANCH_NORMS.LABOR_RATE_MIN} PLN grozi odrzuceniem przez PIP lub brakiem rąk do pracy.`,
+                        value: item.unitPrice,
+                    });
+                } else if (item.unitPrice > BRANCH_NORMS.LABOR_RATE_MAX) {
+                    alerts.push({
+                        severity: 'WARNING',
+                        code: 'HIGH_LABOR_RATE',
+                        message: `⚠️ PRZESZACOWANIE ROBOCIZNY: Stawka ${item.unitPrice} PLN/r-g w pozycji **"${item.name}"** wykracza ponad zalecane maksimum rynkowe (${BRANCH_NORMS.LABOR_RATE_MAX} PLN).`,
+                        value: item.unitPrice,
                     });
                 }
             }
-
-            // 2. Wykrywanie brakujących wycen (Cena = 0)
-            if (price === 0) {
-                alerts.push({
-                    severity: "CRITICAL",
-                    category: "PRICE_ANOMALY",
-                    position: item.name,
-                    message: `Pozycja kosztorysowa nie została wyceniona (cena wynosi 0 PLN).`,
-                    suggestedAction: "Uzupełnij wycenę rynkową lub bazową dla tej pozycji.",
-                });
-            }
-
-            // 3. Wykrywanie pustych przedmiarów (Ilość = 0)
-            if (item.quantity === 0) {
-                alerts.push({
-                    severity: "WARNING",
-                    category: "QUANTITY_MISMATCH",
-                    position: item.name,
-                    message: `Pozycja ma zerowy przedmiar (ilość = 0).`,
-                    suggestedAction: "Upewnij się, czy ten zakres robót nie powinien zostać usunięty lub uzupełniony.",
-                });
-            }
         }
     }
 
-    return { alerts, totalValue, branchValues };
+    return alerts;
 }
 
-// ── Główny Handler ────────────────────────────────────────────────────────────
+// ============================================================
+// ETAP 2: Audyt anomalii inżynierskich (Gemini Pro)
+// ============================================================
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
+async function runAIEngineeringAudit(
+    sections: Section[],
+    totalCost: number,
+    objectType: string
+): Promise<string[]> {
+    console.log(`[Rewident] [Etap 2] Wzywam Agenta Gemini Pro w celu wychwycenia technologicznych błędów inżynieryjnych...`);
+
+    const ai = new GoogleGenAI({
+        vertexai: true,
+        project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+        location: "global",
+    });
+
+    const summary = sections.map((sec) => ({
+        dział: sec.divisionName,
+        koszt: sec.totalPrice,
+        pozycje: sec.items.map((i) => ({ nazwa: i.name, ilość: i.quantity, jednostka: i.unit, cena: i.totalPrice })),
+    }));
+
+    const prompt = `
+Przeanalizuj poniższy uproszczony kosztorys.
+Inwestycja: Budowa obiektu o przeznaczeniu: "${objectType}".
+Całkowity budżet: ${totalCost.toLocaleString('pl-PL')} PLN.
+
+DANE KOSZTORYSOWE:
+${JSON.stringify(summary, null, 2)}
+
+Oceń wzajemne powiązania elementów pod kątem fizyki budowli i technologii. 
+Czy nie ma rażących dysproporcji (np. doliczone tynki bez ścian, zbrojenie niespójne z objętością betonu)?
+  `.trim();
+
+    try {
+        const result = await ai.models.generateContent({
+            model: MODEL_PRO,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                systemInstruction: `Jesteś Głównym Audytorem Budowlanym. Zwróć wyłącznie tablicę JSON zawierającą maksymalnie 4 najważniejsze, konkretne anomalie inżynierskie. Odpowiadaj tylko po polsku. Format: ["anomalia 1", "anomalia 2"]. Jeśli błędów brak, zwróć pustą tablicę [].`,
+                temperature: 0.1,
+                responseMimeType: "application/json",
+            }
+        });
+
+        const raw = (result.text ?? "[]").replace(/```json|```/g, '').trim();
+        const anomalies = JSON.parse(raw) as string[];
+        console.log(`[Rewident] [Etap 2] Analiza AI zakończona. Wykryto anomalii technologicznych: ${anomalies.length}`);
+        return anomalies;
+    } catch (err) {
+        console.error(`[Rewident] [Etap 2] Błąd podczas analizy inżynieryjnej AI:`, err);
+        return [];
+    }
+}
+
+// Przeliczenie ostatecznego wyniku (0-100)
+function calculateFinalScore(
+    deterministicAlerts: DeterministicAlert[],
+    aiAnomalies: string[],
+    coverageResult: CoverageAuditResult
+): number {
+    let score = 100;
+
+    for (const alert of deterministicAlerts) {
+        if (alert.severity === 'CRITICAL') score -= 15;
+        if (alert.severity === 'WARNING') score -= 5;
+    }
+
+    score -= aiAnomalies.length * 8;
+
+    // Uwzględniamy Wskaźnik Pokrycia Zakresu (Waga 30% całego wyniku)
+    const coveragePenalty = Math.round((1 - coverageResult.coverageScore / 100) * 30);
+    score -= coveragePenalty;
+
+    // Kara za niespełnienie twardych warunków SWZ/OPZ
+    score -= coverageResult.hardRequirementViolations.length * 10;
+
+    const final = Math.max(0, Math.min(100, score));
+    console.log(`[Rewident] [Kalkulator] Wynik ostateczny = ${final}/100 | Kara za brak pokrycia: -${coveragePenalty} pkt.`);
+    return final;
+}
+
+// ============================================================
+// GŁÓWNY HANDLER POST
+// ============================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
     console.log("==================================================");
-    console.log("[Rewident] === ROZPOCZĘTO AUDYT KOSZTORYSU ===");
+    console.log("[Rewident] === ROZPOCZĘTO WIELOBRANŻOWY AUDYT KOSZTORYSU ===");
     console.log("==================================================");
 
     try {
-        const ai = new GoogleGenAI({
-            vertexai: true,
-            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-            location: "global",
-        });
+        const { tenderId } = await req.json() as { tenderId: string };
 
-        const body = await req.json();
-        const {
-            sections,
-            buildingType = "Budynek kubaturowy",
-            buildingAreaM2 = 2000,
-            kp = 65,
-            zysk = 12,
-        } = body;
-
-        if (!sections?.length) {
-            console.error("[Rewident] Błąd: Brak sekcji kosztorysu.");
-            return NextResponse.json({ error: "Brak sekcji kosztorysu w żądaniu." }, { status: 400 });
+        if (!tenderId) {
+            console.error("[Rewident] ❌ Błąd: Brak parametru tenderId.");
+            return NextResponse.json({ error: 'Brak parametru tenderId' }, { status: 400 });
         }
 
-        // ════════════════════════════════════════════════════════════════════════
-        // ETAP 1: PRE-AUDIT DETERMINISTYCZNY
-        // ════════════════════════════════════════════════════════════════════════
-        console.log("[Rewident] Etap 1: Uruchamiam lokalny pre-audit matematyczny...");
-        const { alerts: localAlerts, totalValue, branchValues } = runLocalAudit(sections);
+        const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
+        const tenderData = tenderDoc.data();
+        if (!tenderData) {
+            console.error(`[Rewident] ❌ Błąd: Przetarg ${tenderId} nie istnieje w bazie.`);
+            return NextResponse.json({ error: 'Przetarg nie istnieje' }, { status: 404 });
+        }
 
-        const branchRatios = {
-            earthworks: totalValue > 0 ? Math.round(branchValues.earthworks / totalValue * 100) : 0,
-            construction: totalValue > 0 ? Math.round(branchValues.construction / totalValue * 100) : 0,
-            finishing: totalValue > 0 ? Math.round(branchValues.finishing / totalValue * 100) : 0,
-            installations: totalValue > 0 ? Math.round(branchValues.installations / totalValue * 100) : 0,
-            other: totalValue > 0 ? Math.round(branchValues.other / totalValue * 100) : 0,
+        const sections: Section[] = tenderData.sections ?? [];
+        const totalCost = sections.reduce((s, sec) => s + sec.totalPrice, 0);
+        const objectType = tenderData.objectType ?? 'nieznany';
+
+        // --- ETAP 1: Audyt matematyczny ---
+        const deterministicAlerts = runDeterministicAudit(sections);
+
+        // --- ETAP 2: Audyt technologiczny AI ---
+        const aiAnomalies = await runAIEngineeringAudit(sections, totalCost, objectType);
+
+        // --- ETAP 3: Audyt pokrycia z ScopeManifestu ---
+        const coverageResult = await runCoverageAudit(tenderId, totalCost);
+
+        // --- Kalkulacja finalnego punktu ---
+        const finalScore = calculateFinalScore(deterministicAlerts, aiAnomalies, coverageResult);
+
+        const report = {
+            tenderId,
+            generatedAt: new Date().toISOString(),
+            finalScore,
+            totalCost_PLN: totalCost,
+
+            deterministicAlerts,
+            aiAnomalies,
+
+            // Dane z ScopeManifestu (nowość)
+            coverageScore: coverageResult.coverageScore,
+            coverageAlerts: coverageResult.alerts,
+            coverageStats: {
+                total: coverageResult.totalElements,
+                covered: coverageResult.coveredCount,
+                gapFilled: coverageResult.gapFilledCount,
+                missing: coverageResult.missingCount,
+                waitingUser: coverageResult.waitingUserCount,
+            },
+            hardRequirementViolations: coverageResult.hardRequirementViolations,
+
+            riskBuffer: {
+                percent: coverageResult.totalRiskBuffer_Percent,
+                value_PLN: coverageResult.totalRiskBuffer_PLN,
+                budgetWithRisk_PLN: totalCost + coverageResult.totalRiskBuffer_PLN,
+            },
+
+            chatSummary: buildChatSummary(
+                finalScore,
+                coverageResult,
+                deterministicAlerts,
+                aiAnomalies,
+                totalCost
+            ),
         };
 
-        // Sprawdzanie wskaźników branżowych
-        for (const [branch, norm] of Object.entries(BRANCH_NORMS)) {
-            const ratio = branchRatios[branch as keyof typeof branchRatios];
-            if (ratio > 0 && (ratio < norm.min || ratio > norm.max)) {
-                localAlerts.push({
-                    severity: "WARNING",
-                    category: "RATIO_VIOLATION",
-                    message: `Udział procentowy branży [${branch}] wynosi ${ratio}% i wykracza poza standard (${norm.min}% - ${norm.max}%).`,
-                    expectedValue: `${norm.min}%–${norm.max}%`,
-                    actualValue: `${ratio}%`,
-                    suggestedAction: "Sprawdź, czy nie pominięto kluczowych działów lub czy wycena jednej z branż nie jest zawyżona.",
-                });
-            }
-        }
-
-        // Sprawdzenie wskaźnika PLN/m²
-        if (buildingAreaM2 > 0) {
-            const costPerM2 = totalValue / buildingAreaM2;
-            console.log(`[Rewident] Wycena jednostkowa obiektu: ${Math.round(costPerM2)} PLN/m²`);
-
-            if (costPerM2 < 2500) {
-                localAlerts.push({
-                    severity: "CRITICAL",
-                    category: "RATIO_VIOLATION",
-                    message: `Koszt budowy wynoszący ${Math.round(costPerM2)} PLN/m² jest skrajnie za niski. Kosztorys jest najprawdopodobniej niekompletny.`,
-                    expectedValue: "3 500 - 8 000 PLN/m²",
-                    actualValue: `${Math.round(costPerM2)} PLN/m²`,
-                    suggestedAction: "Zweryfikuj czy uwzględniono wszystkie instalacje wewnętrzne oraz roboty wykończeniowe.",
-                });
-            }
-        }
-
-        // ════════════════════════════════════════════════════════════════════════
-        // ETAP 2: AUDYT LOGICZNY AI (Gemini Pro)
-        // ════════════════════════════════════════════════════════════════════════
-        console.log("[Rewident] Etap 2: Wysyłam kosztorys do zaawansowanego audytu inżynieryjnego AI...");
-
-        // Tworzymy lekki skrót kosztorysu dla AI, żeby nie przepełnić kontekstu (poprawione typowanie)
-        const kosztorysSummary = (sections as EstimateSection[]).map((sec: EstimateSection) => ({
-            section: sec.name,
-            totalValue: (sec.items || []).reduce((sum: number, item: any) => sum + (item.quantity * (item.unitPrice || item.basePrice)), 0).toFixed(0),
-            items: (sec.items || []).map((i: any) => ({ name: i.name, qty: i.quantity, unit: i.unit, price: i.unitPrice || i.basePrice }))
-        }));
-
-        const aiPrompt = `
-Jesteś Głównym Rewidentem Kosztorysowym w Polsce.
-Przeanalizuj poniższy kosztorys i znajdź błędy logiczne, niespójności technologiczne lub braki.
-
-TYP INWESTYCJI: ${buildingType}
-POWIERZCHNIA OBIEKTU: ${buildingAreaM2} m²
-KOSZT BAZOWY NETTO: ${totalValue.toFixed(2)} PLN
-
-SKRÓCONY KOSZTORYS PRZEDMIAROWY:
-${JSON.stringify(kosztorysSummary, null, 2)}
-
-PROPORCJE BRANŻOWE:
-- Ziemne: ${branchRatios.earthworks}% | Konstrukcja: ${branchRatios.construction}% | Wykończenie: ${branchRatios.finishing}% | Instalacje: ${branchRatios.installations}%
-
-WYMAGANE KONTROLE INŻYNIERSKIE:
-1. Stosunek stali do betonu: Na 1 m³ betonu konstrukcyjnego (fundamenty, strop, słupy) powinno przypadać 80-130 kg stali. Sprawdź czy to się zgadza.
-2. Powierzchnia tynków: Powierzchnia tynków ściennych wewnętrznych powinna być co najmniej 1.8-2.5 razy większa niż powierzchnia rzutu budynku.
-3. Czy dla inwestycji "${buildingType}" nie zapomniano o kluczowych elementach (np. instalacji odgromowej, izolacji pionowej fundamentów, wentylacji)?
-
-Zwróć odpowiedź WYŁĄCZNIE jako czysty JSON (bez markdown, bez cudzysłowów wewnątrz pól tekstowych):
-{
-  "aiAlerts": [
-    {
-      "severity": "CRITICAL" | "WARNING" | "INFO",
-      "category": "QUANTITY_MISMATCH" | "PRICE_ANOMALY" | "MISSING_POSITION" | "RATIO_VIOLATION",
-      "message": "Opis problemu po polsku (np. za mało stali zbrojeniowej w stosunku do objętości betonu)",
-      "expectedValue": "np. 80-130 kg/m³",
-      "actualValue": "np. 35 kg/m³",
-      "suggestedAction": "Co kosztorysanc powinien poprawić"
-    }
-  ],
-  "completenessScore": 85,
-  "executiveSummary": "Trzy zdania inżynierskiego podsumowania kosztorysu."
-}
-        `.trim();
-
-        const response = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: aiPrompt }] }],
-            config: {
-                temperature: 0.1,
-                maxOutputTokens: 4096,
-                responseMimeType: "application/json",
-            },
+        // Zapis raportu do Firestore
+        console.log(`[Rewident] Zapisuję finalny raport i status wyceny w rekordzie głównym tenders/${tenderId}...`);
+        await adminDb.doc(`tenders/${tenderId}`).update({
+            rewidentReport: report,
+            finalScore,
+            status: finalScore >= 70 ? 'READY_FOR_REVIEW' : 'NEEDS_CORRECTION',
+            updatedAt: new Date().toISOString(),
         });
 
-        let aiAlerts: AuditAlert[] = [];
-        let completenessScore = 80;
-        let executiveSummary = "Audyt kosztorysu zakończony pomyślnie.";
-
-        try {
-            const parsed = JSON.parse(response.text ?? "{}");
-            aiAlerts = parsed.aiAlerts ?? [];
-            completenessScore = parsed.completenessScore ?? 80;
-            executiveSummary = parsed.executiveSummary ?? executiveSummary;
-            console.log(`[Rewident] AI wykryło ${aiAlerts.length} potencjalnych problemów.`);
-        } catch (e) {
-            console.warn("[Rewident] Nie udało się sparsować audytu z Gemini Pro. Używam tylko lokalnego pre-auditu.");
-        }
-
-        // Łączenie alertów deterministycznych i AI
-        const allAlerts = [...localAlerts, ...aiAlerts];
-
-        const criticalCount = allAlerts.filter(a => a.severity === "CRITICAL").length;
-        const warningCount = allAlerts.filter(a => a.severity === "WARNING").length;
-
-        // Finalny score obniżany za każdy błąd krytyczny i ostrzeżenie
-        const finalScore = Math.max(0, completenessScore - (criticalCount * 15) - (warningCount * 5));
-        const passed = criticalCount === 0;
-
-        console.log(`[Rewident] Zakończono. Wynik: ${finalScore}/100. Status: ${passed ? "PASSED" : "FAILED"}`);
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Rewident] ✅ Audyt zakończony sukcesem w czasie ${duration} sek.`);
         console.log("==================================================");
 
-        const finalResponse: RevidentResponse = {
-            passed,
-            score: finalScore,
-            totalValuePln: totalValue,
-            alerts: allAlerts,
-            branchRatios,
-            executiveSummary,
-        };
-
-        return NextResponse.json(finalResponse);
+        return NextResponse.json({ success: true, report });
 
     } catch (error: any) {
-        console.error("[Rewident] Krytyczny błąd audytora:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        console.error('[Rewident] ❌ Krytyczny błąd audytora:', error);
+        return NextResponse.json(
+            { error: 'Błąd audytu Rewidenta', details: String(error) },
+            { status: 500 }
+        );
     }
+}
+
+function buildChatSummary(
+    score: number,
+    coverage: CoverageAuditResult,
+    detAlerts: DeterministicAlert[],
+    aiAnomalies: string[],
+    totalCost: number
+): string {
+    const emoji = score >= 82 ? '✅' : score >= 65 ? '⚠️' : '❌';
+    const verdict = score >= 82
+        ? 'Kosztorys został zweryfikowany i jest wysoce spójny technicznie.'
+        : score >= 65
+            ? 'Kosztorys zawiera niepewne dane lub luki. Zalecany audyt ręczny przed złożeniem oferty.'
+            : 'KRYTYCZNE BŁĘDY: Kosztorys jest skrajnie niekompletny lub zawiera rażące luki cenowe. Nie składaj oferty!';
+
+    const criticalCount = [
+        ...detAlerts.filter((a) => a.severity === 'CRITICAL'),
+        ...coverage.alerts.filter((a) => a.severity === 'CRITICAL'),
+    ].length;
+
+    const warningCount = [
+        ...detAlerts.filter((a) => a.severity === 'WARNING'),
+        ...coverage.alerts.filter((a) => a.severity === 'WARNING'),
+    ].length;
+
+    return [
+        `${emoji} **Rewident zakończył audyt. Score: ${score}/100.**`,
+        `💬 *Diagnoza:* ${verdict}`,
+        ``,
+        `📊 **Pokrycie zakresu:** ${coverage.coverageScore}% (Wyliczone: ${coverage.coveredCount} | Normatywne: ${coverage.gapFilledCount} | Do uzupełnienia: ${coverage.missingCount + coverage.waitingUserCount})`,
+        `💰 **Całkowity koszt kosztorysu:** ${totalCost.toLocaleString('pl-PL')} PLN`,
+        coverage.totalRiskBuffer_PLN > 0
+            ? `⚠️ **Rezerwa ryzyka dokumentacyjnego (+${coverage.totalRiskBuffer_Percent}%):** +${coverage.totalRiskBuffer_PLN.toLocaleString('pl-PL')} PLN\n📈 **Zalecana oferta z buforem bezpieczeństwa:** **${(totalCost + coverage.totalRiskBuffer_PLN).toLocaleString('pl-PL')} PLN**`
+            : '',
+        ``,
+        criticalCount > 0 ? `❗ **Wykryto ${criticalCount} błędów krytycznych** (błędy uniemożliwiające złożenie oferty).` : '',
+        warningCount > 0 ? `⚠️ **Wykryto ${warningCount} ostrzeżeń** (potencjalne braki lub anomalie proporcji).` : '',
+        aiAnomalies.length > 0
+            ? `🔍 **Wnioski technologiczne AI (${aiAnomalies.length}):**\n` + aiAnomalies.map((a) => `• ${a}`).join('\n')
+            : '',
+    ]
+        .filter(Boolean)
+        .join('\n');
 }

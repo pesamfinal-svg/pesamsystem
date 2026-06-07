@@ -1,0 +1,3453 @@
+--- START OF FILE src/components/ScopeHeatMap.tsx ---
+
+'use client';
+
+// ============================================================
+// PESAM – Komponent: ScopeHeatMap
+// Odpowiada za renderowanie mapy ciepła w lewym panelu
+// ============================================================
+
+import React, { useState } from 'react';
+import { useScopeManifest, type HeatMapEntry, type HeatMapColor } from '@/hooks/useScopeManifest';
+
+const COLOR_STYLES: Record<HeatMapColor, { bg: string; border: string; dot: string; label: string }> = {
+    green: { bg: 'bg-emerald-50/50', border: 'border-emerald-200', dot: 'bg-emerald-500', label: 'Rynkowe (Rój)' },
+    yellow: { bg: 'bg-amber-50/50', border: 'border-amber-200', dot: 'bg-amber-400', label: 'Normowe (Łatacz)' },
+    red: { bg: 'bg-red-50/50', border: 'border-red-200', dot: 'bg-red-500', label: 'Brak danych' },
+    gray: { bg: 'bg-gray-50', border: 'border-gray-200', dot: 'bg-gray-300', label: 'Nieznane' },
+};
+
+function CoverageBar({ percent, color }: { percent: number; color: string }) {
+    return (
+        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+            <div
+                className={`h-1.5 rounded-full transition-all duration-500 ${color}`}
+                style={{ width: `${Math.min(100, percent)}%` }}
+            />
+        </div>
+    );
+}
+
+function StatPill({ label, value, color }: { label: string; value: number; color: string }) {
+    return (
+        <div className="flex items-center gap-1.5 text-[10px]">
+            <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
+            <span className="text-slate-500 font-semibold">{label}:</span>
+            <span className="font-bold text-slate-700 ml-auto">{value}</span>
+        </div>
+    );
+}
+
+function HeatMapCell({ entry, onMarkReview }: {
+    entry: HeatMapEntry;
+    onMarkReview: (id: string) => void;
+}) {
+    const [showTooltip, setShowTooltip] = useState(false);
+    const style = COLOR_STYLES[entry.color];
+
+    return (
+        <div
+            className={`relative flex items-start gap-1.5 p-1.5 rounded-xl border ${style.bg} ${style.border} 
+        cursor-default transition-all hover:shadow-xs group`}
+            onMouseEnter={() => setShowTooltip(true)}
+            onMouseLeave={() => setShowTooltip(false)}
+        >
+            <span className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${style.dot} 
+        ${entry.isMandatoryByLaw ? 'ring-2 ring-offset-1 ring-red-400' : ''}`}
+            />
+
+            <div className="flex-1 min-w-0">
+                <p className="text-[10px] font-bold text-slate-700 truncate leading-tight uppercase">
+                    {entry.elementName}
+                    {entry.isMandatoryByLaw && (
+                        <span className="ml-1 text-red-500 text-[9px]" title="Wymagane przez Prawo Budowlane">⚖️</span>
+                    )}
+                </p>
+                {entry.gapFillerValue !== null && (
+                    <p className="text-[9px] text-amber-600 font-black font-mono">
+                        ~{entry.gapFillerValue.toLocaleString('pl-PL')} PLN
+                    </p>
+                )}
+            </div>
+
+            {(entry.color === 'yellow' || entry.color === 'red') && (
+                <button
+                    onClick={() => onMarkReview(entry.elementId)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] 
+            text-slate-400 hover:text-amber-600 flex-shrink-0 font-bold"
+                    title="Oznacz jako zweryfikowane"
+                >
+                    ✓
+                </button>
+            )}
+
+            {showTooltip && (
+                <div className="absolute z-50 bottom-full left-0 mb-1 w-56 bg-slate-900 text-white 
+          text-[9px] rounded-lg p-2 shadow-xl leading-normal pointer-events-none font-semibold">
+                    {entry.tooltipText}
+                    <div className="absolute top-full left-3 w-0 h-0 
+            border-l-4 border-r-4 border-t-4 
+            border-l-transparent border-r-transparent border-t-slate-900" />
+                </div>
+            )}
+        </div>
+    );
+}
+
+function PendingQuestionCard({ elementId, elementName, question, onAnswer }: {
+    elementId: string;
+    elementName: string;
+    question: string;
+    onAnswer: (id: string, value: number, unit: string) => void;
+}) {
+    const [inputValue, setInputValue] = useState('');
+    const [unit, setUnit] = useState('PLN');
+
+    return (
+        <div className="border border-red-200 bg-red-50/50 rounded-2xl p-2.5 mb-1.5">
+            <p className="text-[10px] font-black text-red-700 mb-0.5 uppercase">⏸️ {elementName}</p>
+            <p className="text-[9px] text-slate-600 mb-2 leading-tight whitespace-pre-line font-bold">
+                {question}
+            </p>
+            <div className="flex gap-1">
+                <input
+                    type="number"
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    placeholder="Wartość..."
+                    className="flex-1 text-[10px] border border-slate-200 rounded-lg px-2 py-1 
+            focus:outline-none focus:border-blue-400 bg-white font-black text-center"
+                />
+                <select
+                    value={unit}
+                    onChange={(e) => setUnit(e.target.value)}
+                    className="text-[9px] font-bold border border-slate-200 rounded-lg px-1 py-1 bg-white outline-none"
+                >
+                    <option>PLN</option>
+                    <option>m²</option>
+                    <option>m³</option>
+                    <option>kpl.</option>
+                    <option>szt.</option>
+                    <option>mb</option>
+                    <option>t</option>
+                </select>
+                <button
+                    onClick={() => {
+                        const v = parseFloat(inputValue);
+                        if (!isNaN(v)) onAnswer(elementId, v, unit);
+                    }}
+                    className="text-[10px] bg-red-600 text-white px-2.5 py-1 rounded-lg hover:bg-red-700 
+            transition-colors font-black"
+                >
+                    ✓
+                </button>
+            </div>
+        </div>
+    );
+}
+
+interface ScopeHeatMapProps {
+    tenderId: string | null;
+    className?: string;
+}
+
+export function ScopeHeatMap({ tenderId, className = '' }: ScopeHeatMapProps) {
+    const {
+        manifest,
+        isLoading,
+        error,
+        heatMap,
+        pendingQuestions,
+        coverageStats,
+        markAsNeedsReview,
+        answerQuestion,
+    } = useScopeManifest(tenderId);
+
+    const [activeDiv, setActiveDiv] = useState<string | null>(null);
+    const [showOnlyProblems, setShowOnlyProblems] = useState(false);
+
+    if (!tenderId) {
+        return (
+            <div className={`p-4 text-center text-slate-400 text-xs font-semibold ${className}`}>
+                Wgraj paczkę przetargową ZIP, aby zobaczyć mapę zakresu
+            </div>
+        );
+    }
+
+    if (isLoading) {
+        return (
+            <div className={`p-4 ${className}`}>
+                <div className="animate-pulse space-y-2">
+                    {[...Array(5)].map((_, i) => (
+                        <div key={i} className="h-6 bg-slate-100 rounded-xl" />
+                    ))}
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className={`p-4 text-red-500 text-[10px] font-bold ${className}`}>
+                Błąd ładowania mapy: {error}
+            </div>
+        );
+    }
+
+    if (!manifest) {
+        return (
+            <div className={`p-4 text-slate-400 text-xs text-center font-semibold ${className}`}>
+                Czekam na uruchomienie Analityka Zakresu...
+            </div>
+        );
+    }
+
+    // Grupuj mapę ciepła po działach
+    const byDivision = new Map<string, { name: string; entries: HeatMapEntry[] }>();
+    for (const entry of heatMap) {
+        if (!byDivision.has(entry.divisionId)) {
+            byDivision.set(entry.divisionId, { name: entry.divisionName, entries: [] });
+        }
+        byDivision.get(entry.divisionId)!.entries.push(entry);
+    }
+
+    // Filtry z jawnym rzutowaniem typów dla kompilatora
+    const filteredMap = showOnlyProblems
+        ? new Map<string, { name: string; entries: HeatMapEntry[] }>(
+            [...byDivision.entries()]
+                .map(([id, div]) => [
+                    id,
+                    { ...div, entries: div.entries.filter((e) => e.color !== 'green') },
+                ] as [string, { name: string; entries: HeatMapEntry[] }])
+                .filter(([, div]) => div.entries.length > 0)
+        )
+        : byDivision;
+
+    const barColor =
+        coverageStats.coveragePercent >= 80 ? 'bg-emerald-500'
+            : coverageStats.coveragePercent >= 50 ? 'bg-amber-400'
+                : 'bg-red-500';
+
+    return (
+        <div className={`flex flex-col h-full overflow-hidden ${className}`}>
+
+            {/* Nagłówek */}
+            <div className="p-3 border-b border-slate-100 bg-white flex-shrink-0">
+                <div className="flex items-center justify-between mb-1.5">
+                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-tight">Szczelność Zakresu</h3>
+                    <div className="flex items-center gap-1">
+                        <span className="text-[9px] font-black text-slate-400 uppercase">pewność:</span>
+                        <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded-full">
+                            {coverageStats.confidenceScore}%
+                        </span>
+                    </div>
+                </div>
+
+                <div className="mb-1.5">
+                    <CoverageBar percent={coverageStats.coveragePercent} color={barColor} />
+                </div>
+                <p className="text-[9px] text-slate-400 font-bold mb-2">
+                    Pokrycie: <span className="font-extrabold text-slate-700">{coverageStats.coveragePercent}%</span>
+                    {coverageStats.objectType && (
+                        <span className="ml-1 capitalize text-blue-600 font-black">• {coverageStats.objectType.replace('_', ' ')}</span>
+                    )}
+                    {coverageStats.objectArea_m2 && (
+                        <span className="ml-1 font-black text-slate-600">• {coverageStats.objectArea_m2} m²</span>
+                    )}
+                </p>
+
+                {/* Mini statystyki */}
+                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 mb-1.5 border-t pt-2 border-slate-50">
+                    <StatPill label="Rynkowe" value={coverageStats.covered} color="bg-emerald-500" />
+                    <StatPill label="Szacowane" value={coverageStats.gapFilled} color="bg-amber-400" />
+                    <StatPill label="Brak" value={coverageStats.missing} color="bg-red-500" />
+                    <StatPill label="Czeka" value={coverageStats.waitingUser} color="bg-red-400" />
+                </div>
+
+                {coverageStats.riskBufferPercent > 0 && (
+                    <div className="text-[9px] bg-amber-50 border border-amber-200 rounded-xl px-2 py-1 text-amber-700 font-black uppercase text-center">
+                        ⚠️ Rezerwa ryzyka dokumentacyjnego: <strong>+{coverageStats.riskBufferPercent}%</strong>
+                    </div>
+                )}
+            </div>
+
+            {/* Bloki pytań */}
+            {pendingQuestions.length > 0 && (
+                <div className="p-2.5 border-b border-red-100 bg-red-50/20 flex-shrink-0">
+                    <p className="text-[9px] font-black text-red-700 mb-1.5 uppercase tracking-wide">
+                        ⏸️ Odpowiedz na pytania Roju ({pendingQuestions.length})
+                    </p>
+                    {pendingQuestions.map((q) => (
+                        <PendingQuestionCard
+                            key={q.elementId}
+                            {...q}
+                            onAnswer={answerQuestion}
+                        />
+                    ))}
+                </div>
+            )}
+
+            {/* Filtr */}
+            <div className="px-3 py-1.5 border-b border-slate-100 bg-slate-50 flex-shrink-0">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={showOnlyProblems}
+                        onChange={(e) => setShowOnlyProblems(e.target.checked)}
+                        className="rounded text-blue-600 outline-none"
+                    />
+                    <span className="text-[10px] text-slate-500 font-black uppercase">Pokaż tylko luki</span>
+                </label>
+            </div>
+
+            {/* Zawartość Mapy Ciepła */}
+            <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
+                {[...filteredMap.entries()].map(([divId, { name, entries }]) => {
+                    const isExpanded = activeDiv === null || activeDiv === divId;
+                    const problemCount = entries.filter((e) => e.color !== 'green').length;
+
+                    return (
+                        <div key={divId} className="border border-slate-100 p-1.5 rounded-2xl bg-white shadow-xs">
+                            <button
+                                onClick={() => setActiveDiv(activeDiv === divId ? null : divId)}
+                                className="w-full flex items-center justify-between mb-1.5 group text-left outline-none"
+                            >
+                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-tight truncate max-w-[170px]">
+                                    {divId} · {name}
+                                </span>
+                                <div className="flex items-center gap-1 flex-shrink-0">
+                                    {problemCount > 0 && (
+                                        <span className="text-[8px] font-black bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">
+                                            {problemCount}
+                                        </span>
+                                    )}
+                                    <span className="text-slate-300 text-[8px] group-hover:text-slate-500">
+                                        {activeDiv === divId ? '▲' : '▼'}
+                                    </span>
+                                </div>
+                            </button>
+
+                            {isExpanded && (
+                                <div className="space-y-1">
+                                    {entries.map((entry) => (
+                                        <HeatMapCell
+                                            key={entry.elementId}
+                                            entry={entry}
+                                            onMarkReview={markAsNeedsReview}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+
+                {filteredMap.size === 0 && (
+                    <p className="text-center text-[10px] font-bold text-slate-400 py-6">
+                        {showOnlyProblems ? '✅ Wszystkie pozycje są kompletne!' : 'Brak danych'}
+                    </p>
+                )}
+            </div>
+        </div>
+    );
+}
+
+--- END OF FILE src/components/ScopeHeatMap.tsx ---
+
+
+--- START OF FILE src/hooks/useScopeManifest.ts ---
+
+'use client';
+
+// ============================================================
+// PESAM – Hook: useScopeManifest (Real-Time Listener)
+// Odpowiada za pobieranie i synchronizację mapy ciepła na żywo.
+// ============================================================
+
+import { useEffect, useState, useCallback } from 'react';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '@/lib/firebase/config';
+import type {
+    ScopeManifest,
+    CoverageEntry,
+    DataQuality,
+    ObjectType,
+} from '../app/api/kosztorysant/_shared/scopeManifest.types';
+
+export type HeatMapColor = 'green' | 'yellow' | 'red' | 'gray';
+
+export interface HeatMapEntry {
+    elementId: string;
+    divisionId: string;
+    divisionName: string;
+    elementName: string;
+    color: HeatMapColor;
+    dataQuality: DataQuality;
+    status: string;
+    gapFillerNote: string | null;
+    gapFillerValue: number | null;
+    isMandatoryByLaw: boolean;
+    tooltipText: string;
+}
+
+export interface PendingQuestion {
+    elementId: string;
+    divisionId: string;
+    elementName: string;
+    question: string;
+}
+
+export interface CoverageStats {
+    total: number;
+    covered: number;
+    gapFilled: number;
+    missing: number;
+    waitingUser: number;
+    coveragePercent: number;
+    confidenceScore: number;
+    objectType: ObjectType | null;
+    objectArea_m2: number | null;
+    riskBufferPercent: number;
+}
+
+export interface UseScopeManifestReturn {
+    manifest: ScopeManifest | null;
+    isLoading: boolean;
+    error: string | null;
+    heatMap: HeatMapEntry[];
+    pendingQuestions: PendingQuestion[];
+    coverageStats: CoverageStats;
+    markAsNeedsReview: (elementId: string) => Promise<void>;
+    answerQuestion: (elementId: string, value: number, unit: string) => Promise<void>;
+}
+
+function qualityToColor(quality: DataQuality, status: string): HeatMapColor {
+    if (status === 'MISSING' || status === 'WAITING_USER') return 'red';
+    if (quality === 'MARKET_VERIFIED') return 'green';
+    if (quality === 'NORMATIVE' || quality === 'ESTIMATED') return 'yellow';
+    return 'gray';
+}
+
+function buildTooltip(entry: CoverageEntry, quality: DataQuality, status: string): string {
+    if (status === 'WAITING_USER') {
+        return '🔴 Blokada: Czeka na Twoje dane wejściowe. Podaj parametry w oknie czatu.';
+    }
+    if (status === 'MISSING') {
+        return '🔴 Brak: Pozycja nie została wyceniona. Gap Filler pominął ją.';
+    }
+    if (quality === 'MARKET_VERIFIED') {
+        return '🟢 Rynkowe: Pozycja precyzyjnie wyliczona i wyceniona przez Rój.';
+    }
+    if (quality === 'NORMATIVE') {
+        return `🟡 Normowe: Uzupełniono automatycznie: ${entry.gapFillerNote ?? 'brak opisu'}`;
+    }
+    if (quality === 'ESTIMATED') {
+        return `🟡 Szacunkowe: Wyliczono ze średnich GUS: ${entry.gapFillerNote ?? 'brak opisu'}`;
+    }
+    return '⚪ Brak danych o wycenie.';
+}
+
+export function useScopeManifest(tenderId: string | null): UseScopeManifestReturn {
+    const [manifest, setManifest] = useState<ScopeManifest | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!tenderId) {
+            setIsLoading(false);
+            return;
+        }
+
+        console.log(`[useScopeManifest] [Real-time] Podpinam nasłuch Firestore dla: tenders/${tenderId}/scopeManifest/main...`);
+        setIsLoading(true);
+
+        const manifestRef = doc(db, `tenders/${tenderId}/scopeManifest/main`);
+
+        const unsubscribe = onSnapshot(
+            manifestRef,
+            (snap) => {
+                if (snap.exists()) {
+                    setManifest(snap.data() as ScopeManifest);
+                    console.log(`[useScopeManifest] [Real-time] Dane zsynchronizowane pomyślnie.`);
+                } else {
+                    console.log(`[useScopeManifest] [Real-time] Brak ScopeManifestu w bazie.`);
+                    setManifest(null);
+                }
+                setIsLoading(false);
+                setError(null);
+            },
+            (err) => {
+                console.error('[useScopeManifest] Błąd subskrypcji Firestore:', err);
+                setError(err.message);
+                setIsLoading(false);
+            }
+        );
+
+        return () => {
+            console.log(`[useScopeManifest] [Real-time] Zdejmuję nasłuch.`);
+            unsubscribe();
+        };
+    }, [tenderId]);
+
+    const heatMap: HeatMapEntry[] = (() => {
+        if (!manifest) return [];
+
+        const entries: HeatMapEntry[] = [];
+
+        for (const div of manifest.requiredDivisions) {
+            for (const el of div.elements) {
+                const coverage = manifest.coverageStatus.find(
+                    (c) => c.elementId === el.elementId
+                );
+
+                const quality: DataQuality = coverage?.dataQuality ?? 'MISSING';
+                const status = coverage?.status ?? 'MISSING';
+                const color = qualityToColor(quality, status);
+
+                entries.push({
+                    elementId: el.elementId,
+                    divisionId: div.divisionId,
+                    divisionName: div.divisionName,
+                    elementName: el.name,
+                    color,
+                    dataQuality: quality,
+                    status,
+                    gapFillerNote: coverage?.gapFillerNote ?? null,
+                    gapFillerValue: coverage?.gapFillerValue ?? null,
+                    isMandatoryByLaw: el.isMandatoryByLaw,
+                    tooltipText: coverage
+                        ? buildTooltip(coverage, quality, status)
+                        : '⚪ Brak danych',
+                });
+            }
+        }
+
+        return entries;
+    })();
+
+    const pendingQuestions: PendingQuestion[] = (() => {
+        if (!manifest) return [];
+
+        return manifest.coverageStatus
+            .filter((c) => c.status === 'WAITING_USER' && c.pendingQuestion)
+            .map((c) => {
+                const div = manifest.requiredDivisions.find((d) => d.divisionId === c.divisionId);
+                const el = div?.elements.find((e) => e.elementId === c.elementId);
+                return {
+                    elementId: c.elementId,
+                    divisionId: c.divisionId,
+                    elementName: el?.name ?? c.elementId,
+                    question: c.pendingQuestion!,
+                };
+            });
+    })();
+
+    const coverageStats: CoverageStats = (() => {
+        if (!manifest) {
+            return {
+                total: 0, covered: 0, gapFilled: 0,
+                missing: 0, waitingUser: 0, coveragePercent: 0,
+                confidenceScore: 0, objectType: null,
+                objectArea_m2: null, riskBufferPercent: 0,
+            };
+        }
+
+        const cov = manifest.coverageStatus;
+        const total = cov.length;
+        const covered = cov.filter((c) => c.status === 'COVERED').length;
+        const gapFilled = cov.filter((c) => c.status === 'GAP_FILLED').length;
+        const missing = cov.filter((c) => c.status === 'MISSING').length;
+        const waitingUser = cov.filter((c) => c.status === 'WAITING_USER').length;
+
+        const coveragePercent = total > 0
+            ? Math.round(((covered + gapFilled * 0.7) / total) * 100)
+            : 0;
+
+        const riskBufferPercent = manifest.missingDataRisks.reduce(
+            (sum, r) => sum + (r.userOverridePercent ?? r.costImpactPercent),
+            0
+        );
+
+        return {
+            total, covered, gapFilled, missing, waitingUser, coveragePercent,
+            confidenceScore: manifest.meta.confidenceScore,
+            objectType: manifest.meta.objectType,
+            objectArea_m2: manifest.meta.objectArea_m2,
+            riskBufferPercent,
+        };
+    })();
+
+    const markAsNeedsReview = useCallback(async (elementId: string) => {
+        if (!tenderId || !manifest) return;
+        console.log(`[useScopeManifest] Akcja: Oznaczam "${elementId}" do weryfikacji manualnej...`);
+        try {
+            await fetch(`/api/kosztorysant/scope-manifest/update-coverage`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tenderId, elementId, status: 'NEEDS_REVIEW' }),
+            });
+        } catch (e) {
+            console.error('[useScopeManifest] Błąd markAsNeedsReview:', e);
+        }
+    }, [tenderId, manifest]);
+
+    const answerQuestion = useCallback(async (
+        elementId: string,
+        value: number,
+        unit: string
+    ) => {
+        if (!tenderId) return;
+        console.log(`[useScopeManifest] Akcja: Wysyłam odpowiedź użytkownika dla "${elementId}"...`);
+        try {
+            await fetch(`/api/kosztorysant/scope-manifest/answer-question`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tenderId, elementId, value, unit }),
+            });
+        } catch (e) {
+            console.error('[useScopeManifest] Błąd answerQuestion:', e);
+        }
+    }, [tenderId]);
+
+    return {
+        manifest,
+        isLoading,
+        error,
+        heatMap,
+        pendingQuestions,
+        coverageStats,
+        markAsNeedsReview,
+        answerQuestion,
+    };
+}
+
+--- END OF FILE src/hooks/useScopeManifest.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/_shared/scopeManifest.types.ts ---
+
+// ============================================================
+// PESAM – ScopeManifest Types
+// Kręgosłup systemu. Każdy agent czyta stąd swoje zadanie.
+// ============================================================
+
+export type DocLevel = 0 | 1 | 2 | 3 | 4;
+
+export type ObjectType =
+    | 'przedszkole'
+    | 'szkola'
+    | 'biurowiec'
+    | 'hala_sportowa'
+    | 'hala_produkcyjna'
+    | 'budynek_mieszkalny'
+    | 'szpital'
+    | 'inne';
+
+export type EstimationMethod =
+    | 'PARAMETRIC'
+    | 'ANALOGICAL'
+    | 'ELEMENT_BASED'
+    | 'DETAILED_KNR';
+
+export type DataSource =
+    | 'AI_FROM_PFU'
+    | 'AI_FROM_SWZ'
+    | 'AI_HEURISTIC'
+    | 'HARDCODED_NORM';
+
+export type GapFillerStrategy =
+    | 'SEKOCENBUD_M2'
+    | 'EUROKOD_NORM'
+    | 'GUS_PERCENT'
+    | 'ASK_USER';
+
+export type CoverageStatus =
+    | 'COVERED'
+    | 'GAP_FILLED'
+    | 'MISSING'
+    | 'NEEDS_REVIEW'
+    | 'WAITING_USER';
+
+export type DataQuality =
+    | 'MARKET_VERIFIED'
+    | 'NORMATIVE'
+    | 'ESTIMATED'
+    | 'MISSING';
+
+export type RiskSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+// --- Poziom 1: Nagłówek manifestu ---
+export interface ScopeManifestMeta {
+    tenderId: string;
+    generatedAt: string;
+    updatedAt: string;
+    docLevel: DocLevel;
+    objectType: ObjectType;
+    objectArea_m2: number | null;
+    estimationMethod: EstimationMethod;
+    confidenceScore: number;
+    sourceDocuments: string[];
+    isLocked: boolean;
+}
+
+// --- Poziom 2: Wymagania twarde z SWZ/OPZ ---
+export interface HardRequirement {
+    id: string;
+    description: string;
+    sourceRef: string;
+    affectedDivisionIds: string[];
+    isMandatory: boolean;
+    addedBy: 'AI' | 'USER';
+}
+
+// --- Poziom 3: Wymagane działy (serce manifestu) ---
+export interface ScopeElement {
+    elementId: string;
+    name: string;
+    unit: string;
+    source: DataSource;
+    isMandatoryByLaw: boolean;
+    applicableObjectTypes: ObjectType[] | 'ALL';
+    minDocLevel: DocLevel;
+    gapFillerStrategy: GapFillerStrategy;
+    gapFillerHint?: string;
+    gapFillerMultiplier?: number;
+}
+
+export interface ScopeDivision {
+    divisionId: string;
+    divisionName: string;
+    displayOrder: number;
+    elements: ScopeElement[];
+}
+
+// --- Poziom 4: Ryzyka ---
+export interface MissingDataRisk {
+    riskId: string;
+    description: string;
+    costImpactPercent: number;
+    affectedDivisionIds: string[];
+    severity: RiskSeverity;
+    addedBy: 'AI' | 'USER';
+    userOverridePercent?: number;
+}
+
+// --- Poziom 5: Status pokrycia (żywy dokument) ---
+export interface CoverageEntry {
+    elementId: string;
+    divisionId: string;
+    status: CoverageStatus;
+    coveredBySectionId: string | null;
+    dataQuality: DataQuality;
+    gapFillerNote: string | null;
+    gapFillerValue: number | null;
+    lastUpdatedBy: string;
+    lastUpdatedAt: string;
+    pendingQuestion?: string;
+}
+
+// --- Kompletny dokument ScopeManifest ---
+export interface ScopeManifest {
+    meta: ScopeManifestMeta;
+    hardRequirements: HardRequirement[];
+    requiredDivisions: ScopeDivision[];
+    missingDataRisks: MissingDataRisk[];
+    coverageStatus: CoverageEntry[];
+}
+
+// --- Typy pomocnicze dla agentów ---
+export interface AnalitykZakresuGeminiOutput {
+    objectType: ObjectType;
+    objectArea_m2: number | null;
+    confidenceScore: number;
+    hardRequirements: Omit<HardRequirement, 'addedBy'>[];
+    requiredDivisions: Array<{
+        divisionId: string;
+        divisionName: string;
+        displayOrder: number;
+        elements: Omit<ScopeElement, 'isMandatoryByLaw' | 'applicableObjectTypes' | 'minDocLevel'>[];
+    }>;
+    missingDataRisks: Omit<MissingDataRisk, 'addedBy' | 'userOverridePercent'>[];
+}
+
+export interface GapFillerResult {
+    elementId: string;
+    divisionId: string;
+    strategy: GapFillerStrategy;
+    estimatedValue_PLN: number;
+    note: string;
+    dataQuality: DataQuality;
+}
+
+--- END OF FILE src/app/api/kosztorysant/_shared/scopeManifest.types.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/_shared/heurystyki.ts ---
+
+// ============================================================
+// PESAM – Dynamiczna Baza Heurystyk (Zintegrowana z Firestore)
+// Jeśli baza w Firestore jest pusta, skrypt automatycznie ją zasili.
+// ============================================================
+
+import { adminDb } from '@/lib/firebase/admin';
+import type { ScopeElement, ObjectType, DocLevel, GapFillerStrategy } from './scopeManifest.types';
+
+// ============================================================
+// DOMYŚLNE WZORCE (Używane tylko do pierwszego zasilenia bazy)
+// ============================================================
+
+const DEFAULT_UNIVERSAL: ScopeElement[] = [
+    {
+        elementId: 'UNIV-E1',
+        name: 'Roboty ziemne i wykopy',
+        unit: 'm³',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'EUROKOD_NORM',
+        gapFillerHint: 'Objętość wykopu ≈ powierzchnia zabudowy × 1.5m głębokości posadowienia',
+        gapFillerMultiplier: 1.5,
+    },
+    {
+        elementId: 'UNIV-E2',
+        name: 'Fundamenty żelbetowe (ławy, stopy, płyta)',
+        unit: 'm³',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'EUROKOD_NORM',
+        gapFillerHint: '0.15–0.25 m³ betonu na 1 m² powierzchni zabudowy wg PN-EN 1992',
+        gapFillerMultiplier: 0.2,
+    },
+    {
+        elementId: 'UNIV-E3',
+        name: 'Izolacje przeciwwilgociowe i termiczne fundamentów',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: true,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'EUROKOD_NORM',
+        gapFillerHint: 'Obwód fundamentów × wysokość ścian fundamentowych',
+    },
+    {
+        elementId: 'UNIV-E4',
+        name: 'Ściany konstrukcyjne i nośne',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'SEKOCENBUD_M2',
+        gapFillerHint: 'Szacunek z Sekocenbud – ściany nośne na m² PUM',
+    },
+    {
+        elementId: 'UNIV-E5',
+        name: 'Stropy żelbetowe lub prefabrykowane',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 2,
+        gapFillerStrategy: 'EUROKOD_NORM',
+        gapFillerHint: '≈ powierzchnia kondygnacji × liczba stropów',
+    },
+    {
+        elementId: 'UNIV-E6',
+        name: 'Dach – konstrukcja i pokrycie',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'SEKOCENBUD_M2',
+        gapFillerHint: 'Powierzchnia dachu ≈ 1.15 × powierzchnia rzutu',
+    },
+    {
+        elementId: 'UNIV-E7',
+        name: 'Tynki wewnętrzne maszynowe',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'EUROKOD_NORM',
+        gapFillerHint: 'Powierzchnia tynków ≈ 3.2 × PUM (ściany + sufity)',
+        gapFillerMultiplier: 3.2,
+    },
+    {
+        elementId: 'UNIV-E8',
+        name: 'Posadzki i wylewki',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'SEKOCENBUD_M2',
+    },
+    {
+        elementId: 'UNIV-E9',
+        name: 'Stolarka okienna i drzwiowa',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'SEKOCENBUD_M2',
+        gapFillerHint: 'Okna ≈ 15–20% powierzchni ścian zewnętrznych',
+    },
+    {
+        elementId: 'UNIV-E10',
+        name: 'Instalacja elektryczna (WLZ, tablice, okablowanie)',
+        unit: 'kpl.',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: true,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 0,
+        gapFillerStrategy: 'GUS_PERCENT',
+        gapFillerHint: '8–12% kosztu stanu surowego zamkniętego wg GUS',
+        gapFillerMultiplier: 0.10,
+    },
+    {
+        elementId: 'UNIV-E11',
+        name: 'Instalacja sanitarna (wod-kan, biały montaż)',
+        unit: 'kpl.',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: true,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 0,
+        gapFillerStrategy: 'GUS_PERCENT',
+        gapFillerHint: '6–10% kosztu stanu surowego wg GUS',
+        gapFillerMultiplier: 0.08,
+    },
+    {
+        elementId: 'UNIV-E12',
+        name: 'Instalacja C.O. i wentylacja',
+        unit: 'kpl.',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: true,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 0,
+        gapFillerStrategy: 'GUS_PERCENT',
+        gapFillerHint: '10–15% kosztu stanu surowego wg GUS',
+        gapFillerMultiplier: 0.12,
+    },
+    {
+        elementId: 'UNIV-E13',
+        name: 'Instalacja odgromowa i uziemiająca',
+        unit: 'kpl.',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: true,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 0,
+        gapFillerStrategy: 'GUS_PERCENT',
+        gapFillerHint: '0.5–1.0% kosztu stanu surowego',
+        gapFillerMultiplier: 0.007,
+    },
+    {
+        elementId: 'UNIV-E14',
+        name: 'Zagospodarowanie terenu i drogi wewnętrzne',
+        unit: 'm²',
+        source: 'HARDCODED_NORM',
+        isMandatoryByLaw: false,
+        applicableObjectTypes: 'ALL',
+        minDocLevel: 1,
+        gapFillerStrategy: 'SEKOCENBUD_M2',
+    },
+];
+
+const DEFAULT_SPECIFIC: Record<ObjectType, ScopeElement[]> = {
+    przedszkole: [
+        {
+            elementId: 'PRZ-E1',
+            name: 'Instalacja ppoż. (tryskacze, hydranty, czujniki)',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['przedszkole'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'GUS_PERCENT',
+            gapFillerHint: '3–5% kosztu stanu surowego dla obiektów ZL II',
+            gapFillerMultiplier: 0.04,
+        },
+        {
+            elementId: 'PRZ-E2',
+            name: 'Oświetlenie ewakuacyjne i awaryjne',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['przedszkole'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'GUS_PERCENT',
+            gapFillerMultiplier: 0.015,
+        },
+        {
+            elementId: 'PRZ-E3',
+            name: 'Kuchnia z zapleczem (wyposażenie technologiczne)',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['przedszkole'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+            gapFillerHint: 'Koszt kuchni silnie zależy od liczby posiłków i standardu.',
+        },
+        {
+            elementId: 'PRZ-E4',
+            name: 'Plac zabaw z nawierzchnią bezpieczną',
+            unit: 'm²',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['przedszkole'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'SEKOCENBUD_M2',
+            gapFillerHint: 'Min. 15 m² na oddział wg przepisów.',
+        },
+        {
+            elementId: 'PRZ-E5',
+            name: 'Winda / platforma dla osób niepełnosprawnych',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['przedszkole'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+        },
+    ],
+    szkola: [
+        {
+            elementId: 'SZK-E1',
+            name: 'Instalacja ppoż.',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['szkola'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'GUS_PERCENT',
+            gapFillerMultiplier: 0.04,
+        },
+        {
+            elementId: 'SZK-E2',
+            name: 'Sala gimnastyczna – podłoga sportowa i wyposażenie',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['szkola'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+            gapFillerHint: 'Zależy od powierzchni sali i standardu.',
+        },
+        {
+            elementId: 'SZK-E3',
+            name: 'Sieć komputerowa i instalacja AV (multimedialna)',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['szkola'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'GUS_PERCENT',
+            gapFillerMultiplier: 0.025,
+        },
+    ],
+    hala_sportowa: [
+        {
+            elementId: 'HALS-E1',
+            name: 'Konstrukcja stalowa hali (słupy, rygle, płatwie)',
+            unit: 't',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['hala_sportowa'],
+            minDocLevel: 1,
+            gapFillerStrategy: 'EUROKOD_NORM',
+            gapFillerHint: '25–40 kg/m² powierzchni dachu hali wg PN-EN 1993',
+            gapFillerMultiplier: 32,
+        },
+        {
+            elementId: 'HALS-E2',
+            name: 'Trybuny lub widownia',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['hala_sportowa'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+        },
+        {
+            elementId: 'HALS-E3',
+            name: 'Nawierzchnia sportowa (parkiet, tartan)',
+            unit: 'm²',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['hala_sportowa'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'SEKOCENBUD_M2',
+        },
+    ],
+    hala_produkcyjna: [
+        {
+            elementId: 'HALP-E1',
+            name: 'Konstrukcja stalowa hali przemysłowej',
+            unit: 't',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['hala_produkcyjna'],
+            minDocLevel: 1,
+            gapFillerStrategy: 'EUROKOD_NORM',
+            gapFillerHint: '35–60 kg/m² – konstrukcja dachu',
+            gapFillerMultiplier: 45,
+        },
+        {
+            elementId: 'HALP-E2',
+            name: 'Posadzka przemysłowa (beton utwardzony, żywica)',
+            unit: 'm²',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['hala_produkcyjna'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'SEKOCENBUD_M2',
+        },
+        {
+            elementId: 'HALP-E3',
+            name: 'Wentylacja przemysłowa i odciągi',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['hala_produkcyjna'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+            gapFillerHint: 'Wymaga danych procesowych od użytkownika.',
+        },
+    ],
+    biurowiec: [
+        {
+            elementId: 'BIU-E1',
+            name: 'Windy osobowe',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['biurowiec'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+            gapFillerHint: 'Liczba wind zależy od wysokości i liczby pięter',
+        },
+        {
+            elementId: 'BIU-E2',
+            name: 'System kontroli dostępu i monitoring CCTV',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['biurowiec'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'GUS_PERCENT',
+            gapFillerMultiplier: 0.02,
+        },
+        {
+            elementId: 'BIU-E3',
+            name: 'Klimatyzacja i wentylacja mechaniczna (VRF/VRV)',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['biurowiec'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'GUS_PERCENT',
+            gapFillerMultiplier: 0.17,
+        },
+    ],
+    szpital: [
+        {
+            elementId: 'SZP-E1',
+            name: 'Instalacja gazów medycznych',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: true,
+            applicableObjectTypes: ['szpital'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+        },
+    ],
+    budynek_mieszkalny: [
+        {
+            elementId: 'MIE-E1',
+            name: 'Garaż podziemny lub parkingi',
+            unit: 'kpl.',
+            source: 'HARDCODED_NORM',
+            isMandatoryByLaw: false,
+            applicableObjectTypes: ['budynek_mieszkalny'],
+            minDocLevel: 0,
+            gapFillerStrategy: 'ASK_USER',
+        },
+    ],
+    inne: []
+};
+
+// ============================================================
+// METODY MECHANIZMU UNIKANIA HARDKODOWANIA (FIRESTORE)
+// ============================================================
+
+const SETTINGS_PATH = 'settings/estimatorTemplates';
+
+/**
+ * Automatyczna inicjalizacja bazy w Firestore (Self-Seeding)
+ */
+async function ensureDatabaseIsSeeded(): Promise<void> {
+    const metaRef = adminDb.doc(SETTINGS_PATH);
+    const metaSnap = await metaRef.get();
+
+    if (metaSnap.exists()) {
+        return; // Baza już jest zainicjowana, nic nie robimy
+    }
+
+    console.log('[Heurystyki] ⚠️ Wykryto BRAK bazy szablonów w Firestore. Rozpoczynam automatyczne inicjowanie (Self-Seeding)...');
+
+    try {
+        const batch = adminDb.batch();
+
+        // 1. Zapisz meta-informację o szablonach
+        batch.set(metaRef, {
+            initializedAt: new Date().toISOString(),
+            version: '1.0.0',
+            description: 'Dynamiczne szablony kosztorysowe PESAM'
+        });
+
+        // 2. Zapisz uniwersalny szablon
+        const universalRef = adminDb.doc(`${SETTINGS_PATH}/templates/universal`);
+        batch.set(universalRef, { elements: DEFAULT_UNIVERSAL });
+
+        // 3. Zapisz specyficzne szablony dla typów obiektów
+        for (const [key, elements] of Object.entries(DEFAULT_SPECIFIC)) {
+            const docRef = adminDb.doc(`${SETTINGS_PATH}/templates/${key}`);
+            batch.set(docRef, { elements });
+        }
+
+        await batch.commit();
+        console.log('[Heurystyki] ✅ Sukces: Baza szablonów w Firestore została zasilona domyślnymi wartościami.');
+    } catch (err) {
+        console.error('[Heurystyki] ❌ Błąd krytyczny podczas inicjalizacji bazy:', err);
+    }
+}
+
+/**
+ * Pobiera elementy z szablonu w Firestore
+ */
+async function fetchTemplateElements(templateId: string): Promise<ScopeElement[]> {
+    await ensureDatabaseIsSeeded(); // upewnij się, że baza istnieje
+
+    const docRef = adminDb.doc(`${SETTINGS_PATH}/templates/${templateId}`);
+    const snap = await docRef.get();
+
+    if (snap.exists()) {
+        const data = snap.data();
+        return (data?.elements as ScopeElement[]) || [];
+    }
+
+    console.warn(`[Heurystyki] Ostrzeżenie: Szablon ${templateId} nie istnieje w Firestore.`);
+    return [];
+}
+
+// ============================================================
+// PODSTAWOWE METODY WYWOŁYWANE PRZEZ AGENTY
+// ============================================================
+
+/**
+ * Buduje obowiązkowe minimum dla danego obiektu, czytając z Firestore
+ */
+export async function buildMandatoryMinimum(
+    objectType: ObjectType,
+    docLevel: DocLevel
+): Promise<ScopeElement[]> {
+    console.log(`[Heurystyki] 🔍 Buduję dynamiczne minimum dla: "${objectType}" (Level ${docLevel}) z Firestore...`);
+
+    // Pobierz dane równolegle
+    const [universalElements, specificElements] = await Promise.all([
+        fetchTemplateElements('universal'),
+        fetchTemplateElements(objectType)
+    ]);
+
+    const filteredUniversal = universalElements.filter(
+        (el) => el.minDocLevel <= docLevel
+    );
+
+    const finalMin = [...filteredUniversal, ...specificElements];
+    console.log(`[Heurystyki] Skonstruowano minimum: ${finalMin.length} pozycji.`);
+    return finalMin;
+}
+
+/**
+ * Sprawdza w Firestore, czy dany element jest obowiązkowy prawnie
+ */
+export async function isMandatoryByLaw(elementId: string, objectType: ObjectType): Promise<boolean> {
+    const [universal, specific] = await Promise.all([
+        fetchTemplateElements('universal'),
+        fetchTemplateElements(objectType)
+    ]);
+
+    const all = [...universal, ...specific];
+    const found = all.find((el) => el.elementId === elementId);
+    return found?.isMandatoryByLaw ?? false;
+}
+
+/**
+ * Pobiera z bazy strategię Gap Fillera dla elementu
+ */
+export async function getGapFillerStrategy(elementId: string, objectType: ObjectType): Promise<GapFillerStrategy> {
+    const [universal, specific] = await Promise.all([
+        fetchTemplateElements('universal'),
+        fetchTemplateElements(objectType)
+    ]);
+
+    const all = [...universal, ...specific];
+    const found = all.find((el) => el.elementId === elementId);
+    return found?.gapFillerStrategy ?? 'ASK_USER';
+}
+
+--- END OF FILE src/app/api/kosztorysant/_shared/heurystyki.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-analityk-zakresu/route.ts ---
+
+import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenAI, Type } from '@google/genai';
+import { adminDb } from '@/lib/firebase/admin';
+import { buildMandatoryMinimum } from '../_shared/heurystyki';
+import type {
+    ScopeManifest,
+    HardRequirement,
+    ScopeDivision,
+    ScopeElement,
+    MissingDataRisk,
+    CoverageEntry,
+    ObjectType,
+    DocLevel,
+    AnalitykZakresuGeminiOutput,
+} from '../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+// ============================================================
+// Response Schema – Gemini musi dopasować się do tej struktury
+// ============================================================
+
+const GEMINI_RESPONSE_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        objectType: {
+            type: Type.STRING,
+            enum: ['przedszkole', 'szkola', 'biurowiec', 'hala_sportowa', 'hala_produkcyjna', 'budynek_mieszkalny', 'szpital', 'inne'],
+        },
+        objectArea_m2: { type: Type.NUMBER },
+        confidenceScore: { type: Type.INTEGER },
+        hardRequirements: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    id: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    sourceRef: { type: Type.STRING },
+                    affectedDivisionIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    isMandatory: { type: Type.BOOLEAN },
+                },
+                required: ['id', 'description', 'sourceRef', 'affectedDivisionIds', 'isMandatory'],
+            },
+        },
+        requiredDivisions: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    divisionId: { type: Type.STRING },
+                    divisionName: { type: Type.STRING },
+                    displayOrder: { type: Type.INTEGER },
+                    elements: {
+                        type: Type.ARRAY,
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                elementId: { type: Type.STRING },
+                                name: { type: Type.STRING },
+                                unit: { type: Type.STRING },
+                                source: {
+                                    type: Type.STRING,
+                                    enum: ['AI_FROM_PFU', 'AI_FROM_SWZ', 'AI_HEURISTIC', 'HARDCODED_NORM'],
+                                },
+                                gapFillerStrategy: {
+                                    type: Type.STRING,
+                                    enum: ['SEKOCENBUD_M2', 'EUROKOD_NORM', 'GUS_PERCENT', 'ASK_USER'],
+                                },
+                                gapFillerHint: { type: Type.STRING },
+                            },
+                            required: ['elementId', 'name', 'unit', 'source', 'gapFillerStrategy'],
+                        },
+                    },
+                },
+                required: ['divisionId', 'divisionName', 'displayOrder', 'elements'],
+            },
+        },
+        missingDataRisks: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    riskId: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    costImpactPercent: { type: Type.NUMBER },
+                    affectedDivisionIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    severity: {
+                        type: Type.STRING,
+                        enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+                    },
+                },
+                required: ['riskId', 'description', 'costImpactPercent', 'affectedDivisionIds', 'severity'],
+            },
+        },
+    },
+    required: ['objectType', 'confidenceScore', 'hardRequirements', 'requiredDivisions', 'missingDataRisks'],
+};
+
+// ============================================================
+// System Prompt dla Analityka Zakresu
+// ============================================================
+
+const SYSTEM_INSTRUCTION = `
+Jesteś Analitykiem Zakresu w systemie PESAM – AI kosztorysanta budowlanego.
+Twoim zadaniem jest zbudowanie "Wzorca Zakresu" (ScopeManifest) – dokumentu określającego, co MUSI znaleźć się w kosztorysie ofertowym.
+
+ZASADY DZIAŁANIA:
+1. Czytasz dostarczone dokumenty (SWZ, PFU, OPZ) i wyciągasz WSZYSTKIE wymagania techniczne.
+2. Na podstawie typu obiektu i jego funkcji budujesz listę wymaganych działów kosztorysu.
+3. ZAKRES ma być wg "Tabeli Elementów Scalonych" – 20–40 pozycji, nie pełny KNR.
+4. Dla każdej pozycji określasz jednostkę (m², m³, kpl., mb, szt.) i odpowiednią marżę ryzyka.
+5. Wykrywasz RYZYKA – czego brakuje w dokumentacji i jaki to ma wpływ na koszt.
+
+STRUKTURA DZIAŁÓW (stosuj konsekwentnie):
+D1: Stan Zerowy (roboty ziemne, fundamenty, izolacje)
+D2: Stan Surowy (ściany, stropy, dach)
+D3: Stan Wykończeniowy Wewnętrzny (tynki, posadzki, stolarka)
+D4: Elewacja i zagospodarowanie terenu
+D5: Instalacje Sanitarne (wod-kan, CO, wentylacja)
+D6: Instalacje Elektryczne (WLZ, tablice, oświetlenie, odgrom)
+D7: Instalacje Specjalne (ppoż, windy, AV, BMS) – jeśli dotyczy
+D8: Wyposażenie technologiczne – jeśli dotyczy
+
+STRATEGIE GAP FILLERA:
+- EUROKOD_NORM: gdy można użyć mnożnika normowego (kg/m³, m² itp.)
+- SEKOCENBUD_M2: gdy istnieje cena scalona na m² lub m³ (elewacje, wykończenia)
+- GUS_PERCENT: gdy pozycja to procent od kosztu całości (np. instalacje odgromowe)
+- ASK_USER: gdy brakuje kluczowych danych i AI nie może zgadnąć (geologia, technologia specjalistyczna)
+
+CONFIDENCE SCORE (0–100):
+- 90–100: pełny PFU + SWZ + rysunki
+- 70–89: SWZ + częściowy PFU
+- 50–69: tylko SWZ lub tylko PFU
+- 30–49: krótki opis słowny
+- <30: prawie brak dokumentacji
+
+ODPOWIADAJ WYŁĄCZNIE CZYSTYM, POPRAWNYM JSON.
+`.trim();
+
+// ============================================================
+// Merge: AI output + dynamiczne, modyfikowalne minimum z bazy
+// ============================================================
+
+async function mergeWithMandatoryMinimum(
+    aiOutput: AnalitykZakresuGeminiOutput,
+    docLevel: DocLevel
+): Promise<ScopeDivision[]> {
+    console.log(`[Analityk Zakresu] [Merge] Pobieram obowiązkowe minimum z bazy Firestore dla typu: "${aiOutput.objectType}"...`);
+
+    // Pobieramy heurystyki zapisane w Firestore (krok 2)
+    const mandatory = await buildMandatoryMinimum(aiOutput.objectType, docLevel);
+
+    const divisionMap = new Map<string, ScopeDivision>();
+
+    // Krok 1: Wpisujemy działy wykryte przez AI
+    for (const div of aiOutput.requiredDivisions) {
+        divisionMap.set(div.divisionId, {
+            ...div,
+            elements: div.elements.map((el) => ({
+                ...el,
+                isMandatoryByLaw: false,
+                applicableObjectTypes: 'ALL',
+                minDocLevel: docLevel,
+            })),
+        });
+    }
+
+    // Krok 2: Weryfikujemy i uzupełniamy o obowiązkowe pozycje z bazy (których AI nie ma prawa pominąć)
+    for (const mandatoryEl of mandatory) {
+        const targetDivisionId = resolveDivisionForElement(mandatoryEl.elementId);
+        let alreadyCovered = false;
+
+        for (const [, div] of divisionMap) {
+            if (div.elements.some((el) => isSimilarElement(el.name, mandatoryEl.name))) {
+                alreadyCovered = true;
+                break;
+            }
+        }
+
+        if (!alreadyCovered) {
+            console.log(`[Analityk Zakresu] [Merge] 🛡️ Wykryto brak ważnej pozycji! Dodaję automatycznie: "${mandatoryEl.name}" (${mandatoryEl.elementId})`);
+            if (!divisionMap.has(targetDivisionId)) {
+                divisionMap.set(targetDivisionId, {
+                    divisionId: targetDivisionId,
+                    divisionName: getDivisionName(targetDivisionId),
+                    displayOrder: getDivisionOrder(targetDivisionId),
+                    elements: [],
+                });
+            }
+            divisionMap.get(targetDivisionId)!.elements.push(mandatoryEl);
+        }
+    }
+
+    return Array.from(divisionMap.values()).sort(
+        (a, b) => a.displayOrder - b.displayOrder
+    );
+}
+
+function isSimilarElement(name1: string, name2: string): boolean {
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-ząćęłńóśźż]/g, ' ').trim();
+    const n1 = normalize(name1);
+    const n2 = normalize(name2);
+    const keywords = n2.split(' ').filter((w) => w.length > 4);
+    return keywords.filter((kw) => n1.includes(kw)).length >= 2;
+}
+
+function resolveDivisionForElement(elementId: string): string {
+    if (elementId.startsWith('UNIV-E1') || elementId.startsWith('UNIV-E2') || elementId.startsWith('UNIV-E3')) return 'D1';
+    if (elementId.startsWith('UNIV-E4') || elementId.startsWith('UNIV-E5') || elementId.startsWith('UNIV-E6')) return 'D2';
+    if (elementId.startsWith('UNIV-E7') || elementId.startsWith('UNIV-E8') || elementId.startsWith('UNIV-E9')) return 'D3';
+    if (elementId.startsWith('UNIV-E10') || elementId.startsWith('UNIV-E13')) return 'D6';
+    if (elementId.startsWith('UNIV-E11') || elementId.startsWith('UNIV-E12')) return 'D5';
+    if (elementId.startsWith('UNIV-E14')) return 'D4';
+    return 'D7';
+}
+
+function getDivisionName(id: string): string {
+    const names: Record<string, string> = {
+        D1: 'Stan Zerowy',
+        D2: 'Stan Surowy',
+        D3: 'Stan Wykończeniowy Wewnętrzny',
+        D4: 'Elewacja i zagospodarowanie terenu',
+        D5: 'Instalacje Sanitarne',
+        D6: 'Instalacje Elektryczne',
+        D7: 'Instalacje Specjalne i Wyposażenie',
+        D8: 'Wyposażenie Technologiczne',
+    };
+    return names[id] ?? `Dział ${id}`;
+}
+
+function getDivisionOrder(id: string): number {
+    return parseInt(id.replace('D', ''), 10) || 99;
+}
+
+function initCoverageStatus(divisions: ScopeDivision[]): CoverageEntry[] {
+    const now = new Date().toISOString();
+    return divisions.flatMap((div) =>
+        div.elements.map((el) => ({
+            elementId: el.elementId,
+            divisionId: div.divisionId,
+            status: 'MISSING' as const,
+            coveredBySectionId: null,
+            dataQuality: 'MISSING' as const,
+            gapFillerNote: null,
+            gapFillerValue: null,
+            lastUpdatedBy: 'system-init',
+            lastUpdatedAt: now,
+        }))
+    );
+}
+
+// ============================================================
+// GŁÓWNY HANDLER POST
+// ============================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Analityk Zakresu] === INICJACJA ANALIZY TEKSTOWEJ ===");
+    console.log("==================================================");
+
+    try {
+        const body = await req.json() as {
+            tenderId: string;
+            fileContents: Array<{ fileName: string; content: string; category: string }>;
+            docLevel: DocLevel;
+            estimationMethod: string;
+            sourceDocuments: string[];
+        };
+
+        const { tenderId, fileContents, docLevel, estimationMethod, sourceDocuments } = body;
+
+        if (!tenderId) {
+            console.error("[Analityk Zakresu] ❌ Błąd: Brak tenderId w żądaniu.");
+            return NextResponse.json({ error: 'Brak parametru tenderId' }, { status: 400 });
+        }
+
+        console.log(`[Analityk Zakresu] Projekt: "${tenderId}" | Poziom z klasyfikatora: ${docLevel} (${estimationMethod})`);
+
+        const relevantFiles = fileContents.filter((f) =>
+            ['SWZ', 'PFU', 'OPZ', 'UMOWA', 'OPIS'].includes(f.category.toUpperCase())
+        );
+
+        console.log(`[Analityk Zakresu] Wykryto ${relevantFiles.length} dokumentów tekstowych o dużym znaczeniu.`);
+
+        const filesContext = relevantFiles.length > 0
+            ? relevantFiles.map((f) => `=== NAZWA PLIKU: ${f.fileName} (KATEGORIA: ${f.category}) ===\n${f.content.slice(0, 10000)}`).join('\n\n')
+            : 'BRAK DOKUMENTÓW TEKSTOWYCH. Bazuj na ogólnej wiedzy inżynierskiej i wzorcu z bazy.';
+
+        console.log(`[Analityk Zakresu] Inicjalizuję klienta GoogleGenAI na serwerze GCP...`);
+        const ai = new GoogleGenAI({
+            vertexai: true,
+            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+            location: "global",
+        });
+
+        const prompt = `
+Przeanalizuj poniższe dokumenty przetargowe i wygeneruj ScopeManifest.
+
+PARAMETRY WEJŚCIOWE:
+- ID projektu: ${tenderId}
+- Poziom dokumentów: ${docLevel}
+- Sugerowana Metoda: ${estimationMethod}
+- Dokumenty źródłowe: ${sourceDocuments.join(', ')}
+
+DANE DOKUMENTÓW PRZETARGOWYCH:
+${filesContext}
+
+Wygeneruj kompletny ScopeManifest JSON zgodnie z Response Schema.
+Pamiętaj: Skup się na 20-45 pozycjach elementów scalonych.
+    `.trim();
+
+        console.log(`[Analityk Zakresu] Wysyłam dane do Gemini 1.5 Flash w celu zbudowania manifestu...`);
+
+        const result = await ai.models.generateContent({
+            model: MODEL_FLASH,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                temperature: 0.1,
+                responseMimeType: "application/json",
+                responseSchema: GEMINI_RESPONSE_SCHEMA as any,
+            },
+        });
+
+        const rawText = result.text ?? "{}";
+        console.log(`[Analityk Zakresu] Odebrano JSON od Gemini (${rawText.length} znaków). Rozpoczynam parsowanie...`);
+
+        const aiOutput: AnalitykZakresuGeminiOutput = JSON.parse(rawText);
+
+        if (!aiOutput.objectType || !aiOutput.requiredDivisions?.length) {
+            throw new Error('Wadliwa odpowiedź z chmury Gemini – brak wymaganych pól objectType lub requiredDivisions');
+        }
+
+        console.log(`[Analityk Zakresu] AI sklasyfikowało obiekt jako: "${aiOutput.objectType}" | Pewność: ${aiOutput.confidenceScore}/100`);
+
+        // Mergowanie z bazą dynamicznych heurystyk z bazy Firestore
+        const mergedDivisions = await mergeWithMandatoryMinimum(aiOutput, docLevel);
+
+        // Budowanie statusów początkowych – wszystko na starcie dostaje status "MISSING"
+        console.log(`[Analityk Zakresu] Generuję mapę pokrycia (coverageStatus) dla ${mergedDivisions.length} dziaów...`);
+        const initialCoverage = initCoverageStatus(mergedDivisions);
+
+        const now = new Date().toISOString();
+        const manifest: ScopeManifest = {
+            meta: {
+                tenderId,
+                generatedAt: now,
+                updatedAt: now,
+                docLevel,
+                objectType: aiOutput.objectType,
+                objectArea_m2: aiOutput.objectArea_m2 ?? null,
+                estimationMethod: estimationMethod as any,
+                confidenceScore: aiOutput.confidenceScore,
+                sourceDocuments,
+                isLocked: false,
+            },
+            hardRequirements: aiOutput.hardRequirements.map((hr) => ({
+                ...hr,
+                addedBy: 'AI' as const,
+            })),
+            requiredDivisions: mergedDivisions,
+            missingDataRisks: aiOutput.missingDataRisks.map((r) => ({
+                ...r,
+                addedBy: 'AI' as const,
+            })),
+            coverageStatus: initialCoverage,
+        };
+
+        // Zapis do bazy
+        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
+        console.log(`[Analityk Zakresu] Zapisuję gotowy manifest pod ścieżką w Firestore: "${manifestPath}"...`);
+        await adminDb.doc(manifestPath).set(manifest, { merge: false });
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Analityk Zakresu] ✅ Sukces: Manifest stworzony w czasie ${duration} sek.`);
+        console.log("==================================================");
+
+        return NextResponse.json({
+            success: true,
+            summary: {
+                objectType: manifest.meta.objectType,
+                objectArea_m2: manifest.meta.objectArea_m2,
+                confidenceScore: manifest.meta.confidenceScore,
+                divisionsCount: mergedDivisions.length,
+                elementsCount: initialCoverage.length,
+                hardRequirementsCount: manifest.hardRequirements.length,
+                risksCount: manifest.missingDataRisks.length,
+                askUserCount: initialCoverage.filter((c) =>
+                    mergedDivisions.flatMap((d) => d.elements)
+                        .find((el) => el.elementId === c.elementId)?.gapFillerStrategy === 'ASK_USER'
+                ).length,
+            },
+        });
+
+    } catch (error: any) {
+        console.error('[Analityk Zakresu] ❌ KRYTYCZNY BŁĄD AGENTA:', error);
+        return NextResponse.json(
+            { error: 'Błąd generowania ScopeManifest', details: String(error) },
+            { status: 500 }
+        );
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-analityk-zakresu/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-gap-filler/route.ts ---
+
+// ============================================================
+// PESAM – Agent Gap Filler (Łatacz Luk)
+// POST /api/kosztorysant/agent-gap-filler
+//
+// Wywoływany przez: Frontend (pod koniec pracy roju)
+// Czyta: tenders/{tenderId}/scopeManifest/main
+// Pisze: tenders/{tenderId}/scopeManifest/main (coverageStatus)
+//        tenders/{tenderId} (sections – dołącza wyliczone pozycje scalone)
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import type {
+    ScopeManifest,
+    ScopeElement,
+    CoverageEntry,
+    GapFillerResult,
+} from '../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+// ============================================================
+// Kalkulator Gap Fillera – logika per strategia
+// ============================================================
+
+interface GapCalcInput {
+    element: ScopeElement;
+    tenderData: {
+        objectArea_m2: number | null;
+        objectType: string;
+        totalRoughCost_PLN: number | null;
+        totalCost_PLN: number | null;
+    };
+}
+
+function calculateGapFill(input: GapCalcInput): GapFillerResult | null {
+    const { element, tenderData } = input;
+    const area = tenderData.objectArea_m2;
+    const roughCost = tenderData.totalRoughCost_PLN;
+
+    console.log(`[Gap Filler] [Przelicznik] Wyliczam pozycję: "${element.name}" | Strategia: ${element.gapFillerStrategy}`);
+
+    switch (element.gapFillerStrategy) {
+        case 'EUROKOD_NORM': {
+            if (!area || !element.gapFillerMultiplier) {
+                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Nie można doliczyć ${element.name} przez EUROKOD_NORM - brak powierzchni lub mnożnika.`);
+                return null;
+            }
+            let quantity = 0;
+            let unitCost_PLN = 0;
+
+            if (element.unit === 'm³') {
+                quantity = area * element.gapFillerMultiplier;
+                unitCost_PLN = 800; // ~800 PLN/m³ betonu towarowego C25/30 z pompą i robocizną
+            } else if (element.unit === 'm²') {
+                quantity = area * element.gapFillerMultiplier;
+                unitCost_PLN = 120; // ~120 PLN/m² tynków maszynowych
+            } else if (element.unit === 't') {
+                quantity = area * element.gapFillerMultiplier;
+                unitCost_PLN = 5500; // ~5500 PLN/t stali zbrojeniowej wbudowanej
+            }
+
+            if (quantity <= 0 || unitCost_PLN <= 0) return null;
+
+            const cost = Math.round(quantity * unitCost_PLN);
+            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${quantity} ${element.unit} = ${cost} PLN.`);
+
+            return {
+                elementId: element.elementId,
+                divisionId: '',
+                strategy: 'EUROKOD_NORM',
+                estimatedValue_PLN: cost,
+                note: element.gapFillerHint ?? `Szacunek inżynierski wg Eurokod, mnożnik ${element.gapFillerMultiplier}`,
+                dataQuality: 'NORMATIVE',
+            };
+        }
+
+        case 'SEKOCENBUD_M2': {
+            if (!area) {
+                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Brak powierzchni (objectArea_m2) dla SEKOCENBUD_M2 dla: "${element.name}"`);
+                return null;
+            }
+
+            // Dane cen średnich scalonych z Sekocenbud Q1 2025 (PLN/m² powierzchni)
+            const SEKOCENBUD_RATES: Record<string, number> = {
+                'dach': 320,
+                'posadzki': 185,
+                'stolarka': 280,
+                'elewacja': 420,
+                'nawierzchnia': 180,
+                'default': 250,
+            };
+
+            const rate = detectRate(element.name, SEKOCENBUD_RATES);
+            const cost = Math.round(area * rate);
+            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${area} m² x ${rate} PLN = ${cost} PLN.`);
+
+            return {
+                elementId: element.elementId,
+                divisionId: '',
+                strategy: 'SEKOCENBUD_M2',
+                estimatedValue_PLN: cost,
+                note: `${rate} PLN/m² × ${area} m² PUM (Baza Sekocenbud Q1 2025, dane scalone)`,
+                dataQuality: 'NORMATIVE',
+            };
+        }
+
+        case 'GUS_PERCENT': {
+            if (!roughCost && !tenderData.totalCost_PLN) {
+                console.warn(`[Gap Filler] [Przelicznik] ⚠️ Brak kosztów bazowych dla GUS_PERCENT w pozycji: "${element.name}"`);
+                return null;
+            }
+            const base = roughCost ?? tenderData.totalCost_PLN!;
+            const multiplier = element.gapFillerMultiplier ?? 0.08;
+            const cost = Math.round(base * multiplier);
+
+            console.log(`[Gap Filler] [Przelicznik] Sukces: "${element.name}" -> ${(multiplier * 100).toFixed(1)}% z bazy ${base} PLN = ${cost} PLN.`);
+
+            return {
+                elementId: element.elementId,
+                divisionId: '',
+                strategy: 'GUS_PERCENT',
+                estimatedValue_PLN: cost,
+                note: `${(multiplier * 100).toFixed(1)}% kosztu bazowego stanu surowego (${base.toLocaleString('pl-PL')} PLN) wg średnich wskaźników GUS`,
+                dataQuality: 'ESTIMATED',
+            };
+        }
+
+        case 'ASK_USER':
+            return null; // Pomijamy wyliczenia, wygenerujemy blokadę dla użytkownika
+
+        default:
+            return null;
+    }
+}
+
+function detectRate(name: string, rates: Record<string, number>): number {
+    const lower = name.toLowerCase();
+    for (const [key, rate] of Object.entries(rates)) {
+        if (key !== 'default' && lower.includes(key)) return rate;
+    }
+    return rates['default'];
+}
+
+// ============================================================
+// Pobieranie finansowych danych z Firestore
+// ============================================================
+
+async function extractTenderFinancials(tenderId: string): Promise<{
+    totalRoughCost_PLN: number | null;
+    totalCost_PLN: number | null;
+    concreteVolume_m3: number | null;
+}> {
+    console.log(`[Gap Filler] [Finanse] Przeszukuję dotychczas wyliczony kosztorys dla: ${tenderId}...`);
+    try {
+        const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
+        const data = tenderDoc.data();
+        if (!data?.sections) {
+            console.log(`[Gap Filler] [Finanse] Brak sekcji (sections) w bazie.`);
+            return { totalRoughCost_PLN: null, totalCost_PLN: null, concreteVolume_m3: null };
+        }
+
+        let totalRoughCost = 0;
+        let totalCost = 0;
+        let concreteVolume = 0;
+
+        for (const section of data.sections) {
+            const sectionTotal = section.items?.reduce(
+                (sum: number, item: any) => sum + (item.totalPrice ?? item.unitPrice * item.quantity ?? 0),
+                0
+            ) ?? 0;
+            totalCost += sectionTotal;
+
+            // Stan surowy = D1 (Zerowy) + D2 (Surowy)
+            if (section.divisionId === 'D1' || section.divisionId === 'D2') {
+                totalRoughCost += sectionTotal;
+            }
+
+            for (const item of section.items ?? []) {
+                if (item.unit === 'm³' && item.name?.toLowerCase().includes('beton')) {
+                    concreteVolume += item.quantity ?? 0;
+                }
+            }
+        }
+
+        console.log(`[Gap Filler] [Finanse] Podsumowanie: Koszt całkowity Roju = ${totalCost} PLN | Stan surowy = ${totalRoughCost} PLN`);
+        return {
+            totalRoughCost_PLN: totalRoughCost > 0 ? totalRoughCost : null,
+            totalCost_PLN: totalCost > 0 ? totalCost : null,
+            concreteVolume_m3: concreteVolume > 0 ? concreteVolume : null,
+        };
+    } catch (err) {
+        console.error(`[Gap Filler] [Finanse] Błąd odczytu danych kosztorysu:`, err);
+        return { totalRoughCost_PLN: null, totalCost_PLN: null, concreteVolume_m3: null };
+    }
+}
+
+// ============================================================
+// Dopasowanie pozycji (Weryfikacja pokrycia)
+// ============================================================
+
+async function detectCoveredElements(
+    tenderId: string,
+    manifest: ScopeManifest
+): Promise<Map<string, string>> {
+    console.log(`[Gap Filler] [Detekcja] Weryfikuję, co Rój zdołał wyliczyć w tym cyklu...`);
+    const covered = new Map<string, string>();
+
+    try {
+        const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
+        const sections = tenderDoc.data()?.sections ?? [];
+
+        for (const div of manifest.requiredDivisions) {
+            for (const el of div.elements) {
+                for (const section of sections) {
+                    if (section.divisionId === div.divisionId) {
+                        // Sprawdzamy czy to nie jest sekcja wygenerowana wcześniej przez Gap Fillera
+                        if (section.sectionId?.startsWith('GAP-')) continue;
+
+                        covered.set(el.elementId, section.sectionId ?? section.divisionId);
+                        break;
+                    }
+                    for (const item of section.items ?? []) {
+                        if (isNameMatch(item.name, el.name)) {
+                            covered.set(el.elementId, section.sectionId);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[Gap Filler] [Detekcja] Błąd detekcji:', e);
+    }
+
+    console.log(`[Gap Filler] [Detekcja] Wynik: ${covered.size} z ${manifest.coverageStatus.length} pozycji zostało już pokrytych przez Rój.`);
+    return covered;
+}
+
+function isNameMatch(sectionItemName: string, elementName: string): boolean {
+    if (!sectionItemName || !elementName) return false;
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-ząćęłńóśźż ]/g, '');
+    const keywords = normalize(elementName).split(' ').filter((w) => w.length > 4);
+    const target = normalize(sectionItemName);
+    return keywords.filter((kw) => target.includes(kw)).length >= Math.ceil(keywords.length * 0.5);
+}
+
+function buildAskUserQuestion(element: ScopeElement): string {
+    const hint = element.gapFillerHint
+        ? `\n💡 Wskazówka systemowa: ${element.gapFillerHint}`
+        : '';
+    return `Wycena pozycji **${element.name}** wymaga Twojej decyzji.${hint}\n\nPodaj mi oczekiwaną kwotę lub parametry ilościowe z jednostką, abym doliczył to do budżetu.`;
+}
+
+// ============================================================
+// GŁÓWNY HANDLER POST
+// ============================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Gap Filler] === ROZPOCZĘTO PROCES ŁATANIA LUK ===");
+    console.log("==================================================");
+
+    try {
+        const { tenderId } = await req.json() as { tenderId: string };
+
+        if (!tenderId) {
+            console.error("[Gap Filler] ❌ Błąd: Brak parametru tenderId.");
+            return NextResponse.json({ error: 'Brak parametru tenderId' }, { status: 400 });
+        }
+
+        // 1. Pobieramy ScopeManifest
+        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
+        console.log(`[Gap Filler] Pobieram manifest projektu: "${manifestPath}"...`);
+        const manifestDoc = await adminDb.doc(manifestPath).get();
+
+        if (!manifestDoc.exists) {
+            console.error(`[Gap Filler] ❌ Błąd: Brak dokumentu ScopeManifest pod ścieżką "${manifestPath}"!`);
+            return NextResponse.json({ error: 'ScopeManifest nie istnieje dla tego projektu' }, { status: 404 });
+        }
+
+        const manifest = manifestDoc.data() as ScopeManifest;
+
+        // 2. Pobieramy finansowy status wyceny
+        const financials = await extractTenderFinancials(tenderId);
+
+        // 3. Sprawdzamy co jest pokryte
+        const coveredMap = await detectCoveredElements(tenderId, manifest);
+
+        // 4. Analizujemy pętlę braków
+        const updatedCoverage: CoverageEntry[] = [];
+        const gapFilledSections: any[] = [];
+        const askUserQuestions: Array<{ elementId: string; question: string }> = [];
+        const now = new Date().toISOString();
+
+        for (const div of manifest.requiredDivisions) {
+            for (const el of div.elements) {
+                const existingCoverage = manifest.coverageStatus.find(
+                    (c) => c.elementId === el.elementId
+                );
+
+                // A. Element został już pokryty w kosztorysie
+                if (coveredMap.has(el.elementId)) {
+                    updatedCoverage.push({
+                        elementId: el.elementId,
+                        divisionId: div.divisionId,
+                        status: 'COVERED',
+                        coveredBySectionId: coveredMap.get(el.elementId)!,
+                        dataQuality: 'MARKET_VERIFIED',
+                        gapFillerNote: null,
+                        gapFillerValue: null,
+                        lastUpdatedBy: 'agent-gap-filler',
+                        lastUpdatedAt: now,
+                    });
+                    continue;
+                }
+
+                // B. Jeśli użytkownik ręcznie oznaczył jako "NEEDS_REVIEW" – zostawiamy bez zmian
+                if (existingCoverage?.status === 'NEEDS_REVIEW') {
+                    updatedCoverage.push(existingCoverage);
+                    continue;
+                }
+
+                // C. Blokada typu ASK_USER
+                if (el.gapFillerStrategy === 'ASK_USER') {
+                    const question = buildAskUserQuestion(el);
+                    console.log(`[Gap Filler] ⏸️ Pozycja "${el.name}" blokuje automatyczną wycenę (ASK_USER). Generuję pytanie.`);
+
+                    askUserQuestions.push({ elementId: el.elementId, question });
+                    updatedCoverage.push({
+                        elementId: el.elementId,
+                        divisionId: div.divisionId,
+                        status: 'WAITING_USER',
+                        coveredBySectionId: null,
+                        dataQuality: 'MISSING',
+                        gapFillerNote: null,
+                        gapFillerValue: null,
+                        lastUpdatedBy: 'agent-gap-filler',
+                        lastUpdatedAt: now,
+                        pendingQuestion: question,
+                    });
+                    continue;
+                }
+
+                // D. Przeliczenie normatywne
+                const result = calculateGapFill({
+                    element: el,
+                    tenderData: {
+                        objectArea_m2: manifest.meta.objectArea_m2,
+                        objectType: manifest.meta.objectType,
+                        ...financials,
+                    },
+                });
+
+                if (result) {
+                    result.divisionId = div.divisionId;
+
+                    gapFilledSections.push({
+                        sectionId: `GAP-${el.elementId}`,
+                        divisionId: div.divisionId,
+                        divisionName: div.divisionName,
+                        items: [
+                            {
+                                itemId: `ITEM-${el.elementId}`,
+                                name: el.name,
+                                unit: el.unit,
+                                quantity: null,
+                                unitPrice: null,
+                                totalPrice: result.estimatedValue_PLN,
+                                dataQuality: result.dataQuality,
+                                source: 'GAP_FILLED',
+                                note: result.note,
+                            },
+                        ],
+                        totalPrice: result.estimatedValue_PLN,
+                        dataQuality: result.dataQuality,
+                        isGapFilled: true,
+                    });
+
+                    updatedCoverage.push({
+                        elementId: el.elementId,
+                        divisionId: div.divisionId,
+                        status: 'GAP_FILLED',
+                        coveredBySectionId: `GAP-${el.elementId}`,
+                        dataQuality: result.dataQuality,
+                        gapFillerNote: result.note,
+                        gapFillerValue: result.estimatedValue_PLN,
+                        lastUpdatedBy: 'agent-gap-filler',
+                        lastUpdatedAt: now,
+                    });
+                } else {
+                    // Brak możliwości wyliczenia (np. brak powierzchni) – status MISSING
+                    updatedCoverage.push({
+                        elementId: el.elementId,
+                        divisionId: div.divisionId,
+                        status: 'MISSING',
+                        coveredBySectionId: null,
+                        dataQuality: 'MISSING',
+                        gapFillerNote: 'Nie można wyliczyć pozycji bez podania powierzchni w PFU.',
+                        gapFillerValue: null,
+                        lastUpdatedBy: 'agent-gap-filler',
+                        lastUpdatedAt: now,
+                    });
+                }
+            }
+        }
+
+        // 5. Zapisujemy zaktualizowaną mapę pokrycia w ScopeManifest
+        const newScore = calculateNewConfidence(updatedCoverage, manifest.meta.confidenceScore);
+        console.log(`[Gap Filler] Aktualizuję ScopeManifest... Nowy ConfidenceScore: ${newScore}/100`);
+
+        await adminDb.doc(`tenders/${tenderId}/scopeManifest/main`).update({
+            coverageStatus: updatedCoverage,
+            'meta.updatedAt': now,
+            'meta.confidenceScore': newScore,
+        });
+
+        // 6. Wstrzykujemy wyliczone sekcje Gap Fillera do głównego dokumentu kosztorysu
+        if (gapFilledSections.length > 0) {
+            console.log(`[Gap Filler] Zapisuję ${gapFilledSections.length} wygenerowanych sekcji normowych w tenders/${tenderId}...`);
+            const tenderRef = adminDb.doc(`tenders/${tenderId}`);
+            const tenderDoc = await tenderRef.get();
+            const existingSections = tenderDoc.data()?.sections ?? [];
+
+            // Filtrujemy poprzednie sekcje GAP (by ich nie duplikować przy ponownym uruchomieniu)
+            const cleanSections = existingSections.filter(
+                (s: any) => !s.sectionId?.startsWith('GAP-')
+            );
+
+            await tenderRef.update({
+                sections: [...cleanSections, ...gapFilledSections],
+            });
+        }
+
+        const stats = {
+            total: updatedCoverage.length,
+            covered: updatedCoverage.filter((c) => c.status === 'COVERED').length,
+            gapFilled: updatedCoverage.filter((c) => c.status === 'GAP_FILLED').length,
+            waitingUser: updatedCoverage.filter((c) => c.status === 'WAITING_USER').length,
+            missing: updatedCoverage.filter((c) => c.status === 'MISSING').length,
+            gapFilledTotal_PLN: gapFilledSections.reduce((s, sec) => s + sec.totalPrice, 0),
+        };
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Gap Filler] ✅ Sukces: proces łatania zakończony w czasie ${duration} sek.`);
+        console.log(`[Gap Filler] Podsumowanie: Pokryte=${stats.covered} | Łatki=${stats.gapFilled} | Blokady=${stats.waitingUser} | Brak=${stats.missing}`);
+        console.log("==================================================");
+
+        return NextResponse.json({
+            success: true,
+            stats,
+            askUserQuestions,
+            chatMessages: buildChatMessages(stats, askUserQuestions, gapFilledSections),
+        });
+
+    } catch (error: any) {
+        console.error('[Gap Filler] ❌ Krytyczny błąd podczas łatania kosztorysu:', error);
+        return NextResponse.json(
+            { error: 'Błąd Gap Fillera', details: String(error) },
+            { status: 500 }
+        );
+    }
+}
+
+function calculateNewConfidence(coverage: CoverageEntry[], previousScore: number): number {
+    const total = coverage.length;
+    if (total === 0) return previousScore;
+    const covered = coverage.filter((c) => c.status === 'COVERED').length;
+    const gapFilled = coverage.filter((c) => c.status === 'GAP_FILLED').length;
+    const weightedScore = (covered * 1.0 + gapFilled * 0.6) / total;
+    return Math.round(Math.min(95, Math.max(previousScore, weightedScore * 100)));
+}
+
+function buildChatMessages(
+    stats: any,
+    askUserQuestions: Array<{ elementId: string; question: string }>,
+    gapFilledSections: any[]
+): string[] {
+    const messages: string[] = [];
+
+    if (stats.gapFilled > 0) {
+        const total = gapFilledSections.reduce((s, sec) => s + sec.totalPrice, 0);
+        messages.push(
+            `🏗️ **Gap Filler** doliczył **${stats.gapFilled} pozycji** metodą szacunków normowych ` +
+            `(na łączną kwotę ok. **${total.toLocaleString('pl-PL')} PLN**). ` +
+            `Pozycje te oznaczono kolorem żółtym (🟡) w Twoim zestawieniu.`
+        );
+    }
+
+    for (const q of askUserQuestions) {
+        messages.push(`⏸️ **Zablokowana pozycja:**\n${q.question}`);
+    }
+
+    if (stats.missing > 0) {
+        messages.push(
+            `⚠️ Nie udało się wyliczyć ${stats.missing} wymaganych pozycji z powodu braku metrażu. ` +
+            `Rewident zgłosi te braki jako alerty krytyczne.`
+        );
+    }
+
+    return messages;
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-gap-filler/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-rewident/route.ts ---
+
+// ============================================================
+// PESAM – Agent Rewident (Rozszerzony o Audyt Zakresu)
+// POST /api/kosztorysant/agent-rewident
+//
+// Zapisuje: tenders/{tenderId} (rewidentReport, finalScore, status)
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenAI, Type } from '@google/genai';
+import { adminDb } from '@/lib/firebase/admin';
+import { runCoverageAudit, type CoverageAuditResult } from './coverageAudit';
+
+export const dynamic = "force-dynamic";
+
+const MODEL_PRO = "gemini-1.5-pro";
+
+interface Section {
+    sectionId: string;
+    divisionId: string;
+    divisionName: string;
+    items: Array<{
+        itemId: string;
+        name: string;
+        unit: string;
+        quantity: number | null;
+        unitPrice: number | null;
+        totalPrice: number;
+        dataQuality?: string;
+    }>;
+    totalPrice: number;
+}
+
+interface DeterministicAlert {
+    severity: 'CRITICAL' | 'WARNING' | 'INFO';
+    code: string;
+    message: string;
+    value?: number;
+}
+
+const BRANCH_NORMS = {
+    D1_ZERO_PERCENT: { min: 8, max: 20, label: 'Stan Zerowy (Roboty ziemne / fundamenty)' },
+    D2_ROUGH_PERCENT: { min: 30, max: 55, label: 'Stan Surowy (Ściany / strop / dach)' },
+    D3_FINISH_PERCENT: { min: 15, max: 35, label: 'Wykończenie wewnętrzne' },
+    D5_SANITARY_PERCENT: { min: 8, max: 18, label: 'Instalacje Sanitarne' },
+    D6_ELECTRIC_PERCENT: { min: 6, max: 14, label: 'Instalacje Elektryczne' },
+    LABOR_RATE_MIN: 35,
+    LABOR_RATE_MAX: 85,
+};
+
+// ============================================================
+// ETAP 1: Audyt deterministyczny (TypeScript)
+// ============================================================
+
+function runDeterministicAudit(sections: Section[]): DeterministicAlert[] {
+    console.log(`[Rewident] [Etap 1] Uruchamiam matematyczne testy walidacyjne kosztorysu...`);
+    const alerts: DeterministicAlert[] = [];
+
+    const totalCost = sections.reduce((s, sec) => s + sec.totalPrice, 0);
+    if (totalCost === 0) {
+        alerts.push({
+            severity: 'CRITICAL',
+            code: 'ZERO_TOTAL_COST',
+            message: '❗ KATASTROFA FINANSOWA: Łączny budżet wyceny wynosi 0 PLN. Sprawdź czy pozycje zostały poprawnie zaimportowane.',
+        });
+        return alerts;
+    }
+
+    // Wyszukiwanie zerowych cen w pozycjach wycenionych
+    for (const section of sections) {
+        for (const item of section.items) {
+            if (item.totalPrice === 0 && item.quantity !== 0) {
+                alerts.push({
+                    severity: 'CRITICAL',
+                    code: 'ZERO_PRICE_ITEM',
+                    message: `❗ LUKA CENOWA: Pozycja **"${item.name}"** (${section.divisionName}) posiada wycenę rynkową wynoszącą 0.00 PLN. Sprawdź i uzupełnij cenę.`,
+                    value: 0,
+                });
+            }
+        }
+    }
+
+    // Analiza wskaźników procentowych branż
+    const divisionTotals: Record<string, number> = {};
+    for (const sec of sections) {
+        divisionTotals[sec.divisionId] = (divisionTotals[sec.divisionId] ?? 0) + sec.totalPrice;
+    }
+
+    function checkPercent(divId: string, norm: { min: number; max: number; label: string }) {
+        const divTotal = divisionTotals[divId] ?? 0;
+        const percent = (divTotal / totalCost) * 100;
+        if (divTotal === 0) {
+            alerts.push({
+                severity: 'WARNING',
+                code: `MISSING_DIVISION_${divId}`,
+                message: `⚠️ POMINIĘTY DZIAŁ: Kosztorys nie zawiera żadnej pozycji dla branży **"${norm.label}"** (ID: ${divId}).`,
+            });
+        } else if (percent < norm.min) {
+            alerts.push({
+                severity: 'WARNING',
+                code: `LOW_PROPORTION_${divId}`,
+                message: `⚠️ ANOMALIA PROPORCJI: Branża **"${norm.label}"** stanowi zaledwie ${percent.toFixed(1)}% kosztorysu (średni wskaźnik rynkowy: ${norm.min}-${norm.max}%).`,
+                value: percent,
+            });
+        } else if (percent > norm.max) {
+            alerts.push({
+                severity: 'WARNING',
+                code: `HIGH_PROPORTION_${divId}`,
+                message: `⚠️ ANOMALIA PROPORCJI: Branża **"${norm.label}"** pochłania aż ${percent.toFixed(1)}% całego budżetu (średni wskaźnik rynkowy: ${norm.min}-${norm.max}%).`,
+                value: percent,
+            });
+        }
+    }
+
+    checkPercent('D1', BRANCH_NORMS.D1_ZERO_PERCENT);
+    checkPercent('D2', BRANCH_NORMS.D2_ROUGH_PERCENT);
+    checkPercent('D3', BRANCH_NORMS.D3_FINISH_PERCENT);
+    checkPercent('D5', BRANCH_NORMS.D5_SANITARY_PERCENT);
+    checkPercent('D6', BRANCH_NORMS.D6_ELECTRIC_PERCENT);
+
+    // Walidacja rynkowych stawek roboczogodziny (r-g)
+    for (const section of sections) {
+        for (const item of section.items) {
+            if (item.unit === 'r-g' && item.unitPrice !== null) {
+                if (item.unitPrice < BRANCH_NORMS.LABOR_RATE_MIN) {
+                    alerts.push({
+                        severity: 'CRITICAL',
+                        code: 'LOW_LABOR_RATE',
+                        message: `❗ STAWKA DEFICYTOWA: Roboczogodzina r-g w pozycji **"${item.name}"** wynosi tylko ${item.unitPrice} PLN. Spadek poniżej progu ${BRANCH_NORMS.LABOR_RATE_MIN} PLN grozi odrzuceniem przez PIP lub brakiem rąk do pracy.`,
+                        value: item.unitPrice,
+                    });
+                } else if (item.unitPrice > BRANCH_NORMS.LABOR_RATE_MAX) {
+                    alerts.push({
+                        severity: 'WARNING',
+                        code: 'HIGH_LABOR_RATE',
+                        message: `⚠️ PRZESZACOWANIE ROBOCIZNY: Stawka ${item.unitPrice} PLN/r-g w pozycji **"${item.name}"** wykracza ponad zalecane maksimum rynkowe (${BRANCH_NORMS.LABOR_RATE_MAX} PLN).`,
+                        value: item.unitPrice,
+                    });
+                }
+            }
+        }
+    }
+
+    return alerts;
+}
+
+// ============================================================
+// ETAP 2: Audyt anomalii inżynierskich (Gemini Pro)
+// ============================================================
+
+async function runAIEngineeringAudit(
+    sections: Section[],
+    totalCost: number,
+    objectType: string
+): Promise<string[]> {
+    console.log(`[Rewident] [Etap 2] Wzywam Agenta Gemini Pro w celu wychwycenia technologicznych błędów inżynieryjnych...`);
+
+    const ai = new GoogleGenAI({
+        vertexai: true,
+        project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+        location: "global",
+    });
+
+    const summary = sections.map((sec) => ({
+        dział: sec.divisionName,
+        koszt: sec.totalPrice,
+        pozycje: sec.items.map((i) => ({ nazwa: i.name, ilość: i.quantity, jednostka: i.unit, cena: i.totalPrice })),
+    }));
+
+    const prompt = `
+Przeanalizuj poniższy uproszczony kosztorys.
+Inwestycja: Budowa obiektu o przeznaczeniu: "${objectType}".
+Całkowity budżet: ${totalCost.toLocaleString('pl-PL')} PLN.
+
+DANE KOSZTORYSOWE:
+${JSON.stringify(summary, null, 2)}
+
+Oceń wzajemne powiązania elementów pod kątem fizyki budowli i technologii. 
+Czy nie ma rażących dysproporcji (np. doliczone tynki bez ścian, zbrojenie niespójne z objętością betonu)?
+  `.trim();
+
+    try {
+        const result = await ai.models.generateContent({
+            model: MODEL_PRO,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                systemInstruction: `Jesteś Głównym Audytorem Budowlanym. Zwróć wyłącznie tablicę JSON zawierającą maksymalnie 4 najważniejsze, konkretne anomalie inżynierskie. Odpowiadaj tylko po polsku. Format: ["anomalia 1", "anomalia 2"]. Jeśli błędów brak, zwróć pustą tablicę [].`,
+                temperature: 0.1,
+                responseMimeType: "application/json",
+            }
+        });
+
+        const raw = (result.text ?? "[]").replace(/```json|```/g, '').trim();
+        const anomalies = JSON.parse(raw) as string[];
+        console.log(`[Rewident] [Etap 2] Analiza AI zakończona. Wykryto anomalii technologicznych: ${anomalies.length}`);
+        return anomalies;
+    } catch (err) {
+        console.error(`[Rewident] [Etap 2] Błąd podczas analizy inżynieryjnej AI:`, err);
+        return [];
+    }
+}
+
+// Przeliczenie ostatecznego wyniku (0-100)
+function calculateFinalScore(
+    deterministicAlerts: DeterministicAlert[],
+    aiAnomalies: string[],
+    coverageResult: CoverageAuditResult
+): number {
+    let score = 100;
+
+    for (const alert of deterministicAlerts) {
+        if (alert.severity === 'CRITICAL') score -= 15;
+        if (alert.severity === 'WARNING') score -= 5;
+    }
+
+    score -= aiAnomalies.length * 8;
+
+    // Uwzględniamy Wskaźnik Pokrycia Zakresu (Waga 30% całego wyniku)
+    const coveragePenalty = Math.round((1 - coverageResult.coverageScore / 100) * 30);
+    score -= coveragePenalty;
+
+    // Kara za niespełnienie twardych warunków SWZ/OPZ
+    score -= coverageResult.hardRequirementViolations.length * 10;
+
+    const final = Math.max(0, Math.min(100, score));
+    console.log(`[Rewident] [Kalkulator] Wynik ostateczny = ${final}/100 | Kara za brak pokrycia: -${coveragePenalty} pkt.`);
+    return final;
+}
+
+// ============================================================
+// GŁÓWNY HANDLER POST
+// ============================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Rewident] === ROZPOCZĘTO WIELOBRANŻOWY AUDYT KOSZTORYSU ===");
+    console.log("==================================================");
+
+    try {
+        const { tenderId } = await req.json() as { tenderId: string };
+
+        if (!tenderId) {
+            console.error("[Rewident] ❌ Błąd: Brak parametru tenderId.");
+            return NextResponse.json({ error: 'Brak parametru tenderId' }, { status: 400 });
+        }
+
+        const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
+        const tenderData = tenderDoc.data();
+        if (!tenderData) {
+            console.error(`[Rewident] ❌ Błąd: Przetarg ${tenderId} nie istnieje w bazie.`);
+            return NextResponse.json({ error: 'Przetarg nie istnieje' }, { status: 404 });
+        }
+
+        const sections: Section[] = tenderData.sections ?? [];
+        const totalCost = sections.reduce((s, sec) => s + sec.totalPrice, 0);
+        const objectType = tenderData.objectType ?? 'nieznany';
+
+        // --- ETAP 1: Audyt matematyczny ---
+        const deterministicAlerts = runDeterministicAudit(sections);
+
+        // --- ETAP 2: Audyt technologiczny AI ---
+        const aiAnomalies = await runAIEngineeringAudit(sections, totalCost, objectType);
+
+        // --- ETAP 3: Audyt pokrycia z ScopeManifestu ---
+        const coverageResult = await runCoverageAudit(tenderId, totalCost);
+
+        // --- Kalkulacja finalnego punktu ---
+        const finalScore = calculateFinalScore(deterministicAlerts, aiAnomalies, coverageResult);
+
+        const report = {
+            tenderId,
+            generatedAt: new Date().toISOString(),
+            finalScore,
+            totalCost_PLN: totalCost,
+
+            deterministicAlerts,
+            aiAnomalies,
+
+            // Dane z ScopeManifestu (nowość)
+            coverageScore: coverageResult.coverageScore,
+            coverageAlerts: coverageResult.alerts,
+            coverageStats: {
+                total: coverageResult.totalElements,
+                covered: coverageResult.coveredCount,
+                gapFilled: coverageResult.gapFilledCount,
+                missing: coverageResult.missingCount,
+                waitingUser: coverageResult.waitingUserCount,
+            },
+            hardRequirementViolations: coverageResult.hardRequirementViolations,
+
+            riskBuffer: {
+                percent: coverageResult.totalRiskBuffer_Percent,
+                value_PLN: coverageResult.totalRiskBuffer_PLN,
+                budgetWithRisk_PLN: totalCost + coverageResult.totalRiskBuffer_PLN,
+            },
+
+            chatSummary: buildChatSummary(
+                finalScore,
+                coverageResult,
+                deterministicAlerts,
+                aiAnomalies,
+                totalCost
+            ),
+        };
+
+        // Zapis raportu do Firestore
+        console.log(`[Rewident] Zapisuję finalny raport i status wyceny w rekordzie głównym tenders/${tenderId}...`);
+        await adminDb.doc(`tenders/${tenderId}`).update({
+            rewidentReport: report,
+            finalScore,
+            status: finalScore >= 70 ? 'READY_FOR_REVIEW' : 'NEEDS_CORRECTION',
+            updatedAt: new Date().toISOString(),
+        });
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Rewident] ✅ Audyt zakończony sukcesem w czasie ${duration} sek.`);
+        console.log("==================================================");
+
+        return NextResponse.json({ success: true, report });
+
+    } catch (error: any) {
+        console.error('[Rewident] ❌ Krytyczny błąd audytora:', error);
+        return NextResponse.json(
+            { error: 'Błąd audytu Rewidenta', details: String(error) },
+            { status: 500 }
+        );
+    }
+}
+
+function buildChatSummary(
+    score: number,
+    coverage: CoverageAuditResult,
+    detAlerts: DeterministicAlert[],
+    aiAnomalies: string[],
+    totalCost: number
+): string {
+    const emoji = score >= 82 ? '✅' : score >= 65 ? '⚠️' : '❌';
+    const verdict = score >= 82
+        ? 'Kosztorys został zweryfikowany i jest wysoce spójny technicznie.'
+        : score >= 65
+            ? 'Kosztorys zawiera niepewne dane lub luki. Zalecany audyt ręczny przed złożeniem oferty.'
+            : 'KRYTYCZNE BŁĘDY: Kosztorys jest skrajnie niekompletny lub zawiera rażące luki cenowe. Nie składaj oferty!';
+
+    const criticalCount = [
+        ...detAlerts.filter((a) => a.severity === 'CRITICAL'),
+        ...coverage.alerts.filter((a) => a.severity === 'CRITICAL'),
+    ].length;
+
+    const warningCount = [
+        ...detAlerts.filter((a) => a.severity === 'WARNING'),
+        ...coverage.alerts.filter((a) => a.severity === 'WARNING'),
+    ].length;
+
+    return [
+        `${emoji} **Rewident zakończył audyt. Score: ${score}/100.**`,
+        `💬 *Diagnoza:* ${verdict}`,
+        ``,
+        `📊 **Pokrycie zakresu:** ${coverage.coverageScore}% (Wyliczone: ${coverage.coveredCount} | Normatywne: ${coverage.gapFilledCount} | Do uzupełnienia: ${coverage.missingCount + coverage.waitingUserCount})`,
+        `💰 **Całkowity koszt kosztorysu:** ${totalCost.toLocaleString('pl-PL')} PLN`,
+        coverage.totalRiskBuffer_PLN > 0
+            ? `⚠️ **Rezerwa ryzyka dokumentacyjnego (+${coverage.totalRiskBuffer_Percent}%):** +${coverage.totalRiskBuffer_PLN.toLocaleString('pl-PL')} PLN\n📈 **Zalecana oferta z buforem bezpieczeństwa:** **${(totalCost + coverage.totalRiskBuffer_PLN).toLocaleString('pl-PL')} PLN**`
+            : '',
+        ``,
+        criticalCount > 0 ? `❗ **Wykryto ${criticalCount} błędów krytycznych** (błędy uniemożliwiające złożenie oferty).` : '',
+        warningCount > 0 ? `⚠️ **Wykryto ${warningCount} ostrzeżeń** (potencjalne braki lub anomalie proporcji).` : '',
+        aiAnomalies.length > 0
+            ? `🔍 **Wnioski technologiczne AI (${aiAnomalies.length}):**\n` + aiAnomalies.map((a) => `• ${a}`).join('\n')
+            : '',
+    ]
+        .filter(Boolean)
+        .join('\n');
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-rewident/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-rewident/coverageAudit.ts ---
+
+// ============================================================
+// PESAM – Rozszerzenie Audytu o Pokrycie Zakresu (Coverage Check)
+// Analizuje ScopeManifest i generuje alerty dla Rewidenta.
+// ============================================================
+
+import { adminDb } from '@/lib/firebase/admin';
+import type {
+    ScopeManifest,
+    CoverageEntry,
+} from '../_shared/scopeManifest.types';
+
+export interface CoverageAlert {
+    severity: 'CRITICAL' | 'WARNING' | 'INFO';
+    code: string;
+    elementId: string;
+    elementName: string;
+    divisionName: string;
+    message: string;
+    sourceRef?: string;
+    estimatedImpact_PLN?: number;
+}
+
+export interface CoverageAuditResult {
+    coverageScore: number;
+    totalElements: number;
+    coveredCount: number;
+    gapFilledCount: number;
+    missingCount: number;
+    waitingUserCount: number;
+    alerts: CoverageAlert[];
+    totalRiskBuffer_PLN: number;
+    totalRiskBuffer_Percent: number;
+    hardRequirementViolations: string[];
+}
+
+// ============================================================
+// GŁÓWNA METODA AUDYTU POKRYCIA
+// ============================================================
+
+export async function runCoverageAudit(
+    tenderId: string,
+    totalCost_PLN: number
+): Promise<CoverageAuditResult> {
+    console.log(`[Coverage Audit] 🔍 Rozpoczynam audyt szczelności zakresu dla przetargu: ${tenderId}...`);
+
+    const manifestDoc = await adminDb
+        .doc(`tenders/${tenderId}/scopeManifest/main`)
+        .get();
+
+    if (!manifestDoc.exists) {
+        console.warn(`[Coverage Audit] ⚠️ Ostrzeżenie: Brak dokumentu ScopeManifest dla przetargu ${tenderId}.`);
+        return buildEmptyResult('Brak ScopeManifest. Generowanie alertów pokrycia pominięte.');
+    }
+
+    const manifest = manifestDoc.data() as ScopeManifest;
+    const alerts: CoverageAlert[] = [];
+
+    const coverage = manifest.coverageStatus;
+    const total = coverage.length;
+    const covered = coverage.filter((c) => c.status === 'COVERED').length;
+    const gapFilled = coverage.filter((c) => c.status === 'GAP_FILLED').length;
+    const missing = coverage.filter((c) => c.status === 'MISSING').length;
+    const waitingUser = coverage.filter((c) => c.status === 'WAITING_USER').length;
+
+    console.log(`[Coverage Audit] Dane pokrycia: Wyliczone=${covered} | Łatki=${gapFilled} | Brakujące=${missing} | Blokady=${waitingUser}`);
+
+    // 1. Wykrywanie twardych braków (MISSING lub WAITING_USER)
+    for (const entry of coverage.filter((c) => c.status === 'MISSING' || c.status === 'WAITING_USER')) {
+        const element = findElement(manifest, entry.elementId);
+        const division = manifest.requiredDivisions.find((d) => d.divisionId === entry.divisionId);
+        if (!element || !division) continue;
+
+        if (element.isMandatoryByLaw) {
+            console.log(`[Coverage Audit] ❗ Wykryto krytyczny brak prawny: "${element.name}" jest wymagane przepisami.`);
+            alerts.push({
+                severity: 'CRITICAL',
+                code: 'MISSING_MANDATORY_BY_LAW',
+                elementId: entry.elementId,
+                elementName: element.name,
+                divisionName: division.divisionName,
+                message: `❗ BRAK BEZWZGLĘDNY: Wycena nie zawiera pozycji **${element.name}** (${division.divisionName}) wymaganej przez polskie Prawo Budowlane. Oferta grozi odrzuceniem!`,
+            });
+        } else if (entry.status === 'WAITING_USER') {
+            alerts.push({
+                severity: 'WARNING',
+                code: 'WAITING_USER_INPUT',
+                elementId: entry.elementId,
+                elementName: element.name,
+                divisionName: division.divisionName,
+                message: `⚠️ Pozycja **${element.name}** nie została wyceniona. System czeka na podanie parametrów w oknie czatu (ASK_USER).`,
+            });
+        } else {
+            alerts.push({
+                severity: 'WARNING',
+                code: 'MISSING_ELEMENT',
+                elementId: entry.elementId,
+                elementName: element.name,
+                divisionName: division.divisionName,
+                message: `⚠️ Wykryto lukę: kosztorys nie uwzględnia pozycji **${element.name}** (${division.divisionName}). Gap Filler nie posiadał danych do jej oszacowania.`,
+            });
+        }
+    }
+
+    // 2. Sumaryczny raport z pracy Gap Fillera
+    const gapFilledEntries = coverage.filter((c) => c.status === 'GAP_FILLED');
+    if (gapFilledEntries.length > 0) {
+        const totalGapValue = gapFilledEntries.reduce((sum, c) => sum + (c.gapFillerValue ?? 0), 0);
+        const gapPercent = totalCost_PLN > 0 ? ((totalGapValue / totalCost_PLN) * 100).toFixed(1) : '0';
+
+        alerts.push({
+            severity: 'INFO',
+            code: 'GAP_FILLED_SUMMARY',
+            elementId: 'SUMMARY',
+            elementName: 'Raport Gap Fillera',
+            divisionName: 'Wszystkie działy',
+            message: `ℹ️ Gap Filler automatycznie doliczył **${gapFilledEntries.length} pozycji** na podstawie norm i wskaźników (łącznie: **${totalGapValue.toLocaleString('pl-PL')} PLN**, tj. **${gapPercent}%** budżetu).`,
+            estimatedImpact_PLN: totalGapValue,
+        });
+    }
+
+    // 3. Weryfikacja twardych wymagań z SWZ (HardRequirements)
+    const hardRequirementViolations: string[] = [];
+    for (const req of manifest.hardRequirements.filter((hr) => hr.isMandatory)) {
+        const affectedDivsCovered = req.affectedDivisionIds.every((divId) => {
+            const divCoverage = coverage.filter(
+                (c) => c.divisionId === divId && (c.status === 'COVERED' || c.status === 'GAP_FILLED')
+            );
+            return divCoverage.length > 0;
+        });
+
+        if (!affectedDivsCovered) {
+            console.log(`[Coverage Audit] ❗ Naruszono twardy warunek SWZ: "${req.description}"`);
+            hardRequirementViolations.push(req.id);
+            alerts.push({
+                severity: 'CRITICAL',
+                code: 'HARD_REQUIREMENT_VIOLATION',
+                elementId: req.id,
+                elementName: req.description,
+                divisionName: req.affectedDivisionIds.join(', '),
+                message: `❗ BŁĄD ZGODNOŚCI Z SWZ: Oferta nie spełnia zapisu o treści: **"${req.description}"** (${req.sourceRef}). Ryzyko odrzucenia oferty przez Inwestora.`,
+                sourceRef: req.sourceRef,
+            });
+        }
+    }
+
+    // 4. Kalkulacja buforów ryzyka za wykryte braki
+    let totalRiskPercent = 0;
+    for (const risk of manifest.missingDataRisks) {
+        totalRiskPercent += risk.userOverridePercent ?? risk.costImpactPercent;
+    }
+    const totalRiskBuffer_PLN = Math.round(totalCost_PLN * (totalRiskPercent / 100));
+
+    if (totalRiskPercent > 12) {
+        alerts.push({
+            severity: 'WARNING',
+            code: 'HIGH_RISK_BUFFER',
+            elementId: 'RISK',
+            elementName: 'Rezerwa ryzyka',
+            divisionName: 'Budżet całkowity',
+            message: `⚠️ Wykryte braki w dokumentacji generują wysokie ryzyko finansowe. Doliczona zalecana rezerwa: **+${totalRiskPercent.toFixed(0)}%** budżetu (tj. **${totalRiskBuffer_PLN.toLocaleString('pl-PL')} PLN**).`,
+            estimatedImpact_PLN: totalRiskBuffer_PLN,
+        });
+    }
+
+    // 5. Ostateczny wskaźnik pokrycia (Coverage Score)
+    const weightedCoverage = total > 0
+        ? (covered * 1.0 + gapFilled * 0.7 + waitingUser * 0.3) / total
+        : 0;
+    const coverageScore = Math.round(weightedCoverage * 100);
+
+    if (coverageScore < 60) {
+        console.log(`[Coverage Audit] ❌ Krytycznie niski wskaźnik szczelności: ${coverageScore}%`);
+        alerts.unshift({
+            severity: 'CRITICAL',
+            code: 'LOW_COVERAGE_SCORE',
+            elementId: 'COVERAGE',
+            elementName: 'Pokrycie zakresu',
+            divisionName: 'Wszystkie działy',
+            message: `❗ KRYTYCZNA NIEKOMPLETNOŚĆ: Całkowity wskaźnik szczelności zakresu wynosi zaledwie **${coverageScore}%**. Kosztorys posiada zbyt wiele luk, by złożyć bezpieczną ofertę.`,
+        });
+    }
+
+    console.log(`[Coverage Audit] Audyt zakończony. CoverageScore: ${coverageScore}% | Wygenerowano alertów: ${alerts.length}`);
+    return {
+        coverageScore,
+        totalElements: total,
+        coveredCount: covered,
+        gapFilledCount: gapFilled,
+        missingCount: missing,
+        waitingUserCount: waitingUser,
+        alerts: alerts.sort(sortAlerts),
+        totalRiskBuffer_PLN,
+        totalRiskBuffer_Percent: totalRiskPercent,
+        hardRequirementViolations,
+    };
+}
+
+// Helper: Markuje elementy jako pokryte przez agenty w locie (A2A)
+export async function markElementAsCovered(
+    tenderId: string,
+    divisionId: string,
+    sectionId: string,
+    dataQuality: 'MARKET_VERIFIED' | 'NORMATIVE' | 'ESTIMATED'
+): Promise<void> {
+    console.log(`[Coverage Audit] Oznaczam element w dziale "${divisionId}" jako pokryty przez sekcję "${sectionId}"...`);
+    try {
+        const manifestRef = adminDb.doc(`tenders/${tenderId}/scopeManifest/main`);
+        const manifestDoc = await manifestRef.get();
+
+        if (!manifestDoc.exists) return;
+
+        const manifest = manifestDoc.data() as ScopeManifest;
+        const now = new Date().toISOString();
+
+        const updatedCoverage = manifest.coverageStatus.map((entry) => {
+            if (entry.divisionId === divisionId && entry.status === 'MISSING') {
+                return {
+                    ...entry,
+                    status: 'COVERED' as const,
+                    coveredBySectionId: sectionId,
+                    dataQuality,
+                    lastUpdatedBy: `agent-roj`,
+                    lastUpdatedAt: now,
+                };
+            }
+            return entry;
+        });
+
+        await manifestRef.update({
+            coverageStatus: updatedCoverage,
+            'meta.updatedAt': now,
+        });
+    } catch (e) {
+        console.error('[Coverage Audit] Błąd uaktualniania statusu:', e);
+    }
+}
+
+function findElement(manifest: ScopeManifest, elementId: string) {
+    for (const div of manifest.requiredDivisions) {
+        const el = div.elements.find((e) => e.elementId === elementId);
+        if (el) return el;
+    }
+    return null;
+}
+
+function sortAlerts(a: CoverageAlert, b: CoverageAlert): number {
+    const order = { CRITICAL: 0, WARNING: 1, INFO: 2 };
+    return order[a.severity] - order[b.severity];
+}
+
+function buildEmptyResult(reason: string): CoverageAuditResult {
+    return {
+        coverageScore: 0,
+        totalElements: 0,
+        coveredCount: 0,
+        gapFilledCount: 0,
+        missingCount: 0,
+        waitingUserCount: 0,
+        alerts: [{
+            severity: 'WARNING',
+            code: 'NO_MANIFEST',
+            elementId: 'META',
+            elementName: 'ScopeManifest',
+            divisionName: 'System',
+            message: `⚠️ ${reason}`,
+        }],
+        totalRiskBuffer_PLN: 0,
+        totalRiskBuffer_Percent: 0,
+        hardRequirementViolations: [],
+    };
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-rewident/coverageAudit.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/glowny-kosztorysant/inicjalizuj/route.ts ---
+
+// ============================================================
+// PESAM – Inicjalizator Zadań (rozszerzony o Analizę Zakresu)
+// POST /api/kosztorysant/glowny-kosztorysant/inicjalizuj
+//
+// ZMIANY:
+//   + Dynamiczne tworzenie kolejki zadań z nowymi Agentami
+//   + Dodany task ANALITYK_ZAKRESU jako inicjator Roju
+//   + Dodany task GAP_FILLER przed Rewidentem
+//   + Integracja ze zunifikowaną biblioteką @google/genai
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import { GoogleGenAI, Type } from '@google/genai';
+
+export const dynamic = "force-dynamic";
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+type TaskType =
+    | 'ANALITYK_ZAKRESU'   // Twórca wzorca
+    | 'LEGAL'
+    | 'VISION'
+    | 'KNR'
+    | 'NORMATIVE_STEEL'
+    | 'PARAMETRIC'
+    | 'BROKER'
+    | 'GAP_FILLER'         // Łatacz luk
+    | 'REWIDENT';          // Audytor końcowy
+
+interface Task {
+    taskId: string;
+    type: TaskType;
+    status: 'PENDING' | 'IN_PROGRESS' | 'DONE' | 'ERROR';
+    createdAt: string;
+    order: number;         // Kolejność w pętli roju
+    payload: Record<string, any>;
+    result?: any;
+    error?: string;
+}
+
+interface ClassifierOutput {
+    docLevel: 0 | 1 | 2 | 3 | 4;
+    estimationMethod: string;
+    hasDrawings: boolean;
+    hasSWZ: boolean;
+    hasPFU: boolean;
+    hasReinforcementDetails: boolean;
+    hasGeotechnics: boolean;
+    missingData: string[];
+}
+
+// ============================================================
+// Szybki Klasyfikator Dokumentacji (Gemini)
+// ============================================================
+
+async function classifyDocuments(
+    fileList: Array<{ fileName: string; category: string; storagePath: string }>
+): Promise<ClassifierOutput> {
+    console.log(`[Inicjalizator] [Klasyfikacja] Analizuję strukturę ${fileList.length} plików wejściowych...`);
+
+    const ai = new GoogleGenAI({
+        vertexai: true,
+        project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+        location: "global",
+    });
+
+    const prompt = `
+Oceń poziom dokumentacji i kompletność na podstawie następującej listy zaimportowanych plików:
+${JSON.stringify(fileList, null, 2)}
+
+Przypisz docLevel (0-4) oraz metodę wyceny:
+- LEVEL 0 -> PARAMETRIC (tylko ogólny opis / brak projektów)
+- LEVEL 1-2 -> ANALOGICAL (PFU / koncepcje)
+- LEVEL 3 -> ELEMENT_BASED (są rzuty architektoniczne, brak zbrojenia i instalacji)
+- LEVEL 4 -> DETAILED_KNR (pełny projekt wykonawczy ze specyfikacją)
+
+Zwróć wynik jako czysty obiekt JSON.
+  `.trim();
+
+    const response = await ai.models.generateContent({
+        model: MODEL_FLASH,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+            systemInstruction: "Klasyfikuj dokumentację budowlaną pod kątem prawnym i technicznym. Odpowiadaj wyłącznie poprawnym JSON-em.",
+            temperature: 0.0,
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    docLevel: { type: Type.INTEGER },
+                    estimationMethod: { type: Type.STRING },
+                    hasDrawings: { type: Type.BOOLEAN },
+                    hasSWZ: { type: Type.BOOLEAN },
+                    hasPFU: { type: Type.BOOLEAN },
+                    hasReinforcementDetails: { type: Type.BOOLEAN },
+                    hasGeotechnics: { type: Type.BOOLEAN },
+                    missingData: { type: Type.ARRAY, items: { type: Type.STRING } }
+                },
+                required: ['docLevel', 'estimationMethod', 'hasDrawings', 'hasSWZ', 'hasPFU', 'hasReinforcementDetails', 'hasGeotechnics', 'missingData']
+            }
+        }
+    });
+
+    const parsed: ClassifierOutput = JSON.parse(response.text ?? "{}");
+    console.log(`[Inicjalizator] [Klasyfikacja] Wynik: Level = ${parsed.docLevel} (${parsed.estimationMethod}). Wykryte rysunki: ${parsed.hasDrawings}`);
+    return parsed;
+}
+
+// ============================================================
+// Budowanie kolejki zadań dla Roju
+// ============================================================
+
+function buildTaskQueue(
+    tenderId: string,
+    classification: ClassifierOutput,
+    fileList: Array<{ fileName: string; category: string; storagePath: string; fileId: string }>
+): Task[] {
+    const now = new Date().toISOString();
+    const tasks: Task[] = [];
+    let order = 0;
+
+    const swzFiles = fileList.filter((f) => ['SWZ', 'OPZ', 'PFU', 'UMOWA'].includes(f.category.toUpperCase()));
+    const drawingFiles = fileList.filter((f) => f.category.toUpperCase() === 'RYSUNEK');
+
+    console.log(`[Inicjalizator] [Kolejka] Buduję optymalny łańcuch zadań dla przetargu: ${tenderId}...`);
+
+    // 1. ANALITYK ZAKRESU – Zawsze na pierwszym miejscu (Tworzy ScopeManifest)
+    tasks.push({
+        taskId: `${tenderId}-ANALITYK_ZAKRESU`,
+        type: 'ANALITYK_ZAKRESU',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: {
+            tenderId,
+            docLevel: classification.docLevel,
+            estimationMethod: classification.estimationMethod,
+            sourceDocuments: fileList.map((f) => f.fileName),
+            swzFileIds: swzFiles.map((f) => f.fileId),
+        },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [0] ANALITYK_ZAKRESU (Budowa kryteriów i manifestu)`);
+
+    // 2. LEGAL – Analiza prawna umowy i SWZ
+    if (classification.hasSWZ || swzFiles.length > 0) {
+        tasks.push({
+            taskId: `${tenderId}-LEGAL`,
+            type: 'LEGAL',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                fileIds: swzFiles.map((f) => f.fileId),
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] LEGAL (Przegląd kar, ryzyk i gwarancji)`);
+    }
+
+    // 3. VISION – Analiza rysunków technicznych (Jeśli wgrano i poziom to koncepcja/projekt)
+    if (classification.hasDrawings && classification.docLevel >= 2) {
+        tasks.push({
+            taskId: `${tenderId}-VISION`,
+            type: 'VISION',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                fileIds: drawingFiles.map((f) => f.fileId),
+                docLevel: classification.docLevel,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] VISION (Zliczanie kubatur, rzuty, elewacje)`);
+    }
+
+    // 4. KNR (Przedmiarowanie) – Tylko dla projektów budowlanych/wykonawczych (Level 3+)
+    if (classification.docLevel >= 3) {
+        tasks.push({
+            taskId: `${tenderId}-KNR`,
+            type: 'KNR',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: { tenderId, docLevel: classification.docLevel },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] KNR (Generowanie kosztorysu z normatywów)`);
+    }
+
+    // 5. NORMATIVE_STEEL – Jeśli to projekt budowlany (brak detali zbrojenia) – doliczamy stal wskaźnikowo
+    if (classification.docLevel === 3 && !classification.hasReinforcementDetails) {
+        tasks.push({
+            taskId: `${tenderId}-NORMATIVE_STEEL`,
+            type: 'NORMATIVE_STEEL',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                note: 'Dedykowany moduł szacowania stali konstrukcyjnej ze wskaźnika kg/m3 betonu',
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] NORMATIVE_STEEL (Szacowanie stali zbrojeniowej)`);
+    }
+
+    // 6. PARAMETRIC – Wycena wskaźnikowa (Tylko dla niskich poziomów PFU/opis słowny)
+    if (classification.docLevel <= 1) {
+        tasks.push({
+            taskId: `${tenderId}-PARAMETRIC`,
+            type: 'PARAMETRIC',
+            status: 'PENDING',
+            createdAt: now,
+            order: order++,
+            payload: {
+                tenderId,
+                docLevel: classification.docLevel,
+                hasPFU: classification.hasPFU,
+            },
+        });
+        console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] PARAMETRIC (Wycena wskaźnikowa m2)`);
+    }
+
+    // 7. BROKER – Wycena rynkowa i weryfikacja cen w Google (Zawsze wywoływana)
+    tasks.push({
+        taskId: `${tenderId}-BROKER`,
+        type: 'BROKER',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: { tenderId },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] BROKER (Wyszukiwanie cen online + marże)`);
+
+    // 8. GAP_FILLER – Łatacz luk (Zawsze przed Rewidentem)
+    tasks.push({
+        taskId: `${tenderId}-GAP_FILLER`,
+        type: 'GAP_FILLER',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: {
+            tenderId,
+            note: 'Analizuje luki w ScopeManifest i uzupełnia brakujące pozycje wycenami scalonymi',
+        },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] GAP_FILLER (Automatyczny łatacz braków)`);
+
+    // 9. REWIDENT – Końcowa weryfikacja (Zawsze ostatni)
+    tasks.push({
+        taskId: `${tenderId}-REWIDENT`,
+        type: 'REWIDENT',
+        status: 'PENDING',
+        createdAt: now,
+        order: order++,
+        payload: { tenderId },
+    });
+    console.log(`[Inicjalizator] [Kolejka] + Dodano zadanie [${order - 1}] REWIDENT (Końcowy audytor i bezpiecznik)`);
+
+    return tasks;
+}
+
+// ============================================================
+// GŁÓWNY HANDLER POST
+// ============================================================
+
+export async function POST(req: NextRequest) {
+    const startTime = Date.now();
+    console.log("==================================================");
+    console.log("[Inicjalizator] === ROZPOCZĘTO INICJALIZACJĘ ROJU AGENTÓW ===");
+    console.log("==================================================");
+
+    try {
+        const { tenderId, fileList } = await req.json() as {
+            tenderId: string;
+            fileList: Array<{
+                fileName: string;
+                category: string;
+                storagePath: string;
+                fileId: string;
+            }>;
+        };
+
+        if (!tenderId || !fileList?.length) {
+            console.error("[Inicjalizator] ❌ Błąd: Brak tenderId lub pusty fileList.");
+            return NextResponse.json({ error: 'Brak parametrów wejściowych tenderId lub fileList' }, { status: 400 });
+        }
+
+        // 1. Klasyfikacja plików wejściowych
+        const classification = await classifyDocuments(fileList);
+
+        // 2. Generowanie dynamicznej kolejki zadań
+        const tasks = buildTaskQueue(tenderId, classification, fileList);
+
+        // 3. Masowy zapis w ramach paczki (Firestore Batch)
+        console.log(`[Inicjalizator] Zapisuję ${tasks.length} zadań do podkolekcji Firestore w ramach transakcji Batch...`);
+        const batch = adminDb.batch();
+
+        for (const task of tasks) {
+            const ref = adminDb
+                .collection(`tenders/${tenderId}/tasks`)
+                .doc(task.taskId);
+            batch.set(ref, task);
+        }
+
+        // Aktualizacja statusu głównego rekordu przetargu
+        console.log(`[Inicjalizator] Aktualizuję rekord główny przetargu: tenders/${tenderId}...`);
+        batch.update(adminDb.doc(`tenders/${tenderId}`), {
+            status: 'INITIALIZED',
+            docLevel: classification.docLevel,
+            estimationMethod: classification.estimationMethod,
+            missingDataReport: classification.missingData,
+            tasksCount: tasks.length,
+            tasksOrder: tasks.map((t) => ({ taskId: t.taskId, type: t.type, order: t.order })),
+            updatedAt: new Date().toISOString(),
+        });
+
+        await batch.commit();
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[Inicjalizator] ✅ Sukces: Rój zainicjowany w ${duration} sek. Kolejka jest aktywna.`);
+        console.log("==================================================");
+
+        return NextResponse.json({
+            success: true,
+            tenderId,
+            docLevel: classification.docLevel,
+            estimationMethod: classification.estimationMethod,
+            tasksQueue: tasks.map((t) => ({
+                type: t.type,
+                order: t.order,
+                status: t.status,
+            })),
+        });
+
+    } catch (error: any) {
+        console.error('[Inicjalizator] ❌ KRYTYCZNY BŁĄD PODCZAS ZAPŁONU ROJU:', error);
+        return NextResponse.json(
+            { error: 'Krytyczny błąd inicjalizacji zadań roju', details: String(error) },
+            { status: 500 }
+        );
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/glowny-kosztorysant/inicjalizuj/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/scope-manifest/update-coverage/route.ts ---
+
+// ============================================================
+// PESAM – Endpoint: Update Coverage Entry
+// PATCH /api/kosztorysant/scope-manifest/update-coverage
+//
+// Służy do zmiany statusu elementu (np. na NEEDS_REVIEW) przez kosztorysanta
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import type { ScopeManifest } from '../../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+export async function PATCH(req: NextRequest) {
+    console.log("[API Update Coverage] Rozpoczynam aktualizację statusu pokrycia...");
+
+    try {
+        const { tenderId, elementId, status, dataQuality, coveredBySectionId } = await req.json() as {
+            tenderId: string;
+            elementId: string;
+            status: string;
+            dataQuality?: string;
+            coveredBySectionId?: string;
+        };
+
+        if (!tenderId || !elementId || !status) {
+            console.error("[API Update Coverage] ❌ Błąd: Brak wymaganych parametrów.");
+            return NextResponse.json({ error: 'Brak wymaganych pól w żądaniu' }, { status: 400 });
+        }
+
+        console.log(`[API Update Coverage] Projekt: ${tenderId} | Element: ${elementId} -> Nowy Status: ${status}`);
+
+        const manifestRef = adminDb.doc(`tenders/${tenderId}/scopeManifest/main`);
+        const manifestDoc = await manifestRef.get();
+
+        if (!manifestDoc.exists) {
+            console.error("[API Update Coverage] ❌ Błąd: ScopeManifest nie istnieje w bazie.");
+            return NextResponse.json({ error: 'ScopeManifest nie istnieje' }, { status: 404 });
+        }
+
+        const manifest = manifestDoc.data() as ScopeManifest;
+        const now = new Date().toISOString();
+
+        const updatedCoverage = manifest.coverageStatus.map((entry) =>
+            entry.elementId === elementId
+                ? {
+                    ...entry,
+                    status: status as any,
+                    ...(dataQuality ? { dataQuality: dataQuality as any } : {}),
+                    ...(coveredBySectionId ? { coveredBySectionId } : {}),
+                    lastUpdatedBy: 'user',
+                    lastUpdatedAt: now,
+                }
+                : entry
+        );
+
+        await manifestRef.update({
+            coverageStatus: updatedCoverage,
+            'meta.updatedAt': now,
+        });
+
+        console.log(`[API Update Coverage] ✅ Pomyślnie zaktualizowano status dla elementu: ${elementId}`);
+        return NextResponse.json({ success: true });
+    } catch (error: any) {
+        console.error("[API Update Coverage] ❌ Krytyczny błąd serwera:", error);
+        return NextResponse.json({ error: String(error) }, { status: 500 });
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/scope-manifest/update-coverage/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/scope-manifest/answer-question/route.ts ---
+
+// ============================================================
+// PESAM – Endpoint: Answer Question (ASK_USER)
+// POST /api/kosztorysant/scope-manifest/answer-question
+//
+// Odbiera od użytkownika wartość, przelicza koszt i tworzy sekcję kosztorysu
+// ============================================================
+
+import { NextRequest, NextResponse } from 'next/server';
+import { adminDb } from '@/lib/firebase/admin';
+import type { ScopeManifest, CoverageEntry } from '../../_shared/scopeManifest.types';
+
+export const dynamic = "force-dynamic";
+
+export async function POST(req: NextRequest) {
+    console.log("[API Answer Question] Otrzymano odpowiedź na pytanie z czatu...");
+
+    try {
+        const { tenderId, elementId, value, unit } = await req.json() as {
+            tenderId: string;
+            elementId: string;
+            value: number;
+            unit: string;
+        };
+
+        if (!tenderId || !elementId || value === undefined) {
+            console.error("[API Answer Question] ❌ Błąd: Brak parametrów.");
+            return NextResponse.json({ error: 'Brak wymaganych parametrów wejściowych' }, { status: 400 });
+        }
+
+        console.log(`[API Answer Question] ID: ${tenderId} | Element: ${elementId} | Wartość: ${value} ${unit}`);
+
+        const manifestRef = adminDb.doc(`tenders/${tenderId}/scopeManifest/main`);
+        const manifestDoc = await manifestRef.get();
+
+        if (!manifestDoc.exists) {
+            console.error("[API Answer Question] ❌ Błąd: ScopeManifest nie istnieje.");
+            return NextResponse.json({ error: 'ScopeManifest nie istnieje' }, { status: 404 });
+        }
+
+        const manifest = manifestDoc.data() as ScopeManifest;
+
+        // Szukamy elementu, który użytkownik uzupełnił
+        let targetElement = null;
+        let targetDivisionId = '';
+        for (const div of manifest.requiredDivisions) {
+            const el = div.elements.find((e) => e.elementId === elementId);
+            if (el) { targetElement = el; targetDivisionId = div.divisionId; break; }
+        }
+
+        if (!targetElement) {
+            console.error(`[API Answer Question] ❌ Błąd: Nie znaleziono elementu ${elementId} w strukturze.`);
+            return NextResponse.json({ error: 'Element nie znaleziony w strukturze manifestu' }, { status: 404 });
+        }
+
+        const now = new Date().toISOString();
+
+        // Przeliczanie: Jeśli użytkownik podał czystą kwotę PLN lub ilość fizyczną (np. m3)
+        let estimatedValue_PLN = value;
+        let note = `Wycena podana bezpośrednio przez kosztorysanta: ${value} ${unit}`;
+
+        if (unit !== 'PLN') {
+            const defaultRates: Record<string, number> = {
+                'm²': 250,
+                'm³': 800,
+                't': 5500,
+                'kpl.': 50000,
+                'szt.': 5000,
+                'mb': 120,
+            };
+            const rate = defaultRates[unit] ?? 1000;
+            estimatedValue_PLN = Math.round(value * rate);
+            note = `Koszt doliczony: ${value} ${unit} × ${rate} PLN/${unit} = ${estimatedValue_PLN.toLocaleString('pl-PL')} PLN (użyto polskiej stawki referencyjnej)`;
+        }
+
+        // Aktualizacja bazy danych (ScopeManifest)
+        console.log(`[API Answer Question] Aktualizuję ScopeManifest dla ${elementId}...`);
+        const updatedCoverage: CoverageEntry[] = manifest.coverageStatus.map((entry) =>
+            entry.elementId === elementId
+                ? {
+                    ...entry,
+                    status: 'GAP_FILLED' as const,
+                    dataQuality: 'ESTIMATED' as const,
+                    gapFillerNote: note,
+                    gapFillerValue: estimatedValue_PLN,
+                    coveredBySectionId: `USER-${elementId}`,
+                    pendingQuestion: undefined, // Zdejmujemy pytanie z kolejki
+                    lastUpdatedBy: 'user',
+                    lastUpdatedAt: now,
+                }
+                : entry
+        );
+
+        await manifestRef.update({
+            coverageStatus: updatedCoverage,
+            'meta.updatedAt': now,
+        });
+
+        // Zapisywanie wyliczonego działu do kosztorysu głównego tenders/{id}
+        console.log(`[API Answer Question] Zapisuję nową sekcję wyceny ręcznej do kosztorysu głównego...`);
+        const tenderRef = adminDb.doc(`tenders/${tenderId}`);
+        const tenderDoc = await tenderRef.get();
+        const existingSections = tenderDoc.data()?.sections ?? [];
+
+        const newSection = {
+            sectionId: `USER-${elementId}`,
+            divisionId: targetDivisionId,
+            items: [{
+                itemId: `USER-ITEM-${elementId}`,
+                name: targetElement.name,
+                unit,
+                quantity: unit !== 'PLN' ? value : null,
+                unitPrice: unit !== 'PLN' ? estimatedValue_PLN / value : null,
+                totalPrice: estimatedValue_PLN,
+                dataQuality: 'ESTIMATED',
+                source: 'USER_INPUT',
+                note,
+            }],
+            totalPrice: estimatedValue_PLN,
+            dataQuality: 'ESTIMATED',
+            isUserProvided: true,
+        };
+
+        // Podmieniamy starą wersję tej ręcznej sekcji (jeśli istniała)
+        const cleanSections = existingSections.filter(
+            (s: any) => s.sectionId !== `USER-${elementId}`
+        );
+        await tenderRef.update({ sections: [...cleanSections, newSection] });
+
+        console.log(`[API Answer Question] ✅ Pomyślnie przetworzono odpowiedź. Wyceniono pozycję: ${targetElement.name}`);
+        return NextResponse.json({
+            success: true,
+            estimatedValue_PLN,
+            note,
+            chatMessage: `✅ Zapisałem pozycję **"${targetElement.name}"**: ~${estimatedValue_PLN.toLocaleString('pl-PL')} PLN. ${note}`,
+        });
+
+    } catch (error: any) {
+        console.error("[API Answer Question] ❌ Krytyczny błąd serwera:", error);
+        return NextResponse.json({ error: String(error) }, { status: 500 });
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/scope-manifest/answer-question/route.ts ---
+
+
