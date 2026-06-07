@@ -409,7 +409,8 @@ async function ensureDatabaseIsSeeded(): Promise<void> {
     const metaRef = adminDb.doc(SETTINGS_PATH);
     const metaSnap = await metaRef.get();
 
-    if (metaSnap.exists()) {
+    // 🚀 FIX TS: Usunięto wywołanie funkcji .exists(), odczytujemy jako właściwość
+    if (metaSnap.exists) {
         return; // Baza już jest zainicjowana, nic nie robimy
     }
 
@@ -451,7 +452,8 @@ async function fetchTemplateElements(templateId: string): Promise<ScopeElement[]
     const docRef = adminDb.doc(`${SETTINGS_PATH}/templates/${templateId}`);
     const snap = await docRef.get();
 
-    if (snap.exists()) {
+    // 🚀 FIX TS: Usunięto wywołanie funkcji .exists(), odczytujemy jako właściwość
+    if (snap.exists) {
         const data = snap.data();
         return (data?.elements as ScopeElement[]) || [];
     }
