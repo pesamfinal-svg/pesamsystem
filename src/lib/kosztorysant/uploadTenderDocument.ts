@@ -1,7 +1,7 @@
 /**
- * PESAM – Helper: uploadTenderDocument (Z AUTOMATYCZNYM WYBOREM ENDPOINTU PDF/ZIP)
- *
- * Ścieżka: src/lib/kosztorysant/uploadTenderDocument.ts
+ * PESAM – Helper: uploadTenderDocument
+ * Jednolity system uploadu obsługujący zarówno pojedyncze pliki PDF/XLSX, jak i paczki ZIP.
+ * Przekierowuje cały ruch do Agenta Magazyniera, który inicjuje zsynchronizowany Rój PESAM.
  */
 
 import { MarketTrends, EstimateSection } from "@/app/api/kosztorysant/_shared/types";
@@ -9,12 +9,12 @@ import { MarketTrends, EstimateSection } from "@/app/api/kosztorysant/_shared/ty
 // ── Typy ─────────────────────────────────────────────────────────────────────
 
 export interface UploadParserResult {
-  reply: string;
+  reply?: string;
   generatedSections?: EstimateSection[];
   riskAlerts?: string[];
-  tenderId?: string;    // <--- DODANE OPCJONALNE POLE DLA IMPORTU ZIP
-  projectName?: string; // <--- DODANE OPCJONALNE POLE DLA IMPORTU ZIP
-  filesCount?: number;  // <--- DODANE OPCJONALNE POLE DLA IMPORTU ZIP
+  tenderId?: string;
+  projectName?: string;
+  filesCount?: number;
 }
 
 export interface UploadProgress {
@@ -28,11 +28,11 @@ type ProgressCallback = (progress: UploadProgress) => void;
 
 // ── Stałe ────────────────────────────────────────────────────────────────────
 
-const ENDPOINT_PDF = "/api/kosztorysant/upload-parser";
-const ENDPOINT_ZIP = "/api/kosztorysant/magazynier-zip";
+// JEDEN ENDPOINT DLA WSZYSTKIEGO! Magazynier radzi sobie z ZIP-ami i pojedynczymi plikami.
+const ENDPOINT_UNIFIED = "/api/kosztorysant/magazynier-zip";
 
-/** Limit po stronie klienta – Gemini przyjmuje do 19 MB, ale odrzucamy wcześniej */
-export const MAX_UPLOAD_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB
+/** Limit po stronie klienta: duże pliki na projekty rozbijamy wg wagi */
+export const MAX_UPLOAD_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB dla archiwów
 
 export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "application/pdf": ".pdf",
@@ -47,7 +47,6 @@ export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "image/webp": ".webp",
 };
 
-
 // ── Walidacja po stronie klienta (przed fetch) ────────────────────────────────
 
 export function validateFileClient(file: File): string | null {
@@ -55,19 +54,21 @@ export function validateFileClient(file: File): string | null {
     return "Plik jest pusty.";
   }
 
-  // Osobny limit: 250 MB dla ZIP, 19 MB dla reszty (np. pojedynczych PDF)
-  const isZip = file.name.endsWith(".zip");
-  const limitBytes = isZip ? MAX_UPLOAD_SIZE_BYTES : 19 * 1024 * 1024;
+  // Osobny limit: 250 MB dla ZIP, 25 MB dla reszty (np. pojedynczych PDF)
+  const isZip = file.name.toLowerCase().endsWith(".zip");
+  const limitBytes = isZip ? MAX_UPLOAD_SIZE_BYTES : 25 * 1024 * 1024;
 
   if (file.size > limitBytes) {
     const sizeMB = (file.size / 1024 / 1024).toFixed(1);
     const limitMB = (limitBytes / 1024 / 1024).toFixed(1);
     return `Plik jest za duży (${sizeMB} MB). Maksimum dla tego formatu to ${limitMB} MB.`;
   }
+
   if (!ACCEPTED_MIME_TYPES[file.type] && !isZip) {
     return `Nieobsługiwany format pliku "${file.name}". Prześlij ZIP, PDF, Excel, Word lub obraz.`;
   }
-  return null; // OK
+
+  return null; // Wszystko OK
 }
 
 // ── Główna funkcja wysyłająca ─────────────────────────────────────────────────
@@ -78,19 +79,17 @@ export async function uploadTenderDocument(
   onProgress?: ProgressCallback
 ): Promise<UploadParserResult> {
 
-  // Walidacja klienta
+  // Walidacja przed uderzeniem do serwera
   const clientError = validateFileClient(file);
   if (clientError) {
     onProgress?.({ stage: "error", message: clientError });
     throw new Error(clientError);
   }
 
-  // Budowanie FormData
   const formData = new FormData();
   formData.append("file", file);
   formData.append("trends", JSON.stringify(trends));
 
-  // Faza 1: Upload
   onProgress?.({
     stage: "uploading",
     percent: 0,
@@ -99,39 +98,33 @@ export async function uploadTenderDocument(
 
   let response: Response;
   try {
-    // Wybór odpowiedniego endpointu na podstawie rozszerzenia pliku
-    const endpoint = file.name.endsWith(".zip") ? ENDPOINT_ZIP : ENDPOINT_PDF;
-
-    // XMLHttpRequest daje nam rzeczywisty progress – fetch tego nie oferuje
-    response = await uploadWithProgress(endpoint, formData, onProgress);
+    // Od razu uderzamy do Magazyniera - niezależnie czy to paczka czy pojedynczy plik
+    response = await uploadWithProgress(ENDPOINT_UNIFIED, formData, onProgress);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Błąd sieci podczas przesyłania.";
     onProgress?.({ stage: "error", message });
     throw new Error(message);
   }
 
-  // Faza 2: Analiza AI (czekamy na odpowiedź modelu)
-  const isZip = file.name.endsWith(".zip");
+  const isZip = file.name.toLowerCase().endsWith(".zip");
   onProgress?.({
     stage: "analyzing",
-    message: isZip
-      ? "Rozpakowywanie archiwum ZIP i rejestracja plików w bazie PESAM..."
-      : "Gemini analizuje dokumentację przetargową… (może potrwać 20–60 sekund)",
+    message: "Rejestracja w bazie i inicjalizacja Roju PESAM... (oczekuj na statusy w panelu bocznym)",
   });
 
+  // Weryfikacja kodów błędu HTTP
   if (!response.ok) {
     let errorMsg = `Błąd serwera: HTTP ${response.status}`;
     try {
       const errBody = await response.json();
       if (errBody.error) errorMsg = errBody.error;
     } catch {
-      // Ignoruj błąd parsowania treści błędu
+      // Jeśli serwer zwrócił HTML (500) zamiast JSON-a, zostaw domyślny status
     }
     onProgress?.({ stage: "error", message: errorMsg });
     throw new Error(errorMsg);
   }
 
-  // Parsowanie odpowiedzi
   let result: UploadParserResult;
   try {
     result = await response.json();
@@ -141,19 +134,25 @@ export async function uploadTenderDocument(
     throw new Error(msg);
   }
 
-  // Dla ZIP-a nie sprawdzamy "reply" na wejściu, bo Magazynier zwraca meta-dane rozpakowania
-  if (!isZip && !result.reply) {
-    const msg = "Serwer zwrócił niekompletną odpowiedź (brak pola reply).";
+  // Magazynier zwraca tenderId. Upewnijmy się, że to dotarło.
+  if (!result.tenderId) {
+    const msg = "Serwer przetworzył plik, ale nie zwrócił identyfikatora przetargu.";
     onProgress?.({ stage: "error", message: msg });
     throw new Error(msg);
   }
 
-  onProgress?.({ stage: "done", message: isZip ? "ZIP pomyślnie rozpakowany – Rój rozpoczął pracę!" : "Analiza zakończona – tabela RMS gotowa." });
+  // Symulacja pola "reply" do komunikatu w konsoli czatu dla Głównego Kosztorysanta (Frontend oczekuje pola reply)
+  result.reply = `Plik "${file.name}" został pomyślnie zmagazynowany w bazie. Rój PESAM rozpoczął przetwarzanie zadań równoległych w tle. Statusy aktualizują się w panelu po lewej stronie.`;
+
+  onProgress?.({
+    stage: "done",
+    message: isZip ? "ZIP przetworzony. Rój aktywny!" : "Dokument zainicjowany. Rój aktywny!"
+  });
 
   return result;
 }
 
-// ── XMLHttpRequest z progress dla dużych plików ───────────────────────────────
+// ── XMLHttpRequest z progress bar'em dla dużych plików ────────────────────────
 
 function uploadWithProgress(
   endpoint: string,
@@ -169,7 +168,7 @@ function uploadWithProgress(
         onProgress?.({
           stage: "uploading",
           percent,
-          message: `Przesyłanie: ${percent}%`,
+          message: `Przesyłanie do chmury: ${percent}%`,
         });
       }
     });
@@ -183,18 +182,16 @@ function uploadWithProgress(
       resolve(syntheticResponse);
     });
 
-    // ZNAJDŹ TEN FRAGMENT I PODMIEŃ:
-
     xhr.addEventListener("error", () => {
-      reject(new Error("Połączenie z serwerem zostało przerwane."));
+      reject(new Error("Połączenie z serwerem zostało przerwane (Błąd Sieciowy)."));
     });
 
     xhr.addEventListener("timeout", () => {
-      reject(new Error("Przekroczono limit czasu połączenia (30 minut). Proces może być zbyt duży."));
+      reject(new Error("Przekroczono limit czasu połączenia (30 minut). Spróbuj ponownie."));
     });
 
-    xhr.open("POST", endpoint); // <--- DYNAMICZNY ENDPOINT
-    xhr.timeout = 1800_000; // ZMIANA: 1 800 000 ms = 30 minut (zamiast 90 000)
+    xhr.open("POST", endpoint);
+    xhr.timeout = 1800_000; // 30 minut (dla wielkich projektów)
     xhr.send(formData);
   });
 }
