@@ -4,30 +4,58 @@ import JSZip from "jszip";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { PDFDocument } from "pdf-lib";
 
-function internalUrl(req: NextRequest, path: string): string {
-    const url = new URL(req.url);
-    if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-        url.protocol = "http:";
-    }
-    return `${url.origin}${path}`;
-}
-
 export const dynamic = "force-dynamic";
+// Ustawienie czasu wykonania na 5 minut (dla dużych plików)
+export const maxDuration = 300;
 
 const MODEL_FLASH = "gemini-3.5-flash";
 
 const SYSTEM_INSTRUCTION = `
-  Jesteś Agentem Bibliotekarzem w systemie PESAM. Twoim jedynym zadaniem jest sklasyfikowanie wgranego pliku i wygenerowanie dla niego krótkiego, 1-zdaniowego technicznego podsumowania.
-  Zwróć DOKŁADNIE JEDEN obiekt JSON (bez markdown, bez komentarzy):
+  Jesteś Agentem Bibliotekarzem w systemie PESAM. Twoim zadaniem jest sklasyfikowanie pliku.
+  Zwróć DOKŁADNIE obiekt JSON:
   {
     "category": "SWZ" | "DRAWING" | "ESTIMATE" | "CONTRACT" | "OTHER",
-    "summary": "Jedno krótkie zdanie opisujące techniczny charakter dokumentu."
+    "summary": "Jedno krótkie zdanie opisujące dokument."
   }
 `;
 
+/**
+ * POMOCNIK: Przetwarzanie tablicy w małych paczkach (Batching), 
+ * aby nie zapchać pamięci RAM przy Promise.all
+ */
+async function processInBatches<T>(
+    items: T[],
+    batchSize: number,
+    processor: (item: T) => Promise<void>
+) {
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize);
+        console.log(`[Magazynier ZIP] Przetwarzam paczkę plików: ${i + 1} do ${Math.min(i + batchSize, items.length)} z ${items.length}`);
+        await Promise.all(batch.map(processor));
+    }
+}
+
+/**
+ * POMOCNIK: Wykrywanie MIME typu na podstawie rozszerzenia
+ */
+function getMimeType(fileName: string): string {
+    const ext = fileName.toLowerCase().split('.').pop();
+    switch (ext) {
+        case 'pdf': return "application/pdf";
+        case 'xlsx': return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        case 'xls': return "application/vnd.ms-excel";
+        case 'docx': return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        case 'doc': return "application/msword";
+        case 'png': return "image/png";
+        case 'jpg':
+        case 'jpeg': return "image/jpeg";
+        default: return "application/octet-stream";
+    }
+}
+
 export async function POST(req: NextRequest) {
     console.log("==================================================");
-    console.log("[Magazynier ZIP] === ROZPOCZĘTO NOWE IMPORTOWANIE ===");
+    console.log("[Magazynier ZIP] === ROZPOCZĘTO IMPORT DUŻEJ PACZKI ===");
     console.log("==================================================");
 
     try {
@@ -35,47 +63,39 @@ export async function POST(req: NextRequest) {
         const file = formData.get("file") as File | null;
 
         if (!file) {
-            console.error("[Magazynier ZIP] Błąd: Brak pliku ZIP w żądaniu.");
+            console.error("[Magazynier ZIP] Błąd: Brak pliku ZIP.");
             return NextResponse.json({ error: "Brak pliku ZIP w żądaniu." }, { status: 400 });
         }
 
-        console.log(`[Magazynier ZIP] Odczytano metadane pliku: "${file.name}" (${file.size} bajtów).`);
+        console.log(`[Magazynier ZIP] Plik: "${file.name}" | Wielkość: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
 
         const tenderId = `TND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-        const bucket = adminStorage.bucket(process.env.FIREBASE_STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
+        const bucket = adminStorage.bucket();
 
-        console.log("[Magazynier ZIP] Wczytuję archiwum do bufora pamięci RAM...");
+        // 1. ROZPAKOWYWANIE DO PAMIĘCI
         const arrayBuffer = await file.arrayBuffer();
-
-        console.log("[Magazynier ZIP] JSZip rozpakowuje archiwum w locie...");
         const zip = await JSZip.loadAsync(arrayBuffer);
 
         const filesToProcess: { name: string; buffer: Buffer; type: string }[] = [];
 
         for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
-            if (zipEntry.dir) continue;
+            if (zipEntry.dir || relativePath.includes("__MACOSX") || relativePath.includes(".DS_Store")) continue;
 
-            if (relativePath.startsWith("__MACOSX") || relativePath.includes(".DS_Store")) {
-                continue;
-            }
-
-            const fileBuffer = await zipEntry.async("nodebuffer");
-
-            let type = "application/octet-stream";
-            if (relativePath.endsWith(".pdf")) type = "application/pdf";
-            else if (relativePath.endsWith(".xlsx")) type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-            else if (relativePath.endsWith(".xls")) type = "application/vnd.ms-excel";
-            else if (relativePath.endsWith(".docx")) type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-            else if (relativePath.endsWith(".doc")) type = "application/msword";
-            else if (relativePath.endsWith(".jpg") || relativePath.endsWith(".jpeg")) type = "image/jpeg";
-            else if (relativePath.endsWith(".png")) type = "image/png";
-
+            const buffer = await zipEntry.async("nodebuffer");
             const fileName = relativePath.split("/").pop() || relativePath;
-            filesToProcess.push({ name: fileName, buffer: fileBuffer, type });
+            filesToProcess.push({
+                name: fileName,
+                buffer,
+                type: getMimeType(fileName)
+            });
         }
 
-        console.log(`[Magazynier ZIP] Zakończono rozpakowywanie. Wykryto łącznie ${filesToProcess.length} plików.`);
+        // CZYSZCZENIE PAMIĘCI: Usuwamy obiekt ZIP, gdy mamy już wyciągnięte bufory plików
+        (zip as any) = null;
 
+        console.log(`[Magazynier ZIP] Rozpakowano ${filesToProcess.length} plików.`);
+
+        // 2. TWORZENIE REKORDU W FIRESTORE
         await adminDb.collection("tenders").doc(tenderId).set({
             id: tenderId,
             name: file.name.replace(".zip", ""),
@@ -83,49 +103,52 @@ export async function POST(req: NextRequest) {
             createdAt: new Date().toISOString(),
         });
 
-        console.log("[Magazynier ZIP] Inicjalizuję klienta GoogleGenAI...");
+        // 3. INICJALIZACJA AI
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
             location: "global",
         });
 
-        console.log(`[Magazynier ZIP] ROZPOCZYNAM RÓWNOLEGŁE PRZETWARZANIE ${filesToProcess.length} PLIKÓW...`);
-
-        // 🔴 KLUCZOWA ZMIANA: Równoległe przetwarzanie wszystkich plików (Promise.all)
-        const processPromises = filesToProcess.map(async (item) => {
+        // 4. PRZETWARZANIE PARTIAMI (Batch Size = 2 dla maksymalnego bezpieczeństwa RAM)
+        await processInBatches(filesToProcess, 2, async (item) => {
             const storagePath = `kosztorysy/${tenderId}/${item.name}`;
             const storageFile = bucket.file(storagePath);
 
-            console.log(`[Magazynier ZIP] Przesyłam plik do Storage: "${item.name}"...`);
+            console.log(`[Batch] Zapisuję w Storage: ${item.name}`);
             await storageFile.save(item.buffer, {
                 metadata: { contentType: item.type },
             });
 
             let fileCategory = "OTHER";
-            let fileSummary = "Dokument pomocniczy przetargu.";
+            let fileSummary = "Dokument pomocniczy.";
 
             try {
-                let classificationParts = [];
+                let classificationParts: any[] = [];
 
-                if (item.type === "application/pdf") {
-                    const miniDoc = await PDFDocument.load(item.buffer);
-                    const previewDoc = await PDFDocument.create();
-                    const pagesToPreview = await previewDoc.copyPages(miniDoc, [0].filter(i => i < miniDoc.getPageCount()));
-                    pagesToPreview.forEach(p => previewDoc.addPage(p));
-                    const previewBuffer = Buffer.from(await previewDoc.save());
+                // OPTYMALIZACJA: Tylko jeśli PDF jest mniejszy niż 15MB, próbujemy wyciąć stronę (Vision)
+                // Większe PDF-y klasyfikujemy tylko po nazwie, by nie wywalić RAM-u
+                if (item.type === "application/pdf" && item.buffer.length < 15 * 1024 * 1024) {
+                    try {
+                        const pdf = await PDFDocument.load(item.buffer);
+                        const previewDoc = await PDFDocument.create();
+                        const [page] = await previewDoc.copyPages(pdf, [0]);
+                        if (page) previewDoc.addPage(page);
+                        const previewBuffer = Buffer.from(await previewDoc.save());
 
-                    classificationParts = [
-                        { inlineData: { data: previewBuffer.toString("base64"), mimeType: "application/pdf" } },
-                        { text: `Sklasyfikuj ten dokument. Nazwa pliku: ${item.name}` }
-                    ];
+                        classificationParts = [
+                            { inlineData: { data: previewBuffer.toString("base64"), mimeType: "application/pdf" } },
+                            { text: `Sklasyfikuj plik na podstawie obrazu i nazwy: ${item.name}` }
+                        ];
+                    } catch (pdfErr) {
+                        classificationParts = [{ text: `Sklasyfikuj po nazwie (błąd PDF): ${item.name}` }];
+                    }
                 } else {
-                    classificationParts = [
-                        { text: `Sklasyfikuj dokument na podstawie nazwy pliku: ${item.name}` }
-                    ];
+                    classificationParts = [{ text: `Sklasyfikuj dokument na podstawie nazwy pliku: ${item.name}` }];
                 }
 
-                const response = await ai.models.generateContent({
+                // POPRAWKA: Wywołanie przy użyciu bezpośredniej metody generateContent
+                const result = await ai.models.generateContent({
                     model: MODEL_FLASH,
                     contents: [{ role: "user", parts: classificationParts }],
                     config: {
@@ -135,13 +158,14 @@ export async function POST(req: NextRequest) {
                     },
                 });
 
-                if (response.text) {
-                    const parsed = JSON.parse(response.text);
+                if (result.text) {
+                    const parsed = JSON.parse(result.text);
                     fileCategory = parsed.category || "OTHER";
                     fileSummary = parsed.summary || fileSummary;
                 }
+
             } catch (err) {
-                console.warn(`[Magazynier ZIP] Błąd analizy pliku ${item.name}. Używam kategorii domyślnej.`);
+                console.warn(`[Batch] AI pominęło plik ${item.name} -> fallback do OTHER.`, err);
             }
 
             const fileId = `file-${Math.random().toString(36).slice(2, 9)}`;
@@ -156,37 +180,25 @@ export async function POST(req: NextRequest) {
                 sizeBytes: item.buffer.length,
             });
 
-            console.log(`[Magazynier ZIP] Gotowe: ${item.name} -> [${fileCategory}]`);
+            // RĘCZNE CZYSZCZENIE BUFORA (Pomaga Garbage Collectorowi)
+            (item as any).buffer = null;
         });
 
-        // Oczekiwanie aż WSZYSTKIE pliki przetworzą się jednocześnie
-        await Promise.all(processPromises);
+        // 5. FINALIZACJA
+        await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        console.log(`[Magazynier ZIP] Wszystkie pliki przetworzone pomyślnie. Aktualizuję status przetargu na "READY"...`);
-        await adminDb.collection("tenders").doc(tenderId).update({
-            status: "READY",
-        });
+        // Wywołanie inicjalizatora w tle (nie blokujemy odpowiedzi do klienta)
+        const initUrl = `${new URL(req.url).origin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
+        console.log(`[Magazynier ZIP] Odpalam inicjalizator: ${initUrl}`);
 
-        try {
-            const initUrl = internalUrl(req, "/api/kosztorysant/glowny-kosztorysant/inicjalizuj");
-            console.log(`[Magazynier ZIP] [ZAPŁON] Odpalam inicjalizator zadań: ${initUrl}`);
+        fetch(initUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tenderId })
+        }).catch(e => console.error("[Magazynier ZIP] Błąd zapłonu:", e));
 
-            const initRes = await fetch(initUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId })
-            });
+        console.log(`[Magazynier ZIP] ✅ SUKCES. Przetworzono ${filesToProcess.length} plików.`);
 
-            if (initRes.ok) {
-                console.log(`[Magazynier ZIP] [ZAPŁON] SUKCES: Wygenerowano listę zadań.`);
-            } else {
-                console.warn(`[Magazynier ZIP] [ZAPŁON] Ostrzeżenie: HTTP ${initRes.status}`);
-            }
-        } catch (initErr) {
-            console.error("[Magazynier ZIP] [ZAPŁON] Błąd wywołania inicjalizatora:", initErr);
-        }
-
-        console.log("==================================================");
         return NextResponse.json({
             tenderId,
             projectName: file.name.replace(".zip", ""),
@@ -194,7 +206,7 @@ export async function POST(req: NextRequest) {
         }, { status: 200 });
 
     } catch (error: any) {
-        console.error("[Magazynier ZIP] Krytyczny błąd podczas importu:", error);
+        console.error("[Magazynier ZIP] KRYTYCZNY BŁĄD:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }

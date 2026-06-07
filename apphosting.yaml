@@ -1,38 +1,13 @@
-# Settings for Backend (on Cloud Run).
-# See https://firebase.google.com/docs/app-hosting/configure#cloud-run
+# Konfiguracja zasobów dla Firebase App Hosting
 runConfig:
+  # Zwiększamy pamięć do 2GB, aby obsłużyć rozpakowywanie dużych ZIPów
+  memoryMiB: 2048
+  cpu: 1
+  # Minimalna liczba instancji (0 oznacza oszczędność kosztów, gdy nikt nie używa)
   minInstances: 0
+  maxInstances: 10
 
 env:
-  - variable: FIREBASE_ADMIN_PROJECT_ID
-    secret: FIREBASE_ADMIN_PROJECT_ID
-    availability:
-      - BUILD
-      - RUNTIME
-
-  - variable: FIREBASE_ADMIN_CLIENT_EMAIL
-    secret: FIREBASE_ADMIN_CLIENT_EMAIL
-    availability:
-      - BUILD
-      - RUNTIME
-
-  - variable: FIREBASE_ADMIN_PRIVATE_KEY
-    secret: FIREBASE_ADMIN_PRIVATE_KEY
-    availability:
-      - BUILD
-      - RUNTIME
-
-  - variable: EMAIL_USER
-    secret: EMAIL_USER
-    availability:
-      - RUNTIME
-
-  - variable: EMAIL_PASS
-    secret: EMAIL_PASS
-    availability:
-      - RUNTIME
-
-  - variable: EMAIL_WAREHOUSE
-    secret: EMAIL_WAREHOUSE
-    availability:
-      - RUNTIME
+  # Upewnij się, że masz tu ustawione zmienne środowiskowe, jeśli ich używasz
+  - variable: STORAGE_BUCKET
+    value: "pesam-system-81165.firebasestorage.app"
