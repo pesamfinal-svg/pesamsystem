@@ -125,9 +125,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       forceMarketSearch = true,
     } = body;
 
-    if (!sections?.length) {
-      console.error("[Broker Cenowy] Błąd: Brak sekcji kosztorysu.");
-      return NextResponse.json({ error: "Brak sekcji kosztorysu." }, { status: 400 });
+    if (!sections || sections.length === 0) {
+      console.warn("[Broker Cenowy] Ostrzeżenie: Brak sekcji kosztorysu. Przerywam pracę i zwracam pusty raport.");
+      return NextResponse.json({
+        region,
+        pricedItems: [],
+        marketSummary: "Kosztorys był pusty na etapie wyceny rynkowej.",
+        regionalTrend: `Brak danych do wyceny w regionie ${region}.`,
+        warnings: ["Brak pozycji do wyceny. Upewnij się, że Ilościowiec i Gap Filler zakończyli pracę prawidłowo."]
+      }, { status: 200 });
     }
 
     const allItems = (sections as EstimateSection[]).flatMap((sec: EstimateSection) =>

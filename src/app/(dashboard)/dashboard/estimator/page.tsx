@@ -296,7 +296,8 @@ export default function EstimatorPage() {
                     inputFiles: data.inputFiles || [],
                     result: data.result || null,
                     taskKeywords: data.taskKeywords || [],
-                    payload: data.payload || null
+                    payload: data.payload || null,
+                    dependsOn: data.dependsOn || []
                 });
             });
 
