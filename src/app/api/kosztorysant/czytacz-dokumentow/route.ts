@@ -319,7 +319,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const bucket = adminStorage.bucket();
         const fileObj = bucket.file(fileUrl);
         const [downloadedBuffer] = await fileObj.download();
-        arrayBuffer = downloadedBuffer.buffer.slice(downloadedBuffer.byteOffset, downloadedBuffer.byteOffset + downloadedBuffer.byteLength);
+        // Czysta konwersja Node.js Buffer -> ArrayBuffer
+        arrayBuffer = new Uint8Array(downloadedBuffer).buffer;
         fileName = fileUrl.split("/").pop() || "dokument.pdf";
         fileType = fileName.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream";
       }
