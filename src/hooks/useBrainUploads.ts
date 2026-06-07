@@ -7,11 +7,9 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { collection, query, orderBy, onSnapshot, getFirestore } from 'firebase/firestore';
-import { app } from '@/lib/firebase/config'; // <-- Upewnij się, że to właściwa ścieżka do Twojego Firebase config
+import { collection, query, orderBy, onSnapshot } from 'firebase/firestore';
+import { db } from '@/lib/firebase/config'; // 👈 ZMIANA: Importujemy gotowe db
 import type { BrainUploadRecord } from '@/app/api/kosztorysant/_shared/brainKnowledge.types';
-
-const db = getFirestore(app);
 
 export interface BrainUploadWithId extends BrainUploadRecord {
     id: string;

@@ -6,11 +6,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { doc, onSnapshot, getFirestore } from 'firebase/firestore';
-import { app } from '@/lib/firebase/config';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '@/lib/firebase/config'; // 👈 ZMIANA: Importujemy gotowe db
 import type { QuantityIndicators, BranchProportions } from '@/app/api/kosztorysant/_shared/brainKnowledge.types';
-
-const db = getFirestore(app);
 
 const OBJECT_TYPES = [
     { value: 'przedszkole', label: '🏫 Przedszkole' },
@@ -71,7 +69,6 @@ export function BrainStatsPanel() {
                 <div>
                     <p className="text-xs text-slate-500 uppercase tracking-wide mb-2 font-semibold">Wyuczone Proporcje branż (% budżetu)</p>
                     <div className="space-y-1.5">
-                        {/* Tutaj mapujemy twarde dane z bazy */}
                         <ProgressBar label="D1 Stan zerowy" value={proportions?.D1_zeroPercent?.avg} color="bg-slate-400" />
                         <ProgressBar label="D2 Stan surowy" value={proportions?.D2_roughPercent?.avg} color="bg-blue-500" />
                         <ProgressBar label="D3 Wykończenie" value={proportions?.D3_finishPercent?.avg} color="bg-indigo-500" />
