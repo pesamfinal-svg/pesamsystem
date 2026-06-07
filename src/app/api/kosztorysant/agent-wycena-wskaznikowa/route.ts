@@ -2,17 +2,10 @@
  * PESAM – Agent Wycena Wskaźnikowa (Parametryczna / Analogiczna)
  * 
  * Ścieżka: src/app/api/kosztorysant/agent-wycena-wskaznikowa/route.ts
- * 
- * Odpowiedzialność:
- *  - Służy do wyceny na Poziomie 0 i 1 (brak projektów, samo PFU/opis).
- *  - Stosuje wskaźniki cenowe obiektów budowlanych (PLN / m² powierzchni użytkowej).
- *  - Nakłada współczynniki regionalne i standardu wykonania.
- *  - Generuje scalone pozycje RMS z flagą "PARAMETRIC".
  */
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
-import { EstimateSection } from "../_shared/types";
 
 export const dynamic = "force-dynamic";
 
@@ -53,96 +46,113 @@ ZASADA DZIAŁANIA:
 4. Oblicz szacunkową wartość całkowitą netto.
 5. Rozbij tę kwotę na 5 elementów scalonych (sekcji) zgodnie z procentowym podziałem.
 6. Dla każdego elementu utwórz pozycję w kosztorysie o jednostce "m2" i cenie jednostkowej równej wskaźnikowi cząstkowemu.
-7. Przypisz wskaźnik jakości danych (dataQuality):
-   - Method: "PARAMETRIC"
-   - Confidence: "LOW" (bo wyceniamy bez rysunków)
-   - RiskBuffer: 25 (zalecana 25% rezerwa na nieprzewidziane koszty w trybie "Zaprojektuj i Wybuduj")
+7. Przypisz wskaźnik jakości danych (dataQuality).
+`;
 
-Zwróć wyłącznie poprawny obiekt JSON:
-{
-  "sections": [
-    {
-      "id": "sec-stan-zero",
-      "name": "Dział 1. Stan Zero (Oszacowanie parametryczne)",
-      "items": [
-        {
-          "id": "par-1",
-          "code": "WSK-01",
-          "name": "Wykonanie stanu zero (ziemia, fundamenty, hydroizolacje) - Wskaźnik powierzchniowy",
-          "type": "M", // Dla uproszczenia jako Materiał scalony
-          "quantity": 2000, // powierzchnia [m2]
-          "unit": "m2",
-          "basePrice": 650.00, // cząstkowy koszt m2 stanu zero
-          "unitPrice": 650.00,
-          "dataQuality": {
-            "method": "PARAMETRIC",
-            "confidence": "LOW",
-            "riskBuffer": 25,
-            "notes": ["Wycena na podstawie średnich stawek krajowych dla województwa podkarpackiego (mnożnik 0.90).", "Przyjęto udział stanu zero na poziomie 10% łącznych kosztów."]
-          }
+// ── SCHEMAT ODPOWIEDZI (Gwarantuje, że JSON nigdy się nie rozjedzie ani nie przetnie) ──
+const PARAMETRIC_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    sections: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          name: { type: Type.STRING },
+          items: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                code: { type: Type.STRING },
+                name: { type: Type.STRING },
+                type: { type: Type.STRING, enum: ["R", "M", "S"] },
+                quantity: { type: Type.NUMBER },
+                unit: { type: Type.STRING },
+                basePrice: { type: Type.NUMBER },
+                unitPrice: { type: Type.NUMBER },
+                dataQuality: {
+                  type: Type.OBJECT,
+                  properties: {
+                    method: { type: Type.STRING },
+                    confidence: { type: Type.STRING },
+                    riskBuffer: { type: Type.NUMBER },
+                    notes: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["method", "confidence", "riskBuffer", "notes"]
+                }
+              },
+              required: ["id", "code", "name", "type", "quantity", "unit", "basePrice", "unitPrice", "dataQuality"]
+            }
+          },
+          required: ["id", "name", "items"]
         }
-      ]
-    }
-  ],
-  "parametricComment": "Wycena wskaźnikowa dla przedszkola 2000m2 w Rzeszowie oszacowana na łączną kwotę netto 13.0 mln PLN (średnio 6500 PLN/m2). Uwzględnia 10% korektę na region podkarpacki. Ryzyko wyceny wysokie (rezerwa 25%)."
-}
-`.trim();
+      }
+    },
+    parametricComment: { type: Type.STRING }
+  },
+  required: ["sections", "parametricComment"]
+};
 
 // ── Główny Handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-    console.log("==================================================");
-    console.log("[Agent Parametryczny] === ROZPOCZĘTO WYCENĘ PARAMETRYCZNĄ ===");
-    console.log("==================================================");
+  console.log("==================================================");
+  console.log("[Agent Parametryczny] === ROZPOCZĘTO WYCENĘ PARAMETRYCZNĄ ===");
+  console.log("==================================================");
 
-    try {
-        const ai = new GoogleGenAI({
-            vertexai: true,
-            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-            location: "global",
-        });
+  try {
+    const ai = new GoogleGenAI({
+      vertexai: true,
+      project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+      location: "global",
+    });
 
-        const body = await req.json();
-        const { request, region = "Polska", projectContext = "" } = body;
+    const body = await req.json();
+    const { request, region = "Polska", projectContext = "" } = body;
 
-        console.log(`[Agent Parametryczny] Region docelowy: "${region}"`);
-        console.log(`[Agent Parametryczny] Dane wejściowe: "${request || projectContext}"`);
+    console.log(`[Agent Parametryczny] Region docelowy: "${region}"`);
+    console.log(`[Agent Parametryczny] Dane wejściowe: "${request || projectContext}"`);
 
-        const userPrompt = `
+    const userPrompt = `
 Wykonaj pełną wycenę parametryczną na podstawie poniższych danych:
 Opis inwestycji: ${request || projectContext}
 Lokalizacja (Województwo): ${region}
 
-Wygeneruj 5 głównych sekcji kosztorysu ze scalonymi pozycjami w m2 powierzchni użytkowej.
+Wygeneruj dokładnie 5 głównych sekcji kosztorysu ze scalonymi pozycjami w m2 powierzchni użytkowej.
         `.trim();
 
-        console.log("[Agent Parametryczny] Wysyłam zapytanie do Gemini Pro...");
-        const startTime = Date.now();
+    console.log("[Agent Parametryczny] Wysyłam zapytanie do Gemini Pro...");
+    const startTime = Date.now();
 
-        const response = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-            config: {
-                systemInstruction: SYSTEM_INSTRUCTION,
-                temperature: 0.1,
-                maxOutputTokens: 4096,
-                responseMimeType: "application/json",
-            },
-        });
+    // Wywołanie z zaimplementowanym rygorystycznym schematem odpowiedzi
+    const response = await ai.models.generateContent({
+      model: MODEL_PRO,
+      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        temperature: 0.1,
+        maxOutputTokens: 2048, // Zmniejszamy, aby przyspieszyć odpowiedź i uniknąć ucinania
+        responseMimeType: "application/json",
+        responseSchema: PARAMETRIC_SCHEMA as any, // Schemat zapobiegający błędom składniowym
+      },
+    });
 
-        const rawText = response.text ?? "{}";
-        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Agent Parametryczny] Odebrano wycenę w czasie ${duration}s. Parsowanie JSON...`);
+    const rawText = response.text ?? "{}";
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[Agent Parametryczny] Odebrano wycenę w czasie ${duration}s. Parsowanie JSON...`);
 
-        const parsed = JSON.parse(rawText);
-        console.log(`[Agent Parametryczny] Wycena zakończona pomyślnie.`);
-        console.log(`[Agent Parametryczny] Raport: ${parsed.parametricComment}`);
+    const parsed = JSON.parse(rawText);
+    console.log(`[Agent Parametryczny] Wycena zakończona pomyślnie.`);
+    console.log(`[Agent Parametryczny] Raport: ${parsed.parametricComment}`);
 
-        console.log("==================================================");
-        return NextResponse.json(parsed, { status: 200 });
+    console.log("==================================================");
+    return NextResponse.json(parsed, { status: 200 });
 
-    } catch (error: any) {
-        console.error("[Agent Parametryczny] Krytyczny błąd podczas wyceny parametrycznej:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
-    }
+  } catch (error: any) {
+    console.error("[Agent Parametryczny] Krytyczny błąd podczas wyceny parametrycznej:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
