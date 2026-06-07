@@ -60,8 +60,8 @@ Oceń poziom dokumentacji, typ budynku i jego dokładną powierzchnię na podsta
 TREŚCI DOKUMENTÓW TEKSTOWYCH:
 ${textContext}
 
-LISTA WSZYSTKICH PLIKÓW:
-${JSON.stringify(fileList, null, 2)}
+LISTA WSZYSTKICH PLIKÓW WRAZ Z OPISAMI STRESZCZENIA:
+${JSON.stringify(fileList.map(f => ({ fileName: f.fileName, category: f.category, summary: f.summary || '' })), null, 2)}
 
 ZADANIE:
 Znajdź:

@@ -174,12 +174,13 @@ export async function POST(req: NextRequest) {
                 sizeBytes: item.buffer.length,
             });
 
-            // Dodanie do listy plików wejściowych
+            // Dodanie do listy plików wejściowych z opisem (summary) wyciągniętym przez AI
             uploadedFilesList.push({
                 fileId,
                 fileName: item.name,
                 category: fileCategory,
-                storagePath
+                storagePath,
+                summary: fileSummary
             });
 
             (item as any).buffer = null;
