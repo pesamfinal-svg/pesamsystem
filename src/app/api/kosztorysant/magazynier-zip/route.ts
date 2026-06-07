@@ -70,7 +70,9 @@ export async function POST(req: NextRequest) {
         console.log(`[Magazynier ZIP] Plik: "${file.name}" | Wielkość: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
 
         const tenderId = `TND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-        const bucket = adminStorage.bucket();
+
+        // POPRAWKA: Jawne wskazanie nazwy bucket'u
+        const bucket = adminStorage.bucket(process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
 
         // 1. ROZPAKOWYWANIE DO PAMIĘCI
         const arrayBuffer = await file.arrayBuffer();
@@ -103,7 +105,7 @@ export async function POST(req: NextRequest) {
             createdAt: new Date().toISOString(),
         });
 
-        // 3. INICJALIZACJA AI
+        // 3. INICJALIZACJA AI - PRZYWRÓCONA PRAWIDŁOWA PŁASKA STRUKTURA (z "vertexai: true")
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
@@ -126,8 +128,6 @@ export async function POST(req: NextRequest) {
             try {
                 let classificationParts: any[] = [];
 
-                // OPTYMALIZACJA: Tylko jeśli PDF jest mniejszy niż 15MB, próbujemy wyciąć stronę (Vision)
-                // Większe PDF-y klasyfikujemy tylko po nazwie, by nie wywalić RAM-u
                 if (item.type === "application/pdf" && item.buffer.length < 15 * 1024 * 1024) {
                     try {
                         const pdf = await PDFDocument.load(item.buffer);
@@ -147,7 +147,6 @@ export async function POST(req: NextRequest) {
                     classificationParts = [{ text: `Sklasyfikuj dokument na podstawie nazwy pliku: ${item.name}` }];
                 }
 
-                // POPRAWKA: Wywołanie przy użyciu bezpośredniej metody generateContent
                 const result = await ai.models.generateContent({
                     model: MODEL_FLASH,
                     contents: [{ role: "user", parts: classificationParts }],
@@ -187,7 +186,7 @@ export async function POST(req: NextRequest) {
         // 5. FINALIZACJA
         await adminDb.collection("tenders").doc(tenderId).update({ status: "READY" });
 
-        // Wywołanie inicjalizatora w tle (nie blokujemy odpowiedzi do klienta)
+        // Wywołanie inicjalizatora w tle
         const initUrl = `${new URL(req.url).origin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`;
         console.log(`[Magazynier ZIP] Odpalam inicjalizator: ${initUrl}`);
 
