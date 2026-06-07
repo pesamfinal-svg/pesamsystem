@@ -98,6 +98,7 @@ export interface ScopeManifestMeta {
     docLevel: DocLevel;
     objectType: ObjectType;
     objectArea_m2: number | null;
+    areaIsEstimated?: boolean;
     estimationMethod: EstimationMethod;
     confidenceScore: number;
     sourceDocuments: string[];
