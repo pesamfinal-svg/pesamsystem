@@ -229,12 +229,17 @@ Zwróć TYLKO czysty JSON (bez markdown, bez cudzysłowów wewnątrz tekstów):
             config: {
               temperature: 0.0,
               maxOutputTokens: 256,
-              responseMimeType: "application/json",
-              tools: [{ googleSearch: {} } as any], // Włączenie Google Search Grounding
+              // Wyłączamy kontrolowany format dla zapytania wyszukiwarki
+              tools: [{ googleSearch: {} } as any],
             },
           });
 
-          const parsed = JSON.parse(searchResponse.text ?? "{}");
+          // Czyścimy ewentualne formatowanie markdown (```json) i parsujemy bezpiecznie
+          let cleanText = searchResponse.text ?? "{}";
+          if (cleanText.includes("```")) {
+            cleanText = cleanText.replace(/```json|```/g, "").trim();
+          }
+          const parsed = JSON.parse(cleanText);
           if (parsed.priceMin > 0 && parsed.priceMax > 0) {
             const avgPrice = (parsed.priceMin + parsed.priceMax) / 2;
             marketPrices.set(item.id, {

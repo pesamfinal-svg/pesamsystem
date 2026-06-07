@@ -26,7 +26,7 @@ import type {
 } from '../_shared/scopeManifest.types';
 
 export const dynamic = "force-dynamic";
-const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_FLASH = "gemini-3.5-flash";
 
 // POPRAWKA: Usunięcie problematycznych "enum" ze schematu odpowiedzi, by uniknąć błędu payloadu Google API
 const AUDITOR_RESPONSE_SCHEMA = {
@@ -101,31 +101,63 @@ export async function POST(req: NextRequest) {
             location: "global",
         });
 
-        const prompt = `
+        const searchPrompt = `
+Przeszukaj polskie przepisy budowlane, normy techniczne oraz wymagania ppoż i sanitarne dla budynków typu: "${objectTypeHint}".
+Zidentyfikuj instalacje, systemy i urządzenia, które są bezwzględnie wymagane do odbioru technicznego w Polsce (WT 2021).
+Oto aktualny zakres kosztorysu (czyli to, co już mamy):
+${JSON.stringify(currentElements, null, 2)}
+
+Sprawdź, czy brakuje jakichkolwiek krytycznych systemów instalacyjnych, zabezpieczeń ppoż, separatorów, przyłączy lub kluczowego wyposażenia technologicznego niezbędnego do odbioru technicznego.
+Podaj konkretne fakty prawne i techniczne.
+        `.trim();
+
+        console.log("[Cichy Rewident] [Krok 1] Szukam technicznych pułapek w Google Search...");
+        let groundedFacts = "";
+        try {
+            const searchResult = await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.1,
+                },
+            });
+            groundedFacts = searchResult.text ?? "";
+            console.log(`[Cichy Rewident] [Krok 1] Zebrano ${groundedFacts.length} znaków faktów z Google Search.`);
+        } catch (searchError: any) {
+            console.warn(`[Cichy Rewident] [Krok 1] Google Search niedostępny: ${searchError.message}. Działam na bazie wiedzy wbudowanej.`);
+            groundedFacts = `Brak danych z wyszukiwarki. Bazuj na ogólnej wiedzy technicznej dla typu: "${objectTypeHint}".`;
+        }
+
+        const dnaPrompt = `
+Jako Audytor Technologiczny przeanalizuj poniższe fakty oraz aktualny zakres kosztorysu.
+
 TYP OBIEKTU: ${objectTypeHint}
 
 AKTUALNY ZAKRES KOSZTORYSU:
 ${JSON.stringify(currentElements, null, 2)}
 
+FAKTY Z PRZEPISÓW (WT 2021) I ANALIZY RYNKOWEJ:
+${groundedFacts}
+
 ZADANIE:
-1. Przeszukaj internet za pomocą Google Search pod kątem polskich norm technicznych i przepisów ppoż/budowlanych dla budynków typu: "${objectTypeHint}".
-2. Wyryj krytyczne instalacje, systemy lub urządzenia, o których zapomniał projektant, a które są bezwzględnie wymagane do odbioru technicznego budynku.
-3. Wylistuj maksymalnie 5 najważniejszych braków. Jeśli kosztorys jest kompletny, zwróć pustą tablicę "alerts".
+1. Wykryj krytyczne instalacje, systemy lub urządzenia, o których zapomniał projektant, a które są bezwzględnie wymagane prawem lub technologią do odbioru tego typu budynku.
+2. Wylistuj maksymalnie 30 najważniejszych braków. Każdy brak przypisz do odpowiedniego działu (D1-D8).
+3. Jeśli kosztorys jest w pełni kompletny i nie ma żadnych braków, zwróć pustą tablicę "alerts".
+
+Odpowiedz WYŁĄCZNIE czystym JSON bez komentarzy.
         `.trim();
 
-        console.log("[Cichy Rewident] Wysyłam zapytanie do Gemini z włączonym uziemieniem wyszukiwarki Google...");
+        console.log("[Cichy Rewident] [Krok 2] Buduję listę braków technologicznych (Structured Output)...");
 
         const result = await ai.models.generateContent({
             model: MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            contents: [{ role: "user", parts: [{ text: dnaPrompt }] }],
             config: {
-                systemInstruction: AUDITOR_SYSTEM_INSTRUCTION,
+                systemInstruction: SYSTEM_INSTRUCTION,
                 temperature: 0.1,
                 responseMimeType: "application/json",
                 responseSchema: AUDITOR_RESPONSE_SCHEMA as any,
-                tools: [
-                    { googleSearch: {} } // 👈 GROUNDING Z GOOGLE SEARCH WŁĄCZONE!
-                ]
             },
         });
 
