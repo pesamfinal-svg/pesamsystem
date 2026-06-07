@@ -154,7 +154,7 @@ Odpowiedz WYŁĄCZNIE czystym JSON bez komentarzy.
             model: MODEL_FLASH,
             contents: [{ role: "user", parts: [{ text: dnaPrompt }] }],
             config: {
-                systemInstruction: SYSTEM_INSTRUCTION,
+                systemInstruction: AUDITOR_SYSTEM_INSTRUCTION,
                 temperature: 0.1,
                 responseMimeType: "application/json",
                 responseSchema: AUDITOR_RESPONSE_SCHEMA as any,
