@@ -55,7 +55,7 @@ function getMimeType(fileName: string): string {
 
 export async function POST(req: NextRequest) {
     console.log("==================================================");
-    console.log("[Magazynier ZIP] === ROZPOCZĘTO IMPORT DUŻEJ PACZKI ===");
+    console.log("[Magazynier ZIP] === ROZPOCZĘTO IMPORT PLIKÓW PROJEKTU ===");
     console.log("==================================================");
 
     try {
@@ -63,8 +63,8 @@ export async function POST(req: NextRequest) {
         const file = formData.get("file") as File | null;
 
         if (!file) {
-            console.error("[Magazynier ZIP] Błąd: Brak pliku ZIP.");
-            return NextResponse.json({ error: "Brak pliku ZIP w żądaniu." }, { status: 400 });
+            console.error("[Magazynier ZIP] Błąd: Brak pliku.");
+            return NextResponse.json({ error: "Brak pliku w żądaniu." }, { status: 400 });
         }
 
         console.log(`[Magazynier ZIP] Plik: "${file.name}" | Wielkość: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
@@ -74,38 +74,44 @@ export async function POST(req: NextRequest) {
         // POPRAWKA: Jawne wskazanie nazwy bucket'u
         const bucket = adminStorage.bucket(process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app");
 
-        // 1. ROZPAKOWYWANIE DO PAMIĘCI
         const arrayBuffer = await file.arrayBuffer();
-        const zip = await JSZip.loadAsync(arrayBuffer);
-
         const filesToProcess: { name: string; buffer: Buffer; type: string }[] = [];
 
-        for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
-            if (zipEntry.dir || relativePath.includes("__MACOSX") || relativePath.includes(".DS_Store")) continue;
+        // 1. ROZPOZNAWANIE: CZY TO ARCHIWUM ZIP CZY POJEDYNCZY PLIK
+        if (file.name.toLowerCase().endsWith(".zip")) {
+            const zip = await JSZip.loadAsync(arrayBuffer);
+            for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
+                if (zipEntry.dir || relativePath.includes("__MACOSX") || relativePath.includes(".DS_Store")) continue;
 
-            const buffer = await zipEntry.async("nodebuffer");
-            const fileName = relativePath.split("/").pop() || relativePath;
+                const buffer = await zipEntry.async("nodebuffer");
+                const fileName = relativePath.split("/").pop() || relativePath;
+                filesToProcess.push({
+                    name: fileName,
+                    buffer,
+                    type: getMimeType(fileName)
+                });
+            }
+            (zip as any) = null; // Czyszczenie
+            console.log(`[Magazynier ZIP] Rozpakowano archiwum ZIP. Liczba plików: ${filesToProcess.length}`);
+        } else {
+            // Traktujemy pojedynczy plik (np. PDF, Excel) jako jednoelementową paczkę
             filesToProcess.push({
-                name: fileName,
-                buffer,
-                type: getMimeType(fileName)
+                name: file.name,
+                buffer: Buffer.from(arrayBuffer),
+                type: file.type || getMimeType(file.name)
             });
+            console.log(`[Magazynier ZIP] Przyjęto plik bez kompresji (PDF/Excel). Przetwarzam jako projekt.`);
         }
-
-        // CZYSZCZENIE PAMIĘCI: Usuwamy obiekt ZIP, gdy mamy już wyciągnięte bufory plików
-        (zip as any) = null;
-
-        console.log(`[Magazynier ZIP] Rozpakowano ${filesToProcess.length} plików.`);
 
         // 2. TWORZENIE REKORDU W FIRESTORE
         await adminDb.collection("tenders").doc(tenderId).set({
             id: tenderId,
-            name: file.name.replace(".zip", ""),
+            name: file.name.replace(/\.zip|\.pdf|\.xlsx/gi, ""),
             status: "ANALYZING",
             createdAt: new Date().toISOString(),
         });
 
-        // 3. INICJALIZACJA AI - PRZYWRÓCONA PRAWIDŁOWA PŁASKA STRUKTURA (z "vertexai: true")
+        // 3. INICJALIZACJA AI - PŁASKA STRUKTURA (zgodna z Twoimi typami TypeScript)
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
@@ -200,7 +206,7 @@ export async function POST(req: NextRequest) {
 
         return NextResponse.json({
             tenderId,
-            projectName: file.name.replace(".zip", ""),
+            projectName: file.name.replace(/\.zip|\.pdf|\.xlsx/gi, ""),
             filesCount: filesToProcess.length,
         }, { status: 200 });
 

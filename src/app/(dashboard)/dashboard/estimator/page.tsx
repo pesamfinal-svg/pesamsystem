@@ -643,8 +643,9 @@ export default function EstimatorPage() {
                 }
             });
 
+            // Poprawka typowania dla kompilatora Next.js
             if (result.reply) {
-                setMessages(prev => [...prev, { role: "ai", content: result.reply }]);
+                setMessages(prev => [...prev, { role: "ai", content: result.reply || "" }]);
             }
 
             if (result.generatedSections && result.generatedSections.length > 0) {
@@ -693,7 +694,6 @@ export default function EstimatorPage() {
             setUploadMsg("");
         }
     };
-
     // ── METODY OBLICZANIA KOSZTORYSU (TRENDY I NARZUTY) ──────────────────────
 
     const calculateRowValue = (item: EstimateItem) => {
