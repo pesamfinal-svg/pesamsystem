@@ -16,6 +16,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/admin';
 import { GoogleGenAI, Type } from '@google/genai';
+import { Agent, setGlobalDispatcher } from "undici";
+
+// Zwiększamy domyślny limit oczekiwania fetch() w Node.js z 30s do 5 minut.
+// Dzięki temu zapytania Google Search Grounding mogą spokojnie ukończyć analizę sieciową.
+setGlobalDispatcher(new Agent({
+    headersTimeout: 300000, // 5 minut
+    bodyTimeout: 300000,    // 5 minut
+}));
 import { buildMandatoryMinimum } from '../_shared/heurystyki';
 import type {
     ScopeManifest,
@@ -30,7 +38,7 @@ import type {
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-3.5-flash";
+const MODEL_FLASH = "gemini-2.5-flash";
 
 // ================================================================
 // Response Schema – DNA budynku (używane TYLKO w Kroku 2, bez Search)
@@ -345,7 +353,7 @@ export async function POST(req: NextRequest) {
         const ai = new GoogleGenAI({
             vertexai: true,
             project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-            location: "global",
+            location: "europe-west4",
         });
 
         const areaContext = objectAreaHint_m2
