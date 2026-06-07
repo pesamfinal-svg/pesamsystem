@@ -283,8 +283,20 @@ export default function EstimatorPage() {
         const tasksRef = collection(db, "tenders", activeTenderId, "tasks");
         const unsubscribe = onSnapshot(tasksRef, (snapshot) => {
             const updatedTasks: SwarmTask[] = [];
-            snapshot.forEach((doc) => {
-                updatedTasks.push(doc.data() as SwarmTask);
+            snapshot.forEach((docSnap) => {
+                const data = docSnap.data();
+
+                // Bezpieczne mapowanie danych z bazy (Firestore schema) na model oczekiwany przez frontend
+                updatedTasks.push({
+                    id: data.taskId || data.id || docSnap.id,
+                    agentType: data.type || data.agentType || "ANALITYK_ZAKRESU",
+                    description: data.description || `Uruchomienie procesu ${data.type || "analizy"}`,
+                    status: data.status || "PENDING",
+                    inputFiles: data.inputFiles || [],
+                    result: data.result || null,
+                    taskKeywords: data.taskKeywords || [],
+                    payload: data.payload || null
+                });
             });
 
             // Generowanie komunikatów na czacie w momencie, gdy jakiś Agent rozpoczyna pracę lub wywali błąd
@@ -452,9 +464,9 @@ export default function EstimatorPage() {
                 payload = {
                     tenderId: activeTenderId,
                     fileContents,
-                    docLevel: task.payload.docLevel,
-                    estimationMethod: task.payload.estimationMethod,
-                    sourceDocuments: task.payload.sourceDocuments,
+                    docLevel: task.payload?.docLevel || 0,
+                    estimationMethod: task.payload?.estimationMethod || "PARAMETRIC",
+                    sourceDocuments: task.payload?.sourceDocuments || [],
                 };
             }
             else if (task.agentType === "GAP_FILLER") {
@@ -463,13 +475,13 @@ export default function EstimatorPage() {
             }
             else if (task.agentType === "LEGAL") {
                 endpoint = "/api/kosztorysant/czytacz-dokumentow";
-                payload = { fileUrl: task.inputFiles[0], trends, taskKeywords: task.taskKeywords || [] };
+                payload = { fileUrl: task.inputFiles?.[0] || "", trends, taskKeywords: task.taskKeywords || [] };
             } else if (task.agentType === "QUANTITY") {
                 endpoint = "/api/kosztorysant/agent-knr";
                 payload = { request: task.description, currentTrends: trends, mode: "GENERATE_FROM_SCRATCH" };
             } else if (task.agentType === "VISION") {
                 endpoint = "/api/kosztorysant/agent-vision-konstruktor";
-                payload = { fileUrl: task.inputFiles[0], drawingHints: task.description };
+                payload = { fileUrl: task.inputFiles?.[0] || "", drawingHints: task.description };
             } else if (task.agentType === "NORMATIVE_STEEL") {
                 const visionResult = tasks.find(t => t.agentType === "VISION" && t.status === "DONE")?.result;
                 endpoint = "/api/kosztorysant/agent-normatywne-zbrojenie";
