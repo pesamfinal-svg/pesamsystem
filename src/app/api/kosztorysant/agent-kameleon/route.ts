@@ -121,12 +121,22 @@ Przeanalizuj plik i wyciągnij pozycje kosztorysowe. Zwróć JSON.
             const sectionId = `sec_kameleon_${taskId}`;
             const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
 
-            // Standard 1: Zapis nagłówka sekcji
+            // Standard 1: Zapis nagłówka sekcji z tablicą items dla błyskawicznego renderingu
             batch.set(sectionRef, {
                 section: "Roboty Specjalistyczne (Kameleon)",
                 status: "QUANTITY_READY",
                 totalValue: 0,
                 sourceTaskId: taskId,
+                items: allExtractedItems.map((item: any) => ({
+                    id: uuidv4(),
+                    pozycja: item.pozycja || "Pozycja specjalistyczna",
+                    opis: item.opis || "",
+                    ilosc: Number(item.ilosc) || 0,
+                    cenaJed: 0,
+                    KNR_ref: item.KNR_ref || "WYCENA_INDYWIDUALNA",
+                    confidence: "MEDIUM",
+                    sourceTrack: `Analiza Kameleon (Task-${taskId})`
+                })),
                 updatedAt: new Date()
             });
 

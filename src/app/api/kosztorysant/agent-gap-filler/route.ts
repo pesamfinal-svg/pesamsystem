@@ -108,12 +108,22 @@ Podaj standardowe wartości rynkowe w Polsce. Zwróć tekst.
             const sectionId = `sec_gap_${taskId}`;
             const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
 
-            // Standard 1: Nagłówek sekcji kosztorysu
+            // Standard 1: Nagłówek sekcji kosztorysu z tablicą items dla renderowania na froncie
             batch.set(sectionRef, {
                 section: "Szacunki Wskaźnikowe (Braki w dokumentacji)",
                 status: "QUANTITY_READY",
                 totalValue: 0,
                 sourceTaskId: taskId,
+                items: estimatedItems.map((item: any) => ({
+                    id: uuidv4(),
+                    pozycja: item.pozycja,
+                    opis: item.opis,
+                    ilosc: Number(item.ilosc) || 1,
+                    cenaJed: 0,
+                    KNR_ref: item.KNR_ref || "WSKAŹNIK_RYNKOWY",
+                    confidence: "LOW",
+                    sourceTrack: "Szacunek Wskaźnikowy (GAP_FILLER)"
+                })),
                 updatedAt: new Date()
             });
 

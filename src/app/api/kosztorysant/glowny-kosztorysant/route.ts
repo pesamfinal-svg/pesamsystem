@@ -20,7 +20,7 @@ const ai = new GoogleGenAI({
 // Mózg używa modelu PRO do zaawansowanego wnioskowania i planowania
 const MODEL_PRO = "gemini-2.5-pro";
 
-// Rejestr Agentów (Książka telefoniczna Mózgu) - mapowanie na endpointy (PESAM 3.0)
+// Rejestr Agentów (Książka telefoniczna Mózgu) - mapowanie na endpointy
 const AGENT_ENDPOINTS: Record<string, string> = {
     "LEGAL_EXPERT": "/api/kosztorysant/czytacz-dokumentow",
     "VISION_ARCHITECTURE": "/api/kosztorysant/agent-wbs-architekt",
@@ -32,7 +32,8 @@ const AGENT_ENDPOINTS: Record<string, string> = {
     "PYTHON_CALC": "/api/kosztorysant/agent-python-calc",
     "BROKER": "/api/kosztorysant/broker-cenowy",
     "SILENT_AUDITOR": "/api/kosztorysant/agent-cichy-rewident",
-    "REVISOR_JUDGE": "/api/kosztorysant/agent-rewident"
+    "REVISOR_JUDGE": "/api/kosztorysant/agent-rewident",
+    "BUDOWLANIEC": "/api/kosztorysant/agent-budowlaniec" // Dodany Agent Budowlany
 };
 
 // Schemat odpowiedzi Mózgu (Standard 1: Ścisła spójność i obsługa tempId)
@@ -122,36 +123,42 @@ export async function POST(req: Request) {
         const tasks = tasksSnap.docs.map(d => ({ id: d.id, agentType: d.data().agentType, status: d.data().status, description: d.data().description }));
         const brainState = brainSnap.exists ? brainSnap.data() : { phase: "PLANNING", knownFacts: {} };
 
-        // 3. Budowa Promptu dla Mózgu
+        // 3. Budowa Promptu dla Mózgu (Zapewnia pełną autonomię decyzyjną ReAct)
         const systemPrompt = `
 Jesteś Głównym Orkiestratorem (Mózgiem) systemu kosztorysowego PESAM 3.0.
-Działasz w pętli ReAct (Reason -> Act -> Observe). Twoim zadaniem jest delegowanie pracy do specjalistów.
+Działasz w pętli ReAct (Reason -> Act -> Observe). Twoim jedynym celem jest doprowadzenie do stworzenia kompletnego, wycenionego kosztorysu (Live Estimate) dla danego przetargu.
+Służą do tego wyspecjalizowani agenci w bazie, którym delegujesz zadania. Samodzielnie analizujesz sytuację, posiadane dokumenty, ich tagi oraz braki i decydujesz o kolejnych krokach.
 
-DOSTĘPNI AGENCI (Rejestr):
-- LEGAL_EXPERT: Analizuje umowy, SWZ, PFU. Szuka kar, terminów, gwarancji.
-- VISION_ARCHITECTURE: Analizuje rysunki architektoniczne (rzuty, przekroje).
-- VISION_CONSTRUCT: Analizuje rysunki konstrukcyjne (zbrojenia, beton).
-- BOQ_PARSER: Wyciąga dane z przedmiarów (Excel, tabele).
-- BROKER: Wycenia pozycje (uruchamiaj dopiero gdy ilości są znane).
-- SILENT_AUDITOR: Szuka braków technologicznych (uruchamiaj na końcu).
+TWÓJ DYNAMICZNY REJESTR AGENTÓW (Możesz przydzielać im zadania w polu agentType):
+- LEGAL_EXPERT: Analizuje umowy, SWZ, PFU pod kątem wymagań formalnych, kar, terminów, certyfikatów i wadium.
+- VISION_ARCHITECTURE: Analizuje rysunki architektoniczne (wyciąga surowe wymiary ścian, okien, posadzek).
+- VISION_CONSTRUCT: Analizuje rysunki konstrukcyjne (wyciąga klasy betonu, stal, fundamenty).
+- VISION_MEP: Analizuje rysunki i schematy instalacji MEP (sanitarne, elektryczne).
+- BOQ_PARSER: Parsuje ślepe kosztorysy/przedmiary w Excelu/tabelach, automatycznie wyciągając gotowe ilości.
+- GAP_FILLER: Szacuje koszty i ilości wskaźnikowo/parametrycznie dla brakujących branż lub gdy brak jest jakichkolwiek rysunków technicznych.
+- BUDOWLANIEC: Inżynier budowy. Projektuje od podstaw proces technologiczny (prace ziemne, stan zerowy, surowy, instalacje, wykończenie) dopasowany do typologii obiektu. Może dopytywać o brakujące dane i debatować z Silent Auditor [1].
+- SILENT_AUDITOR: Weryfikuje kosztorys pod kątem WT 2021, Sanepidu i PPOŻ, dopisując brakujące wymagane elementy technologiczne.
+- BROKER: Wycenia rynkowo pozycje (szuka cen netto w sieci) - uruchamiaj go dopiero, gdy ilości dla danej sekcji są już znane (QUANTITY_READY).
+- REVISOR_JUDGE: Rozstrzyga spory i konflikty technologiczne między agentami.
+- UNIVERSAL_SPECIALIST: Kameleon, któremu możesz w polu 'description' zadać unikalną rolę (np. "Przeanalizuj technologię basenową...").
+- PYTHON_CALC: Matematyk. Pisze skrypty Python do bezbłędnych obliczeń geometrycznych i objętościowych. Wywołuj go jako pod-zadanie (sub-task) dla skomplikowanych obliczeń.
 
-STAN OBECNY:
-Faza: ${brainState?.phase}
-Wyzwalacz: ${trigger}
+STAN OBECNY PRZETARGU:
+Faza: ${brainState?.phase || "PLANNING"}
+Wyzwalacz ostatniej akcji: ${trigger}
 
 DOKUMENTY W BAZIE (Użyj ich identyfikatorów 'id' w polu inputDocIds):
 ${JSON.stringify(documents, null, 2)}
 
-OBECNE ZADANIA W BAZIE (Jeśli chcesz określić zależność do istniejącego już zadania, użyj jego rzeczywistego ID z tej listy):
+OBECNE ZADANIA W BAZIE (Użyj rzeczywistych ID dla zależności 'dependsOn' jeśli zadanie już istnieje):
 ${JSON.stringify(tasks, null, 2)}
 
-ZASADY PLANOWANIA:
-1. Nie wykonuj pracy sam. Twórz zadania (newTasks) dla agentów.
-2. Jeśli dokument ma tag [SWZ], zleć go do LEGAL_EXPERT.
-3. Jeśli dokument ma tag [RYSUNEK, ARCHITEKTURA], zleć do VISION_ARCHITECTURE.
-4. Używaj 'dependsOn' do określania kolejności. Możesz w nim wpisywać 'tempId' innych zadań, które tworzysz w tym samym wywołaniu.
-5. Jeśli wszystkie dokumenty są w trakcie analizy, nie twórz nowych zadań, zmień fazę na WORKING.
-6. Jeśli wszystkie zadania mają status DONE, zmień fazę na DONE.
+ZASADY PLANOWANIA (RE-ACT WORKFLOW):
+1. Twój cel to doprowadzenie kosztorysu do statusu wycenionego (DONE).
+2. Samodzielnie analizuj, jakie pliki masz w bazie. Jeśli brakuje rysunków, używaj kombinacji BUDOWLANIEC i GAP_FILLER, aby zbudować szacunkowy kosztorys parametryczny i technologiczny na podstawie znanych faktów/SWZ, a następnie wyceń go BROKEREM [1].
+3. Nigdy nie twórz zadań dublujących się z istniejącymi zadaniami w bazie (sprawdzaj listę OBECNE ZADANIA).
+4. Planuj zależności logiczne za pomocą 'dependsOn' (używaj 'tempId' dla nowych zadań tworzonych w tym samym wywołaniu lub rzeczywistych ID dla już istniejących).
+5. Samodzielnie zarządzaj stanem 'phase'. Gdy czekasz na zakończenie zadań agentów, ustaw phase na WORKING. Gdy wszystko jest gotowe, ustaw phase na DONE.
 `;
 
         // 4. Wywołanie modelu Gemini Pro
