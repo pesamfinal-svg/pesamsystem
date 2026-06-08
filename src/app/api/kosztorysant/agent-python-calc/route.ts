@@ -159,8 +159,10 @@ ${calcContext}
         console.log(`[PESAM 3.0 🧮] Zadanie ${taskId} zakończone. Wykonano ${parsedResult.calculations?.length || 0} obliczeń.`);
 
         // 4. Wybudzenie Mózgu (ReAct Loop kontynuuje działanie)
-        const origin = new URL(req.url).origin;
-        fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
+        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+        console.log(`[PESAM 3.0 🧮] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
+
+        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })

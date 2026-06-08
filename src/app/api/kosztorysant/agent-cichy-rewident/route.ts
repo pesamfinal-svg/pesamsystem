@@ -174,12 +174,14 @@ ${searchContext}
         await batch.commit();
 
         // 4. Wybudzenie Mózgu
-        const origin = new URL(req.url).origin;
-        fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
+        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+        console.log(`[PESAM 3.0 🕵️] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
+
+        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error(e));
+        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po audycie:", e));
 
         return NextResponse.json({ success: true, itemsAdded: missingItems.length });
 

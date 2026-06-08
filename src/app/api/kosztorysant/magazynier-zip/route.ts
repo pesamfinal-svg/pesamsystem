@@ -37,13 +37,15 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: "Żądanie musi być typu multipart/form-data" }, { status: 400 });
         }
 
-        // 1. Parsowanie FormData z żądania wejściowego
+        // 1. Parsowanie FormData z żądania wejściowego (Obsługa wielu plików)
         const formData = await req.formData();
-        const file = formData.get("file") as File | null;
-        const marketTrendsRaw = formData.get("marketTrends") as string | null;
+        const files = formData.getAll("file") as File[];
 
-        if (!file) {
-            return NextResponse.json({ error: "Brak pliku w żądaniu (pole 'file')" }, { status: 400 });
+        // Obsługa obu wariantów kluczy z narzutami ("trends" i "marketTrends")
+        const marketTrendsRaw = (formData.get("trends") || formData.get("marketTrends")) as string | null;
+
+        if (files.length === 0) {
+            return NextResponse.json({ error: "Brak plików w żądaniu (pole 'file')" }, { status: 400 });
         }
 
         // 2. Generowanie unikalnego ID przetargu (wykorzystujemy autogenerowane ID z Firestore)
@@ -75,42 +77,43 @@ export async function POST(req: Request) {
             }
         });
 
-        // 4. Konwersja pliku wejściowego do bezpiecznego bufora Node.js
-        const fileArrayBuffer = await file.arrayBuffer();
-        const fileBuffer = Buffer.from(new Uint8Array(fileArrayBuffer).buffer); // Standard 3: Bezpieczna konwersja
-
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const bucket = adminStorage.bucket(bucketName);
         const batch = adminDb.batch();
 
         const extractedFiles: Array<{ name: string; buffer: Buffer; mime: string }> = [];
 
-        // 5. Sprawdzamy czy wgrany plik to ZIP, czy pojedynczy dokument (np. PDF)
-        if (file.name.endsWith(".zip") || file.type === "application/zip") {
-            console.log("[PESAM 3.0 📦] Wykryto archiwum ZIP. Rozpoczynam rozpakowywanie w pamięci...");
+        // 4. Pętla przetwarzająca każdy z przesłanych plików
+        for (const file of files) {
+            const fileArrayBuffer = await file.arrayBuffer();
+            const fileBuffer = Buffer.from(new Uint8Array(fileArrayBuffer).buffer); // Standard 3: Bezpieczna konwersja
 
-            const zip = new AdmZip(fileBuffer);
-            const zipEntries = zip.getEntries();
+            if (file.name.endsWith(".zip") || file.type === "application/zip") {
+                console.log(`[PESAM 3.0 📦] Wykryto ZIP "${file.name}". Rozpakowywanie w pamięci...`);
 
-            for (const entry of zipEntries) {
-                // Pomijamy foldery i pliki ukryte (np. __MACOSX, .DS_Store)
-                if (entry.isDirectory || entry.entryName.startsWith("__MACOSX") || entry.name.startsWith(".")) {
-                    continue;
+                const zip = new AdmZip(fileBuffer);
+                const zipEntries = zip.getEntries();
+
+                for (const entry of zipEntries) {
+                    // Pomijamy foldery i pliki ukryte (np. __MACOSX, .DS_Store)
+                    if (entry.isDirectory || entry.entryName.startsWith("__MACOSX") || entry.name.startsWith(".")) {
+                        continue;
+                    }
+
+                    extractedFiles.push({
+                        name: entry.name,
+                        buffer: entry.getData(),
+                        mime: getMimeType(entry.name)
+                    });
                 }
-
+            } else {
+                console.log(`[PESAM 3.0 📦] Wykryto dokument pojedynczy "${file.name}". Przetwarzam bezpośrednio.`);
                 extractedFiles.push({
-                    name: entry.name,
-                    buffer: entry.getData(),
-                    mime: getMimeType(entry.name)
+                    name: file.name,
+                    buffer: fileBuffer,
+                    mime: file.type || getMimeType(file.name)
                 });
             }
-        } else {
-            console.log("[PESAM 3.0 📦] Wykryto pojedynczy dokument (nie-ZIP). Przetwarzam bezpośrednio.");
-            extractedFiles.push({
-                name: file.name,
-                buffer: fileBuffer,
-                mime: file.type || getMimeType(file.name)
-            });
         }
 
         if (extractedFiles.length === 0) {
@@ -145,8 +148,10 @@ export async function POST(req: Request) {
         console.log(`[PESAM 3.0 📦] Pomyślnie przetworzono i zarejestrowano ${extractedFiles.length} plików.`);
 
         // 7. Dynamiczne i asynchroniczne wybudzenie Fazy 0 (Inicjalizacji/Klasyfikacji)
-        const origin = new URL(req.url).origin;
-        fetch(`${origin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`, {
+        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+        console.log(`[PESAM 3.0 📦] Wybudzam Fazę 0 lokalnie przez loopback: ${localOrigin}`);
+
+        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId })

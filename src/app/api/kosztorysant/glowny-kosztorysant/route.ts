@@ -229,12 +229,12 @@ ZASADY PLANOWANIA:
         await batch.commit();
 
         // 6. Asynchroniczne i bezpieczne wybudzenie Agentów dla nowych zadań
-        const origin = new URL(req.url).origin;
+        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
         for (const task of newTasksCreated) {
             const endpoint = AGENT_ENDPOINTS[task.agentType];
             if (endpoint) {
-                console.log(`[PESAM 3.0 🧠] ⚡ Wybudzam Agenta: ${task.agentType} dla zadania ${task.id}`);
-                fetch(`${origin}${endpoint}`, {
+                console.log(`[PESAM 3.0 🧠] ⚡ Wybudzam Agenta lokalnie przez loopback: ${task.agentType} -> ${localOrigin}${endpoint}`);
+                fetch(`${localOrigin}${endpoint}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tenderId, taskId: task.id })

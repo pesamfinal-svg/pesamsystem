@@ -74,31 +74,50 @@ export function validateFileClient(file: File): string | null {
 // ── Główna funkcja wysyłająca ─────────────────────────────────────────────────
 
 export async function uploadTenderDocument(
-  file: File,
+  files: FileList | File[] | File,
   trends: MarketTrends,
   onProgress?: ProgressCallback
 ): Promise<UploadParserResult> {
 
-  // Walidacja przed uderzeniem do serwera
-  const clientError = validateFileClient(file);
-  if (clientError) {
-    onProgress?.({ stage: "error", message: clientError });
-    throw new Error(clientError);
+  // Normalizacja wejścia do stabilnej tablicy plików
+  const fileList = files instanceof FileList
+    ? Array.from(files)
+    : Array.isArray(files)
+      ? files
+      : [files];
+
+  if (fileList.length === 0) {
+    const err = "Brak plików do przesłania.";
+    onProgress?.({ stage: "error", message: err });
+    throw new Error(err);
+  }
+
+  // Walidacja wszystkich plików przed uderzeniem do serwera
+  for (const file of fileList) {
+    const clientError = validateFileClient(file);
+    if (clientError) {
+      const formattedError = `${file.name}: ${clientError}`;
+      onProgress?.({ stage: "error", message: formattedError });
+      throw new Error(formattedError);
+    }
   }
 
   const formData = new FormData();
-  formData.append("file", file);
+  // Dodanie każdego pliku pod klucz "file"
+  fileList.forEach(file => {
+    formData.append("file", file);
+  });
   formData.append("trends", JSON.stringify(trends));
 
+  const fileNames = fileList.map(f => f.name).join(", ");
   onProgress?.({
     stage: "uploading",
     percent: 0,
-    message: `Przesyłanie dokumentu "${file.name}"…`,
+    message: `Przesyłanie plików [${fileNames}]…`,
   });
 
   let response: Response;
   try {
-    // Od razu uderzamy do Magazyniera - niezależnie czy to paczka czy pojedynczy plik
     response = await uploadWithProgress(ENDPOINT_UNIFIED, formData, onProgress);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Błąd sieci podczas przesyłania.";
@@ -106,20 +125,19 @@ export async function uploadTenderDocument(
     throw new Error(message);
   }
 
-  const isZip = file.name.toLowerCase().endsWith(".zip");
+  const hasZip = fileList.some(f => f.name.toLowerCase().endsWith(".zip"));
   onProgress?.({
     stage: "analyzing",
     message: "Rejestracja w bazie i inicjalizacja Roju PESAM... (oczekuj na statusy w panelu bocznym)",
   });
 
-  // Weryfikacja kodów błędu HTTP
   if (!response.ok) {
     let errorMsg = `Błąd serwera: HTTP ${response.status}`;
     try {
       const errBody = await response.json();
       if (errBody.error) errorMsg = errBody.error;
     } catch {
-      // Jeśli serwer zwrócił HTML (500) zamiast JSON-a, zostaw domyślny status
+      // Jeśli serwer zwrócił HTML, zostaw domyślny status
     }
     onProgress?.({ stage: "error", message: errorMsg });
     throw new Error(errorMsg);
@@ -134,19 +152,17 @@ export async function uploadTenderDocument(
     throw new Error(msg);
   }
 
-  // Magazynier zwraca tenderId. Upewnijmy się, że to dotarło.
   if (!result.tenderId) {
     const msg = "Serwer przetworzył plik, ale nie zwrócił identyfikatora przetargu.";
     onProgress?.({ stage: "error", message: msg });
     throw new Error(msg);
   }
 
-  // Symulacja pola "reply" do komunikatu w konsoli czatu dla Głównego Kosztorysanta (Frontend oczekuje pola reply)
-  result.reply = `Plik "${file.name}" został pomyślnie zmagazynowany w bazie. Rój PESAM rozpoczął przetwarzanie zadań równoległych w tle. Statusy aktualizują się w panelu po lewej stronie.`;
+  result.reply = `Pliki [${fileNames}] zostały pomyślnie zmagazynowane w bazie. Rój PESAM rozpoczął przetwarzanie zadań równoległych w tle. Statusy aktualizują się w panelu po lewej stronie.`;
 
   onProgress?.({
     stage: "done",
-    message: isZip ? "ZIP przetworzony. Rój aktywny!" : "Dokument zainicjowany. Rój aktywny!"
+    message: hasZip ? "Archiwum ZIP przetworzone. Rój aktywny!" : "Dokumenty pomyślnie zainicjowane. Rój aktywny!"
   });
 
   return result;

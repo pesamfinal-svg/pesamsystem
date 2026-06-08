@@ -194,10 +194,11 @@ export default function EstimatorPage() {
 
     // --- AKCJE ---
 
-    const handleFileUpload = async (file: File) => {
+    const handleFileUpload = async (files: FileList) => {
+        if (files.length === 0) return;
         setIsUploading(true);
         try {
-            const result = await uploadTenderDocument(file, { laborAdjustment: 0, materialAdjustment: 0, equipmentAdjustment: 0, kp: 65, zysk: 12 }, (p: UploadProgress) => {
+            const result = await uploadTenderDocument(files, { laborAdjustment: 0, materialAdjustment: 0, equipmentAdjustment: 0, kp: 65, zysk: 12 }, (p: UploadProgress) => {
                 setUploadMsg(p.message);
             });
 
@@ -334,7 +335,7 @@ export default function EstimatorPage() {
                                     <span className="text-[10px] font-bold text-slate-400">Przeciągnij ZIP (SWZ + Rysunki)</span>
                                 </>
                             )}
-                            <input type="file" id="file-upload-input" onChange={e => e.target.files?.[0] && handleFileUpload(e.target.files[0])} className="hidden" accept=".zip,.pdf" />
+                            <input type="file" id="file-upload-input" onChange={e => e.target.files && handleFileUpload(e.target.files)} className="hidden" accept=".zip,.pdf" multiple />
                         </div>
                     </div>
 
