@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
-import { randomUUID } from "crypto";
+import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +19,6 @@ const ai = new GoogleGenAI({
 
 const MODEL_FLASH = "gemini-2.5-flash";
 
-// Schemat dla Kroku 2 (Strukturyzacja wskaźników)
 const GAP_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -29,16 +28,15 @@ const GAP_SCHEMA = {
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującej branży/elementu, np. 'Instalacje elektryczne (szacunek wskaźnikowy)'" },
-                    opis: { type: Type.STRING, description: "Uzasadnienie wskaźnika, np. 'Przyjęto 12% wartości stanu surowego na podstawie średnich rynkowych'" },
-                    ilosc: { type: Type.NUMBER, description: "Ilość (zazwyczaj 1.0 dla kompletów lub powierzchnia m2)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka, np. 'kpl', 'm2'" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze wpisz 'WSKAŹNIK_RYNKOWY'" }
+                    pozycja: { type: Type.STRING, description: "Nazwa brakującej branży/elementu" },
+                    opis: { type: Type.STRING, description: "Uzasadnienie rynkowe wskaźnika" },
+                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (zawsze jako liczba)" },
+                    KNR_ref: { type: Type.STRING, description: "Zawsze 'WSKAŹNIK_RYNKOWY'" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["pozycja", "opis", "ilosc", "KNR_ref"]
             }
         },
-        summary: { type: Type.STRING, description: "Podsumowanie wyliczeń wskaźnikowych." }
+        summary: { type: Type.STRING, description: "Podsumowanie audytu braków." }
     },
     required: ["estimatedItems", "summary"]
 };
@@ -54,60 +52,42 @@ export async function POST(req: Request) {
 
         if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
 
-        console.log(`[PESAM 3.0 🧩] GAP_FILLER wybudzony. Przetarg: ${tenderId}`);
+        console.log(`[PESAM 3.0 🧩] GAP_FILLER start dla: ${tenderId}`);
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists || taskDoc.data()!.status !== "PENDING") return NextResponse.json({ message: "Pominięto." });
+        if (!taskDoc.exists || taskDoc.data()!.status !== "PENDING") {
+            return NextResponse.json({ message: "Zadanie obsłużone." });
+        }
 
-        const taskData = taskDoc.data()!;
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // 1. Zbieranie kontekstu (Co budujemy i co już mamy wycenione?)
         const tenderDoc = await adminDb.collection("tenders").doc(tenderId).get();
         const objectType = tenderDoc.data()?.objectType || "Obiekt budowlany";
 
-        const estimateSnap = await adminDb.collection(`tenders/${tenderId}/estimate`).get();
-        let currentTotalValue = 0;
-        estimateSnap.docs.forEach(doc => {
-            currentTotalValue += (doc.data().totalValue || 0);
-        });
-
         let totalTokensUsed = 0;
 
-        // ====================================================================
-        // STANDARD 2: KROK 1 - WYSZUKIWANIE WSKAŹNIKÓW (Google Search)
-        // ====================================================================
+        // KROK 1: Grounding Search
         const searchPrompt = `
-Jesteś Kosztorysantem Wskaźnikowym. Budujemy obiekt: ${objectType}.
-Obecna wartość wyliczonych robót (np. stan surowy) wynosi: ${currentTotalValue} PLN.
-
-Zadanie od Głównego Inżyniera: ${taskData.description}
-
-Użyj wyszukiwarki, aby znaleźć średnie wskaźniki procentowe lub cenowe (np. za m2 lub % całości) dla brakujących branż w tego typu obiektach w Polsce.
-Zwróć raport tekstowy z propozycją wyliczeń.
+Wyszukaj wskaźniki cenowe i procentowe dla brakującej branży w obiekcie typu: ${objectType}.
+Zadanie: ${taskDoc.data()!.description}
+Podaj standardowe wartości rynkowe w Polsce. Zwróć tekst.
 `;
+
+        // POPRAWKA TS2353: 'tools' poprawnie zagnieżdżone wewnątrz obiektu 'config'
         const searchResult = await ai.models.generateContent({
             model: MODEL_FLASH,
             contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
             config: {
-                tools: [{ googleSearch: {} }] // Standard 2: Narzędzia zawsze wewnątrz config
+                tools: [{ googleSearch: {} }]
             }
         });
 
         const searchContext = searchResult.text ?? "";
         totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
 
-        // ====================================================================
-        // STANDARD 2: KROK 2 - STRUKTURYZACJA (JSON Schema)
-        // ====================================================================
-        const structurePrompt = `
-Na podstawie poniższego raportu wskaźnikowego, utwórz pozycje kosztorysowe.
-Zwróć TYLKO poprawny obiekt JSON.
-
-Raport:
-${searchContext}
-`;
+        // KROK 2: Strukturyzacja JSON
+        const structurePrompt = `Na podstawie raportu, utwórz pozycje kosztorysowe. Raport:\n${searchContext}`;
         const structureResult = await ai.models.generateContent({
             model: MODEL_FLASH,
             contents: [{ role: "user", parts: [{ text: structurePrompt }] }],
@@ -124,34 +104,37 @@ ${searchContext}
         const estimatedItems = parsedResult.estimatedItems || [];
         const batch = adminDb.batch();
 
-        // 2. Zapis do Żywego Kosztorysu
         if (estimatedItems.length > 0) {
             const sectionId = `sec_gap_${taskId}`;
-            const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+            const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
 
-            const formattedItems = estimatedItems.map((item: any) => ({
-                id: randomUUID(),
-                pozycja: item.pozycja,
-                opis: item.opis,
-                ilosc: Number(item.ilosc) || 1,
-                jednostka: item.jednostka || "kpl",
-                cenaJed: 0, // Zostawiamy 0, Broker to wyceni lub Mózg zaakceptuje jako ryczałt
-                KNR_ref: item.KNR_ref,
-                confidence: "LOW", // Wskaźniki zawsze mają niską pewność
-                sourceTrack: `Szacunek Wskaźnikowy (GAP_FILLER)`
-            }));
-
-            batch.set(estimateRef, {
+            // Standard 1: Nagłówek sekcji kosztorysu
+            batch.set(sectionRef, {
                 section: "Szacunki Wskaźnikowe (Braki w dokumentacji)",
                 status: "QUANTITY_READY",
                 totalValue: 0,
                 sourceTaskId: taskId,
-                items: formattedItems,
                 updatedAt: new Date()
+            });
+
+            // Standard 1: Pozycje jako dokumenty w podkolekcji `items`
+            estimatedItems.forEach((item: any) => {
+                const itemId = uuidv4();
+                const itemRef = sectionRef.collection("items").doc(itemId);
+
+                batch.set(itemRef, {
+                    id: itemId,
+                    pozycja: item.pozycja,
+                    opis: item.opis,
+                    ilosc: Number(item.ilosc) || 1,
+                    cenaJed: 0,
+                    KNR_ref: item.KNR_ref || "WSKAŹNIK_RYNKOWY",
+                    confidence: "LOW",
+                    sourceTrack: "Szacunek Wskaźnikowy (GAP_FILLER)"
+                });
             });
         }
 
-        // 3. Zakończenie zadania
         batch.update(taskRef, {
             status: "DONE",
             result: { summary: parsedResult.summary, itemsAdded: estimatedItems.length },
@@ -166,7 +149,6 @@ ${searchContext}
 
         await batch.commit();
 
-        // 4. Wybudzenie Mózgu
         const origin = new URL(req.url).origin;
         fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST",

@@ -132,7 +132,7 @@ export function ScopeHeatMap({ tenderId, className = '' }: { tenderId: string | 
         <div className={`flex flex-col h-full overflow-hidden ${className}`}>
             <div className="p-3 border-b border-slate-100 bg-white flex-shrink-0">
                 <div className="flex items-center justify-between mb-1.5">
-                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-tight">Szczelność Zakresu (PESAM 2.0)</h3>
+                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-tight">Szczelność Zakresu (PESAM 3.0)</h3>
                     <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded-full">{coverageStats.confidenceScore}%</span>
                 </div>
                 <div className="mb-1.5"><CoverageBar percent={coverageStats.coveragePercent} color={barColor} /></div>
@@ -152,7 +152,10 @@ export function ScopeHeatMap({ tenderId, className = '' }: { tenderId: string | 
             {pendingQuestions.length > 0 && (
                 <div className="p-2.5 border-b border-red-100 bg-red-50/20 flex-shrink-0">
                     <p className="text-[9px] font-black text-red-700 mb-1.5 uppercase tracking-wide">⏸️ Pytania od Roju ({pendingQuestions.length})</p>
-                    {pendingQuestions.map((q) => <PendingQuestionCard key={q.elementId} {...q} onAnswer={answerQuestion} />)}
+                    {/* POPRAWKA TS7006: Parametr q ma teraz jawny, bezpieczny typ strukturalny */}
+                    {pendingQuestions.map((q: { elementId: string; elementName: string; question: string }) => (
+                        <PendingQuestionCard key={q.elementId} {...q} onAnswer={answerQuestion} />
+                    ))}
                 </div>
             )}
 

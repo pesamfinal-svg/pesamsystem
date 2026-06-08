@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
-import { randomUUID } from "crypto";
+import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +17,6 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-// Kameleon używa modelu PRO, ponieważ musi adaptować się do skomplikowanych, nietypowych instrukcji
 const MODEL_PRO = "gemini-2.5-pro";
 
 const KAMELEON_SCHEMA = {
@@ -29,16 +28,15 @@ const KAMELEON_SCHEMA = {
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa elementu" },
-                    opis: { type: Type.STRING, description: "Szczegółowy opis techniczny" },
-                    ilosc: { type: Type.NUMBER, description: "Ilość (liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary" },
-                    KNR_ref: { type: Type.STRING, description: "Sugerowany kod lub 'WYCENA_INDYWIDUALNA'" }
+                    pozycja: { type: Type.STRING },
+                    opis: { type: Type.STRING },
+                    ilosc: { type: Type.NUMBER },
+                    KNR_ref: { type: Type.STRING }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["pozycja", "opis", "ilosc", "KNR_ref"]
             }
         },
-        summary: { type: Type.STRING, description: "Raport z wykonania zadania specjalnego." }
+        summary: { type: Type.STRING }
     },
     required: ["items", "summary"]
 };
@@ -54,14 +52,16 @@ export async function POST(req: Request) {
 
         if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
 
-        console.log(`[PESAM 3.0 🦎] KAMELEON wybudzony. Przetarg: ${tenderId}`);
+        console.log(`[PESAM 3.0 🦎] KAMELEON start dla: ${tenderId}`);
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists || taskDoc.data()!.status !== "PENDING") return NextResponse.json({ message: "Pominięto." });
+        if (!taskDoc.exists || taskDoc.data()!.status !== "PENDING") {
+            return NextResponse.json({ message: "Task handled." });
+        }
 
-        const taskData = taskDoc.data()!;
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+        const taskData = taskDoc.data()!;
 
         const inputDocIds: string[] = taskData.inputDocIds || [];
         let totalTokensUsed = 0;
@@ -81,15 +81,10 @@ export async function POST(req: Request) {
                 const safeArrayBuffer = new Uint8Array(downloadedBuffer).buffer;
                 const base64Data = Buffer.from(safeArrayBuffer).toString("base64");
 
-                // Kameleon przyjmuje tożsamość zadaną przez Mózg w taskData.description
                 const prompt = `
-Jesteś Uniwersalnym Specjalistą (Kameleonem) w systemie PESAM 3.0.
-Mózg systemu nadał Ci następującą rolę i zadanie:
-"${taskData.description}"
-
-Przeanalizuj załączony dokument zgodnie z tą rolą.
-Wyciągnij specjalistyczne pozycje kosztorysowe, ilości i parametry.
-Zwróć dane w formacie JSON.
+Jesteś Ekspertem Technologicznym.
+Zadanie: ${taskData.description}
+Przeanalizuj plik i wyciągnij pozycje kosztorysowe. Zwróć JSON.
 `;
                 const result = await ai.models.generateContent({
                     model: MODEL_PRO,
@@ -103,7 +98,7 @@ Zwróć dane w formacie JSON.
                         }
                     ],
                     config: {
-                        temperature: 0.2,
+                        temperature: 0.1,
                         responseMimeType: "application/json",
                         responseSchema: KAMELEON_SCHEMA as any
                     }
@@ -113,21 +108,10 @@ Zwróć dane w formacie JSON.
                 totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
 
                 if (parsedResult.items) {
-                    const formattedItems = parsedResult.items.map((item: any) => ({
-                        id: randomUUID(),
-                        pozycja: item.pozycja,
-                        opis: item.opis,
-                        ilosc: Number(item.ilosc) || 0,
-                        jednostka: item.jednostka || "szt",
-                        cenaJed: 0,
-                        KNR_ref: item.KNR_ref || "WYCENA_INDYWIDUALNA",
-                        confidence: "MEDIUM",
-                        sourceTrack: `Specjalista: Kameleon | Plik: ${docData.fileName}`
-                    }));
-                    allExtractedItems.push(...formattedItems);
+                    allExtractedItems.push(...parsedResult.items);
                 }
             } catch (err) {
-                console.error(`[PESAM 3.0 🦎] Błąd analizy ${docData.fileName}:`, err);
+                console.error(err);
             }
         }
 
@@ -135,26 +119,42 @@ Zwróć dane w formacie JSON.
 
         if (allExtractedItems.length > 0) {
             const sectionId = `sec_kameleon_${taskId}`;
-            const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+            const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
 
-            batch.set(estimateRef, {
-                section: "Roboty Specjalistyczne (Nietypowe)",
-                status: "QUANTITY_READY", // Przekazujemy Brokerowi do wyceny
+            // Standard 1: Zapis nagłówka sekcji
+            batch.set(sectionRef, {
+                section: "Roboty Specjalistyczne (Kameleon)",
+                status: "QUANTITY_READY",
                 totalValue: 0,
                 sourceTaskId: taskId,
-                items: allExtractedItems,
                 updatedAt: new Date()
+            });
+
+            // Standard 1: Zapis pozycji do podkolekcji `items`
+            allExtractedItems.forEach((item: any) => {
+                const itemId = uuidv4();
+                const itemRef = sectionRef.collection("items").doc(itemId);
+
+                batch.set(itemRef, {
+                    id: itemId,
+                    pozycja: item.pozycja || "Pozycja specjalistyczna",
+                    opis: item.opis || "",
+                    ilosc: Number(item.ilosc) || 0,
+                    cenaJed: 0,
+                    KNR_ref: item.KNR_ref || "WYCENA_INDYWIDUALNA",
+                    confidence: "MEDIUM",
+                    sourceTrack: `Analiza Kameleon (Task-${taskId})`
+                });
             });
         }
 
         batch.update(taskRef, {
             status: "DONE",
-            result: { itemsExtracted: allExtractedItems.length },
+            result: { itemsCount: allExtractedItems.length },
             costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        // Model PRO jest droższy ($0.002 / 1k tokenów)
         const costUSD = (totalTokensUsed / 1000) * 0.002;
         batch.update(adminDb.collection("tenders").doc(tenderId), {
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
@@ -172,7 +172,7 @@ Zwróć dane w formacie JSON.
         return NextResponse.json({ success: true, itemsExtracted: allExtractedItems.length });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 🦎] Błąd:", error);
+        console.error(error);
         if (tenderId && taskId) {
             await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({ status: "ERROR" }).catch(() => { });
         }
