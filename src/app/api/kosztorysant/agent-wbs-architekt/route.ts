@@ -1,458 +1,245 @@
 // ============================================================
-// PESAM 2.0 – Agent "Architekt Struktury (WBS)"
+// PESAM 3.0 – Agent Specjalista: VISION (Architekt / Konstruktor)
 // POST /api/kosztorysant/agent-wbs-architekt
-//
-// ROLA W DAG: Faza 0 – zawsze pierwszy, równolegle z document-based agentami
-// WEJŚCIE:   objectTypeHint, objectAreaHint_m2, docLevel, fileNamesContext
-// WYJŚCIE:   Szkielet ScopeManifest w Firestore (wszystko MISSING)
-//
-// NAPRAWKA v2.2:
-//   Google Search i responseSchema NIE mogą być w jednym wywołaniu (Vertex AI).
-//   Rozwiązanie: dwa wywołania:
-//     Krok 1 – Google Search → zbiera fakty z przepisów (bez schema)
-//     Krok 2 – Structured output → buduje DNA na podstawie faktów (bez Search)
 // ============================================================
 
-import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase/admin';
-import { GoogleGenAI, Type } from '@google/genai';
-import { buildMandatoryMinimum } from '../_shared/heurystyki';
-import type {
-    ScopeManifest,
-    ScopeDivision,
-    ScopeElement,
-    CoverageEntry,
-    ObjectType,
-    DocLevel,
-    WbsArchitectOutput,
-    AgentPhase,
-} from '../_shared/scopeManifest.types';
+import { NextResponse } from "next/server";
+import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI, Type } from "@google/genai";
+import { randomUUID } from "crypto"; // Standard 4: Natywny generator bez zewnętrznych zależności
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-3.5-flash";
+// Standard 3 & 4: Inicjalizacja klienta Google GenAI (Vertex AI, global)
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
 
-// ================================================================
-// Response Schema – DNA budynku (używane TYLKO w Kroku 2, bez Search)
-// ================================================================
+const MODEL_FLASH = "gemini-2.5-flash";
 
-const WBS_RESPONSE_SCHEMA = {
+// Schemat odpowiedzi Agenta Wizyjnego (Zgodność ze Standardem 1)
+const VISION_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        objectType: {
-            type: Type.STRING,
-            description: "Typ obiektu: dokładnie jeden z: przedszkole, szkola, biurowiec, hala_sportowa, hala_produkcyjna, budynek_mieszkalny, szpital, inne",
-        },
-        objectArea_m2: { type: Type.NUMBER },
-        confidenceScore: { type: Type.INTEGER },
-        requiredDivisions: {
+        items: {
             type: Type.ARRAY,
+            description: "Lista wyciągniętych pozycji przedmiarowych z rysunku.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    divisionId: { type: Type.STRING },
-                    divisionName: { type: Type.STRING },
-                    displayOrder: { type: Type.INTEGER },
-                    elements: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                elementId: { type: Type.STRING },
-                                name: { type: Type.STRING },
-                                unit: { type: Type.STRING },
-                                source: {
-                                    type: Type.STRING,
-                                    description: "Zapisz dokładnie: AI_WBS_HEURISTIC",
-                                },
-                                gapFillerStrategy: {
-                                    type: Type.STRING,
-                                    description: "Dokładnie jeden z: SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, ASK_USER",
-                                },
-                                gapFillerHint: { type: Type.STRING },
-                            },
-                            required: ['elementId', 'name', 'unit', 'source', 'gapFillerStrategy'],
-                        },
-                    },
+                    pozycja: { type: Type.STRING, description: "Krótka nazwa elementu, np. 'Ściana nośna gr. 24cm', 'Ława fundamentowa'" },
+                    opis: { type: Type.STRING, description: "Szczegółowy opis z wymiarami, np. 'Ściana z pustaków ceramicznych, wys. 3m, dł. 12m'" },
+                    ilosc: { type: Type.NUMBER, description: "Wyliczona ilość (zawsze jako liczba zmiennoprzecinkowa, np. 36.0)" },
+                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. 'm2', 'm3', 'mb', 'szt'" },
+                    KNR_ref: { type: Type.STRING, description: "Sugerowany kod KNR lub kategoria, np. 'KNR 2-02', 'KNR 2-01'" },
+                    confidence: { type: Type.STRING, description: "Pewność odczytu: 'HIGH', 'MEDIUM', 'LOW'" }
                 },
-                required: ['divisionId', 'divisionName', 'displayOrder', 'elements'],
-            },
+                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref", "confidence"]
+            }
         },
-        initialRisks: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    riskId: { type: Type.STRING },
-                    description: { type: Type.STRING },
-                    costImpactPercent: { type: Type.NUMBER },
-                    affectedDivisionIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    severity: {
-                        type: Type.STRING,
-                        description: "Dokładnie jeden z: LOW, MEDIUM, HIGH, CRITICAL",
-                    },
-                },
-                required: ['riskId', 'description', 'costImpactPercent', 'affectedDivisionIds', 'severity'],
-            },
-        },
-        areaEstimateNote: {
+        summary: {
             type: Type.STRING,
-            description: "Krótka notatka skąd pochodzi szacunek powierzchni jeśli objectAreaHint_m2 był null",
-        },
+            description: "Krótkie podsumowanie tego, co udało się odczytać z rysunku."
+        }
     },
-    required: ['objectType', 'confidenceScore', 'requiredDivisions', 'initialRisks'],
+    required: ["items", "summary"]
 };
 
-// ================================================================
-// Pomocnicze funkcje mapowania (bez zmian)
-// ================================================================
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
 
-function getDivisionName(id: string): string {
-    const names: Record<string, string> = {
-        D1: 'Stan Zerowy', D2: 'Stan Surowy', D3: 'Stan Wykończeniowy Wewnętrzny',
-        D4: 'Elewacja i zagospodarowanie terenu', D5: 'Instalacje Sanitarne',
-        D6: 'Instalacje Elektryczne', D7: 'Instalacje Specjalne i Wyposażenie',
-        D8: 'Wyposażenie Technologiczne',
-    };
-    return names[id] ?? `Dział ${id}`;
-}
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
 
-function getDivisionOrder(id: string): number {
-    return parseInt(id.replace('D', ''), 10) || 99;
-}
-
-function isSimilarElement(name1: string, name2: string): boolean {
-    const normalize = (s: string) => s.toLowerCase().replace(/[^a-ząćęłńóśźż\s]/g, ' ').trim();
-    const n1 = normalize(name1);
-    const n2 = normalize(name2);
-    const keywords = n2.split(' ').filter((w) => w.length > 4);
-    return keywords.filter((kw) => n1.includes(kw)).length >= 2;
-}
-
-function resolveDivisionForElement(elementId: string): string {
-    if (elementId.startsWith('UNIV-E1') || elementId.startsWith('UNIV-E2') || elementId.startsWith('UNIV-E3')) return 'D1';
-    if (elementId.startsWith('UNIV-E4') || elementId.startsWith('UNIV-E5') || elementId.startsWith('UNIV-E6')) return 'D2';
-    if (elementId.startsWith('UNIV-E7') || elementId.startsWith('UNIV-E8') || elementId.startsWith('UNIV-E9')) return 'D3';
-    if (elementId.startsWith('UNIV-E10') || elementId.startsWith('UNIV-E13')) return 'D6';
-    if (elementId.startsWith('UNIV-E11') || elementId.startsWith('UNIV-E12')) return 'D5';
-    if (elementId.startsWith('UNIV-E14')) return 'D4';
-    return 'D7';
-}
-
-async function mergeWithMandatoryMinimum(
-    aiOutput: WbsArchitectOutput,
-    docLevel: DocLevel
-): Promise<ScopeDivision[]> {
-    const mandatory = await buildMandatoryMinimum(aiOutput.objectType, docLevel);
-    const divisionMap = new Map<string, ScopeDivision>();
-
-    for (const div of aiOutput.requiredDivisions) {
-        divisionMap.set(div.divisionId, {
-            ...div,
-            elements: div.elements.map((el) => ({
-                ...el,
-                isMandatoryByLaw: false,
-                applicableObjectTypes: 'ALL' as const,
-                minDocLevel: docLevel,
-                mappedFileId: null,
-                quantity: null,
-                quantitySource: null,
-                techAuditNote: null,
-            })),
-        });
-    }
-
-    for (const mandatoryEl of mandatory) {
-        const targetDivisionId = resolveDivisionForElement(mandatoryEl.elementId);
-        let alreadyCovered = false;
-
-        for (const [, div] of divisionMap) {
-            if (div.elements.some((el) => isSimilarElement(el.name, mandatoryEl.name))) {
-                alreadyCovered = true;
-                break;
-            }
+        if (!tenderId || !taskId) {
+            return NextResponse.json({ error: "Brak tenderId lub taskId" }, { status: 400 });
         }
 
-        if (!alreadyCovered) {
-            if (!divisionMap.has(targetDivisionId)) {
-                divisionMap.set(targetDivisionId, {
-                    divisionId: targetDivisionId,
-                    divisionName: getDivisionName(targetDivisionId),
-                    displayOrder: getDivisionOrder(targetDivisionId),
-                    elements: [],
+        console.log(`[PESAM 3.0 📐] VISION_AGENT wybudzony. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+
+        // Idempotentność
+        if (taskData.status !== "PENDING") {
+            console.log(`[PESAM 3.0 📐] Zadanie ${taskId} ma status ${taskData.status}. Pomijam.`);
+            return NextResponse.json({ message: "Task already processed." });
+        }
+
+        // 1. Oznaczamy zadanie jako IN_PROGRESS
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        const inputDocIds: string[] = taskData.inputDocIds || [];
+        if (inputDocIds.length === 0) {
+            await taskRef.update({ status: "DONE", result: { summary: "Brak rysunków do analizy." } });
+            return NextResponse.json({ message: "Brak dokumentów." });
+        }
+
+        let totalTokensUsed = 0;
+        const allExtractedItems: any[] = [];
+        const summaries: string[] = [];
+
+        // 2. Pobieranie i analiza rysunków
+        const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
+        const bucket = adminStorage.bucket(bucketName);
+
+        for (const docId of inputDocIds) {
+            const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
+            if (!docSnap.exists) continue;
+
+            const docData = docSnap.data()!;
+            console.log(`[PESAM 3.0 📐] Analizuję rysunek: ${docData.fileName}`);
+
+            try {
+                // Standard 3: Bezpieczne pobieranie bufora
+                const fileRef = bucket.file(docData.storagePath);
+                const [downloadedBuffer] = await fileRef.download();
+                const safeArrayBuffer = new Uint8Array(downloadedBuffer).buffer;
+                const base64Data = Buffer.from(safeArrayBuffer).toString("base64");
+
+                const prompt = `
+Jesteś Inżynierem (Architektem/Konstruktorem) w systemie PESAM 3.0.
+Twoje zadanie: ${taskData.description}
+
+Przeanalizuj załączony rysunek techniczny.
+Zidentyfikuj główne elementy budowlane (np. ściany, stropy, fundamenty, stolarkę okienną).
+Odczytaj wymiary i oblicz przybliżone ilości (np. powierzchnię w m2, objętość w m3).
+Zwróć dane w ustrukturyzowanym formacie JSON.
+`;
+
+                const result = await ai.models.generateContent({
+                    model: MODEL_FLASH,
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [
+                                { text: prompt },
+                                { inlineData: { data: base64Data, mimeType: docData.mimeType || "application/pdf" } }
+                            ]
+                        }
+                    ],
+                    config: {
+                        temperature: 0.1,
+                        responseMimeType: "application/json",
+                        responseSchema: VISION_SCHEMA as any
+                    }
                 });
+
+                const responseText = result.text ?? "{}";
+                const parsedResult = JSON.parse(responseText);
+
+                totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+
+                if (parsedResult.items && Array.isArray(parsedResult.items)) {
+                    // Formatowanie pozycji zgodnie ze Standardem 1 (items/{itemId})
+                    const formattedItems = parsedResult.items.map((item: any) => ({
+                        id: randomUUID(), // Standard 4: Natywny UUID
+                        pozycja: item.pozycja || "Nieznana pozycja",
+                        opis: item.opis || "",
+                        ilosc: Number(item.ilosc) || 0, // Zawsze liczba
+                        jednostka: item.jednostka || "szt",
+                        cenaJed: 0, // Agent wizyjny nie zna cen, wyceni to Broker
+                        wartosc: 0,
+                        KNR_ref: item.KNR_ref || "Analiza Własna",
+                        confidence: item.confidence || "MEDIUM",
+                        sourceTrack: `Wymiar: Task-${taskId} (${taskData.agentType}) | Plik: ${docData.fileName}`,
+                        sourceTaskId: taskId
+                    }));
+                    allExtractedItems.push(...formattedItems);
+                }
+
+                if (parsedResult.summary) summaries.push(parsedResult.summary);
+
+            } catch (err) {
+                console.error(`[PESAM 3.0 📐] Błąd analizy rysunku ${docData.fileName}:`, err);
+            }
+        }
+
+        // 3. Zapis wyników do bazy (Aktualizacja Zadania i Kosztorysu)
+        const batch = adminDb.batch();
+
+        // A. Zakończenie zadania
+        batch.update(taskRef, {
+            status: "DONE",
+            result: {
+                itemsCount: allExtractedItems.length,
+                summary: summaries.join(" | ")
+            },
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        // B. Zapis do Żywego Kosztorysu (Kolekcja estimate) z unikiem nadpisania danych (Standard 1)
+        if (allExtractedItems.length > 0) {
+            const sectionId = `sec_${taskId}`;
+            const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+
+            // Pobieramy ewentualne istniejące pozycje, aby nie wymazać wyników pracy innych plików
+            const estimateDoc = await estimateRef.get();
+            let combinedItems = allExtractedItems;
+            if (estimateDoc.exists) {
+                const existingItems = estimateDoc.data()?.items || [];
+                combinedItems = [...existingItems, ...allExtractedItems];
             }
 
-            divisionMap.get(targetDivisionId)!.elements.push({
-                ...mandatoryEl,
-                mappedFileId: null,
-                quantity: null,
-                quantitySource: null,
-                techAuditNote: null,
-            });
+            const sectionName = taskData.agentType === "VISION_CONSTRUCT"
+                ? "Roboty Konstrukcyjne (Stan Surowy)"
+                : "Roboty Architektoniczne i Wykończeniowe";
+
+            batch.set(estimateRef, {
+                section: sectionName,
+                status: "QUANTITY_READY",
+                totalValue: 0,
+                sourceTaskId: taskId,
+                items: combinedItems, // Scalona tablica
+                updatedAt: new Date()
+            }, { merge: true });
         }
-    }
 
-    return Array.from(divisionMap.values()).sort((a, b) => a.displayOrder - b.displayOrder);
-}
-
-// ================================================================
-// KROK 1: Google Search – zbieranie faktów z przepisów
-// Osobne wywołanie BEZ responseSchema (Vertex AI tego wymaga)
-// ================================================================
-
-async function fetchGroundedFacts(
-    ai: GoogleGenAI,
-    objectTypeHint: string,
-    areaContext: string,
-    fileNamesContext: string[]
-): Promise<string> {
-    console.log("[WBS Architekt] [Krok 1] Szukam przepisów w Google Search...");
-
-    const filesInfo = fileNamesContext.length > 0
-        ? `Dostępne dokumenty projektu: ${fileNamesContext.join(', ')}`
-        : 'Brak wrzuconych dokumentów – działam w trybie heurystycznym.';
-
-    const searchPrompt = `
-Przeszukaj polskie przepisy budowlane i znajdź wymagania dla budynku typu: "${objectTypeHint}".
-${areaContext}
-${filesInfo}
-
-Znajdź i podaj konkretne wymagania:
-1. Wymagania WT 2021 (Warunki Techniczne) – jakie instalacje są obowiązkowe?
-2. Wymagania ppoż – czy wymagany system oddymiania, hydranty wewnętrzne, SUG?
-3. Wymagania sanitarne – wentylacja mechaniczna, klimatyzacja, technologia kuchni (jeśli dotyczy)?
-4. Wymagania dostępności (art. 100 Pzp) – windy, podjazdy, łazienki przystosowane?
-5. Typowa powierzchnia użytkowa i kubatura dla tego typu obiektu w Polsce?
-6. Typowe wskaźniki kosztów budowy (zł/m²) według Sekocenbud dla tego typu?
-
-Odpowiedz jako zwykły tekst z konkretnymi faktami. Będę używał tej wiedzy do zbudowania kosztorysu.
-`.trim();
-
-    try {
-        const searchResult = await ai.models.generateContent({
-            model: MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
-            config: {
-                tools: [{ googleSearch: {} }],
-                temperature: 0.1,
-            },
+        // C. Aktualizacja Budget Guard (Flash: ~$0.000015 / 1k tokenów)
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
+        const tenderRef = adminDb.collection("tenders").doc(tenderId);
+        batch.update(tenderRef, {
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        const facts = searchResult.text ?? "";
-        console.log(`[WBS Architekt] [Krok 1] Zebrano ${facts.length} znaków faktów z Google Search.`);
-        return facts;
-    } catch (searchError: any) {
-        // Google Search może nie być dostępne w każdym regionie/projekcie
-        // Fallback: kontynuuj bez groundingu
-        console.warn(`[WBS Architekt] [Krok 1] Google Search niedostępny: ${searchError.message}. Kontynuuję bez groundingu.`);
-        return `Brak danych z Google Search. Używam wiedzy wbudowanej dla typu: "${objectTypeHint}".`;
-    }
-}
+        await batch.commit();
+        console.log(`[PESAM 3.0 📐] Zadanie ${taskId} zakończone. Zapisano ${allExtractedItems.length} nowych pozycji.`);
 
-// ================================================================
-// KROK 2: Structured Output – budowanie DNA na podstawie faktów
-// Osobne wywołanie BEZ tools (Vertex AI tego wymaga)
-// ================================================================
+        // 4. Wybudzenie Mózgu (ReAct Loop)
+        const origin = new URL(req.url).origin;
+        fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
+        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po zadaniu wizyjnym:", e));
 
-async function buildDnaFromFacts(
-    ai: GoogleGenAI,
-    objectTypeHint: string,
-    objectAreaHint_m2: number | null,
-    docLevel: DocLevel,
-    groundedFacts: string
-): Promise<WbsArchitectOutput> {
-    console.log("[WBS Architekt] [Krok 2] Buduję strukturę DNA na podstawie zebranych faktów...");
-
-    const areaInstruction = objectAreaHint_m2
-        ? `Powierzchnia użytkowa z dokumentów: ${objectAreaHint_m2} m². Użyj tej wartości.`
-        : `Powierzchnia nieznana – oszacuj typową dla "${objectTypeHint}" na podstawie zebranych faktów i podaj w polu objectArea_m2.`;
-
-    const dnaPrompt = `
-Na podstawie poniższych faktów z przepisów prawa budowlanego, zbuduj kompletne DNA kosztorysowe budynku.
-
-TYP OBIEKTU: ${objectTypeHint}
-${areaInstruction}
-POZIOM DOKUMENTACJI: ${docLevel}/4 (0=brak doc, 4=pełny projekt)
-
-FAKTY Z PRZEPISÓW I NORM:
-${groundedFacts}
-
-ZADANIE:
-Wygeneruj listę wszystkich działów kosztorysowych i elementów scalonych które muszą być wycenione,
-żeby budynek uzyskał pozwolenie na użytkowanie. Dla każdego elementu podaj:
-- jednostkę miary (m², m³, szt., kpl., t)
-- strategię szacowania gdy brak danych (SEKOCENBUD_M2, EUROKOD_NORM, GUS_PERCENT, ASK_USER)
-- krótką wskazówkę jak szacować (gapFillerHint)
-
-Pamiętaj o elementach specyficznych dla "${objectTypeHint}" wykrytych w przepisach
-(np. technologia kuchni dla przedszkola, oddymianie klatek dla budynku >2 kondygnacji, itp.).
-
-Odpowiedz WYŁĄCZNIE czystym JSON bez komentarzy.
-`.trim();
-
-    const dnaResult = await ai.models.generateContent({
-        model: MODEL_FLASH,
-        contents: [{ role: "user", parts: [{ text: dnaPrompt }] }],
-        config: {
-            systemInstruction: "Jesteś Architektem Kosztorysowym PESAM. Budujesz DNA budynku jako strukturę JSON. Odpowiadasz WYŁĄCZNIE poprawnym JSON-em bez markdown.",
-            temperature: 0.1,
-            responseMimeType: "application/json",
-            responseSchema: WBS_RESPONSE_SCHEMA as any,
-            // Celowo BEZ tools: [] – Vertex AI nie pozwala łączyć Search z responseSchema
-        },
-    });
-
-    const rawText = dnaResult.text ?? "{}";
-    console.log(`[WBS Architekt] [Krok 2] Odebrano DNA: ${rawText.length} znaków.`);
-
-    const parsed: WbsArchitectOutput = JSON.parse(rawText);
-
-    // Jeśli AI nie wypełniło powierzchni a mieliśmy hint – przywróć
-    if (!parsed.objectArea_m2 && objectAreaHint_m2) {
-        parsed.objectArea_m2 = objectAreaHint_m2;
-    }
-
-    return parsed;
-}
-
-// ================================================================
-// GŁÓWNY HANDLER POST
-// ================================================================
-
-export async function POST(req: NextRequest) {
-    const startTime = Date.now();
-    console.log("==================================================");
-    console.log("[WBS Architekt] === FAZA 0: BUDOWANIE DNA BUDYNKU (v2.2) ===");
-    console.log("==================================================");
-
-    try {
-        const body = await req.json() as {
-            tenderId: string;
-            objectTypeHint: string;
-            objectAreaHint_m2: number | null;
-            docLevel: DocLevel;
-            estimationMethod: string;
-            fileNamesContext: string[];
-        };
-
-        const { tenderId, objectTypeHint, objectAreaHint_m2, docLevel, estimationMethod, fileNamesContext } = body;
-
-        if (!tenderId) return NextResponse.json({ error: 'Brak tenderId' }, { status: 400 });
-
-        console.log(`[WBS Architekt] Projekt: "${tenderId}" | Typ: "${objectTypeHint}" | Powierzchnia: ${objectAreaHint_m2 ?? 'nieznana'} m²`);
-
-        const ai = new GoogleGenAI({
-            vertexai: true,
-            project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-            location: "global",
-        });
-
-        const areaContext = objectAreaHint_m2
-            ? `Szacowana powierzchnia użytkowa z dokumentów: ${objectAreaHint_m2} m².`
-            : `Powierzchnia nieznana – przyjmij typową dla "${objectTypeHint}".`;
-
-        // ── KROK 1: Google Search (bez responseSchema) ──────────────────
-        const groundedFacts = await fetchGroundedFacts(ai, objectTypeHint, areaContext, fileNamesContext);
-
-        // ── KROK 2: Structured Output (bez Search) ────────────────────────
-        const aiOutput = await buildDnaFromFacts(ai, objectTypeHint, objectAreaHint_m2, docLevel, groundedFacts);
-
-        const duration1 = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[WBS Architekt] Oba kroki ukończone w ${duration1}s. Mergowanie z minimum obowiązkowym...`);
-
-        // ── Merge z hardcoded minimum ─────────────────────────────────────
-        const mergedDivisions = await mergeWithMandatoryMinimum(aiOutput, docLevel);
-
-        const initialCoverage: CoverageEntry[] = mergedDivisions.flatMap((div) =>
-            div.elements.map((el) => ({
-                elementId: el.elementId,
-                divisionId: div.divisionId,
-                status: 'MISSING' as const,
-                dataSource: 'AI_WBS_HEURISTIC' as const,  // ← kluczowe: oznaczamy że to szacunek WBS
-                coveredBySectionId: null,
-                dataQuality: 'MISSING' as const,
-                gapFillerNote: null,
-                gapFillerValue: null,
-                lastUpdatedBy: 'agent-wbs-architekt',
-                lastUpdatedAt: new Date().toISOString(),
-                mappedFileId: null,
-                quantityEstimated: null,
-                quantitySource: null,
-            }))
-        );
-
-        const now = new Date().toISOString();
-        const manifest: ScopeManifest = {
-            meta: {
-                tenderId,
-                generatedAt: now,
-                updatedAt: now,
-                docLevel,
-                objectType: aiOutput.objectType,
-                objectArea_m2: aiOutput.objectArea_m2 || objectAreaHint_m2 || null,
-                areaIsEstimated: !objectAreaHint_m2,  // ← oznaczamy czy powierzchnia jest szacunkowa
-                estimationMethod: estimationMethod as any,
-                confidenceScore: aiOutput.confidenceScore,
-                sourceDocuments: fileNamesContext,
-                isLocked: false,
-                completedPhases: ['WBS_ARCHITECT'],
-            },
-            hardRequirements: [],
-            requiredDivisions: mergedDivisions,
-            missingDataRisks: aiOutput.initialRisks.map((r) => ({ ...r, addedBy: 'AI' as const })),
-            coverageStatus: initialCoverage,
-        };
-
-        // ── Zapis do Firestore ─────────────────────────────────────────────
-        const manifestPath = `tenders/${tenderId}/scopeManifest/main`;
-        console.log(`[WBS Architekt] Zapisuję manifest do Firestore: "${manifestPath}"...`);
-        await adminDb.doc(manifestPath).set(manifest);
-
-        await adminDb.doc(`tenders/${tenderId}/tasks/${tenderId}-WBS_ARCHITECT`).update({
-            status: 'DONE',
-            result: {
-                objectType: aiOutput.objectType,
-                objectArea_m2: manifest.meta.objectArea_m2,
-                areaIsEstimated: manifest.meta.areaIsEstimated,
-                elementsCount: initialCoverage.length,
-                divisionsCount: mergedDivisions.length,
-                groundedFactsLength: groundedFacts.length,
-            },
-            updatedAt: now,
-        });
-
-        const totalDuration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[WBS Architekt] ✅ Faza 0 zakończona sukcesem w ${totalDuration}s. ${initialCoverage.length} elementów w ${mergedDivisions.length} działach.`);
-        console.log("==================================================");
-
-        return NextResponse.json({
-            success: true,
-            phase: 'WBS_ARCHITECT' as AgentPhase,
-            summary: {
-                objectType: manifest.meta.objectType,
-                objectArea_m2: manifest.meta.objectArea_m2,
-                areaIsEstimated: manifest.meta.areaIsEstimated,
-                confidenceScore: manifest.meta.confidenceScore,
-                divisionsCount: mergedDivisions.length,
-                elementsCount: initialCoverage.length,
-            },
-        });
+        return NextResponse.json({ success: true, itemsExtracted: allExtractedItems.length });
 
     } catch (error: any) {
-        console.error('[WBS Architekt] ❌ KRYTYCZNY BŁĄD AGENTA:', JSON.stringify(error?.message ?? error));
+        console.error("[PESAM 3.0 📐] ❌ Błąd krytyczny Agenta Wizyjnego:", error);
 
-        // Próba oznaczenia taska jako ERROR w Firestore
-        try {
-            const body = await req.json().catch(() => ({})) as { tenderId?: string };
-            if (body?.tenderId) {
-                await adminDb.doc(`tenders/${body.tenderId}/tasks/${body.tenderId}-WBS_ARCHITECT`).update({
-                    status: 'ERROR',
-                    error: error.message,
-                    updatedAt: new Date().toISOString(),
+        // Bezpieczny raport awarii przy użyciu zmiennych lokalnych
+        if (tenderId && taskId) {
+            try {
+                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                    status: "ERROR",
+                    result: { error: error.message }
                 });
+            } catch (dbError) {
+                console.error("[PESAM 3.0 📐] Nie udało się zapisać statusu błędu:", dbError);
             }
-        } catch (_) { /* ignoruj błąd zapisu statusu */ }
+        }
 
         return NextResponse.json({ error: error.message }, { status: 500 });
     }

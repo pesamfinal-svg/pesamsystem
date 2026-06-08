@@ -1,337 +1,258 @@
-/**
- * PESAM – Główny Kosztorysant (Orkiestrator Roju z pełnym logowaniem)
- *
- * Ścieżka: src/app/api/kosztorysant/glowny-kosztorysant/route.ts
- *
- * Odpowiedzialność:
- *  - Jedyny punkt wejścia wywoływany przez czat na frontendzie.
- *  - Ściąga spis plików (Manifest) z Firestore w czasie rzeczywistym.
- *  - Wywołuje Agenta Klasyfikacji (Dyspozytora).
- *  - Przekazuje zadania KNR i wyceny do Agenta KNR.
- *  - Uruchamia deterministycznego Agenta Finansowego w TS.
- *  - Generuje finalną syntezę rynkową u Agenta Redaktora.
- */
+// ============================================================
+// PESAM 3.0 – Główny Orkiestrator (Mózg / ReAct Loop)
+// POST /api/kosztorysant/glowny-kosztorysant
+// ============================================================
 
-import { GoogleGenAI } from "@google/genai";
-import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase/admin"; // Inicjalizacja Firestore Admin
-import {
-  AgentMode,
-  EstimateSection,
-  MarketTrends,
-  RmsEngineRequest,
-  RmsEngineResponse,
-  extractAllJSONObjects,
-} from "../_shared/types";
+import { NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI, Type } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
-// Najnowsze modele Gemini (seria 2.5 i 3.5)
+// Standard 3: Inicjalizacja klienta Google GenAI (Vertex AI, global)
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+// Mózg używa modelu PRO do zaawansowanego wnioskowania i planowania
 const MODEL_PRO = "gemini-2.5-pro";
-const MODEL_FLASH = "gemini-3.5-flash";
 
-// Budowanie bezpiecznego URL dla wewnętrznych wywołań API w Next.js
-function internalUrl(req: NextRequest, path: string): string {
-  const url = new URL(req.url);
-  if (url.hostname === "0.0.0.0" || url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-    url.protocol = "http:";
-  }
-  return `${url.origin}${path}`;
-}
+// Rejestr Agentów (Książka telefoniczna Mózgu) - mapowanie na endpointy (PESAM 3.0)
+const AGENT_ENDPOINTS: Record<string, string> = {
+    "LEGAL_EXPERT": "/api/kosztorysant/czytacz-dokumentow",
+    "VISION_ARCHITECTURE": "/api/kosztorysant/agent-wbs-architekt",
+    "VISION_CONSTRUCT": "/api/kosztorysant/agent-wbs-architekt",
+    "VISION_MEP": "/api/kosztorysant/agent-wbs-architekt", // Tymczasowo ten sam endpoint dla instalacji
+    "BOQ_PARSER": "/api/kosztorysant/agent-ilosciowiec",
+    "GAP_FILLER": "/api/kosztorysant/agent-gap-filler",
+    "UNIVERSAL_SPECIALIST": "/api/kosztorysant/agent-kameleon",
+    "PYTHON_CALC": "/api/kosztorysant/agent-python-calc",
+    "BROKER": "/api/kosztorysant/broker-cenowy",
+    "SILENT_AUDITOR": "/api/kosztorysant/agent-cichy-rewident",
+    "REVISOR_JUDGE": "/api/kosztorysant/agent-rewident"
+};
 
-// ── AGENT RYZYKA (Wbudowany - Gemini 3.5 Flash) ───────────────────────────────
+// Schemat odpowiedzi Mózgu (Standard 1: Ścisła spójność i obsługa tempId)
+const BRAIN_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        reasoning: {
+            type: Type.STRING,
+            description: "Logika decyzyjna: dlaczego podejmujesz takie kroki w tej iteracji?"
+        },
+        phase: {
+            type: Type.STRING,
+            description: "Nowa faza: PLANNING, WORKING, WAITING_INPUT, CONSENSUS_BUILDING, DONE"
+        },
+        currentGoal: {
+            type: Type.STRING,
+            description: "Krótki opis tego, co system ma teraz osiągnąć."
+        },
+        newTasks: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    tempId: {
+                        type: Type.STRING,
+                        description: "Unikalny identyfikator tymczasowy dla tego zadania, np. 'temp_legal', 'temp_vision'"
+                    },
+                    agentType: {
+                        type: Type.STRING,
+                        description: "Klucz z Rejestru Agentów, np. LEGAL_EXPERT, VISION_ARCHITECTURE"
+                    },
+                    description: {
+                        type: Type.STRING,
+                        description: "Szczegółowe polecenie dla agenta"
+                    },
+                    dependsOn: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: "Tablica ID istniejących zadań z sekcji OBECNE ZADANIA lub 'tempId' zadań tworzonych w tym samym obiekcie JSON."
+                    },
+                    inputDocIds: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: "Tablica ID dokumentów, które agent ma przeanalizować"
+                    }
+                },
+                required: ["tempId", "agentType", "description", "dependsOn", "inputDocIds"]
+            }
+        }
+    },
+    required: ["reasoning", "phase", "currentGoal", "newTasks"]
+};
 
-async function agentRyzyka(request: string): Promise<string[]> {
-  console.log("[Główny Kosztorysant / Agent Ryzyka] Rozpoczynam analizę ryzyka kontraktowego...");
-
-  const ai = new GoogleGenAI({
-    vertexai: true,
-    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-    location: "global",
-  });
-
-  const systemInstruction = `
-    Jesteś Prawnikiem Kontraktowym specjalizującym się w polskim Prawie Zamówień Publicznych (PZP).
-    Wygeneruj listę 3-5 konkretnych, krótkich alertów prawno-ryzykownych dotyczących opisanego przetargu.
-    Format każdego alertu (jedno zdanie, bez użycia znaku "):
-    - "⚠️ UWAGA: [opis]"
-    - "❗ RYZYKO: [opis]"
-    - "✅ OK: [potwierdzenie]"
-    Zwróć wyłącznie tablicę JSON stringów: ["alert1", "alert2"]
-  `;
-
-  try {
-    const response = await ai.models.generateContent({
-      model: MODEL_FLASH,
-      contents: [{ role: "user", parts: [{ text: request }] }],
-      config: { systemInstruction, temperature: 0.2, maxOutputTokens: 512 }
-    });
-
-    const raw = response.text ?? "";
-    console.log(`[Główny Kosztorysant / Agent Ryzyka] Surowa odpowiedź o ryzykach (${raw.length} znaków).`);
-
-    const arrayMatch = raw.match(/\[[\s\S]*\]/);
-    if (arrayMatch) {
-      const parsed = JSON.parse(arrayMatch[0]);
-      if (Array.isArray(parsed)) {
-        console.log(`[Główny Kosztorysant / Agent Ryzyka] Pomyślnie wyekstrahowano ${parsed.length} alertów ryzyka.`);
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.error("[Główny Kosztorysant / Agent Ryzyka] Błąd wywołania lub parsowania:", err);
-  }
-  return ["⚠️ UWAGA: Szczegółowa analiza ryzyka PZP chwilowo niedostępna ze względu na błąd techniczny bota."];
-}
-
-// ── AGENT FINANSOWY (Deterministyczny - Pure TypeScript) ─────────────────────
-
-interface FinancialSummary {
-  totalBase: number;
-  totalAfterTrends: number;
-  totalWithMarkups: number;
-  byType: { R: number; M: number; S: number };
-}
-
-function agentFinansowy(sections: EstimateSection[], trends: MarketTrends): FinancialSummary {
-  console.log("[Główny Kosztorysant / Agent Finansowy] Uruchamiam deterministyczne liczenie narzutów (TS)...");
-
-  let totalBase = 0;
-  let totalAfterTrends = 0;
-  let totalWithMarkups = 0;
-  const byType = { R: 0, M: 0, S: 0 };
-
-  const kpFactor = trends.kp / 100;
-  const zFactor = trends.zysk / 100;
-
-  for (const sec of sections) {
-    for (const item of sec.items) {
-      const base = item.quantity * item.basePrice;
-      totalBase += base;
-      byType[item.type] += base;
-
-      let adjustedPrice = item.basePrice;
-      if (item.type === "R") adjustedPrice *= 1 + trends.laborAdjustment / 100;
-      else if (item.type === "M") adjustedPrice *= 1 + trends.materialAdjustment / 100;
-      else if (item.type === "S") adjustedPrice *= 1 + trends.equipmentAdjustment / 100;
-
-      const directCost = item.quantity * adjustedPrice;
-      totalAfterTrends += directCost;
-
-      if (item.type === "R" || item.type === "S") {
-        const kpVal = directCost * kpFactor;
-        const zVal = (directCost + kpVal) * zFactor;
-        totalWithMarkups += directCost + kpVal + zVal;
-      } else {
-        totalWithMarkups += directCost;
-      }
-    }
-  }
-
-  console.log(`[Główny Kosztorysant / Agent Finansowy] Podsumowanie matematyczne: Base=${totalBase} zł | AfterTrends=${totalAfterTrends} zł | FinalWithMarkups=${totalWithMarkups} zł`);
-  return { totalBase, totalAfterTrends, totalWithMarkups, byType };
-}
-
-// ── AGENT REDAKTOR (Wbudowany - Gemini 2.5 Pro) ───────────────────────────────
-
-async function agentRedaktor(
-  request: string,
-  mode: AgentMode,
-  financial: FinancialSummary,
-  narrativeHints: string,
-  riskAlerts: string[],
-  trends: MarketTrends
-): Promise<string> {
-  console.log("[Główny Kosztorysant / Agent Redaktor] Generuję finalne podsumowanie merytoryczne...");
-
-  const ai = new GoogleGenAI({
-    vertexai: true,
-    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-    location: "global",
-  });
-
-  const systemInstruction = `
-    Jesteś Głównym Inżynierem Kontraktu w systemie PESAM. Przemawiasz do Głównego Kosztorysanta.
-    Odpowiadaj bardzo zwięźle (4-6 zdań). Podaj konkretne, zsumowane liczby i wskaż najważniejsze kwestie ryzyka.
-    Nie używaj cudzysłowu (") wewnątrz tekstu (używaj pojedynczych apostrofów ').
-  `;
-
-  const userPrompt = `
-    OPERACJA: ${mode}
-    POLECENIE: "${request}"
-
-    Kalkulacja finansowa:
-    - Koszt bezpośredni (baza): ${Math.round(financial.totalBase).toLocaleString("pl-PL")} PLN
-    - Wycena rynkowa: ${Math.round(financial.totalAfterTrends).toLocaleString("pl-PL")} PLN
-    - Cena ofertowa (Kp ${trends.kp}%, Z ${trends.zysk}%): ${Math.round(financial.totalWithMarkups).toLocaleString("pl-PL")} PLN
-    - Struktura: R=${Math.round(financial.byType.R).toLocaleString("pl-PL")} zł | M=${Math.round(financial.byType.M).toLocaleString("pl-PL")} zł | S=${Math.round(financial.byType.S).toLocaleString("pl-PL")} zł
-
-    Wskazówki od bazy KNR: "${narrativeHints}"
-    Alerty ryzyka: ${riskAlerts.length > 0 ? riskAlerts.join(" | ") : "brak"}
-  `;
-
-  try {
-    const response = await ai.models.generateContent({
-      model: MODEL_PRO,
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      config: { systemInstruction, temperature: 0.3, maxOutputTokens: 512 }
-    });
-
-    const text = response.text?.trim() ?? "Wycena została pomyślnie zaktualizowana.";
-    console.log(`[Główny Kosztorysant / Agent Redaktor] Pomyślnie wygenerowano odpowiedź (${text.length} znaków).`);
-    return text;
-  } catch (err) {
-    console.error("[Główny Kosztorysant / Agent Redaktor] Błąd wygenerowania opinii:", err);
-    return `Kosztorys zaktualizowany. Cena ofertowa z narzutami wynosi: ${Math.round(financial.totalWithMarkups).toLocaleString("pl-PL")} PLN.`;
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ORKIESTRATOR (GŁÓWNY HANDLER)
-// ══════════════════════════════════════════════════════════════════════════════
-
-export async function POST(req: NextRequest) {
-  console.log("==================================================");
-  console.log("[Główny Kosztorysant] === ROZPOCZĘTO NOWĄ ORKIESTRACJĘ ===");
-  console.log("==================================================");
-
-  try {
-    const body = await req.json();
-    const { request, currentTrends, currentSections, tenderId } = body;
-
-    if (!request?.trim()) {
-      console.error("[Główny Kosztorysant] Błąd: Brak tekstu zlecenia.");
-      return NextResponse.json({ reply: "Proszę podać polecenie." }, { status: 400 });
-    }
-
-    console.log(`[Główny Kosztorysant] Tekst zlecenia: "${request}"`);
-    console.log(`[Główny Kosztorysant] TenderID: "${tenderId || "brak"}"`);
-    console.log(`[Główny Kosztorysant] Ilość sekcji na wejściu: ${currentSections?.length || 0}`);
-
-    // ── KROK 1: Pobranie "Spisu Treści" z bazy (Firestore), jeśli pracujemy na konkretnym tenderId!
-    let filesContext = "";
-    if (tenderId) {
-      console.log(`[Główny Kosztorysant] Odpytuję Firestore o pliki dla projektu: ${tenderId}...`);
-      try {
-        const filesSnap = await adminDb.collection("tenders").doc(tenderId).collection("files").get();
-        const filesList = filesSnap.docs.map(doc => doc.data());
-        console.log(`[Główny Kosztorysant] Pomyślnie pobrano ${filesList.length} plików z bazy.`);
-
-        filesContext = `SPIS DOKUMENTÓW PRZETARGOWYCH (tenderId: ${tenderId}):\n` +
-          filesList.map(f => `- Plik: "${f.fileName}" (Typ: ${f.category}, Opis: ${f.summary}, Link: ${f.storageUrl})`).join("\n");
-      } catch (dbErr) {
-        console.error("[Główny Kosztorysant] Błąd odczytu spisu treści z bazy Firestore:", dbErr);
-      }
-    }
-
-    const enrichedRequest = filesContext ? `${request}\n\n${filesContext}` : request;
-
-    // ── KROK 2: DYSPOZYTOR: Klasyfikacja intencji (Gemini Flash) ────────────────────
-    let mode: AgentMode = "GENERAL_QUERY";
-    const dispatcherUrl = internalUrl(req, "/api/kosztorysant/dyspozytor");
-    console.log(`[Główny Kosztorysant] Wywołuję Agenta Dyspozytora: ${dispatcherUrl}...`);
-
+export async function POST(req: Request) {
     try {
-      const dispRes = await fetch(dispatcherUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request: enrichedRequest }),
-      });
-      if (dispRes.ok) {
-        const dispData = await dispRes.json();
-        mode = dispData.intent;
-        console.log(`[Główny Kosztorysant] Dyspozytor zaklasyfikował intencję do trybu: "${mode}"`);
-      } else {
-        console.warn(`[Główny Kosztorysant] Dyspozytor zwrócił błąd HTTP: ${dispRes.status}`);
-      }
-    } catch (err) {
-      console.error("[Główny Kosztorysant] Błąd wywołania Dyspozytora:", err);
-    }
+        const body = await req.json();
+        const { tenderId, trigger } = body;
 
-    // ── KROK 3: DELEGACJA DO AGENTÓW WYKONAWCZYCH ─────────────────────────────
-    let sections: EstimateSection[] = currentSections ?? [];
-    let narrativeHints = "";
-    let riskAlerts: string[] = [];
+        if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
-    const isCalculationMode =
-      mode === "GENERATE_FROM_SCRATCH" ||
-      mode === "MODIFY_TECHNOLOGY" ||
-      mode === "RECALCULATE_DIVISION";
+        console.log(`[PESAM 3.0 🧠] Wybudzenie Mózgu. Przetarg: ${tenderId} | Trigger: ${trigger}`);
 
-    if (mode === "RISK_ANALYSIS") {
-      // Wywołanie wbudowanego Agenta Prawnego (Flash)
-      riskAlerts = await agentRyzyka(enrichedRequest);
-    } else if (isCalculationMode) {
-      // Wywołanie odseparowanego Agenta KNR (Pro + Python)
-      const knrUrl = internalUrl(req, "/api/kosztorysant/agent-knr");
-      console.log(`[Główny Kosztorysant] Wywołuję Agenta KNR (agent-knr): ${knrUrl}...`);
+        const tenderRef = adminDb.collection("tenders").doc(tenderId);
+        const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
 
-      try {
-        const knrRes = await fetch(knrUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            request: enrichedRequest,
-            currentTrends,
-            mode,
-            currentSections: sections,
-          }),
+        // 1. Pobranie stanu przetargu i sprawdzenie Bezpiecznika (Budget Guard)
+        const tenderDoc = await tenderRef.get();
+        if (!tenderDoc.exists) throw new Error("Przetarg nie istnieje.");
+
+        const tenderData = tenderDoc.data()!;
+        const budgetGuard = tenderData.budgetGuard || { currentCostUSD: 0, maxBudgetUSD: 5.0, limitReached: false, iterationCount: 0, maxIterations: 50 };
+
+        if (budgetGuard.limitReached || budgetGuard.iterationCount >= budgetGuard.maxIterations) {
+            console.warn(`[PESAM 3.0 🧠] 🛑 Przekroczono budżet lub limit iteracji! Zatrzymuję Mózg.`);
+            await tenderRef.update({ status: "HALTED" });
+            return NextResponse.json({ message: "Halted by Budget Guard" });
+        }
+
+        // 2. Zbieranie Kontekstu (Obserwacja)
+        const [docsSnap, tasksSnap, brainSnap] = await Promise.all([
+            adminDb.collection(`tenders/${tenderId}/documents`).get(),
+            adminDb.collection(`tenders/${tenderId}/tasks`).get(),
+            brainRef.get()
+        ]);
+
+        const documents = docsSnap.docs.map(d => ({ id: d.id, fileName: d.data().fileName, tags: d.data().tags, summary: d.data().summary }));
+        const tasks = tasksSnap.docs.map(d => ({ id: d.id, agentType: d.data().agentType, status: d.data().status, description: d.data().description }));
+        const brainState = brainSnap.exists ? brainSnap.data() : { phase: "PLANNING", knownFacts: {} };
+
+        // 3. Budowa Promptu dla Mózgu
+        const systemPrompt = `
+Jesteś Głównym Orkiestratorem (Mózgiem) systemu kosztorysowego PESAM 3.0.
+Działasz w pętli ReAct (Reason -> Act -> Observe). Twoim zadaniem jest delegowanie pracy do specjalistów.
+
+DOSTĘPNI AGENCI (Rejestr):
+- LEGAL_EXPERT: Analizuje umowy, SWZ, PFU. Szuka kar, terminów, gwarancji.
+- VISION_ARCHITECTURE: Analizuje rysunki architektoniczne (rzuty, przekroje).
+- VISION_CONSTRUCT: Analizuje rysunki konstrukcyjne (zbrojenia, beton).
+- BOQ_PARSER: Wyciąga dane z przedmiarów (Excel, tabele).
+- BROKER: Wycenia pozycje (uruchamiaj dopiero gdy ilości są znane).
+- SILENT_AUDITOR: Szuka braków technologicznych (uruchamiaj na końcu).
+
+STAN OBECNY:
+Faza: ${brainState?.phase}
+Wyzwalacz: ${trigger}
+
+DOKUMENTY W BAZIE (Użyj ich identyfikatorów 'id' w polu inputDocIds):
+${JSON.stringify(documents, null, 2)}
+
+OBECNE ZADANIA W BAZIE (Jeśli chcesz określić zależność do istniejącego już zadania, użyj jego rzeczywistego ID z tej listy):
+${JSON.stringify(tasks, null, 2)}
+
+ZASADY PLANOWANIA:
+1. Nie wykonuj pracy sam. Twórz zadania (newTasks) dla agentów.
+2. Jeśli dokument ma tag [SWZ], zleć go do LEGAL_EXPERT.
+3. Jeśli dokument ma tag [RYSUNEK, ARCHITEKTURA], zleć do VISION_ARCHITECTURE.
+4. Używaj 'dependsOn' do określania kolejności. Możesz w nim wpisywać 'tempId' innych zadań, które tworzysz w tym samym wywołaniu.
+5. Jeśli wszystkie dokumenty są w trakcie analizy, nie twórz nowych zadań, zmień fazę na WORKING.
+6. Jeśli wszystkie zadania mają status DONE, zmień fazę na DONE.
+`;
+
+        // 4. Wywołanie modelu Gemini Pro
+        const result = await ai.models.generateContent({
+            model: MODEL_PRO,
+            contents: [{ role: "user", parts: [{ text: systemPrompt }] }],
+            config: {
+                temperature: 0.2,
+                responseMimeType: "application/json",
+                responseSchema: BRAIN_SCHEMA as any
+            }
         });
 
-        if (knrRes.ok) {
-          const knrData = await knrRes.json();
-          sections = knrData.sections || [];
-          narrativeHints = knrData.narrativeHints || "";
-          console.log(`[Główny Kosztorysant] Agent KNR pomyślnie zaktualizował strukturę. Ilość sekcji: ${sections.length}`);
-        } else {
-          console.error(`[Główny Kosztorysant] Agent KNR zwrócił błąd HTTP: ${knrRes.status}`);
+        const responseText = result.text ?? "{}";
+        const parsedResult = JSON.parse(responseText);
+
+        console.log(`[PESAM 3.0 🧠] Decyzja: ${parsedResult.reasoning}`);
+
+        // 5. Zapis nowych zadań i kompilacja zależności (Standard 1)
+        const newTasksCreated: any[] = [];
+        const batch = adminDb.batch();
+
+        // Mapa do translacji tempId -> realDocId
+        const tempIdToDocIdMap = new Map<string, string>();
+        const taskRefs = (parsedResult.newTasks || []).map(() => adminDb.collection(`tenders/${tenderId}/tasks`).doc());
+
+        // Krok A: Generowanie rzeczywistych identyfikatorów
+        (parsedResult.newTasks || []).forEach((task: any, index: number) => {
+            if (task.tempId) {
+                tempIdToDocIdMap.set(task.tempId, taskRefs[index].id);
+            }
+        });
+
+        // Krok B: Przypisywanie i translacja zależności
+        for (let i = 0; i < (parsedResult.newTasks || []).length; i++) {
+            const task = parsedResult.newTasks[i];
+            const taskRef = taskRefs[i];
+
+            // Tłumaczenie zależności tempId na rzeczywiste ID
+            const resolvedDependsOn = (task.dependsOn || []).map((dep: string) => {
+                return tempIdToDocIdMap.get(dep) || dep;
+            });
+
+            const taskData = {
+                taskId: taskRef.id,
+                agentType: task.agentType,
+                description: task.description,
+                dependsOn: resolvedDependsOn,
+                inputDocIds: task.inputDocIds || [],
+                status: "PENDING",
+                priority: 5,
+                createdAt: new Date()
+            };
+            batch.set(taskRef, taskData);
+            newTasksCreated.push({ id: taskRef.id, ...taskData });
         }
-      } catch (err) {
-        console.error("[Główny Kosztorysant] Błąd wywołania Agenta KNR:", err);
-        narrativeHints = "Połączenie z bazą KNR utracone – zachowano poprzednie wartości.";
-      }
-    } else {
-      console.log(`[Główny Kosztorysant] Tryb ${mode} nie modyfikuje bazy KNR. Pomijam krok wyliczeń.`);
+
+        // Aktualizacja stanu Mózgu
+        batch.update(brainRef, {
+            phase: parsedResult.phase,
+            currentGoal: parsedResult.currentGoal,
+            reasoningLog: FieldValue.arrayUnion(parsedResult.reasoning)
+        });
+
+        // Aktualizacja Budget Guard (Pro kosztuje ok $0.002 / 1k tokenów)
+        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        const costUSD = (tokensUsed / 1000) * 0.002;
+
+        batch.update(tenderRef, {
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD),
+            "budgetGuard.iterationCount": FieldValue.increment(1),
+            status: parsedResult.phase === "DONE" ? "DONE" : "ORCHESTRATING"
+        });
+
+        await batch.commit();
+
+        // 6. Asynchroniczne i bezpieczne wybudzenie Agentów dla nowych zadań
+        const origin = new URL(req.url).origin;
+        for (const task of newTasksCreated) {
+            const endpoint = AGENT_ENDPOINTS[task.agentType];
+            if (endpoint) {
+                console.log(`[PESAM 3.0 🧠] ⚡ Wybudzam Agenta: ${task.agentType} dla zadania ${task.id}`);
+                fetch(`${origin}${endpoint}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ tenderId, taskId: task.id })
+                }).catch(e => console.error(`[PESAM 3.0] Błąd wybudzania ${task.agentType}:`, e));
+            } else {
+                console.warn(`[PESAM 3.0 🧠] ⚠️ Brak zarejestrowanego endpointu dla agenta: ${task.agentType}`);
+            }
+        }
+
+        return NextResponse.json({
+            success: true,
+            phase: parsedResult.phase,
+            tasksCreated: newTasksCreated.length,
+            costUSD
+        });
+
+    } catch (error: any) {
+        console.error("[PESAM 3.0 🧠] ❌ Błąd krytyczny Mózgu:", error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
-    // ── KROK 4: DETERMINISTYCZNY AGENT FINANSOWY (TypeScript) ─────────────────
-    const financial = agentFinansowy(sections, currentTrends);
-
-    // ── KROK 5: REDAKTOR (Gemini Pro) ─────────────────────────────────────────
-    const reply = await agentRedaktor(
-      request,
-      mode,
-      financial,
-      narrativeHints,
-      riskAlerts,
-      currentTrends
-    );
-
-    // Kompletowanie paczki wyjściowej
-    const responsePayload: RmsEngineResponse & { riskAlerts?: string[] } = { reply };
-
-    if (isCalculationMode && sections.length > 0) {
-      responsePayload.generatedSections = sections;
-    }
-    if (riskAlerts.length > 0) {
-      responsePayload.riskAlerts = riskAlerts;
-    }
-
-    console.log("[Główny Kosztorysant] Orkiestracja zakończona sukcesem. Wysyłam paczkę na frontend.");
-    console.log("==================================================");
-
-    return NextResponse.json(responsePayload, { status: 200 });
-
-  } catch (error: any) {
-    console.error("[Główny Kosztorysant] Krytyczny błąd orkiestratora:", error);
-    return NextResponse.json({ reply: `⚠️ Krytyczny błąd kosztorysanta: ${error.message}` }, { status: 500 });
-  }
-}
-
-export async function GET(): Promise<NextResponse> {
-  return NextResponse.json({
-    service: "PESAM Główny Kosztorysant (Orkiestrator z diagnostyką)",
-    status: "operational",
-    logsEnabled: true,
-  });
 }

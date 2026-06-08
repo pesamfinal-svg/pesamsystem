@@ -1,372 +1,230 @@
 // ============================================================
-// PESAM – Agent Rewident (Rozszerzony o Audyt Zakresu)
+// PESAM 3.0 – Agent Specjalista: REVISOR_JUDGE (Sędzia / Rewident)
 // POST /api/kosztorysant/agent-rewident
-//
-// Zapisuje: tenders/{tenderId} (rewidentReport, finalScore, status)
 // ============================================================
 
-import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenAI, Type } from '@google/genai';
-import { adminDb } from '@/lib/firebase/admin';
-import { runCoverageAudit, type CoverageAuditResult } from './coverageAudit';
+import { NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI, Type } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
-const MODEL_PRO = "gemini-2.5-pro";
+// Standard 3 & 4: Inicjalizacja klienta Google GenAI (Vertex AI, global)
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
 
-interface Section {
-    sectionId: string;
-    divisionId: string;
-    divisionName: string;
-    items: Array<{
-        itemId: string;
-        name: string;
-        unit: string;
-        quantity: number | null;
-        unitPrice: number | null;
-        totalPrice: number;
-        dataQuality?: string;
-    }>;
-    totalPrice: number;
-}
+const MODEL_PRO = "gemini-2.5-pro"; // Sędzia potrzebuje najwyższej logiki
+const MODEL_FLASH = "gemini-2.5-flash"; // Do taniego formatowania JSON
 
-interface DeterministicAlert {
-    severity: 'CRITICAL' | 'WARNING' | 'INFO';
-    code: string;
-    message: string;
-    value?: number;
-}
-
-const BRANCH_NORMS = {
-    D1_ZERO_PERCENT: { min: 8, max: 20, label: 'Stan Zerowy (Roboty ziemne / fundamenty)' },
-    D2_ROUGH_PERCENT: { min: 30, max: 55, label: 'Stan Surowy (Ściany / strop / dach)' },
-    D3_FINISH_PERCENT: { min: 15, max: 35, label: 'Wykończenie wewnętrzne' },
-    D5_SANITARY_PERCENT: { min: 8, max: 18, label: 'Instalacje Sanitarne' },
-    D6_ELECTRIC_PERCENT: { min: 6, max: 14, label: 'Instalacje Elektryczne' },
-    LABOR_RATE_MIN: 35,
-    LABOR_RATE_MAX: 85,
+// Schemat dla Kroku 2 (Strukturyzacja Wyroku)
+const JUDGE_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        decision: {
+            type: Type.STRING,
+            description: "Wybrana wartość (np. 'C25/30') lub informacja o braku rozstrzygnięcia."
+        },
+        justification: {
+            type: Type.STRING,
+            description: "Uzasadnienie wyroku, np. 'Zgodnie z Prawem Budowlanym, rysunek konstrukcyjny jest nadrzędny nad opisem ogólnym SWZ.'"
+        },
+        escalateToUser: {
+            type: Type.BOOLEAN,
+            description: "Ustaw na true, jeśli sprzeczność jest krytyczna i wymaga ręcznej decyzji Kosztorysanta."
+        }
+    },
+    required: ["decision", "justification", "escalateToUser"]
 };
 
-// ============================================================
-// ETAP 1: Audyt deterministyczny (TypeScript)
-// ============================================================
+export async function POST(req: Request) {
+    // Bezpieczna deklaracja zmiennych (ochrona przed błędem strumienia w catch)
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
 
-function runDeterministicAudit(sections: Section[]): DeterministicAlert[] {
-    console.log(`[Rewident] [Etap 1] Uruchamiam matematyczne testy walidacyjne kosztorysu...`);
-    const alerts: DeterministicAlert[] = [];
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
 
-    const totalCost = sections.reduce((s, sec) => s + sec.totalPrice, 0);
-    if (totalCost === 0) {
-        alerts.push({
-            severity: 'CRITICAL',
-            code: 'ZERO_TOTAL_COST',
-            message: '❗ KATASTROFA FINANSOWA: Łączny budżet wyceny wynosi 0 PLN. Sprawdź czy pozycje zostały poprawnie zaimportowane.',
-        });
-        return alerts;
-    }
-
-    // Wyszukiwanie zerowych cen w pozycjach wycenionych
-    for (const section of sections) {
-        for (const item of section.items) {
-            if (item.totalPrice === 0 && item.quantity !== 0) {
-                alerts.push({
-                    severity: 'CRITICAL',
-                    code: 'ZERO_PRICE_ITEM',
-                    message: `❗ LUKA CENOWA: Pozycja **"${item.name}"** (${section.divisionName}) posiada wycenę rynkową wynoszącą 0.00 PLN. Sprawdź i uzupełnij cenę.`,
-                    value: 0,
-                });
-            }
+        if (!tenderId || !taskId) {
+            return NextResponse.json({ error: "Brak tenderId lub taskId" }, { status: 400 });
         }
-    }
 
-    // Analiza wskaźników procentowych branż
-    const divisionTotals: Record<string, number> = {};
-    for (const sec of sections) {
-        divisionTotals[sec.divisionId] = (divisionTotals[sec.divisionId] ?? 0) + sec.totalPrice;
-    }
+        console.log(`[PESAM 3.0 ⚖️] REVISOR_JUDGE wybudzony. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
 
-    function checkPercent(divId: string, norm: { min: number; max: number; label: string }) {
-        const divTotal = divisionTotals[divId] ?? 0;
-        const percent = (divTotal / totalCost) * 100;
-        if (divTotal === 0) {
-            alerts.push({
-                severity: 'WARNING',
-                code: `MISSING_DIVISION_${divId}`,
-                message: `⚠️ POMINIĘTY DZIAŁ: Kosztorys nie zawiera żadnej pozycji dla branży **"${norm.label}"** (ID: ${divId}).`,
-            });
-        } else if (percent < norm.min) {
-            alerts.push({
-                severity: 'WARNING',
-                code: `LOW_PROPORTION_${divId}`,
-                message: `⚠️ ANOMALIA PROPORCJI: Branża **"${norm.label}"** stanowi zaledwie ${percent.toFixed(1)}% kosztorysu (średni wskaźnik rynkowy: ${norm.min}-${norm.max}%).`,
-                value: percent,
-            });
-        } else if (percent > norm.max) {
-            alerts.push({
-                severity: 'WARNING',
-                code: `HIGH_PROPORTION_${divId}`,
-                message: `⚠️ ANOMALIA PROPORCJI: Branża **"${norm.label}"** pochłania aż ${percent.toFixed(1)}% całego budżetu (średni wskaźnik rynkowy: ${norm.min}-${norm.max}%).`,
-                value: percent,
-            });
+        const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+
+        // Idempotentność
+        if (taskData.status !== "PENDING") {
+            console.log(`[PESAM 3.0 ⚖️] Zadanie ${taskId} ma status ${taskData.status}. Pomijam.`);
+            return NextResponse.json({ message: "Task already processed." });
         }
-    }
 
-    checkPercent('D1', BRANCH_NORMS.D1_ZERO_PERCENT);
-    checkPercent('D2', BRANCH_NORMS.D2_ROUGH_PERCENT);
-    checkPercent('D3', BRANCH_NORMS.D3_FINISH_PERCENT);
-    checkPercent('D5', BRANCH_NORMS.D5_SANITARY_PERCENT);
-    checkPercent('D6', BRANCH_NORMS.D6_ELECTRIC_PERCENT);
+        // 1. Oznaczamy zadanie jako IN_PROGRESS
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-    // Walidacja rynkowych stawek roboczogodziny (r-g)
-    for (const section of sections) {
-        for (const item of section.items) {
-            if (item.unit === 'r-g' && item.unitPrice !== null) {
-                if (item.unitPrice < BRANCH_NORMS.LABOR_RATE_MIN) {
-                    alerts.push({
-                        severity: 'CRITICAL',
-                        code: 'LOW_LABOR_RATE',
-                        message: `❗ STAWKA DEFICYTOWA: Roboczogodzina r-g w pozycji **"${item.name}"** wynosi tylko ${item.unitPrice} PLN. Spadek poniżej progu ${BRANCH_NORMS.LABOR_RATE_MIN} PLN grozi odrzuceniem przez PIP lub brakiem rąk do pracy.`,
-                        value: item.unitPrice,
-                    });
-                } else if (item.unitPrice > BRANCH_NORMS.LABOR_RATE_MAX) {
-                    alerts.push({
-                        severity: 'WARNING',
-                        code: 'HIGH_LABOR_RATE',
-                        message: `⚠️ PRZESZACOWANIE ROBOCIZNY: Stawka ${item.unitPrice} PLN/r-g w pozycji **"${item.name}"** wykracza ponad zalecane maksimum rynkowe (${BRANCH_NORMS.LABOR_RATE_MAX} PLN).`,
-                        value: item.unitPrice,
-                    });
+        // 2. Pobieramy wszystkie otwarte konflikty dla tego przetargu
+        const conflictsRef = adminDb.collection(`tenders/${tenderId}/conflicts`);
+        const openConflictsSnap = await conflictsRef.where("status", "==", "OPEN").get();
+
+        if (openConflictsSnap.empty) {
+            console.log(`[PESAM 3.0 ⚖️] Brak otwartych konfliktów do rozstrzygnięcia.`);
+            await taskRef.update({ status: "DONE", result: { summary: "Brak konfliktów." } });
+
+            // Wybudzenie Mózgu
+            const origin = new URL(req.url).origin;
+            fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
+            }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu:", e));
+
+            return NextResponse.json({ message: "Brak konfliktów." });
+        }
+
+        let totalTokensUsedPro = 0;
+        let totalTokensUsedFlash = 0;
+        let resolvedCount = 0;
+        let escalatedCount = 0;
+
+        const batch = adminDb.batch();
+
+        // 3. Rozpatrywanie każdego konfliktu (Sąd Roju)
+        for (const conflictDoc of openConflictsSnap.docs) {
+            const conflictData = conflictDoc.data();
+            console.log(`[PESAM 3.0 ⚖️] Rozpatruję sprawę: ${conflictData.topic}`);
+
+            const partiesInfo = (conflictData.parties || []).map((p: any) =>
+                `- Agent: ${p.agent} | Twierdzi: "${p.claim}" | Źródło: ${p.sourceDoc}`
+            ).join("\n");
+
+            // ====================================================================
+            // STANDARD 2: KROK 1 - BADANIE (Google Search Grounding, BEZ JSON)
+            // ====================================================================
+            const searchPrompt = `
+Jesteś Głównym Sędzią (Rewidentem) w systemie kosztorysowym PESAM 3.0.
+Wykryto konflikt między agentami analizującymi dokumentację przetargową.
+
+Temat sporu: ${conflictData.topic}
+Stanowiska stron:
+${partiesInfo}
+
+Twoje zadanie:
+1. Użyj wyszukiwarki, aby sprawdzić standardy budowlane, Prawo Zamówień Publicznych (PZP) lub hierarchię ważności dokumentów (np. czy projekt wykonawczy jest ważniejszy od PFU/SWZ).
+2. Przeanalizuj argumenty.
+3. Wydaj werdykt w formie opisowej (zwykły tekst).
+`;
+            const searchResult = await ai.models.generateContent({
+                model: MODEL_PRO,
+                contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
+                config: {
+                    tools: [{ googleSearch: {} }] // Standard 2: Narzędzia zawsze wewnątrz config
                 }
+            });
+
+            const searchContext = searchResult.text ?? "";
+            totalTokensUsedPro += searchResult.usageMetadata?.totalTokenCount || 0;
+
+            // ====================================================================
+            // STANDARD 2: KROK 2 - STRUKTURYZACJA WYROKU (JSON Schema, BEZ NARZĘDZI)
+            // ====================================================================
+            const structurePrompt = `
+Na podstawie poniższego wyroku, sformatuj decyzję do obiektu JSON.
+Jeśli nie jesteś w 100% pewien lub sprawa dotyczy krytycznych kosztów, ustaw 'escalateToUser' na true.
+
+Wyrok:
+${searchContext}
+`;
+            const structureResult = await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: [{ role: "user", parts: [{ text: structurePrompt }] }],
+                config: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: JUDGE_SCHEMA as any
+                }
+            });
+
+            const parsedResult = JSON.parse(structureResult.text ?? "{}");
+            totalTokensUsedFlash += structureResult.usageMetadata?.totalTokenCount || 0;
+
+            // 4. Optymalizacja zapisu: Jedna, ostateczna aktualizacja konfliktu w bazie (Standard 1)
+            const finalStatus = parsedResult.escalateToUser ? "ESCALATED_TO_USER" : "RESOLVED";
+            const finalDecision = parsedResult.escalateToUser ? "Wymagana decyzja człowieka" : parsedResult.decision;
+
+            batch.update(conflictDoc.ref, {
+                status: finalStatus,
+                investigatorAssigned: taskId,
+                resolution: {
+                    decision: finalDecision,
+                    justification: parsedResult.justification
+                },
+                updatedAt: new Date()
+            });
+
+            if (parsedResult.escalateToUser) {
+                escalatedCount++;
+                console.log(`[PESAM 3.0 ⚖️] Sprawa ${conflictDoc.id} eskalowana do Kosztorysanta.`);
+            } else {
+                resolvedCount++;
+                console.log(`[PESAM 3.0 ⚖️] Sprawa ${conflictDoc.id} rozstrzygnięta: ${parsedResult.decision}`);
             }
         }
-    }
 
-    return alerts;
-}
-
-// ============================================================
-// ETAP 2: Audyt anomalii inżynierskich (Gemini Pro)
-// ============================================================
-
-async function runAIEngineeringAudit(
-    sections: Section[],
-    totalCost: number,
-    objectType: string
-): Promise<string[]> {
-    console.log(`[Rewident] [Etap 2] Wzywam Agenta Gemini Pro w celu wychwycenia technologicznych błędów inżynieryjnych...`);
-
-    const ai = new GoogleGenAI({
-        vertexai: true,
-        project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
-        location: "global",
-    });
-
-    const summary = sections.map((sec) => ({
-        dział: sec.divisionName,
-        koszt: sec.totalPrice,
-        pozycje: sec.items.map((i) => ({ nazwa: i.name, ilość: i.quantity, jednostka: i.unit, cena: i.totalPrice })),
-    }));
-
-    const prompt = `
-Przeanalizuj poniższy uproszczony kosztorys.
-Inwestycja: Budowa obiektu o przeznaczeniu: "${objectType}".
-Całkowity budżet: ${totalCost.toLocaleString('pl-PL')} PLN.
-
-DANE KOSZTORYSOWE:
-${JSON.stringify(summary, null, 2)}
-
-Oceń wzajemne powiązania elementów pod kątem fizyki budowli i technologii. 
-Czy nie ma rażących dysproporcji (np. doliczone tynki bez ścian, zbrojenie niespójne z objętością betonu)?
-  `.trim();
-
-    try {
-        const result = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            config: {
-                systemInstruction: `Jesteś Głównym Audytorem Budowlanym. Zwróć wyłącznie tablicę JSON zawierającą maksymalnie 4 najważniejsze, konkretne anomalie inżynierskie. Odpowiadaj tylko po polsku. Format: ["anomalia 1", "anomalia 2"]. Jeśli błędów brak, zwróć pustą tablicę [].`,
-                temperature: 0.1,
-                responseMimeType: "application/json",
-            }
+        // 5. Zakończenie zadania i aktualizacja budżetu
+        batch.update(taskRef, {
+            status: "DONE",
+            result: {
+                resolved: resolvedCount,
+                escalated: escalatedCount,
+                summary: `Rozstrzygnięto: ${resolvedCount}, Eskalowano: ${escalatedCount}`
+            },
+            costTokens: totalTokensUsedPro + totalTokensUsedFlash,
+            updatedAt: new Date()
         });
 
-        const raw = (result.text ?? "[]").replace(/```json|```/g, '').trim();
-        const anomalies = JSON.parse(raw) as string[];
-        console.log(`[Rewident] [Etap 2] Analiza AI zakończona. Wykryto anomalii technologicznych: ${anomalies.length}`);
-        return anomalies;
-    } catch (err) {
-        console.error(`[Rewident] [Etap 2] Błąd podczas analizy inżynieryjnej AI:`, err);
-        return [];
-    }
-}
-
-// Przeliczenie ostatecznego wyniku (0-100)
-function calculateFinalScore(
-    deterministicAlerts: DeterministicAlert[],
-    aiAnomalies: string[],
-    coverageResult: CoverageAuditResult
-): number {
-    let score = 100;
-
-    for (const alert of deterministicAlerts) {
-        if (alert.severity === 'CRITICAL') score -= 15;
-        if (alert.severity === 'WARNING') score -= 5;
-    }
-
-    score -= aiAnomalies.length * 8;
-
-    // Uwzględniamy Wskaźnik Pokrycia Zakresu (Waga 30% całego wyniku)
-    const coveragePenalty = Math.round((1 - coverageResult.coverageScore / 100) * 30);
-    score -= coveragePenalty;
-
-    // Kara za niespełnienie twardych warunków SWZ/OPZ
-    score -= coverageResult.hardRequirementViolations.length * 10;
-
-    const final = Math.max(0, Math.min(100, score));
-    console.log(`[Rewident] [Kalkulator] Wynik ostateczny = ${final}/100 | Kara za brak pokrycia: -${coveragePenalty} pkt.`);
-    return final;
-}
-
-// ============================================================
-// GŁÓWNY HANDLER POST
-// ============================================================
-
-export async function POST(req: NextRequest) {
-    const startTime = Date.now();
-    console.log("==================================================");
-    console.log("[Rewident] === ROZPOCZĘTO WIELOBRANŻOWY AUDYT KOSZTORYSU ===");
-    console.log("==================================================");
-
-    try {
-        const { tenderId } = await req.json() as { tenderId: string };
-
-        if (!tenderId) {
-            console.error("[Rewident] ❌ Błąd: Brak parametru tenderId.");
-            return NextResponse.json({ error: 'Brak parametru tenderId' }, { status: 400 });
-        }
-
-        const tenderDoc = await adminDb.doc(`tenders/${tenderId}`).get();
-        const tenderData = tenderDoc.data();
-        if (!tenderData) {
-            console.error(`[Rewident] ❌ Błąd: Przetarg ${tenderId} nie istnieje w bazie.`);
-            return NextResponse.json({ error: 'Przetarg nie istnieje' }, { status: 404 });
-        }
-
-        const sections: Section[] = tenderData.sections ?? [];
-        const totalCost = sections.reduce((s, sec) => s + sec.totalPrice, 0);
-        const objectType = tenderData.objectType ?? 'nieznany';
-
-        // --- ETAP 1: Audyt matematyczny ---
-        const deterministicAlerts = runDeterministicAudit(sections);
-
-        // --- ETAP 2: Audyt technologiczny AI ---
-        const aiAnomalies = await runAIEngineeringAudit(sections, totalCost, objectType);
-
-        // --- ETAP 3: Audyt pokrycia z ScopeManifestu ---
-        const coverageResult = await runCoverageAudit(tenderId, totalCost);
-
-        // --- Kalkulacja finalnego punktu ---
-        const finalScore = calculateFinalScore(deterministicAlerts, aiAnomalies, coverageResult);
-
-        const report = {
-            tenderId,
-            generatedAt: new Date().toISOString(),
-            finalScore,
-            totalCost_PLN: totalCost,
-
-            deterministicAlerts,
-            aiAnomalies,
-
-            // Dane z ScopeManifestu (nowość)
-            coverageScore: coverageResult.coverageScore,
-            coverageAlerts: coverageResult.alerts,
-            coverageStats: {
-                total: coverageResult.totalElements,
-                covered: coverageResult.coveredCount,
-                gapFilled: coverageResult.gapFilledCount,
-                missing: coverageResult.missingCount,
-                waitingUser: coverageResult.waitingUserCount,
-            },
-            hardRequirementViolations: coverageResult.hardRequirementViolations,
-
-            riskBuffer: {
-                percent: coverageResult.totalRiskBuffer_Percent,
-                value_PLN: coverageResult.totalRiskBuffer_PLN,
-                budgetWithRisk_PLN: totalCost + coverageResult.totalRiskBuffer_PLN,
-            },
-
-            chatSummary: buildChatSummary(
-                finalScore,
-                coverageResult,
-                deterministicAlerts,
-                aiAnomalies,
-                totalCost
-            ),
-        };
-
-        // Zapis raportu do Firestore
-        console.log(`[Rewident] Zapisuję finalny raport i status wyceny w rekordzie głównym tenders/${tenderId}...`);
-        await adminDb.doc(`tenders/${tenderId}`).update({
-            rewidentReport: report,
-            finalScore,
-            status: finalScore >= 70 ? 'READY_FOR_REVIEW' : 'NEEDS_CORRECTION',
-            updatedAt: new Date().toISOString(),
+        // Aktualizacja Budget Guard
+        const costUSD = (totalTokensUsedPro / 1000) * 0.002 + (totalTokensUsedFlash / 1000) * 0.000015;
+        const tenderRef = adminDb.collection("tenders").doc(tenderId);
+        batch.update(tenderRef, {
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Rewident] ✅ Audyt zakończony sukcesem w czasie ${duration} sek.`);
-        console.log("==================================================");
+        await batch.commit();
 
-        return NextResponse.json({ success: true, report });
+        // 6. Wybudzenie Mózgu (ReAct Loop)
+        const origin = new URL(req.url).origin;
+        fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
+        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po wyrokach:", e));
+
+        return NextResponse.json({ success: true, resolvedCount, escalatedCount });
 
     } catch (error: any) {
-        console.error('[Rewident] ❌ Krytyczny błąd audytora:', error);
-        return NextResponse.json(
-            { error: 'Błąd audytu Rewidenta', details: String(error) },
-            { status: 500 }
-        );
+        console.error("[PESAM 3.0 ⚖️] ❌ Błąd krytyczny Sędziego:", error);
+
+        if (tenderId && taskId) {
+            try {
+                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                    status: "ERROR",
+                    result: { error: error.message }
+                });
+            } catch (dbError) {
+                console.error("[PESAM 3.0 ⚖️] Nie udało się zapisać statusu ERROR do bazy:", dbError);
+            }
+        }
+
+        return NextResponse.json({ error: error.message }, { status: 500 });
     }
-}
-
-function buildChatSummary(
-    score: number,
-    coverage: CoverageAuditResult,
-    detAlerts: DeterministicAlert[],
-    aiAnomalies: string[],
-    totalCost: number
-): string {
-    const emoji = score >= 82 ? '✅' : score >= 65 ? '⚠️' : '❌';
-    const verdict = score >= 82
-        ? 'Kosztorys został zweryfikowany i jest wysoce spójny technicznie.'
-        : score >= 65
-            ? 'Kosztorys zawiera niepewne dane lub luki. Zalecany audyt ręczny przed złożeniem oferty.'
-            : 'KRYTYCZNE BŁĘDY: Kosztorys jest skrajnie niekompletny lub zawiera rażące luki cenowe. Nie składaj oferty!';
-
-    const criticalCount = [
-        ...detAlerts.filter((a) => a.severity === 'CRITICAL'),
-        ...coverage.alerts.filter((a) => a.severity === 'CRITICAL'),
-    ].length;
-
-    const warningCount = [
-        ...detAlerts.filter((a) => a.severity === 'WARNING'),
-        ...coverage.alerts.filter((a) => a.severity === 'WARNING'),
-    ].length;
-
-    return [
-        `${emoji} **Rewident zakończył audyt. Score: ${score}/100.**`,
-        `💬 *Diagnoza:* ${verdict}`,
-        ``,
-        `📊 **Pokrycie zakresu:** ${coverage.coverageScore}% (Wyliczone: ${coverage.coveredCount} | Normatywne: ${coverage.gapFilledCount} | Do uzupełnienia: ${coverage.missingCount + coverage.waitingUserCount})`,
-        `💰 **Całkowity koszt kosztorysu:** ${totalCost.toLocaleString('pl-PL')} PLN`,
-        coverage.totalRiskBuffer_PLN > 0
-            ? `⚠️ **Rezerwa ryzyka dokumentacyjnego (+${coverage.totalRiskBuffer_Percent}%):** +${coverage.totalRiskBuffer_PLN.toLocaleString('pl-PL')} PLN\n📈 **Zalecana oferta z buforem bezpieczeństwa:** **${(totalCost + coverage.totalRiskBuffer_PLN).toLocaleString('pl-PL')} PLN**`
-            : '',
-        ``,
-        criticalCount > 0 ? `❗ **Wykryto ${criticalCount} błędów krytycznych** (błędy uniemożliwiające złożenie oferty).` : '',
-        warningCount > 0 ? `⚠️ **Wykryto ${warningCount} ostrzeżeń** (potencjalne braki lub anomalie proporcji).` : '',
-        aiAnomalies.length > 0
-            ? `🔍 **Wnioski technologiczne AI (${aiAnomalies.length}):**\n` + aiAnomalies.map((a) => `• ${a}`).join('\n')
-            : '',
-    ]
-        .filter(Boolean)
-        .join('\n');
 }
