@@ -204,12 +204,8 @@ export default function EstimatorPage() {
 
             if (result.tenderId) {
                 setActiveTenderId(result.tenderId);
-                // Wybudzenie Mózgu (Faza 0 - Inicjalizacja)
-                await fetch('/api/kosztorysant/glowny-kosztorysant/inicjalizuj', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tenderId: result.tenderId })
-                });
+                // ZMIANA: Usunięto nadmiarowy fetch do /api/kosztorysant/glowny-kosztorysant/inicjalizuj.
+                // Backendowy "magazynier-zip" wywołuje inicjalizację bezpiecznie i asynchronicznie po swojej stronie.
             }
         } catch (err: any) {
             alert("Błąd przesyłania: " + err.message);
@@ -244,7 +240,39 @@ export default function EstimatorPage() {
             console.error("Błąd komunikacji z Mózgiem:", e);
         }
     };
+    const handleStopTender = async () => {
+        if (!activeTenderId) return;
+        if (!confirm("Czy na pewno chcesz zatrzymać ten przetarg i anulować aktywne zadania agentów?")) return;
+        try {
+            const res = await fetch("/api/kosztorysant/zatrzymaj", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenderId: activeTenderId })
+            });
+            if (res.ok) alert("Przetarg zatrzymany pomyślnie. Status: HALTED.");
+        } catch (e) {
+            alert("Błąd podczas awaryjnego zatrzymywania.");
+        }
+    };
 
+    const handleDeleteTender = async () => {
+        if (!activeTenderId) return;
+        if (!confirm("Czy na pewno chcesz bezpowrotnie usunąć ten przetarg wraz ze wszystkimi plikami, pamięcią i kosztorysem? Tej operacji NIE DA SIĘ COFNĄĆ!")) return;
+        try {
+            const res = await fetch("/api/kosztorysant/usun-przetarg", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenderId: activeTenderId })
+            });
+            if (res.ok) {
+                alert("Przetarg i jego subkolekcje zostały całkowicie usunięte z bazy danych.");
+                setActiveTenderId(null);
+                setSavedTendersList(prev => prev.filter(t => t.id !== activeTenderId));
+            }
+        } catch (e) {
+            alert("Błąd podczas usuwania dokumentacji z bazy.");
+        }
+    };
     const resolveConflict = async (conflictId: string, decision: string, justification: string) => {
         try {
             await fetch(`/api/kosztorysant/scope-manifest/resolve-conflict`, {
@@ -306,6 +334,23 @@ export default function EstimatorPage() {
                             <option key={t.id} value={t.id}>{t.name}</option>
                         ))}
                     </select>
+
+                    {activeTenderId && (
+                        <div className="flex gap-2">
+                            <button
+                                onClick={handleStopTender}
+                                className="bg-red-600 hover:bg-red-700 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow-md transition-all uppercase tracking-wider"
+                            >
+                                🛑 STOP
+                            </button>
+                            <button
+                                onClick={handleDeleteTender}
+                                className="bg-slate-900 hover:bg-red-950/40 hover:text-red-400 border border-slate-800 hover:border-red-900 text-slate-400 font-bold text-xs px-4 py-2.5 rounded-xl shadow-md transition-all"
+                            >
+                                🗑️ USUŃ
+                            </button>
+                        </div>
+                    )}
 
                     <div className="text-right bg-blue-600 text-white px-5 py-2.5 rounded-2xl shadow-md">
                         <span className="text-[9px] font-black text-blue-200 uppercase block">Wartość Kosztorysu</span>

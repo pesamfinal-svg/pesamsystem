@@ -131,11 +131,18 @@ export async function POST(req: Request) {
         // ==========================================
         // 3. ZBIERANIE KONTEKSTU I WYNIKÓW
         // ==========================================
-        const [docsSnap, brainSnap, unprocessedTasksSnap] = await Promise.all([
+        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
-            tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get()
+            tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
+            tenderRef.get() // Dociągamy stan główny przetargu
         ]);
+
+        // ZABEZPIECZENIE: Przerywamy działanie jeśli użytkownik wcisnął guzik STOP
+        if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
+            console.log(`[MÓZG 🧠] Przetarg ${tenderId} ma status HALTED. Natychmiast przerywam pętlę.`);
+            return NextResponse.json({ message: "Brain is stopped by user." });
+        }
 
         const documents = docsSnap.docs.map(d => ({ id: d.id, tags: d.data().tags, summary: d.data().summary }));
         const currentBrainState = brainSnap.exists ? brainSnap.data() : { knownFacts: {}, phase: "PLANNING" };
