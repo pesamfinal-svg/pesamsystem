@@ -78,11 +78,16 @@ export async function POST(req: Request) {
         if (agentRegistrySnap.empty) {
             console.log("[MÓZG 🧠] Rejestr agentów jest pusty. Inicjalizuję domyślny Seed...");
             const defaultAgents = [
-                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Analizuje rysunki budowlane w formacie PDF/obraz. Wymaga przekazania plików w 'inputDocIds'. Zwraca wymiary, materiały i zliczone ilości." },
-                { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Analizuje tekst umów i SWZ. Wymaga przekazania plików tekstowych/PDF w 'inputDocIds'. Zwraca kary, terminy, gwarancje i wymagania formalne." },
-                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Matematyk. Wykonuje zaawansowane obliczenia w Pythonie. NIE CZYTA PLIKÓW. Wymaga podania konkretnych danych liczbowych i wzorów w 'inputFactsKeys'. Zwraca gotowe wyniki obliczeń." },
-                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Wycenia rynkowo pozycje. Wymaga przekazania w 'instruction' listy materiałów lub robót do wyceny. Używa wyszukiwarki do znalezienia aktualnych cen netto." },
-                { name: "UNIVERSAL_AGENT", endpoint: "/api/kosztorysant/agent-uniwersalny", capabilities: ["general_reasoning"], description: "Uniwersalny analityk. Używaj go do zadań logicznych, dedukcji lub gdy żaden inny specjalista nie pasuje. Może przyjmować zarówno pliki, jak i fakty." }
+                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Analizuje rysunki budowlane w formacie PDF/obraz. Wymaga plików w 'inputDocIds'. Zwraca wymiary i ilości." },
+                { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Analizuje umowy i SWZ. Wymaga plików tekstowych w 'inputDocIds'. Zwraca kary, terminy, wadium, gwarancje." },
+                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Matematyk. Liczy pola i objętości w Pythonie. Wymaga podania wymiarów w 'inputFactsKeys'." },
+                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Wycenia rynkowo gotowe pozycje kosztorysowe. Szuka cen netto w polskim internecie." },
+                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Inżynier budowy. Projektuje kompletną technologię budowy (stan zerowy, surowy, wykończenie) na podstawie faktów." },
+                { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Audytor technologiczny. Weryfikuje wymogi prawne (WT 2021, Sanepid, PPOŻ) dla wygenerowanych już pozycji." },
+                { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Łatacz / Wskaźnikowiec. Szacuje koszty parametrycznie/wskaźnikowo dla branż, dla których brakuje rysunków." },
+                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Przedmiarowiec. Analizuje tabele ze ślepych kosztorysów i wyciąga gotowe pozycje z ilościami." },
+                { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Specjalista branżowy. Analizuje nietypowe, wąskie dokumentacje techniczne (np. baseny, gazy medyczne)." },
+                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Sędzia Roju. Rozstrzyga merytoryczne konflikty prawne i inżynieryjne w oparciu o przepisy i hierarchię dokumentów." }
             ];
 
             const seedBatch = adminDb.batch();
