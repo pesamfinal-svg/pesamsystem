@@ -1,265 +1,316 @@
-// ============================================================
-// PESAM 3.0 – Główny Orkiestrator (Mózg / ReAct Loop)
-// POST /api/kosztorysant/glowny-kosztorysant
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
-// Standard 3: Inicjalizacja klienta Google GenAI (Vertex AI, global)
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
     location: "global"
 });
 
-// Mózg używa modelu PRO do zaawansowanego wnioskowania i planowania
 const MODEL_PRO = "gemini-2.5-pro";
 
-// Rejestr Agentów (Książka telefoniczna Mózgu) - mapowanie na endpointy
-const AGENT_ENDPOINTS: Record<string, string> = {
-    "LEGAL_EXPERT": "/api/kosztorysant/czytacz-dokumentow",
-    "VISION_ARCHITECTURE": "/api/kosztorysant/agent-wbs-architekt",
-    "VISION_CONSTRUCT": "/api/kosztorysant/agent-wbs-architekt",
-    "VISION_MEP": "/api/kosztorysant/agent-wbs-architekt", // Tymczasowo ten sam endpoint dla instalacji
-    "BOQ_PARSER": "/api/kosztorysant/agent-ilosciowiec",
-    "GAP_FILLER": "/api/kosztorysant/agent-gap-filler",
-    "UNIVERSAL_SPECIALIST": "/api/kosztorysant/agent-kameleon",
-    "PYTHON_CALC": "/api/kosztorysant/agent-python-calc",
-    "BROKER": "/api/kosztorysant/broker-cenowy",
-    "SILENT_AUDITOR": "/api/kosztorysant/agent-cichy-rewident",
-    "REVISOR_JUDGE": "/api/kosztorysant/agent-rewident",
-    "BUDOWLANIEC": "/api/kosztorysant/agent-budowlaniec" // Dodany Agent Budowlany
-};
-
-// Schemat odpowiedzi Mózgu (Standard 1: Ścisła spójność i obsługa tempId)
+// Schemat odpowiedzi Mózgu
 const BRAIN_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        reasoning: {
-            type: Type.STRING,
-            description: "Logika decyzyjna: dlaczego podejmujesz takie kroki w tej iteracji?"
+        updateKnownFacts: {
+            type: Type.OBJECT,
+            description: "Słownik (klucz-wartość) nowych faktów do dopisania do pamięci Mózgu na podstawie przeanalizowanych wyników."
         },
-        phase: {
-            type: Type.STRING,
-            description: "Nowa faza: PLANNING, WORKING, WAITING_INPUT, CONSENSUS_BUILDING, DONE"
+        newEstimateItems: {
+            type: Type.ARRAY,
+            description: "Lista konkretnych pozycji do dodania do Żywego Kosztorysu.",
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    sectionName: { type: Type.STRING, description: "Nazwa sekcji, np. 'Roboty Ziemne', 'Wymogi Prawne'" },
+                    pozycja: { type: Type.STRING },
+                    opis: { type: Type.STRING },
+                    ilosc: { type: Type.NUMBER },
+                    jednostka: { type: Type.STRING },
+                    KNR_ref: { type: Type.STRING }
+                },
+                required: ["sectionName", "pozycja", "ilosc", "jednostka"]
+            }
         },
-        currentGoal: {
-            type: Type.STRING,
-            description: "Krótki opis tego, co system ma teraz osiągnąć."
-        },
+        reasoning: { type: Type.STRING, description: "Logika decyzyjna." },
+        phase: { type: Type.STRING, description: "PLANNING, WORKING, DONE" },
+        currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    tempId: {
-                        type: Type.STRING,
-                        description: "Unikalny identyfikator tymczasowy dla tego zadania, np. 'temp_legal', 'temp_vision'"
-                    },
-                    agentType: {
-                        type: Type.STRING,
-                        description: "Klucz z Rejestru Agentów, np. LEGAL_EXPERT, VISION_ARCHITECTURE"
-                    },
-                    description: {
-                        type: Type.STRING,
-                        description: "Szczegółowe polecenie dla agenta"
-                    },
-                    dependsOn: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                        description: "Tablica ID istniejących zadań z sekcji OBECNE ZADANIA lub 'tempId' zadań tworzonych w tym samym obiekcie JSON."
-                    },
-                    inputDocIds: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                        description: "Tablica ID dokumentów, które agent ma przeanalizować"
-                    }
+                    agentType: { type: Type.STRING, description: "Wybierz z listy dostępnych agentów." },
+                    instruction: { type: Type.STRING, description: "Precyzyjna instrukcja dla agenta oraz struktura JSON jakiej od niego oczekujesz." },
+                    inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Klucze z knownFacts, które chcesz mu przekazać." },
+                    modelOverride: { type: Type.STRING, description: "gemini-2.5-flash lub gemini-2.5-pro" }
                 },
-                required: ["tempId", "agentType", "description", "dependsOn", "inputDocIds"]
+                required: ["agentType", "instruction", "inputDocIds"]
             }
         }
     },
-    required: ["reasoning", "phase", "currentGoal", "newTasks"]
+    required: ["updateKnownFacts", "newEstimateItems", "reasoning", "phase", "currentGoal", "newTasks"]
 };
 
 export async function POST(req: Request) {
     try {
-        const body = await req.json();
-        const { tenderId, trigger } = body;
-
+        const { tenderId, trigger } = await req.json();
         if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
-        console.log(`[PESAM 3.0 🧠] Wybudzenie Mózgu. Przetarg: ${tenderId} | Trigger: ${trigger}`);
+        console.log(`[MÓZG 🧠] Przebudzenie. Przetarg: ${tenderId} | Trigger: ${trigger}`);
 
-        const tenderRef = adminDb.collection("tenders").doc(tenderId);
+        const tasksRef = adminDb.collection(`tenders/${tenderId}/tasks`);
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
+        const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
-        // 1. Pobranie stanu przetargu i sprawdzenie Bezpiecznika (Budget Guard)
-        const tenderDoc = await tenderRef.get();
-        if (!tenderDoc.exists) throw new Error("Przetarg nie istnieje.");
+        // ==========================================
+        // 1. POBIERANIE REJESTRU AGENTÓW (Z SEEDINGIEM)
+        // ==========================================
+        let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
 
-        const tenderData = tenderDoc.data()!;
-        const budgetGuard = tenderData.budgetGuard || { currentCostUSD: 0, maxBudgetUSD: 5.0, limitReached: false, iterationCount: 0, maxIterations: 50 };
+        if (agentRegistrySnap.empty) {
+            console.log("[MÓZG 🧠] Rejestr agentów jest pusty. Inicjalizuję domyślny Seed...");
+            const defaultAgents = [
+                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Analizuje rysunki budowlane w formacie PDF/obraz. Wymaga przekazania plików w 'inputDocIds'. Zwraca wymiary, materiały i zliczone ilości." },
+                { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Analizuje tekst umów i SWZ. Wymaga przekazania plików tekstowych/PDF w 'inputDocIds'. Zwraca kary, terminy, gwarancje i wymagania formalne." },
+                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Matematyk. Wykonuje zaawansowane obliczenia w Pythonie. NIE CZYTA PLIKÓW. Wymaga podania konkretnych danych liczbowych i wzorów w 'inputFactsKeys'. Zwraca gotowe wyniki obliczeń." },
+                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Wycenia rynkowo pozycje. Wymaga przekazania w 'instruction' listy materiałów lub robót do wyceny. Używa wyszukiwarki do znalezienia aktualnych cen netto." },
+                { name: "UNIVERSAL_AGENT", endpoint: "/api/kosztorysant/agent-uniwersalny", capabilities: ["general_reasoning"], description: "Uniwersalny analityk. Używaj go do zadań logicznych, dedukcji lub gdy żaden inny specjalista nie pasuje. Może przyjmować zarówno pliki, jak i fakty." }
+            ];
 
-        if (budgetGuard.limitReached || budgetGuard.iterationCount >= budgetGuard.maxIterations) {
-            console.warn(`[PESAM 3.0 🧠] 🛑 Przekroczono budżet lub limit iteracji! Zatrzymuję Mózg.`);
-            await tenderRef.update({ status: "HALTED" });
-            return NextResponse.json({ message: "Halted by Budget Guard" });
+            const seedBatch = adminDb.batch();
+            for (const agent of defaultAgents) {
+                seedBatch.set(adminDb.collection("agentRegistry").doc(agent.name), agent);
+            }
+            await seedBatch.commit();
+            agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         }
 
-        // 2. Zbieranie Kontekstu (Obserwacja)
-        const [docsSnap, tasksSnap, brainSnap] = await Promise.all([
+        const availableAgents = agentRegistrySnap.docs.map(d => d.data());
+
+        // ==========================================
+        // 2. BLOKADA WYŚCIGU Z ZABEZPIECZENIEM (TIMEOUT)
+        // ==========================================
+        const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
+
+        const now = Date.now();
+        const TIMEOUT_MS = 10 * 60 * 1000; // 10 minut
+        const lockBatch = adminDb.batch();
+        let trulyActiveCount = 0;
+
+        activeTasksSnap.docs.forEach(doc => {
+            const data = doc.data();
+            const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
+
+            if (now - lastActive >= TIMEOUT_MS) {
+                console.warn(`[MÓZG 🧠] Zadanie ${doc.id} przekroczyło timeout! Oznaczam jako ERROR.`);
+                lockBatch.update(doc.ref, {
+                    status: "ERROR",
+                    rawResult: { error: "TIMEOUT_EXCEEDED", message: "Agent nie odpowiedział w czasie 10 minut." },
+                    processedByBrain: false,
+                    updatedAt: new Date()
+                });
+            } else {
+                trulyActiveCount++;
+            }
+        });
+
+        if (trulyActiveCount > 0) {
+            await lockBatch.commit();
+            console.log(`[MÓZG 🧠] Ignoruję trigger. Inni agenci wciąż pracują (${trulyActiveCount} zadań). Idę spać.`);
+            return NextResponse.json({ message: "Waiting for parallel tasks to finish." });
+        }
+
+        // ==========================================
+        // 3. ZBIERANIE KONTEKSTU I WYNIKÓW
+        // ==========================================
+        const [docsSnap, brainSnap, unprocessedTasksSnap] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
-            adminDb.collection(`tenders/${tenderId}/tasks`).get(),
-            brainRef.get()
+            brainRef.get(),
+            tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get()
         ]);
 
-        const documents = docsSnap.docs.map(d => ({ id: d.id, fileName: d.data().fileName, tags: d.data().tags, summary: d.data().summary }));
-        const tasks = tasksSnap.docs.map(d => ({ id: d.id, agentType: d.data().agentType, status: d.data().status, description: d.data().description }));
-        const brainState = brainSnap.exists ? brainSnap.data() : { phase: "PLANNING", knownFacts: {} };
+        const documents = docsSnap.docs.map(d => ({ id: d.id, tags: d.data().tags, summary: d.data().summary }));
+        const currentBrainState = brainSnap.exists ? brainSnap.data() : { knownFacts: {}, phase: "PLANNING" };
 
-        // 3. Budowa Promptu dla Mózgu (Zapewnia pełną autonomię decyzyjną ReAct)
+        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
+            taskId: d.id,
+            agentType: d.data().agentType,
+            status: d.data().status,
+            rawResult: d.data().rawResult
+        }));
+
+        // ==========================================
+        // 4. RE-ACT LOOP (WYWOŁANIE LLM MÓZGU)
+        // ==========================================
         const systemPrompt = `
-Jesteś Głównym Orkiestratorem (Mózgiem) systemu kosztorysowego PESAM 3.0.
-Działasz w pętli ReAct (Reason -> Act -> Observe). Twoim jedynym celem jest doprowadzenie do stworzenia kompletnego, wycenionego kosztorysu (Live Estimate) dla danego przetargu.
-Służą do tego wyspecjalizowani agenci w bazie, którym delegujesz zadania. Samodzielnie analizujesz sytuację, posiadane dokumenty, ich tagi oraz braki i decydujesz o kolejnych krokach.
+Jesteś Głównym Mózgiem systemu kosztorysowego. Twoim celem jest zbudowanie kompletnego kosztorysu.
+Posiadasz bazę faktów (knownFacts) oraz listę dokumentów. 
+Właśnie zakończyły się zadania agentów. Twoim zadaniem jest je 'przetrawić' i zaplanować kolejne kroki.
 
-TWÓJ DYNAMICZNY REJESTR AGENTÓW (Możesz przydzielać im zadania w polu agentType):
-- LEGAL_EXPERT: Analizuje umowy, SWZ, PFU pod kątem wymagań formalnych, kar, terminów, certyfikatów i wadium.
-- VISION_ARCHITECTURE: Analizuje rysunki architektoniczne (wyciąga surowe wymiary ścian, okien, posadzek).
-- VISION_CONSTRUCT: Analizuje rysunki konstrukcyjne (wyciąga klasy betonu, stal, fundamenty).
-- VISION_MEP: Analizuje rysunki i schematy instalacji MEP (sanitarne, elektryczne).
-- BOQ_PARSER: Parsuje ślepe kosztorysy/przedmiary w Excelu/tabelach, automatycznie wyciągając gotowe ilości.
-- GAP_FILLER: Szacuje koszty i ilości wskaźnikowo/parametrycznie dla brakujących branż lub gdy brak jest jakichkolwiek rysunków technicznych.
-- BUDOWLANIEC: Inżynier budowy. Projektuje od podstaw proces technologiczny (prace ziemne, stan zerowy, surowy, instalacje, wykończenie) dopasowany do typologii obiektu. Może dopytywać o brakujące dane i debatować z Silent Auditor [1].
-- SILENT_AUDITOR: Weryfikuje kosztorys pod kątem WT 2021, Sanepidu i PPOŻ, dopisując brakujące wymagane elementy technologiczne.
-- BROKER: Wycenia rynkowo pozycje (szuka cen netto w sieci) - uruchamiaj go dopiero, gdy ilości dla danej sekcji są już znane (QUANTITY_READY).
-- REVISOR_JUDGE: Rozstrzyga spory i konflikty technologiczne między agentami.
-- UNIVERSAL_SPECIALIST: Kameleon, któremu możesz w polu 'description' zadać unikalną rolę (np. "Przeanalizuj technologię basenową...").
-- PYTHON_CALC: Matematyk. Pisze skrypty Python do bezbłędnych obliczeń geometrycznych i objętościowych. Wywołuj go jako pod-zadanie (sub-task) dla skomplikowanych obliczeń.
+DOSTĘPNI AGENCI (Wybieraj 'agentType' TYLKO z poniższej listy!):
+${JSON.stringify(availableAgents.map(a => ({ name: a.name, description: a.description, capabilities: a.capabilities })), null, 2)}
 
-STAN OBECNY PRZETARGU:
-Faza: ${brainState?.phase || "PLANNING"}
-Wyzwalacz ostatniej akcji: ${trigger}
+TWOJA BAZA FAKTÓW (knownFacts):
+${JSON.stringify(currentBrainState?.knownFacts || {}, null, 2)}
 
-DOKUMENTY W BAZIE (Użyj ich identyfikatorów 'id' w polu inputDocIds):
+DOSTĘPNE DOKUMENTY:
 ${JSON.stringify(documents, null, 2)}
 
-OBECNE ZADANIA W BAZIE (Użyj rzeczywistych ID dla zależności 'dependsOn' jeśli zadanie już istnieje):
-${JSON.stringify(tasks, null, 2)}
+ŚWIEŻE WYNIKI OD AGENTÓW (rawResult):
+${JSON.stringify(newlyFinishedResults, null, 2)}
 
-ZASADY PLANOWANIA (RE-ACT WORKFLOW):
-1. Twój cel to doprowadzenie kosztorysu do statusu wycenionego (DONE).
-2. Samodzielnie analizuj, jakie pliki masz w bazie. Jeśli brakuje rysunków, używaj kombinacji BUDOWLANIEC i GAP_FILLER, aby zbudować szacunkowy kosztorys parametryczny i technologiczny na podstawie znanych faktów/SWZ, a następnie wyceń go BROKEREM [1].
-3. Nigdy nie twórz zadań dublujących się z istniejącymi zadaniami w bazie (sprawdzaj listę OBECNE ZADANIA).
-4. Planuj zależności logiczne za pomocą 'dependsOn' (używaj 'tempId' dla nowych zadań tworzonych w tym samym wywołaniu lub rzeczywistych ID dla już istniejących).
-5. Samodzielnie zarządzaj stanem 'phase'. Gdy czekasz na zakończenie zadań agentów, ustaw phase na WORKING. Gdy wszystko jest gotowe, ustaw phase na DONE.
+ZASADY:
+1. Przeanalizuj 'ŚWIEŻE WYNIKI'. Jeśli agent odczytał z umowy termin realizacji, kary, czy powierzchnię z rysunku - dodaj je do "updateKnownFacts" (klucz-wartość).
+2. Jeśli agent wyciągnął konkretne przedmiary lub zaprojektował technologię - przekaż je jako pozycje do "newEstimateItems". Zgrupuj je logicznie nadając im "sectionName".
+3. Jeśli czegoś brakuje, zaplanuj "newTasks" dla agentów. Narzucaj im dokładną formę w polu 'instruction' (np. 'Zwróć wynik jako: { powierzchnia: 120 }').
+4. Gdy nie ma już nic do roboty i masz wszystkie ilości, stwórz zadanie dla agenta BROKER, aby wycenił wszystko z sieci, a phase ustaw na WORKING. Gdy Broker skończy, phase na DONE.
 `;
 
-        // 4. Wywołanie modelu Gemini Pro
         const result = await ai.models.generateContent({
             model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: systemPrompt }] }],
-            config: {
-                temperature: 0.2,
-                responseMimeType: "application/json",
-                responseSchema: BRAIN_SCHEMA as any
-            }
+            contents: systemPrompt,
+            config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: BRAIN_SCHEMA as any }
         });
 
-        const responseText = result.text ?? "{}";
-        const parsedResult = JSON.parse(responseText);
-
-        console.log(`[PESAM 3.0 🧠] Decyzja: ${parsedResult.reasoning}`);
-
-        // 5. Zapis nowych zadań i kompilacja zależności (Standard 1)
-        const newTasksCreated: any[] = [];
+        const parsedResult = JSON.parse(result.text ?? "{}");
         const batch = adminDb.batch();
 
-        // Mapa do translacji tempId -> realDocId
-        const tempIdToDocIdMap = new Map<string, string>();
-        const taskRefs = (parsedResult.newTasks || []).map(() => adminDb.collection(`tenders/${tenderId}/tasks`).doc());
+        console.log(`[MÓZG 🧠] Decyzja: ${parsedResult.reasoning}`);
 
-        // Krok A: Generowanie rzeczywistych identyfikatorów
-        (parsedResult.newTasks || []).forEach((task: any, index: number) => {
-            if (task.tempId) {
-                tempIdToDocIdMap.set(task.tempId, taskRefs[index].id);
-            }
+        // ==========================================
+        // 5. APLIKACJA DECYZJI DO BAZY DANYCH
+        // ==========================================
+
+        unprocessedTasksSnap.docs.forEach(doc => {
+            batch.update(doc.ref, { processedByBrain: true });
         });
 
-        // Krok B: Przypisywanie i translacja zależności
-        for (let i = 0; i < (parsedResult.newTasks || []).length; i++) {
-            const task = parsedResult.newTasks[i];
-            const taskRef = taskRefs[i];
+        const mergedFacts = {
+            ...(currentBrainState?.knownFacts || {}),
+            ...(parsedResult.updateKnownFacts || {})
+        };
 
-            // Tłumaczenie zależności tempId na rzeczywiste ID
-            const resolvedDependsOn = (task.dependsOn || []).map((dep: string) => {
-                return tempIdToDocIdMap.get(dep) || dep;
+        batch.update(brainRef, {
+            phase: parsedResult.phase,
+            currentGoal: parsedResult.currentGoal,
+            knownFacts: mergedFacts,
+            reasoningLog: FieldValue.arrayUnion(parsedResult.reasoning)
+        });
+
+        if (parsedResult.newEstimateItems && parsedResult.newEstimateItems.length > 0) {
+            console.log(`[MÓZG 🧠] Przygotowuję zapis ${parsedResult.newEstimateItems.length} nowych pozycji do kosztorysu...`);
+            const sectionsMap = new Map<string, any[]>();
+            parsedResult.newEstimateItems.forEach((item: any) => {
+                const sec = item.sectionName || "Inne";
+                if (!sectionsMap.has(sec)) sectionsMap.set(sec, []);
+                sectionsMap.get(sec)!.push(item);
+            });
+
+            for (const [sectionName, items] of Array.from(sectionsMap.entries())) {
+                const safeName = sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
+                const sectionId = `sec_${safeName}`;
+                const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+
+                // 1. Mapujemy pozycje i nadajemy im ID na poziomie Mózgu
+                const formattedItems = items.map((item: any) => ({
+                    id: randomUUID(),
+                    pozycja: item.pozycja,
+                    opis: item.opis || "",
+                    ilosc: Number(item.ilosc),
+                    jednostka: item.jednostka || "szt",
+                    cenaJed: 0,
+                    KNR_ref: item.KNR_ref || "Z analizy AI",
+                    confidence: "HIGH",
+                    sourceTrack: "Mózg -> Synteza wyników"
+                }));
+
+                console.log(`[MÓZG 🧠] Zapisuję sekcję: ${sectionName} (SectionId: ${sectionId}) z tablicą ${formattedItems.length} pozycji.`);
+
+                // 2. Zapis do dokumentu nadrzędnego (dla błyskawicznego renderingu na frontendzie)
+                batch.set(sectionRef, {
+                    section: sectionName,
+                    status: "QUANTITY_READY",
+                    items: formattedItems, // Ta linijka ratuje Twój frontend!
+                    updatedAt: new Date()
+                }, { merge: true });
+
+                // 3. Zapis do podkolekcji (dla zachowania porządku w strukturze danych)
+                formattedItems.forEach((fItem) => {
+                    batch.set(sectionRef.collection("items").doc(fItem.id), fItem);
+                });
+            }
+        }
+
+        const newTasksCreated: any[] = [];
+        (parsedResult.newTasks || []).forEach((task: any) => {
+            const taskRef = tasksRef.doc();
+
+            const inputFacts: any = {};
+            (task.inputFactsKeys || []).forEach((key: string) => {
+                if (mergedFacts[key]) inputFacts[key] = mergedFacts[key];
             });
 
             const taskData = {
                 taskId: taskRef.id,
                 agentType: task.agentType,
-                description: task.description,
-                dependsOn: resolvedDependsOn,
+                instruction: task.instruction,
                 inputDocIds: task.inputDocIds || [],
+                inputFacts: inputFacts,
+                modelOverride: task.modelOverride || "gemini-2.5-flash",
                 status: "PENDING",
-                priority: 5,
-                createdAt: new Date()
+                processedByBrain: false,
+                createdAt: new Date(),
+                updatedAt: new Date()
             };
             batch.set(taskRef, taskData);
-            newTasksCreated.push({ id: taskRef.id, ...taskData });
-        }
-
-        // Aktualizacja stanu Mózgu
-        batch.update(brainRef, {
-            phase: parsedResult.phase,
-            currentGoal: parsedResult.currentGoal,
-            reasoningLog: FieldValue.arrayUnion(parsedResult.reasoning)
+            newTasksCreated.push(taskData);
         });
 
-        // Aktualizacja Budget Guard (Pro kosztuje ok $0.002 / 1k tokenów)
-        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
-        const costUSD = (tokensUsed / 1000) * 0.002;
-
         batch.update(tenderRef, {
-            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD),
-            "budgetGuard.iterationCount": FieldValue.increment(1),
+            "budgetGuard.currentCostUSD": FieldValue.increment((result.usageMetadata?.totalTokenCount || 0) * 0.000002),
             status: parsedResult.phase === "DONE" ? "DONE" : "ORCHESTRATING"
         });
 
         await batch.commit();
 
-        // 6. Asynchroniczne i bezpieczne wybudzenie Agentów dla nowych zadań
+        // ==========================================
+        // 6. DYNAMICZNY ROUTING (WYBUDZENIE AGENTÓW)
+        // ==========================================
         const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+
         for (const task of newTasksCreated) {
-            const endpoint = AGENT_ENDPOINTS[task.agentType];
-            if (endpoint) {
-                console.log(`[PESAM 3.0 🧠] ⚡ Wybudzam Agenta lokalnie przez loopback: ${task.agentType} -> ${localOrigin}${endpoint}`);
-                fetch(`${localOrigin}${endpoint}`, {
+            const agentDef = availableAgents.find(a => a.name === task.agentType);
+
+            if (agentDef && agentDef.endpoint) {
+                console.log(`[MÓZG 🧠] ⚡ Budzę Agenta: ${task.agentType} -> ${agentDef.endpoint}`);
+                fetch(`${localOrigin}${agentDef.endpoint}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ tenderId, taskId: task.id })
-                }).catch(e => console.error(`[PESAM 3.0] Błąd wybudzania ${task.agentType}:`, e));
+                    body: JSON.stringify({ tenderId, taskId: task.taskId })
+                }).catch(e => console.error(`[MÓZG 🧠] Błąd wywołania ${task.agentType}:`, e));
             } else {
-                console.warn(`[PESAM 3.0 🧠] ⚠️ Brak zarejestrowanego endpointu dla agenta: ${task.agentType}`);
+                console.warn(`[MÓZG 🧠] ⚠️ UWAGA: Nieznany agent: ${task.agentType}`);
+                adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
+                    status: "ERROR",
+                    rawResult: { error: `Agent ${task.agentType} nie istnieje w rejestrze.` },
+                    processedByBrain: false,
+                    updatedAt: new Date()
+                }).catch(() => { });
             }
         }
 
-        return NextResponse.json({
-            success: true,
-            phase: parsedResult.phase,
-            tasksCreated: newTasksCreated.length,
-            costUSD
-        });
+        return NextResponse.json({ success: true, newTasks: newTasksCreated.length });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 🧠] ❌ Błąd krytyczny Mózgu:", error);
+        console.error("[MÓZG 🧠] ❌ Błąd krytyczny:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }

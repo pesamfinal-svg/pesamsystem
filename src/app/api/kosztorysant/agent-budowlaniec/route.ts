@@ -1,152 +1,164 @@
-// ============================================================
-// PESAM 3.0 – Agent Specjalista: BUDOWLANIEC (Inżynier Budowy)
-// POST /api/kosztorysant/agent-budowlaniec
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
-import { randomUUID } from "crypto"; // Natywna biblioteka Node.js (Gwarancja budowania bez błędów)
 
 export const dynamic = "force-dynamic";
 
-// Inicjalizacja klienta SDK w bezpiecznej globalnej lokalizacji Vertex AI
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
     location: "global"
 });
 
-const MODEL_PRO = "gemini-2.5-pro"; // Wymagany do zaawansowanego projektowania i debaty
-const MODEL_FLASH = "gemini-2.5-flash"; // Do szybkiej strukturyzacji końcowej
+const MODEL_PRO = "gemini-2.5-pro"; // Zaawansowana logika debaty wymaga modelu Pro
+const MODEL_FLASH = "gemini-2.5-flash"; // Do końcowej syntezy na JSON
 
-// Schemat strukturyzacji wyjściowej (Zgodny ze Standardem 1)
+// Schemat ustrukturyzowanego wyjścia z debaty inżynierskiej
 const BUDOWLANIEC_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        missingDataQuestions: {
+        missingQuestions: {
             type: Type.ARRAY,
-            description: "Krytyczne pytania inżynieryjne o brakujące parametry (jeśli występują).",
+            description: "Krytyczne pytania inżynieryjne o brakujące parametry gruntowe lub projektowe, które uniemożliwiają wycenę. Zostaw puste jeśli nie ma krytycznych braków.",
             items: { type: Type.STRING }
         },
         items: {
             type: Type.ARRAY,
-            description: "Wygenerowane pozycje robót budowlanych podzielone na etapy (ziemne, zero, surowy, wykończenie).",
+            description: "Wygenerowane pozycje robót budowlanych podzielone na etapy technologiczne.",
             items: {
                 type: Type.OBJECT,
                 properties: {
                     pozycja: { type: Type.STRING, description: "Nazwa roboty, np. 'Wykopy pod ławy fundamentowe'" },
                     opis: { type: Type.STRING, description: "Szczegółowy opis techniczny i technologiczny roboty" },
                     ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
+                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. m3, m2, szt" },
                     KNR_ref: { type: Type.STRING, description: "Sugerowana podstawa KNR, np. 'KNR 2-01'" }
                 },
-                required: ["pozycja", "opis", "ilosc", "KNR_ref"]
+                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
             }
         },
         summary: { type: Type.STRING, description: "Krótkie podsumowanie założeń inżynieryjnych." }
     },
-    required: ["missingDataQuestions", "items", "summary"]
+    required: ["missingQuestions", "items", "summary"]
 };
 
 export async function POST(req: Request) {
     let tenderId: string | undefined;
     let taskId: string | undefined;
+    let isSuccess = false;
 
     try {
         const body = await req.json();
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        console.log(`[BUDOWLANIEC 🧱] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        console.log(`[PESAM 3.0 🧱] BUDOWLANIEC wybudzony dla przetargu: ${tenderId}`);
+        if (!tenderId || !taskId) {
+            console.error("[BUDOWLANIEC 🧱] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
+            return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        if (!taskDoc.exists) {
+            console.error(`[BUDOWLANIEC 🧱] Zadanie o ID ${taskId} nie istnieje w bazie.`);
+            throw new Error("Zadanie nie istnieje.");
+        }
 
         const taskData = taskDoc.data()!;
+        console.log(`[BUDOWLANIEC 🧱] Wczytano dane zadania. Status w bazie: ${taskData.status}`);
 
-        // Idempotentność: Pomijamy jeśli już przetworzone
         if (taskData.status !== "PENDING") {
-            console.log(`[PESAM 3.0 🧱] Zadanie ${taskId} ma status ${taskData.status}. Pomijam.`);
+            console.log(`[BUDOWLANIEC 🧱] Zadanie ma status ${taskData.status}. Przerywam.`);
             return NextResponse.json({ message: "Zadanie już wykonane." });
         }
 
+        // Zmiana statusu na IN_PROGRESS
+        console.log("[BUDOWLANIEC 🧱] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // 1. Zbieranie faktów i typologii obiektu
-        const tenderDoc = await adminDb.collection("tenders").doc(tenderId).get();
-        const objectType = tenderDoc.data()?.objectType || "Obiekt budowlany";
-
-        const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
-        const brainDoc = await brainRef.get();
-        const knownFacts = brainDoc.exists ? brainDoc.data()?.knownFacts || {} : {};
-
+        const knownFacts = taskData.inputFacts || {};
         let totalTokensUsed = 0;
 
         // ====================================================================
-        // DEBATA - KROK 1: Projekt Technologii Budowy (Budowlaniec + Google Search)
+        // DEBATA - KROK 1: Projekt Technologii Budowy (Model Pro + Google Search)
         // ====================================================================
+        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 1: Projektowanie technologii budowy z Google Search Grounding...");
         const designPrompt = `
-Jesteś Głównym Inżynierem Budowy. Zaprojektuj technologię budowy obiektu typu: ${objectType}.
-Znane fakty o projekcie: ${JSON.stringify(knownFacts)}
+Jesteś Głównym Inżynierem Budowy. Zaprojektuj technologię budowy i procesy wykonawcze dla projektu.
+Znane fakty o obiekcie przekazane przez Mózg: ${JSON.stringify(knownFacts)}
 
-Uwzględnij pełen cykl budowlany:
-1. Prace ziemne i stan zerowy (geodezja, humus, ławy, instalacje podposadzkowe, chudy beton).
-2. Stan surowy (ściany nośne, stropy, więźba dachowa, pokrycie dachu, stolarka okienna i drzwiowa).
-3. Instalacje i wykończenie.
+Twoje polecenie od Mózgu:
+${taskData.instruction}
 
-Jeśli brakuje Ci krytycznych danych do precyzyjnego zaprojektowania (np. kategoria gruntu, dokładna powierzchnia), wymień te pytania na początku swojego raportu jako 'BRAKI:'.
-Zwróć raport w formie czytelnego tekstu.
+Zaprojektuj pełen cykl budowlany:
+1. Prace ziemne i stan zerowy (humus, wykopy, ławy, instalacje podposadzkowe).
+2. Stan surowy (ściany nośne, stropy, konstrukcja dachu).
+3. Wykończenie i zagospodarowanie.
+
+Użyj wyszukiwarki Google Search, aby zweryfikować aktualne standardy WT 2021 oraz normy budowlane w Polsce.
+Zwróć kompletny raport technologiczny jako czytelny tekst.
 `;
-        // POPRAWKA TS2353: 'tools' poprawnie zagnieżdżone wewnątrz obiektu 'config'
+
         const designResult = await ai.models.generateContent({
             model: MODEL_PRO,
             contents: [{ role: "user", parts: [{ text: designPrompt }] }],
             config: {
-                tools: [{ googleSearch: {} }] // Używamy wyszukiwarki do weryfikacji standardów WT 2021
+                tools: [{ googleSearch: {} }], // Grounding budowlany
+                temperature: 0.2
             }
         });
 
         const builderProposal = designResult.text ?? "";
-        totalTokensUsed += designResult.usageMetadata?.totalTokenCount || 0;
+        const tokensStep1 = designResult.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += tokensStep1;
+        console.log(`[BUDOWLANIEC 🧱] Ukończono KROK 1. Zużyto tokenów: ${tokensStep1}`);
 
         // ====================================================================
         // DEBATA - KROK 2: Krytyka i Audyt (Simulated Silent Auditor)
         // ====================================================================
+        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 2: Symulacja krytycznego audytu inżynieryjnego...");
         const auditPrompt = `
-Jesteś Inspektorem Nadzoru i Cichym Audytorem. Przeanalizuj poniższą propozycję technologii budowy dla obiektu: ${objectType}.
-Wytknij błędy, braki i pominięcia technologiczne (np. czy zapomniano o transporcie urobku, zabezpieczeniu wykopów, deskowaniach, izolacjach pionowych/poziomych).
+Jesteś Inspektorem Nadzoru Budowlanego i Cichym Audytorem. 
+Przeanalizuj krytycznie poniższą propozycję technologii budowy zaprojektowaną przez Głównego Inżyniera:
 
-Propozycja:
 ${builderProposal}
 
-Zwróć listę uwag i poprawek w formie zwykłego tekstu.
+Wytknij błędy, pominięcia i braki technologiczne (np. brak zabezpieczenia ścian wykopów, pominięcie deskowań, brak pionowej izolacji przeciwwilgociowej, transportu urobku, itp.).
+Wypunktuj wszystkie słabe punkty w formie zwykłego tekstu.
 `;
+
         const auditResult = await ai.models.generateContent({
             model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: auditPrompt }] }]
+            contents: [{ role: "user", parts: [{ text: auditPrompt }] }],
+            config: { temperature: 0.2 }
         });
 
         const auditorFeedback = auditResult.text ?? "";
-        totalTokensUsed += auditResult.usageMetadata?.totalTokenCount || 0;
+        const tokensStep2 = auditResult.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += tokensStep2;
+        console.log(`[BUDOWLANIEC 🧱] Ukończono KROK 2. Zużyto tokenów: ${tokensStep2}`);
 
         // ====================================================================
         // DEBATA - KROK 3: Synteza i Strukturyzacja na JSON (Model Flash)
         // ====================================================================
+        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 3: Synteza poprawek i generowanie struktury JSON...");
         const synthesisPrompt = `
-Jesteś Głównym Inżynierem. Przeanalizuj uwagi Audytora i skoryguj swój projekt budowy.
-Wygeneruj ostateczną, kompletną listę pozycji kosztorysowych, uwzględniając poprawki.
-Zwróć dane jako czysty JSON według zadanego schematu.
+Jesteś Głównym Inżynierem. Przeanalizuj uwagi krytyczne Audytora i skoryguj swój pierwotny projekt budowy.
+Wygeneruj ostateczną, kompletną listę pozycji kosztorysowych, uwzględniając poprawki oraz wymogi techniczne.
 
-Twoja propozycja:
+Twoja pierwotna propozycja:
 ${builderProposal}
 
 Uwagi Audytora:
 ${auditorFeedback}
+
+Zwróć ostateczny wynik jako poprawny JSON dopasowany ściśle do wymaganego schematu.
 `;
+
         const structureResult = await ai.models.generateContent({
             model: MODEL_FLASH,
             contents: [{ role: "user", parts: [{ text: synthesisPrompt }] }],
@@ -157,133 +169,62 @@ ${auditorFeedback}
             }
         });
 
+        console.log("[BUDOWLANIEC 🧱] Pomyślnie sparsowano wynik do formatu JSON.");
         const parsedResult = JSON.parse(structureResult.text ?? "{}");
-        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
+        const tokensStep3 = structureResult.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += tokensStep3;
+        console.log(`[BUDOWLANIEC 🧱] Ukończono KROK 3. Zużyto tokenów: ${tokensStep3}`);
 
-        const batch = adminDb.batch();
-
-        // 2. Jeśli brakuje danych krytycznych - dopytujemy Mózg / Kosztorysanta i wstrzymujemy proces
-        if (parsedResult.missingDataQuestions && parsedResult.missingDataQuestions.length > 0) {
-            console.log(`[PESAM 3.0 🧱] Wykryto braki danych. Dopytuję Mózg: ${parsedResult.missingDataQuestions.join(", ")}`);
-
-            // Zapisujemy pytania do stanu umysłu Mózgu (pendingDecisions / missingData)
-            batch.update(brainRef, {
-                missingData: FieldValue.arrayUnion(...parsedResult.missingDataQuestions),
-                reasoningLog: FieldValue.arrayUnion(`Budowlaniec wstrzymał pracę: brak danych o: ${parsedResult.missingDataQuestions.join(", ")}`)
-            });
-
-            // Wstrzymujemy zadanie, zmieniając status na WAITING_INPUT
-            batch.update(taskRef, {
-                status: "WAITING_INPUT",
-                result: { questions: parsedResult.missingDataQuestions },
-                updatedAt: new Date()
-            });
-
-            // Wysyłamy powiadomienie na czat projektu w imieniu Mózgu
-            const chatRef = adminDb.collection(`tenders/${tenderId}/chat`).doc();
-            batch.set(chatRef, {
-                role: "brain",
-                content: `⏸️ Agent Budowlany wstrzymał projektowanie technologii. Potrzebuję dodatkowych informacji: \n\n${parsedResult.missingDataQuestions.map((q: string, i: number) => `${i + 1}. ${q}`).join("\n")}\n\nOdpowiedz na czacie, aby wznowić proces.`,
-                timestamp: new Date(),
-                intent: "GENERAL"
-            });
-
-            await batch.commit();
-
-            // Budzimy Mózg loopbackiem
-            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId, trigger: `TASK_WAITING_INPUT_${taskId}` })
-            }).catch(e => console.error(e));
-
-            return NextResponse.json({ success: true, waitingOnInput: true });
-        }
-
-        // 3. Jeśli wszystko jest jasne - zapisujemy pozycje do kosztorysu (Standard 1: subkolekcja)
-        const generatedItems = parsedResult.items || [];
-        if (generatedItems.length > 0) {
-            const sectionId = `sec_budowlaniec_${taskId}`;
-            const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
-
-            // Zapis nagłówka sekcji oraz tablicy items na poziomie dokumentu nadrzędnego dla błyskawicznego renderowania na froncie
-            batch.set(sectionRef, {
-                section: `Prace Budowlane (Stan Surowy i Zerowy - Projekt Inżynierski)`,
-                status: "QUANTITY_READY", // Gotowe do wyceny przez Brokera
-                totalValue: 0,
-                sourceTaskId: taskId,
-                items: generatedItems.map((item: any) => ({
-                    id: randomUUID(), // Poprawione: Wywołanie bezpiecznego, natywnego generatora Node.js
-                    pozycja: item.pozycja,
-                    opis: item.opis,
-                    ilosc: Number(item.ilosc) || 1,
-                    cenaJed: 0,
-                    KNR_ref: item.KNR_ref || "KNR 2-01",
-                    confidence: "HIGH",
-                    sourceTrack: `Zaprojektowane przez: BUDOWLANIEC (Debata z Cichym Audytorem)`
-                })),
-                updatedAt: new Date()
-            });
-
-            // Zapis pozycji do subkolekcji `items` (Standard 1)
-            generatedItems.forEach((item: any) => {
-                const itemId = randomUUID(); // Natywny generator bez bibliotek zewnętrznych
-                const itemRef = sectionRef.collection("items").doc(itemId);
-
-                batch.set(itemRef, {
-                    id: itemId,
-                    pozycja: item.pozycja,
-                    opis: item.opis,
-                    ilosc: Number(item.ilosc) || 1,
-                    cenaJed: 0, // Broker to wyceni rynkowo
-                    KNR_ref: item.KNR_ref || "KNR 2-01",
-                    confidence: "HIGH",
-                    sourceTrack: `Zaprojektowane przez: BUDOWLANIEC (Debata z Cichym Audytorem)`
-                });
-            });
-        }
-
-        // Zakończenie zadania
-        batch.update(taskRef, {
+        // Zapisujemy całą strukturę (items, missingQuestions, summary) bezpośrednio do rawResult
+        console.log("[BUDOWLANIEC 🧱] Zapisuję rawResult w bazie danych i oznaczam zadanie jako DONE.");
+        await taskRef.update({
             status: "DONE",
-            result: { summary: parsedResult.summary, itemsAdded: generatedItems.length },
+            rawResult: parsedResult,
+            processedByBrain: false,
             costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        // Naliczanie kosztu tokenów (PRO: ~$0.002 / 1k, FLASH: ~$0.000015 / 1k)
-        const costUSD = (totalTokensUsed * 0.9 / 1000) * 0.002 + (totalTokensUsed * 0.1 / 1000) * 0.000015;
-        const tenderRef = adminDb.collection("tenders").doc(tenderId);
-        batch.update(tenderRef, {
-            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        // Przybliżona kalkulacja kosztu (KROK 1 i 2 na Pro, KROK 3 na Flash)
+        const costPro = ((tokensStep1 + tokensStep2) / 1000) * 0.002;
+        const costFlash = (tokensStep3 / 1000) * 0.000015;
+        const totalCostUSD = costPro + costFlash;
+
+        console.log(`[BUDOWLANIEC 🧱] Łączny koszt tokenów: ${totalCostUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        await adminDb.collection("tenders").doc(tenderId).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(totalCostUSD)
         });
 
-        await batch.commit();
-        console.log(`[PESAM 3.0 🧱] Budowlaniec pomyślnie zaprojektował i zapisał ${generatedItems.length} pozycji.`);
-
-        // 4. Wybudzenie Mózgu lokalnym loopbackiem
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error(e));
-
-        return NextResponse.json({ success: true, itemsAdded: generatedItems.length });
+        isSuccess = true;
+        console.log("[BUDOWLANIEC 🧱] Proces inżynieryjny zakończony pomyślnie.");
+        return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 🧱] Błąd krytyczny Agenta Budowlanego:", error);
+        console.error("[BUDOWLANIEC 🧱] ❌ Błąd krytyczny w agencie budowlanym:", error);
         if (tenderId && taskId) {
-            try {
-                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                    status: "ERROR",
-                    result: { error: error.message }
-                });
-            } catch (dbError) {
-                console.error("[PESAM 3.0 🧱] Nie udało się zapisać statusu błędu:", dbError);
-            }
+            console.log("[BUDOWLANIEC 🧱] Zapisuję status błędu (ERROR) do bazy.");
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch((dbErr) => console.error("[BUDOWLANIEC 🧱] Nie udało się zapisać błędu do Firestore:", dbErr));
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        // Gwarancja wybudzenia Mózgu (zawsze w finally)
+        if (tenderId && taskId) {
+            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            console.log(`[BUDOWLANIEC 🧱] Wybudzam Mózg przez loopback na adresie: ${localOrigin}`);
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch((fetchErr) => console.error("[BUDOWLANIEC 🧱] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+        }
     }
 }

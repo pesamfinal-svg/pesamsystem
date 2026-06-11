@@ -1,25 +1,18 @@
-// ============================================================
-// PESAM 3.0 – Inicjalizator Zadań (Faza 0: Klasyfikacja i Zapłon Roju)
-// POST /api/kosztorysant/glowny-kosztorysant/inicjalizuj
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
-// Standard 4: Brak zewnętrznych zależności undici (region europe-west4 działa natywnie)
 const MODEL_FLASH = "gemini-2.5-flash";
 
-// Inicjalizacja klienta Google GenAI (Standard 3: lokalizacja global i Vertex AI)
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
     location: "global"
 });
 
-// Definicja schematu odpowiedzi klasyfikatora (Zgodna z nowym SDK)
+// Definicja schematu odpowiedzi klasyfikatora
 const CLASSIFIER_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -41,42 +34,46 @@ export async function POST(req: Request) {
         const body = await req.json();
         const { tenderId } = body;
 
+        console.log(`[FAZA 0 🚀] Start inicjalizacji i klasyfikacji dla przetargu: ${tenderId}`);
+
         if (!tenderId) {
+            console.error("[FAZA 0 🚀] Błąd: Brak wymaganej zmiennej tenderId.");
             return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
         }
-
-        console.log(`[PESAM 3.0] 🚀 Start Fazy 0 (Inicjalizacja) dla przetargu: ${tenderId}`);
 
         // 1. Pobranie dokumentów o statusie UPLOADED
         const docsRef = adminDb.collection(`tenders/${tenderId}/documents`);
         const snapshot = await docsRef.where("status", "==", "UPLOADED").get();
 
         if (snapshot.empty) {
-            console.log(`[PESAM 3.0] Brak nowych dokumentów do klasyfikacji.`);
+            console.log(`[FAZA 0 🚀] Brak nowych dokumentów (UPLOADED) do klasyfikacji.`);
             return NextResponse.json({ message: "Brak dokumentów do przetworzenia." });
         }
 
+        console.log(`[FAZA 0 🚀] Znaleziono ${snapshot.size} dokumentów do sklasyfikowania.`);
         let totalTokensUsed = 0;
 
-        // 2. Przetwarzanie każdego dokumentu (Klasyfikator)
+        const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
+        const bucket = adminStorage.bucket(bucketName);
+
+        // 2. Klasyfikator w pętli dla każdego dokumentu
         for (const docSnap of snapshot.docs) {
             const docData = docSnap.data();
-            console.log(`[PESAM 3.0] 📄 Klasyfikacja pliku: ${docData.fileName}`);
+            console.log(`[FAZA 0 🚀] Rozpoczynam klasyfikację pliku: ${docData.fileName}`);
 
             try {
-                // Standard 3: Bezpieczne pobieranie ze Storage (jawny bucket i brak publicznych URL)
-                const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
-                const bucket = adminStorage.bucket(bucketName);
                 const fileRef = bucket.file(docData.storagePath);
-
                 const [downloadedBuffer] = await fileRef.download();
+                console.log(`[FAZA 0 🚀] Pobrano ${downloadedBuffer.length} bajtów pliku.`);
 
-                // Standard 3: Bezpieczna konwersja bufora w środowisku Next.js
                 const safeArrayBuffer = new Uint8Array(downloadedBuffer).buffer;
                 const base64Data = Buffer.from(safeArrayBuffer).toString("base64");
 
-                // Przygotowanie wsadu dla Gemini
-                const prompt = `Jesteś Klasyfikatorem systemu PESAM 3.0. Przeanalizuj pierwszą stronę lub widoczną treść tego dokumentu budowlanego. Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.`;
+                const prompt = `
+Jesteś Klasyfikatorem systemu kosztorysowego PESAM 3.0. 
+Przeanalizuj pierwszą stronę lub widoczną treść tego dokumentu budowlanego. 
+Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
+`;
 
                 const imagePart = {
                     inlineData: {
@@ -85,7 +82,8 @@ export async function POST(req: Request) {
                     }
                 };
 
-                // Wywołanie modelu z poprawną strukturą nowej biblioteki
+                console.log(`[FAZA 0 🚀] Wysyłam pierwszą stronę ${docData.fileName} do Gemini Flash...`);
+
                 const result = await ai.models.generateContent({
                     model: MODEL_FLASH,
                     contents: [
@@ -106,11 +104,12 @@ export async function POST(req: Request) {
 
                 const responseText = result.text ?? "{}";
                 const parsedResult = JSON.parse(responseText);
+                const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+                totalTokensUsed += tokensUsed;
 
-                // Zliczanie tokenów do Budget Guard
-                totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+                console.log(`[FAZA 0 🚀] Plik sklasyfikowany. Tagi: ${JSON.stringify(parsedResult.tags)}. Zużyto tokenów: ${tokensUsed}`);
 
-                // Aktualizacja dokumentu w bazie (Standard 1: Ścisła spójność schematu)
+                // Aktualizacja metadanych dokumentu w bazie
                 await docSnap.ref.update({
                     tags: parsedResult.tags,
                     summary: parsedResult.summary,
@@ -119,17 +118,19 @@ export async function POST(req: Request) {
                     updatedAt: new Date()
                 });
 
-                console.log(`[PESAM 3.0] ✅ Sklasyfikowano: ${docData.fileName} -> Tagi: ${parsedResult.tags.join(", ")}`);
-
-            } catch (docError) {
-                console.error(`[PESAM 3.0] ❌ Błąd klasyfikacji pliku ${docData.fileName}:`, docError);
-                await docSnap.ref.update({ status: "ERROR_CLASSIFYING" });
+            } catch (docError: any) {
+                console.error(`[FAZA 0 🚀] ❌ Błąd klasyfikacji pliku ${docData.fileName}:`, docError);
+                await docSnap.ref.update({
+                    status: "ERROR_CLASSIFYING",
+                    errorDetails: docError.message,
+                    updatedAt: new Date()
+                }).catch(() => { });
             }
         }
 
         // 3. Aktualizacja Bezpiecznika Budżetowego (Budget Guard)
-        // Przyjmujemy orientacyjny koszt dla Flash: $0.000015 / 1k tokenów
         const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000015;
+        console.log(`[FAZA 0 🚀] Łączny koszt tokenów Flash: ${estimatedCostUSD.toFixed(6)} USD. Aktualizuję Budget Guard transakcyjnie.`);
 
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
         await adminDb.runTransaction(async (t) => {
@@ -141,14 +142,16 @@ export async function POST(req: Request) {
                 const limitReached = newCost >= currentBudget.maxBudgetUSD;
 
                 t.update(tenderRef, {
-                    status: "ORCHESTRATING", // Przekazanie pałeczki do Mózgu
+                    status: "ORCHESTRATING",
                     "budgetGuard.currentCostUSD": newCost,
-                    "budgetGuard.limitReached": limitReached
+                    "budgetGuard.limitReached": limitReached,
+                    updatedAt: new Date()
                 });
             }
         });
 
         // 4. Inicjalizacja Stanu Umysłu (Brain State)
+        console.log("[FAZA 0 🚀] Inicjalizuję pusty stan pamięci i umysłu Mózgu (brain/main)...");
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         await brainRef.set({
             phase: "PLANNING",
@@ -163,14 +166,15 @@ export async function POST(req: Request) {
 
         // 5. Dynamiczne i asynchroniczne wybudzenie Głównego Orkiestratora (Mózgu)
         const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
+        console.log(`[FAZA 0 🚀] Wybudzam właściwy Mózg (ReAct Loop) przez loopback: ${localOrigin}/api/kosztorysant/glowny-kosztorysant`);
 
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
-        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po klasyfikacji:", e));
+        }).catch(e => console.error("[FAZA 0 🚀] Błąd wybudzania Mózgu po klasyfikacji:", e));
 
+        console.log("[FAZA 0 🚀] Faza 0 zakończona sukcesem. Klasyfikacja dopięta.");
         return NextResponse.json({
             success: true,
             message: "Faza 0 zakończona. Mózg został wybudzony.",
@@ -178,7 +182,7 @@ export async function POST(req: Request) {
         });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0] ❌ Błąd krytyczny Fazy 0:", error);
+        console.error("[FAZA 0 🚀] ❌ Błąd krytyczny Fazy 0:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }

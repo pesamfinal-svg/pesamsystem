@@ -1,8 +1,3 @@
-// ============================================================
-// PESAM 3.0 – Agent Specjalista: REVISOR_JUDGE (Sędzia / Rewident)
-// POST /api/kosztorysant/agent-rewident
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
@@ -10,223 +5,189 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
-// Standard 3 & 4: Inicjalizacja klienta Google GenAI (Vertex AI, global)
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
     location: "global"
 });
 
-const MODEL_PRO = "gemini-2.5-pro"; // Sędzia potrzebuje najwyższej logiki
-const MODEL_FLASH = "gemini-2.5-flash"; // Do taniego formatowania JSON
+const MODEL_PRO = "gemini-2.5-pro"; // Judicial reasoning and conflict resolution requires high-level logic (Pro model)
 
-// Schemat dla Kroku 2 (Strukturyzacja Wyroku)
+// Schemat ustrukturyzowanego wyjścia wyroków
 const JUDGE_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        decision: {
-            type: Type.STRING,
-            description: "Wybrana wartość (np. 'C25/30') lub informacja o braku rozstrzygnięcia."
+        resolutions: {
+            type: Type.ARRAY,
+            description: "Lista rozstrzygniętych spraw spornych.",
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    conflictId: { type: Type.STRING, description: "Unikalny identyfikator konfliktu przekazany przez Mózg." },
+                    decision: { type: Type.STRING, description: "Wybrana ostateczna wartość, technologia lub rozstrzygnięcie." },
+                    justification: { type: Type.STRING, description: "Uzasadnienie oparte na hierarchii dokumentów, Prawie Budowlanym, PZP lub WT 2021." },
+                    escalateToUser: { type: Type.BOOLEAN, description: "Ustaw na true, jeśli konflikt jest krytyczny finansowo lub niemożliwy do pogodzenia bez decyzji Kosztorysanta." }
+                },
+                required: ["conflictId", "decision", "justification", "escalateToUser"]
+            }
         },
-        justification: {
-            type: Type.STRING,
-            description: "Uzasadnienie wyroku, np. 'Zgodnie z Prawem Budowlanym, rysunek konstrukcyjny jest nadrzędny nad opisem ogólnym SWZ.'"
-        },
-        escalateToUser: {
-            type: Type.BOOLEAN,
-            description: "Ustaw na true, jeśli sprzeczność jest krytyczna i wymaga ręcznej decyzji Kosztorysanta."
-        }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie wydanych wyroków dla Mózgu." }
     },
-    required: ["decision", "justification", "escalateToUser"]
+    required: ["resolutions", "summary"]
 };
 
 export async function POST(req: Request) {
-    // Bezpieczna deklaracja zmiennych (ochrona przed błędem strumienia w catch)
     let tenderId: string | undefined;
     let taskId: string | undefined;
+    let isSuccess = false;
 
     try {
         const body = await req.json();
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        if (!tenderId || !taskId) {
-            return NextResponse.json({ error: "Brak tenderId lub taskId" }, { status: 400 });
-        }
+        console.log(`[SĘDZIA ⚖️] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        console.log(`[PESAM 3.0 ⚖️] REVISOR_JUDGE wybudzony. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
+        if (!tenderId || !taskId) {
+            console.error("[SĘDZIA ⚖️] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
+            return NextResponse.json({ error: "Brak danych" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
 
-        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
-
-        const taskData = taskDoc.data()!;
-
-        // Idempotentność
-        if (taskData.status !== "PENDING") {
-            console.log(`[PESAM 3.0 ⚖️] Zadanie ${taskId} ma status ${taskData.status}. Pomijam.`);
-            return NextResponse.json({ message: "Task already processed." });
+        if (!taskDoc.exists) {
+            console.error(`[SĘDZIA ⚖️] Zadanie o ID ${taskId} nie istnieje w bazie.`);
+            throw new Error("Zadanie nie istnieje.");
         }
 
-        // 1. Oznaczamy zadanie jako IN_PROGRESS
+        const taskData = taskDoc.data()!;
+        console.log(`[SĘDZIA ⚖️] Wczytano zadanie. Status w bazie: ${taskData.status}`);
+
+        if (taskData.status !== "PENDING") {
+            console.log(`[SĘDZIA ⚖️] Zadanie ma status ${taskData.status}. Przerywam.`);
+            return NextResponse.json({ message: "Zadanie już obsłużone." });
+        }
+
+        // Zmiana statusu na IN_PROGRESS
+        console.log("[SĘDZIA ⚖️] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // 2. Pobieramy wszystkie otwarte konflikty dla tego przetargu
-        const conflictsRef = adminDb.collection(`tenders/${tenderId}/conflicts`);
-        const openConflictsSnap = await conflictsRef.where("status", "==", "OPEN").get();
+        // Pobieramy konflikty przekazane przez Mózg w inputFacts
+        const conflictsToResolve = taskData.inputFacts?.conflicts || [];
+        console.log(`[SĘDZIA ⚖️] Pobrano ${conflictsToResolve.length} spraw spornych do rozpatrzenia.`);
 
-        if (openConflictsSnap.empty) {
-            console.log(`[PESAM 3.0 ⚖️] Brak otwartych konfliktów do rozstrzygnięcia.`);
-            await taskRef.update({ status: "DONE", result: { summary: "Brak konfliktów." } });
-
-            // Wybudzenie Mózgu
-            const origin = new URL(req.url).origin;
-            fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-            }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu:", e));
-
+        if (conflictsToResolve.length === 0) {
+            console.warn("[SĘDZIA ⚖️] Brak konfliktów w inputFacts. Kończę zadanie bez wyroku.");
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { resolutions: [], summary: "Brak spraw spornych do rozstrzygnięcia." },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
+            isSuccess = true;
             return NextResponse.json({ message: "Brak konfliktów." });
         }
 
-        let totalTokensUsedPro = 0;
-        let totalTokensUsedFlash = 0;
-        let resolvedCount = 0;
-        let escalatedCount = 0;
-
-        const batch = adminDb.batch();
-
-        // 3. Rozpatrywanie każdego konfliktu (Sąd Roju)
-        for (const conflictDoc of openConflictsSnap.docs) {
-            const conflictData = conflictDoc.data();
-            console.log(`[PESAM 3.0 ⚖️] Rozpatruję sprawę: ${conflictData.topic}`);
-
-            const partiesInfo = (conflictData.parties || []).map((p: any) =>
+        // Przygotowujemy opis spraw spornych dla LLM
+        const casesDescription = conflictsToResolve.map((c: any, index: number) => {
+            const partiesText = (c.parties || []).map((p: any) =>
                 `- Agent: ${p.agent} | Twierdzi: "${p.claim}" | Źródło: ${p.sourceDoc}`
             ).join("\n");
 
-            // ====================================================================
-            // STANDARD 2: KROK 1 - BADANIE (Google Search Grounding, BEZ JSON)
-            // ====================================================================
-            const searchPrompt = `
-Jesteś Głównym Sędzią (Rewidentem) w systemie kosztorysowym PESAM 3.0.
-Wykryto konflikt między agentami analizującymi dokumentację przetargową.
-
-Temat sporu: ${conflictData.topic}
+            return `
+Sprawa #${index + 1} (ConflictId: ${c.id})
+Temat sporu: ${c.topic}
 Stanowiska stron:
-${partiesInfo}
-
-Twoje zadanie:
-1. Użyj wyszukiwarki, aby sprawdzić standardy budowlane, Prawo Zamówień Publicznych (PZP) lub hierarchię ważności dokumentów (np. czy projekt wykonawczy jest ważniejszy od PFU/SWZ).
-2. Przeanalizuj argumenty.
-3. Wydaj werdykt w formie opisowej (zwykły tekst).
+${partiesText}
 `;
-            const searchResult = await ai.models.generateContent({
-                model: MODEL_PRO,
-                contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
-                config: {
-                    tools: [{ googleSearch: {} }] // Standard 2: Narzędzia zawsze wewnątrz config
-                }
-            });
+        }).join("\n");
 
-            const searchContext = searchResult.text ?? "";
-            totalTokensUsedPro += searchResult.usageMetadata?.totalTokenCount || 0;
+        // Kompilujemy prompt prawno-inżynieryjny z wyszukiwarką
+        const prompt = `
+Jesteś Głównym Sędzią i Rewidentem technicznym w systemie kosztorysowym PESAM 3.0.
+Rozpatrujesz spory technologiczne i interpretacyjne między agentami analizującymi projekt budowlany.
 
-            // ====================================================================
-            // STANDARD 2: KROK 2 - STRUKTURYZACJA WYROKU (JSON Schema, BEZ NARZĘDZI)
-            // ====================================================================
-            const structurePrompt = `
-Na podstawie poniższego wyroku, sformatuj decyzję do obiektu JSON.
-Jeśli nie jesteś w 100% pewien lub sprawa dotyczy krytycznych kosztów, ustaw 'escalateToUser' na true.
+Oto wykaz spraw do rozstrzygnięcia:
+${casesDescription}
 
-Wyrok:
-${searchContext}
+Twoje polecenie od Mózgu:
+${taskData.instruction}
+
+Zasady orzekania:
+1. Użyj wyszukiwarki Google Search, aby zweryfikować standardy budowlane, prawo zamówień publicznych (PZP) czy polskie normy inżynieryjne.
+2. Zastosuj ogólnie przyjęte zasady (np. rysunki konstrukcyjne są ważniejsze niż opisy w SWZ, a projekt budowlany/wykonawczy jest nadrzędny nad PFU).
+3. Dla każdej sprawy spornej wydaj jasne, jednoznaczne rozstrzygnięcie techniczne lub prawne oraz je rzetelnie uzasadnij.
+4. Jeśli sprawa jest bardzo skomplikowana lub niesie ryzyko wysokich kosztów, ustaw 'escalateToUser' na true.
+5. Zwróć wynik jako poprawny obiekt JSON, pasujący dokładnie do zdefiniowanego schematu.
+6. Nie dodawaj żadnego innego tekstu poza czystym JSON-em.
 `;
-            const structureResult = await ai.models.generateContent({
-                model: MODEL_FLASH,
-                contents: [{ role: "user", parts: [{ text: structurePrompt }] }],
-                config: {
-                    temperature: 0.1,
-                    responseMimeType: "application/json",
-                    responseSchema: JUDGE_SCHEMA as any
-                }
-            });
 
-            const parsedResult = JSON.parse(structureResult.text ?? "{}");
-            totalTokensUsedFlash += structureResult.usageMetadata?.totalTokenCount || 0;
+        console.log("[SĘDZIA ⚖️] Uruchamiam proces analizy sądowej w Gemini Pro z włączonym Google Search...");
 
-            // 4. Optymalizacja zapisu: Jedna, ostateczna aktualizacja konfliktu w bazie (Standard 1)
-            const finalStatus = parsedResult.escalateToUser ? "ESCALATED_TO_USER" : "RESOLVED";
-            const finalDecision = parsedResult.escalateToUser ? "Wymagana decyzja człowieka" : parsedResult.decision;
-
-            batch.update(conflictDoc.ref, {
-                status: finalStatus,
-                investigatorAssigned: taskId,
-                resolution: {
-                    decision: finalDecision,
-                    justification: parsedResult.justification
-                },
-                updatedAt: new Date()
-            });
-
-            if (parsedResult.escalateToUser) {
-                escalatedCount++;
-                console.log(`[PESAM 3.0 ⚖️] Sprawa ${conflictDoc.id} eskalowana do Kosztorysanta.`);
-            } else {
-                resolvedCount++;
-                console.log(`[PESAM 3.0 ⚖️] Sprawa ${conflictDoc.id} rozstrzygnięta: ${parsedResult.decision}`);
+        const result = await ai.models.generateContent({
+            model: taskData.modelOverride || MODEL_PRO, // Sędzia zawsze powinien używać Pro
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                tools: [{ googleSearch: {} }], // Grounding orzeczniczy i prawny
+                temperature: 0.1,
+                responseMimeType: "application/json",
+                responseSchema: JUDGE_SCHEMA as any
             }
-        }
+        });
 
-        // 5. Zakończenie zadania i aktualizacja budżetu
-        batch.update(taskRef, {
+        console.log("[SĘDZIA ⚖️] Odebrano wyrok z Gemini Pro. Parsuję JSON...");
+        const parsedResult = JSON.parse(result.text ?? "{}");
+        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        console.log(`[SĘDZIA ⚖️] Wyroki wydane. Zużyto tokenów: ${tokensUsed}. Zapisuję rawResult.`);
+
+        // Zapisujemy wyroki bezpośrednio do rawResult i oznaczamy zadanie jako DONE
+        await taskRef.update({
             status: "DONE",
-            result: {
-                resolved: resolvedCount,
-                escalated: escalatedCount,
-                summary: `Rozstrzygnięto: ${resolvedCount}, Eskalowano: ${escalatedCount}`
-            },
-            costTokens: totalTokensUsedPro + totalTokensUsedFlash,
+            rawResult: parsedResult,
+            processedByBrain: false,
+            costTokens: tokensUsed,
             updatedAt: new Date()
         });
 
-        // Aktualizacja Budget Guard
-        const costUSD = (totalTokensUsedPro / 1000) * 0.002 + (totalTokensUsedFlash / 1000) * 0.000015;
-        const tenderRef = adminDb.collection("tenders").doc(tenderId);
-        batch.update(tenderRef, {
+        // Koszt tokenów (Pro: ~$0.002 / 1k)
+        const costUSD = (tokensUsed / 1000) * 0.002;
+
+        console.log(`[SĘDZIA ⚖️] Koszt tokenów: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        await batch.commit();
-
-        // 6. Wybudzenie Mózgu (ReAct Loop)
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0 ⚖️] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
-
-        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po wyrokach:", e));
-
-        return NextResponse.json({ success: true, resolvedCount, escalatedCount });
+        isSuccess = true;
+        console.log("[SĘDZIA ⚖️] Wszystkie sprawy sporne zostały rozstrzygnięte.");
+        return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 ⚖️] ❌ Błąd krytyczny Sędziego:", error);
-
+        console.error("[SĘDZIA ⚖️] ❌ Błąd krytyczny w agencie sędziowskim:", error);
         if (tenderId && taskId) {
-            try {
-                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                    status: "ERROR",
-                    result: { error: error.message }
-                });
-            } catch (dbError) {
-                console.error("[PESAM 3.0 ⚖️] Nie udało się zapisać statusu ERROR do bazy:", dbError);
-            }
+            console.log("[SĘDZIA ⚖️] Zapisuję status błędu (ERROR) do bazy.");
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch((dbErr) => console.error("[SĘDZIA ⚖️] Błąd zapisu błędu do Firestore:", dbErr));
         }
-
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        // Gwarancja wybudzenia Mózgu
+        if (tenderId && taskId) {
+            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            console.log(`[SĘDZIA ⚖️] Wybudzam Mózg przez loopback: ${localOrigin}`);
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch((fetchErr) => console.error("[SĘDZIA ⚖️] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+        }
     }
 }

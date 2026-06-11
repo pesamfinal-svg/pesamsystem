@@ -1,13 +1,7 @@
-// ============================================================
-// PESAM 3.0 – Agent Specjalista: SILENT_AUDITOR (Cichy Rewident)
-// POST /api/kosztorysant/agent-cichy-rewident
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
-import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -17,188 +11,158 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-const MODEL_FLASH = "gemini-2.5-flash";
+const MODEL_FLASH = "gemini-2.5-flash"; // Model Flash świetnie radzi sobie z szybkim audytem rynkowym
 
-// Schemat dla Kroku 2 (Strukturyzacja braków) - Standard 1
+// Schemat ustrukturyzowanego wyjścia z audytu
 const AUDITOR_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         missingItems: {
             type: Type.ARRAY,
-            description: "Lista brakujących elementów technologicznych/prawnych.",
+            description: "Lista brakujących elementów technologicznych, prawnych, BHP lub sanitarnych.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującego elementu, np. 'Separator tłuszczu', 'Drzwi ppoż EI60'" },
-                    opis: { type: Type.STRING, description: "Uzasadnienie prawne/technologiczne, np. 'Wymóg WT 2021 dla kuchni zbiorowego żywienia'" },
-                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (zawsze liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka, np. 'kpl', 'szt'" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze wpisz 'TECH_REQUIRED'" },
-                    confidence: { type: Type.STRING, description: "Zawsze 'HIGH'" }
+                    pozycja: { type: Type.STRING, description: "Nazwa brakującego elementu, np. 'Drzwi ppoż EI60', 'Separator tłuszczu'" },
+                    opis: { type: Type.STRING, description: "Szczegółowe uzasadnienie technologiczne lub prawne (np. wymóg WT 2021, PPOŻ, Sanepid)" },
+                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
+                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. szt, kpl, m" },
+                    KNR_ref: { type: Type.STRING, description: "Zawsze wpisz 'TECH_REQUIRED'" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref", "confidence"]
+                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
             }
         },
-        summary: { type: Type.STRING, description: "Podsumowanie audytu." }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie wykonanego audytu technicznego." }
     },
     required: ["missingItems", "summary"]
 };
 
 export async function POST(req: Request) {
-    // Bezpieczna deklaracja zmiennych (ochrona przed błędem strumienia w catch)
     let tenderId: string | undefined;
     let taskId: string | undefined;
+    let isSuccess = false;
 
     try {
         const body = await req.json();
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
+        console.log(`[SILENT AUDITOR 🕵️] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        console.log(`[PESAM 3.0 🕵️] SILENT_AUDITOR wybudzony. Przetarg: ${tenderId}`);
+        if (!tenderId || !taskId) {
+            console.error("[SILENT AUDITOR 🕵️] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
+            return NextResponse.json({ error: "Brak danych" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        if (!taskDoc.exists) {
+            console.error(`[SILENT AUDITOR 🕵️] Zadanie o ID ${taskId} nie istnieje w bazie.`);
+            throw new Error("Zadanie nie istnieje.");
+        }
 
         const taskData = taskDoc.data()!;
+        console.log(`[SILENT AUDITOR 🕵️] Wczytano zadanie. Status w bazie: ${taskData.status}`);
 
-        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Task processed." });
+        if (taskData.status !== "PENDING") {
+            console.log(`[SILENT AUDITOR 🕵️] Zadanie ma status ${taskData.status}. Pomijam.`);
+            return NextResponse.json({ message: "Task processed." });
+        }
+
+        // Zmiana statusu na IN_PROGRESS
+        console.log("[SILENT AUDITOR 🕵️] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // 1. Zbieranie kontekstu (Co budujemy i co już mamy?)
-        const tenderDoc = await adminDb.collection("tenders").doc(tenderId).get();
-        const objectType = tenderDoc.data()?.objectType || "Obiekt budowlany";
+        // Pobieramy informacje kontekstowe przekazane przez Mózg
+        const existingItems = taskData.inputFacts?.existingItems || [];
+        const objectType = taskData.inputFacts?.objectType || "Obiekt budowlany";
 
-        const estimateSnap = await adminDb.collection(`tenders/${tenderId}/estimate`).get();
-        const existingItems: string[] = [];
-        estimateSnap.docs.forEach(doc => {
-            const items = doc.data().items || [];
-            items.forEach((i: any) => existingItems.push(i.pozycja));
-        });
+        console.log(`[SILENT AUDITOR 🕵️] Projekt dotyczy obiektu typu: ${objectType}. Liczba dotychczasowych pozycji w kosztorysie: ${existingItems.length}`);
 
-        let totalTokensUsed = 0;
+        // Kompilujemy prompt z wyszukiwarką
+        const prompt = `
+Jesteś Głównym Inspektorem Nadzoru i Audytorem Technologicznym w Polsce.
+Analizujemy kosztorys dla obiektu typu: ${objectType}.
+Obecnie w kosztorysie mamy m.in. następujące pozycje: 
+${JSON.stringify(existingItems.slice(0, 50))}
 
-        // ====================================================================
-        // STANDARD 2: KROK 1 - WYSZUKIWANIE (Google Search Grounding)
-        // ====================================================================
-        const searchPrompt = `
-Jesteś Cichym Rewidentem Technologicznym w Polsce.
-Budujemy obiekt typu: ${objectType}.
-Obecnie w kosztorysie mamy m.in.: ${existingItems.slice(0, 50).join(", ")}.
+Twoje polecenie od Mózgu:
+${taskData.instruction}
 
-Użyj wyszukiwarki, aby sprawdzić aktualne przepisy (WT 2021, PPOŻ, Sanepid).
-Czego ewidentnie brakuje w tym zestawieniu, a jest absolutnie wymagane prawem lub technologią dla tego typu obiektu? 
-Wymień te elementy i krótko uzasadnij. Zwróć zwykły tekst.
+Zasady audytu:
+1. Użyj wyszukiwarki Google Search, aby sprawdzić aktualne, restrykcyjne przepisy budowlane w Polsce (Warunki Techniczne WT 2021, wymogi PPOŻ dla tej kategorii budynków, wymogi Sanepidu).
+2. Zidentyfikuj, czy w dotychczasowym kosztorysie nie zapomniano o krytycznych, obowiązkowych elementach (np. instalacja odgromowa, separatory, drzwi pożarowe, klapy dymowe, zabezpieczenia BHP).
+3. Zwróć wykryte braki jako poprawny obiekt JSON, pasujący dokładnie do zdefiniowanego schematu.
+4. Nie dodawaj żadnego innego tekstu poza czystym JSON-em.
 `;
 
-        const searchResult = await ai.models.generateContent({
-            model: MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
+        console.log("[SILENT AUDITOR 🕵️] Wysyłam zapytanie do Gemini z włączonym Google Search Grounding...");
+
+        const result = await ai.models.generateContent({
+            model: taskData.modelOverride || MODEL_FLASH,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
             config: {
-                tools: [{ googleSearch: {} }], // Standard 2: Narzędzia zawsze wewnątrz config
-                temperature: 0.1
-            }
-        });
-
-        const searchContext = searchResult.text ?? "";
-        totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
-
-        // ====================================================================
-        // STANDARD 2: KROK 2 - STRUKTURYZACJA (JSON Schema)
-        // ====================================================================
-        const structurePrompt = `
-Na podstawie poniższego raportu z audytu, wyodrębnij brakujące elementy jako pozycje kosztorysowe.
-Zwróć TYLKO poprawny obiekt JSON.
-
-Raport:
-${searchContext}
-`;
-        const structureResult = await ai.models.generateContent({
-            model: MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: structurePrompt }] }],
-            config: {
+                tools: [{ googleSearch: {} }], // Grounding techniczny i prawny
                 temperature: 0.1,
                 responseMimeType: "application/json",
                 responseSchema: AUDITOR_SCHEMA as any
             }
         });
 
-        const parsedResult = JSON.parse(structureResult.text ?? "{}");
-        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
+        console.log("[SILENT AUDITOR 🕵️] Odebrano odpowiedź z Gemini. Parsuję JSON...");
+        const parsedResult = JSON.parse(result.text ?? "{}");
+        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        console.log(`[SILENT AUDITOR 🕵️] Zużyto tokenów: ${tokensUsed}. Zapisuję rawResult w bazie.`);
 
-        const missingItems = parsedResult.missingItems || [];
-        const batch = adminDb.batch();
-
-        // 2. Zapis braków do Żywego Kosztorysu
-        if (missingItems.length > 0) {
-            const sectionId = `sec_auditor_${taskId}`;
-            const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
-
-            const formattedItems = missingItems.map((item: any) => ({
-                id: randomUUID(),
-                pozycja: item.pozycja,
-                opis: item.opis,
-                ilosc: Number(item.ilosc) || 1,
-                jednostka: item.jednostka || "kpl",
-                cenaJed: 0, // Broker to wyceni
-                KNR_ref: item.KNR_ref,
-                confidence: item.confidence,
-                sourceTrack: `Audyt Technologiczny (SILENT_AUDITOR)`
-            }));
-
-            batch.set(estimateRef, {
-                section: "Wymogi Prawne i Technologiczne (Audyt)",
-                status: "QUANTITY_READY", // Gotowe dla Brokera
-                totalValue: 0,
-                sourceTaskId: taskId,
-                items: formattedItems,
-                updatedAt: new Date()
-            });
-        }
-
-        // 3. Zakończenie zadania
-        batch.update(taskRef, {
+        // Zapisujemy czysty JSON do rawResult i oznaczamy zadanie jako DONE
+        await taskRef.update({
             status: "DONE",
-            result: { summary: parsedResult.summary, itemsAdded: missingItems.length },
-            costTokens: totalTokensUsed,
+            rawResult: parsedResult,
+            processedByBrain: false,
+            costTokens: tokensUsed,
             updatedAt: new Date()
         });
 
-        const costUSD = (totalTokensUsed / 1000) * 0.000015;
-        batch.update(adminDb.collection("tenders").doc(tenderId), {
+        // Koszt tokenów (Flash: ~$0.000015 / 1k, Pro: ~$0.002 / 1k)
+        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
+        const costUSD = (tokensUsed / 1000) * costPerThousand;
+
+        console.log(`[SILENT AUDITOR 🕵️] Koszt tokenów: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        await batch.commit();
-
-        // 4. Wybudzenie Mózgu
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0 🕵️] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
-
-        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po audycie:", e));
-
-        return NextResponse.json({ success: true, itemsAdded: missingItems.length });
+        isSuccess = true;
+        console.log("[SILENT AUDITOR 🕵️] Audyt zakończony pomyślnie.");
+        return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 🕵️] Błąd krytyczny Cichego Rewidenta:", error);
-
-        // Bezpieczny raport awarii bez ponownego odczytu strumienia req
+        console.error("[SILENT AUDITOR 🕵️] ❌ Błąd krytyczny w audytorze:", error);
         if (tenderId && taskId) {
-            try {
-                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                    status: "ERROR",
-                    result: { error: error.message }
-                });
-            } catch (dbError) {
-                console.error("[PESAM 3.0 🕵️] Nie udało się zapisać statusu błędu:", dbError);
-            }
+            console.log("[SILENT AUDITOR 🕵️] Zapisuję status błędu (ERROR) do bazy.");
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch((dbErr) => console.error("[SILENT AUDITOR 🕵️] Błąd zapisu błędu do Firestore:", dbErr));
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        // Gwarancja wybudzenia Mózgu
+        if (tenderId && taskId) {
+            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            console.log(`[SILENT AUDITOR 🕵️] Wybudzam Mózg przez loopback: ${localOrigin}`);
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch((fetchErr) => console.error("[SILENT AUDITOR 🕵️] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+        }
     }
 }

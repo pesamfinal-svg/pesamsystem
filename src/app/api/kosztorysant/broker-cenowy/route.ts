@@ -1,12 +1,7 @@
-// ============================================================
-// PESAM 3.0 – Broker Cenowy (Ścisła zgodność ze strukturą bazy)
-// POST /api/kosztorysant/broker-cenowy
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
@@ -16,173 +11,127 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-const MODEL_FLASH = "gemini-2.5-flash";
-
-const BROKER_SCHEMA = {
-    type: Type.OBJECT,
-    properties: {
-        prices: {
-            type: Type.ARRAY,
-            description: "Lista wycenionych pozycji.",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    id: { type: Type.STRING },
-                    cenaJed: { type: Type.NUMBER, description: "Cena rynkowa netto w PLN" }
-                },
-                required: ["id", "cenaJed"]
-            }
-        }
-    },
-    required: ["prices"]
-};
-
 export async function POST(req: Request) {
     let tenderId: string | undefined;
     let taskId: string | undefined;
+    let isSuccess = false;
 
     try {
         const body = await req.json();
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
+        console.log(`[BROKER 💰] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        console.log(`[PESAM 3.0 💰] BROKER start dla: ${tenderId}`);
+        if (!tenderId || !taskId) {
+            console.error("[BROKER 💰] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
+            return NextResponse.json({ error: "Brak tenderId lub taskId" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists || taskDoc.data()!.status !== "PENDING") {
-            return NextResponse.json({ message: "Task handled." });
+
+        if (!taskDoc.exists) {
+            console.error(`[BROKER 💰] Zadanie o ID ${taskId} nie istnieje w bazie.`);
+            throw new Error("Zadanie nie istnieje.");
         }
 
+        const taskData = taskDoc.data()!;
+        console.log(`[BROKER 💰] Wczytano dane zadania. Status w bazie: ${taskData.status}`);
+
+        if (taskData.status !== "PENDING") {
+            console.log(`[BROKER 💰] Zadanie ma już status ${taskData.status}. Przerywam przetwarzanie.`);
+            return NextResponse.json({ message: "Zadanie już obsłużone." });
+        }
+
+        // Oznaczamy jako IN_PROGRESS
+        console.log(`[BROKER 💰] Zmieniam status zadania na IN_PROGRESS.`);
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // Pobieramy sekcje do wyceny (QUANTITY_READY)
-        const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`);
-        const sectionsSnap = await estimateRef.where("status", "==", "QUANTITY_READY").get();
+        const itemsToPrice = taskData.inputFacts?.items || [];
+        console.log(`[BROKER 💰] Pobrano ${itemsToPrice.length} pozycji do wyceny z inputFacts.`);
 
-        if (sectionsSnap.empty) {
-            await taskRef.update({ status: "DONE", result: { summary: "Brak pozycji do wyceny." } });
+        // Kompilujemy dynamiczny prompt rynkowy dla Google Search Grounding
+        const prompt = `
+Jesteś Ekspertem ds. Wycen i Szacowania Kosztów w Polsce.
+Użyj narzędzia wyszukiwarki internetowej (Google Search), aby znaleźć aktualne, realne, średnie ceny rynkowe netto (w PLN) dla poniższych pozycji:
 
-            const origin = new URL(req.url).origin;
-            fetch(`${origin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-            }).catch(e => console.error(e));
+${JSON.stringify(itemsToPrice, null, 2)}
 
-            return NextResponse.json({ message: "Brak pozycji." });
-        }
+Twój cel:
+${taskData.instruction}
 
-        let totalTokensUsed = 0;
-        let pricedItemsCount = 0;
-        const globalBatch = adminDb.batch();
+Ważne zasady:
+- Podawaj ceny rynkowe netto w PLN (bez VAT).
+- Zwróć wynik jako poprawny obiekt JSON, pasujący dokładnie do struktury zdefiniowanej przez Mózg w instrukcji.
+- Nie dodawaj żadnego dodatkowego tekstu ani znaczników markdown poza czystym JSON-em.
+`;
 
-        for (const sectionDoc of sectionsSnap.docs) {
-            const sectionId = sectionDoc.id;
+        console.log("[BROKER 💰] Wysyłam zapytanie do Gemini z włączonym Google Search Grounding...");
 
-            // Standard 1: Pobieramy pozycje bezpośrednio z podkolekcji `items`
-            const itemsSnap = await estimateRef.doc(sectionId).collection("items").get();
-            const items = itemsSnap.docs.map(d => d.data());
-
-            if (items.length === 0) continue;
-
-            const itemsQuery = items.map((i: any) =>
-                `ID: ${i.id} | Pozycja: ${i.pozycja} | Opis: ${i.opis}`
-            ).join("\n");
-
-            // KROK 1: Grounding Search
-            const searchPrompt = `Znajdź aktualne ceny netto w Polsce dla pozycji:\n${itemsQuery}\nZwróć raport tekstowy.`;
-
-            // POPRAWKA TS2353: 'tools' poprawnie zagnieżdżone wewnątrz obiektu 'config'
-            const searchResult = await ai.models.generateContent({
-                model: MODEL_FLASH,
-                contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
-                config: {
-                    tools: [{ googleSearch: {} }]
-                }
-            });
-
-            const searchContext = searchResult.text ?? "";
-            totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
-
-            // KROK 2: JSON
-            const structurePrompt = `Zwróć JSON z cenami jednostkowymi na podstawie raportu:\n${searchContext}`;
-            const structureResult = await ai.models.generateContent({
-                model: MODEL_FLASH,
-                contents: [{ role: "user", parts: [{ text: structurePrompt }] }],
-                config: {
-                    temperature: 0.1,
-                    responseMimeType: "application/json",
-                    responseSchema: BROKER_SCHEMA as any
-                }
-            });
-
-            const parsedPrices = JSON.parse(structureResult.text ?? "{}");
-            totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
-
-            // POPRAWKA TS2363: Jawne typowanie mapy jako <string, number> w celu eliminacji błędu typów przy operacji arytmetycznej
-            const priceMap = new Map<string, number>(
-                (parsedPrices.prices || []).map((p: any) => [p.id, Number(p.cenaJed) || 0])
-            );
-            let sectionTotalValue = 0;
-
-            for (const itemDoc of itemsSnap.docs) {
-                const itemData = itemDoc.data();
-                const price = priceMap.get(itemDoc.id) || 0; // price jest bezpiecznie wnioskowane jako number
-
-                sectionTotalValue += (Number(itemData.ilosc) || 0) * price;
-
-                globalBatch.update(itemDoc.ref, {
-                    cenaJed: price,
-                    confidence: "HIGH",
-                    sourceTrack: `${itemData.sourceTrack || ""} -> Wycena: Broker (Google Search)`
-                });
+        const result = await ai.models.generateContent({
+            model: taskData.modelOverride || "gemini-2.5-flash", // Domyślnie używamy tańszego Flash
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                tools: [{ googleSearch: {} }], // Standard 2: Narzędzia zawsze wewnątrz config
+                temperature: 0.1,
+                responseMimeType: "application/json"
             }
+        });
 
-            // Aktualizacja dokumentu głównego sekcji
-            globalBatch.update(sectionDoc.ref, {
-                totalValue: sectionTotalValue,
-                status: "PRICED",
-                updatedAt: new Date()
-            });
+        console.log("[BROKER 💰] Odebrano odpowiedź z Gemini. Parsuję wynik JSON...");
+        const rawResult = JSON.parse(result.text ?? "{}");
+        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        console.log(`[BROKER 💰] Zużyto tokenów: ${tokensUsed}. Zapisuję rawResult w bazie.`);
 
-            pricedItemsCount += items.length;
-        }
-
-        // Zakończenie zadania i aktualizacja budżetu
-        globalBatch.update(taskRef, {
+        // Aktualizujemy zadanie jako DONE
+        await taskRef.update({
             status: "DONE",
-            result: { pricedItems: pricedItemsCount },
-            costTokens: totalTokensUsed,
+            rawResult: rawResult,
+            processedByBrain: false,
+            costTokens: tokensUsed,
             updatedAt: new Date()
         });
 
-        const costUSD = (totalTokensUsed / 1000) * 0.000015;
-        globalBatch.update(adminDb.collection("tenders").doc(tenderId), {
+        // Koszt tokenów (Flash: ~$0.000015 / 1k, Pro: ~$0.002 / 1k)
+        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
+        const costUSD = (tokensUsed / 1000) * costPerThousand;
+
+        console.log(`[BROKER 💰] Naliczyłem koszt wykonania zadania: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        await globalBatch.commit();
-        console.log(`[PESAM 3.0 💰] Ukończono wycenę subkolekcji. Pozycji: ${pricedItemsCount}`);
-
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0 💰] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
-
-        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po wycenie:", e));
-
-        return NextResponse.json({ success: true, pricedItemsCount });
+        isSuccess = true;
+        console.log(`[BROKER 💰] Zadanie ukończone sukcesem.`);
+        return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error(error);
+        console.error("[BROKER 💰] ❌ Błąd krytyczny w brokerze cenowym:", error);
         if (tenderId && taskId) {
-            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({ status: "ERROR" }).catch(() => { });
+            console.log("[BROKER 💰] Zapisuję status błędu (ERROR) do zadania w bazie.");
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch((dbErr) => console.error("[BROKER 💰] Nie udało się zapisać błędu do Firestore:", dbErr));
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        // Gwarancja wybudzenia Mózgu (zawsze w finally)
+        if (tenderId && taskId) {
+            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            console.log(`[BROKER 💰] Wybudzam Mózg przez loopback na adresie: ${localOrigin}`);
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch((fetchErr) => console.error("[BROKER 💰] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+        }
     }
 }

@@ -1,227 +1,184 @@
-// ============================================================
-// PESAM 3.0 – Agent Specjalista: LEGAL_EXPERT (Czytacz Dokumentów)
-// POST /api/kosztorysant/czytacz-dokumentow
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
-// Standard 3 & 4: Inicjalizacja klienta Google GenAI (Vertex AI, global, brak undici)
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
     location: "global"
 });
 
-const MODEL_FLASH = "gemini-2.5-flash";
-
-// Schemat odpowiedzi Agenta Prawnego
-const LEGAL_SCHEMA = {
-    type: Type.OBJECT,
-    properties: {
-        extractedFacts: {
-            type: Type.ARRAY,
-            description: "Lista twardych faktów prawnych/administracyjnych wyciągniętych z dokumentu.",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    key: { type: Type.STRING, description: "Kategoria, np. 'Termin_Realizacji', 'Wadium', 'Kary_Umowne', 'Gwarancja'" },
-                    value: { type: Type.STRING, description: "Konkretna wartość, np. '12 miesięcy od podpisania umowy', '50 000 PLN'" }
-                },
-                required: ["key", "value"]
-            }
-        },
-        summary: {
-            type: Type.STRING,
-            description: "Krótkie podsumowanie analizy prawnej dla Mózgu."
-        }
-    },
-    required: ["extractedFacts", "summary"]
-};
-
 export async function POST(req: Request) {
-    // POPRAWKA 2: Deklaracja zmiennych na zewnątrz bloku try, aby catch miał do nich bezpieczny dostęp
     let tenderId: string | undefined;
     let taskId: string | undefined;
+    let isSuccess = false;
 
     try {
         const body = await req.json();
         tenderId = body.tenderId;
         taskId = body.taskId;
 
+        console.log(`[LEGAL EXPERT ⚖️] Otrzymano żądanie POST dla tenderId: ${tenderId}, taskId: ${taskId}`);
+
         if (!tenderId || !taskId) {
+            console.error("[LEGAL EXPERT ⚖️] Błąd: Brak parametrów tenderId lub taskId.");
             return NextResponse.json({ error: "Brak tenderId lub taskId" }, { status: 400 });
         }
-
-        console.log(`[PESAM 3.0 ⚖️] LEGAL_EXPERT wybudzony. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
 
         if (!taskDoc.exists) {
+            console.error(`[LEGAL EXPERT ⚖️] Zadanie o ID ${taskId} nie istnieje w bazie.`);
             throw new Error("Zadanie nie istnieje.");
         }
 
         const taskData = taskDoc.data()!;
+        console.log(`[LEGAL EXPERT ⚖️] Wczytano zadanie. Status: ${taskData.status}`);
 
-        // Idempotentność: Jeśli zadanie nie jest PENDING, ignorujemy
         if (taskData.status !== "PENDING") {
-            console.log(`[PESAM 3.0 ⚖️] Zadanie ${taskId} ma status ${taskData.status}. Pomijam.`);
+            console.log(`[LEGAL EXPERT ⚖️] Zadanie zostało już przetworzone (status: ${taskData.status}). Przerywam.`);
             return NextResponse.json({ message: "Task already processed or in progress." });
         }
 
-        // 1. Oznaczamy zadanie jako IN_PROGRESS
+        // Zmiana statusu na IN_PROGRESS
+        console.log("[LEGAL EXPERT ⚖️] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
         const inputDocIds: string[] = taskData.inputDocIds || [];
+        console.log(`[LEGAL EXPERT ⚖️] Do przeanalizowania wskazano dokumenty o ID: ${JSON.stringify(inputDocIds)}`);
+
         if (inputDocIds.length === 0) {
-            await taskRef.update({ status: "DONE", result: { summary: "Brak dokumentów do analizy." } });
+            console.warn("[LEGAL EXPERT ⚖️] Brak dokumentów wejściowych w zadaniu. Kończę pomyślnie bez analizy.");
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { message: "Brak dokumentów do analizy." },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
+            isSuccess = true;
             return NextResponse.json({ message: "Brak dokumentów." });
         }
 
-        let totalTokensUsed = 0;
-        const allExtractedFacts: Record<string, string> = {};
-        const summaries: string[] = [];
-
-        // 2. Pobieranie i analiza dokumentów
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const bucket = adminStorage.bucket(bucketName);
+        const parts: any[] = [];
 
+        // Pobieramy i konwertujemy pliki do base64
         for (const docId of inputDocIds) {
+            console.log(`[LEGAL EXPERT ⚖️] Pobieram metadane dokumentu o ID: ${docId}`);
             const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
-            if (!docSnap.exists) continue;
+
+            if (!docSnap.exists) {
+                console.warn(`[LEGAL EXPERT ⚖️] Dokument o ID ${docId} nie istnieje w Firestore. Pomijam.`);
+                continue;
+            }
 
             const docData = docSnap.data()!;
-            console.log(`[PESAM 3.0 ⚖️] Czytam dokument: ${docData.fileName}`);
+            console.log(`[LEGAL EXPERT ⚖️] Pobieram plik z Google Cloud Storage: ${docData.storagePath}`);
 
             try {
-                // Standard 3: Bezpieczne pobieranie bufora
                 const fileRef = bucket.file(docData.storagePath);
                 const [downloadedBuffer] = await fileRef.download();
+                console.log(`[LEGAL EXPERT ⚖️] Pobrano ${downloadedBuffer.length} bajtów dla pliku: ${docData.fileName}`);
+
                 const safeArrayBuffer = new Uint8Array(downloadedBuffer).buffer;
                 const base64Data = Buffer.from(safeArrayBuffer).toString("base64");
+                console.log(`[LEGAL EXPERT ⚖️] Pomyślnie przekonwertowano ${docData.fileName} do Base64.`);
 
-                const prompt = `
-Jesteś Agentem Prawnym (LEGAL_EXPERT) w systemie PESAM 3.0.
-Twoje zadanie: ${taskData.description}
-
-Przeanalizuj załączony dokument (np. SWZ, PFU, Umowa).
-Szukaj wyłącznie twardych faktów mających wpływ na koszty i ryzyko:
-- Terminy realizacji
-- Kary umowne
-- Wymagane wadium / zabezpieczenie należytego wykonania
-- Okresy gwarancji
-- Wymagania dotyczące certyfikatów lub ubezpieczeń
-
-Zwróć dane w formacie JSON.
-`;
-
-                const result = await ai.models.generateContent({
-                    model: MODEL_FLASH,
-                    contents: [
-                        {
-                            role: "user",
-                            parts: [
-                                { text: prompt },
-                                { inlineData: { data: base64Data, mimeType: docData.mimeType || "application/pdf" } }
-                            ]
-                        }
-                    ],
-                    config: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json",
-                        responseSchema: LEGAL_SCHEMA as any
+                parts.push({
+                    inlineData: {
+                        data: base64Data,
+                        mimeType: docData.mimeType || "application/pdf"
                     }
                 });
-
-                const responseText = result.text ?? "{}";
-                const parsedResult = JSON.parse(responseText);
-
-                totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
-
-                // Transformacja tablicy {key, value} na płaską mapę
-                if (parsedResult.extractedFacts) {
-                    // POPRAWKA 1: Bezpieczna nazwa pliku bez kropek (ochrona przed zagnieżdżaniem w Firestore)
-                    const safeFileName = docData.fileName.replace(/\./g, "_");
-
-                    parsedResult.extractedFacts.forEach((fact: any) => {
-                        allExtractedFacts[`${safeFileName}_${fact.key}`] = fact.value;
-                    });
-                }
-                if (parsedResult.summary) summaries.push(parsedResult.summary);
-
-            } catch (err) {
-                console.error(`[PESAM 3.0 ⚖️] Błąd analizy pliku ${docData.fileName}:`, err);
+            } catch (err: any) {
+                console.error(`[LEGAL EXPERT ⚖️] Błąd pobierania pliku ${docData.fileName} ze Storage:`, err);
+                throw err;
             }
         }
 
-        // 3. Zapis wyników do bazy (Aktualizacja Zadania i Mózgu)
-        const batch = adminDb.batch();
+        // Składanie dynamicznego promptu od Mózgu
+        const prompt = `
+Jesteś Ekspertem Prawnym i Analitykiem Umów Przetargowych w Polsce.
+Przeanalizuj załączone pliki w oparciu o poniższą instrukcję:
 
-        // A. Zakończenie zadania
-        batch.update(taskRef, {
+${taskData.instruction}
+
+Ważne zasady:
+- Skup się na twardych danych mających realny wpływ na koszty i ryzyko.
+- Zwróć wynik jako poprawny obiekt JSON, pasujący dokładnie do struktury zdefiniowanej przez Mózg w instrukcji.
+- Nie dodawaj żadnego dodatkowego tekstu ani znaczników markdown poza czystym JSON-em.
+`;
+
+        parts.unshift({ text: prompt });
+        console.log(`[LEGAL EXPERT ⚖️] Wysyłam zapytanie do Gemini z ${parts.length - 1} plikami jako wsad multimedialny...`);
+
+        const result = await ai.models.generateContent({
+            model: taskData.modelOverride || "gemini-2.5-flash", // Domyślnie Flash
+            contents: [{ role: "user", parts }],
+            config: {
+                temperature: 0.1,
+                responseMimeType: "application/json"
+            }
+        });
+
+        console.log("[LEGAL EXPERT ⚖️] Odebrano odpowiedź z Gemini. Parsuję wynik JSON...");
+        const rawResult = JSON.parse(result.text ?? "{}");
+        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        console.log(`[LEGAL EXPERT ⚖️] Zużyto tokenów: ${tokensUsed}. Zapisuję rawResult w bazie.`);
+
+        // Aktualizujemy zadanie jako DONE
+        await taskRef.update({
             status: "DONE",
-            result: {
-                facts: allExtractedFacts,
-                summary: summaries.join(" | ")
-            },
-            costTokens: totalTokensUsed,
+            rawResult: rawResult,
+            processedByBrain: false,
+            costTokens: tokensUsed,
             updatedAt: new Date()
         });
 
-        // B. Wstrzyknięcie faktów do Mózgu (knownFacts)
-        const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
+        // Koszt tokenów (Flash: ~$0.000015 / 1k, Pro: ~$0.002 / 1k)
+        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
+        const costUSD = (tokensUsed / 1000) * costPerThousand;
 
-        const brainUpdates: Record<string, any> = {};
-        for (const [key, value] of Object.entries(allExtractedFacts)) {
-            brainUpdates[`knownFacts.${key}`] = value;
-        }
-
-        if (Object.keys(brainUpdates).length > 0) {
-            batch.update(brainRef, brainUpdates);
-        }
-
-        // C. Aktualizacja Budget Guard
-        const costUSD = (totalTokensUsed / 1000) * 0.000015;
-        const tenderRef = adminDb.collection("tenders").doc(tenderId);
-        batch.update(tenderRef, {
+        console.log(`[LEGAL EXPERT ⚖️] Naliczyłem koszt: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        await batch.commit();
-        console.log(`[PESAM 3.0 ⚖️] Zadanie ${taskId} zakończone. Fakty zapisane w Mózgu.`);
-
-        // 4. Wybudzenie Mózgu (ReAct Loop kontynuuje działanie)
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0 ⚖️] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
-
-        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po zadaniu prawnym:", e));
-
-        return NextResponse.json({ success: true, factsFound: Object.keys(allExtractedFacts).length });
+        isSuccess = true;
+        console.log("[LEGAL EXPERT ⚖️] Zadanie zakończone sukcesem.");
+        return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 ⚖️] ❌ Błąd krytyczny Agenta Prawnego:", error);
-
-        // POPRAWKA 2: Bezpieczne użycie zmiennych z zewnętrznego scope'u bez ponownego czytania req.json()
+        console.error("[LEGAL EXPERT ⚖️] ❌ Błąd krytyczny w Legal Expert:", error);
         if (tenderId && taskId) {
-            try {
-                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                    status: "ERROR",
-                    result: { error: error.message }
-                });
-            } catch (dbError) {
-                console.error("[PESAM 3.0 ⚖️] Nie udało się zapisać statusu ERROR do bazy:", dbError);
-            }
+            console.log("[LEGAL EXPERT ⚖️] Zapisuję status błędu (ERROR) do zadania w bazie.");
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch((dbErr) => console.error("[LEGAL EXPERT ⚖️] Nie udało się zapisać błędu do Firestore:", dbErr));
         }
-
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        // Gwarancja wybudzenia Mózgu (zawsze w finally)
+        if (tenderId && taskId) {
+            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            console.log(`[LEGAL EXPERT ⚖️] Wybudzam Mózg przez loopback na adresie: ${localOrigin}`);
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch((fetchErr) => console.error("[LEGAL EXPERT ⚖️] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+        }
     }
 }

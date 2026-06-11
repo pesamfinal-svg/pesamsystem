@@ -1,8 +1,3 @@
-// ============================================================
-// PESAM 3.0 – Agent Specjalista: BOQ_PARSER (Przedmiarowiec)
-// POST /api/kosztorysant/agent-ilosciowiec
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
@@ -17,27 +12,28 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-// Używamy modelu PRO, bo parsowanie gęstych tabel wymaga wysokiej precyzji
-const MODEL_PRO = "gemini-2.5-pro";
+const MODEL_PRO = "gemini-2.5-pro"; // Parsowanie tabel i dokumentacji ilościowej wymaga najwyższej dokładności
 
+// Schemat ustrukturyzowanego wyjścia przedmiarowego
 const BOQ_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         items: {
             type: Type.ARRAY,
+            description: "Lista odczytanych pozycji przedmiarowych z tabeli.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Numer lub krótka nazwa pozycji (np. '1.1', 'Wykopy')" },
-                    opis: { type: Type.STRING, description: "Pełny opis z tabeli przedmiaru" },
-                    ilosc: { type: Type.NUMBER, description: "Ilość z przedmiaru (tylko liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary (np. m3, m2)" },
-                    KNR_ref: { type: Type.STRING, description: "Podstawa wyceny (np. KNR 2-01 0119-03)" }
+                    pozycja: { type: Type.STRING, description: "Numer lub indeks pozycji (np. '1.1', '2.4.1')" },
+                    opis: { type: Type.STRING, description: "Pełny, szczegółowy opis pozycji z tabeli przedmiaru" },
+                    ilosc: { type: Type.NUMBER, description: "Ilość z przedmiaru (zawsze jako liczba)" },
+                    jednostka: { type: Type.STRING, description: "Jednostka miary (np. m3, m2, mb, szt, kpl)" },
+                    KNR_ref: { type: Type.STRING, description: "Sugerowana podstawa KNR, kod lub norma (jeśli występuje w tabeli)" }
                 },
                 required: ["pozycja", "opis", "ilosc", "jednostka"]
             }
         },
-        summary: { type: Type.STRING }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie zawartości odczytanego przedmiaru." }
     },
     required: ["items", "summary"]
 };
@@ -45,48 +41,99 @@ const BOQ_SCHEMA = {
 export async function POST(req: Request) {
     let tenderId: string | undefined;
     let taskId: string | undefined;
+    let isSuccess = false;
 
     try {
         const body = await req.json();
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
+        console.log(`[BOQ PARSER 📊] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        console.log(`[PESAM 3.0 📊] BOQ_PARSER wybudzony. Przetarg: ${tenderId}`);
+        if (!tenderId || !taskId) {
+            console.error("[BOQ PARSER 📊] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
+            return NextResponse.json({ error: "Brak danych" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists || taskDoc.data()!.status !== "PENDING") return NextResponse.json({ message: "Pominięto." });
+
+        if (!taskDoc.exists) {
+            console.error(`[BOQ PARSER 📊] Zadanie o ID ${taskId} nie istnieje w bazie.`);
+            throw new Error("Zadanie nie istnieje.");
+        }
 
         const taskData = taskDoc.data()!;
+        console.log(`[BOQ PARSER 📊] Wczytano zadanie. Status w bazie: ${taskData.status}`);
+
+        if (taskData.status !== "PENDING") {
+            console.log(`[BOQ PARSER 📊] Zadanie ma status ${taskData.status}. Przerywam.`);
+            return NextResponse.json({ message: "Pominięto." });
+        }
+
+        // Zmiana statusu na IN_PROGRESS
+        console.log("[BOQ PARSER 📊] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
         const inputDocIds: string[] = taskData.inputDocIds || [];
-        let totalTokensUsed = 0;
-        const allExtractedItems: any[] = [];
+        console.log(`[BOQ PARSER 📊] Dokumenty przedmiarowe do sparsowania: ${JSON.stringify(inputDocIds)}`);
+
+        if (inputDocIds.length === 0) {
+            console.warn("[BOQ PARSER 📊] Brak dokumentów w zadaniu. Kończę pomyślnie.");
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { message: "Brak plików do przeanalizowania." },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
+            isSuccess = true;
+            return NextResponse.json({ message: "Brak plików." });
+        }
 
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const bucket = adminStorage.bucket(bucketName);
+        const allExtractedItems: any[] = [];
+        let totalTokensUsed = 0;
 
+        // Iterujemy po wszystkich dokumentach przedmiarowych
         for (const docId of inputDocIds) {
+            console.log(`[BOQ PARSER 📊] Pobieram metadane dokumentu: ${docId}`);
             const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
-            if (!docSnap.exists) continue;
+            if (!docSnap.exists) {
+                console.warn(`[BOQ PARSER 📊] Dokument ${docId} nie istnieje w bazie. Pomijam.`);
+                continue;
+            }
+
             const docData = docSnap.data()!;
+            console.log(`[BOQ PARSER 📊] Pobieram plik przedmiaru ze Storage: ${docData.storagePath}`);
 
             try {
                 const fileRef = bucket.file(docData.storagePath);
                 const [downloadedBuffer] = await fileRef.download();
+                console.log(`[BOQ PARSER 📊] Pobrano plik ${docData.fileName} (${downloadedBuffer.length} bajtów).`);
+
                 const safeArrayBuffer = new Uint8Array(downloadedBuffer).buffer;
                 const base64Data = Buffer.from(safeArrayBuffer).toString("base64");
+                console.log(`[BOQ PARSER 📊] Przekonwertowano ${docData.fileName} do Base64.`);
 
                 const prompt = `
-Jesteś Przedmiarowcem (BOQ_PARSER). Przeanalizuj załączony dokument (ślepy kosztorys / przedmiar).
-Wyciągnij wszystkie pozycje kosztorysowe, ich opisy, ilości i jednostki.
-Zignoruj puste wiersze i nagłówki stron. Zwróć czysty JSON.
+Jesteś Ekspertem ds. Przedmiarów (BOQ_PARSER). 
+Przeanalizuj załączony dokument (ślepy kosztorys / przedmiar / zestawienie ilościowe robót).
+Zidentyfikuj i wyodrębnij wszystkie pozycje przedmiarowe.
+
+Twoje polecenie od Mózgu:
+${taskData.instruction}
+
+Ważne zasady:
+- Ignoruj puste wiersze, stopki i nagłówki stron.
+- Zwróć wynik jako poprawny obiekt JSON, pasujący dokładnie do zdefiniowanego schematu.
+- Nie dodawaj żadnego innego tekstu poza czystym JSON-em.
 `;
+
+                console.log(`[BOQ PARSER 📊] Wysyłam zapytanie do Gemini Pro dla pliku: ${docData.fileName}`);
+
                 const result = await ai.models.generateContent({
-                    model: MODEL_PRO,
+                    model: taskData.modelOverride || MODEL_PRO, // Przedmiary domyślnie parsujemy droższym, precyzyjnym Pro
                     contents: [
                         {
                             role: "user",
@@ -103,75 +150,78 @@ Zignoruj puste wiersze i nagłówki stron. Zwróć czysty JSON.
                     }
                 });
 
+                console.log(`[BOQ PARSER 📊] Odebrano odpowiedź z Gemini dla pliku: ${docData.fileName}. Parsuję JSON...`);
                 const parsedResult = JSON.parse(result.text ?? "{}");
-                totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+                const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+                totalTokensUsed += tokensUsed;
 
-                if (parsedResult.items) {
-                    const formattedItems = parsedResult.items.map((item: any) => ({
-                        id: randomUUID(),
-                        pozycja: item.pozycja,
-                        opis: item.opis,
-                        ilosc: Number(item.ilosc) || 0,
-                        jednostka: item.jednostka || "szt",
-                        cenaJed: 0, // Broker wyceni
-                        KNR_ref: item.KNR_ref || "Z Przedmiaru",
-                        confidence: "HIGH",
-                        sourceTrack: `Przedmiar: ${docData.fileName}`
-                    }));
-                    allExtractedItems.push(...formattedItems);
+                if (parsedResult.items && parsedResult.items.length > 0) {
+                    console.log(`[BOQ PARSER 📊] Wyciągnięto ${parsedResult.items.length} pozycji z pliku ${docData.fileName}`);
+                    allExtractedItems.push(...parsedResult.items);
+                } else {
+                    console.warn(`[BOQ PARSER 📊] Nie wykryto pozycji przedmiarowych w pliku ${docData.fileName}.`);
                 }
-            } catch (err) {
-                console.error(`[PESAM 3.0 📊] Błąd parsowania ${docData.fileName}:`, err);
+
+            } catch (err: any) {
+                console.error(`[BOQ PARSER 📊] Błąd krytyczny podczas parsowania pliku ${docData.fileName}:`, err);
+                throw err;
             }
         }
 
-        const batch = adminDb.batch();
+        console.log(`[BOQ PARSER 📊] Łącznie ze wszystkich plików wyodrębniono ${allExtractedItems.length} pozycji przedmiarowych.`);
 
-        if (allExtractedItems.length > 0) {
-            const sectionId = `sec_boq_${taskId}`;
-            const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
-
-            batch.set(estimateRef, {
-                section: "Pozycje z Przedmiaru (BOQ)",
-                status: "QUANTITY_READY", // Gotowe dla Brokera
-                totalValue: 0,
-                sourceTaskId: taskId,
-                items: allExtractedItems,
-                updatedAt: new Date()
-            });
-        }
-
-        batch.update(taskRef, {
+        // Zapisujemy całą strukturę bezpośrednio do rawResult i oznaczamy zadanie jako DONE
+        console.log("[BOQ PARSER 📊] Zapisuję rawResult w bazie danych.");
+        await taskRef.update({
             status: "DONE",
-            result: { itemsExtracted: allExtractedItems.length },
+            rawResult: {
+                items: allExtractedItems,
+                summary: `Pomyślnie sparsowano przedmiar robót. Wyodrębniono łącznie ${allExtractedItems.length} pozycji.`
+            },
+            processedByBrain: false,
             costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        // Model PRO jest droższy ($0.002 / 1k tokenów)
-        const costUSD = (totalTokensUsed / 1000) * 0.002;
-        batch.update(adminDb.collection("tenders").doc(tenderId), {
+        // Koszt tokenów dla modelu Pro: ~$0.002 / 1k tokenów
+        const costPerThousand = (taskData.modelOverride === "gemini-2.5-flash") ? 0.000015 : 0.002;
+        const costUSD = (totalTokensUsed / 1000) * costPerThousand;
+
+        console.log(`[BOQ PARSER 📊] Koszt tokenów: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
-        await batch.commit();
-
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0 📊] Wybudzam Mózg lokalnie przez loopback: ${localOrigin}`);
-
-        fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tenderId, trigger: `TASK_COMPLETED_${taskId}` })
-        }).catch(e => console.error("[PESAM 3.0] Błąd wybudzania Mózgu po analizie przedmiaru:", e));
-
-        return NextResponse.json({ success: true, itemsExtracted: allExtractedItems.length });
+        isSuccess = true;
+        console.log("[BOQ PARSER 📊] Parsowanie przedmiarów zakończone sukcesem.");
+        return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 📊] Błąd:", error);
+        console.error("[BOQ PARSER 📊] ❌ Błąd krytyczny w agencie przedmiarowym:", error);
         if (tenderId && taskId) {
-            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({ status: "ERROR" }).catch(() => { });
+            console.log("[BOQ PARSER 📊] Zapisuję status błędu (ERROR) do bazy.");
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch((dbErr) => console.error("[BOQ PARSER 📊] Błąd zapisu błędu do Firestore:", dbErr));
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        // Gwarancja wybudzenia Mózgu
+        if (tenderId && taskId) {
+            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            console.log(`[BOQ PARSER 📊] Wybudzam Mózg przez loopback: ${localOrigin}`);
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch((fetchErr) => console.error("[BOQ PARSER 📊] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+        }
     }
 }

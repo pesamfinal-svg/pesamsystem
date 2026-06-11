@@ -1,18 +1,12 @@
-// ============================================================
-// PESAM 3.0 – Magazynier ZIP (Odbiór i rozpakowanie dokumentacji)
-// POST /api/kosztorysant/magazynier-zip
-// ============================================================
-
 import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
-import { GoogleGenAI } from "@google/genai";
-// @ts-ignore - Wyłączenie kontroli typów dla biblioteki bez wbudowanych typów TS
-import AdmZip from "adm-zip"; // Standardowa i lekka biblioteka do obsługi ZIP w pamięci
+// @ts-ignore - AdmZip może nie mieć wbudowanych typów w niektórych konfiguracjach TS, ignorujemy to ostrzeżenie
+import AdmZip from "adm-zip";
 
 export const dynamic = "force-dynamic";
 
-// Funkcja pomocnicza określająca mimeType na podstawie rozszerzenia
-function getMimeType(fileName: string): string {
+// Słownik pomocniczy do określania typu MIME na podstawie rozszerzenia pliku
+function determineMimeType(fileName: string): string {
     const ext = fileName.split('.').pop()?.toLowerCase();
     switch (ext) {
         case 'pdf': return 'application/pdf';
@@ -30,29 +24,31 @@ export async function POST(req: Request) {
     let tenderId: string | undefined;
 
     try {
-        console.log("[PESAM 3.0 📦] Magazynier ZIP: Odebrano żądanie przesłania pliku.");
+        console.log("[MAGAZYNIER ZIP 📦] Rozpoczynam obsługę żądania uploadu pliku...");
 
         const contentType = req.headers.get("content-type") || "";
         if (!contentType.includes("multipart/form-data")) {
+            console.error("[MAGAZYNIER ZIP 📦] Błąd: Żądanie nie jest typu multipart/form-data.");
             return NextResponse.json({ error: "Żądanie musi być typu multipart/form-data" }, { status: 400 });
         }
 
-        // 1. Parsowanie FormData z żądania wejściowego (Obsługa wielu plików)
+        // 1. Parsowanie FormData z żądania
         const formData = await req.formData();
         const files = formData.getAll("file") as File[];
-
-        // Obsługa obu wariantów kluczy z narzutami ("trends" i "marketTrends")
         const marketTrendsRaw = (formData.get("trends") || formData.get("marketTrends")) as string | null;
 
+        console.log(`[MAGAZYNIER ZIP 📦] Odebrano pliki: ${files.length} szt. Narzuty kosztorysowe (raw): ${marketTrendsRaw}`);
+
         if (files.length === 0) {
+            console.error("[MAGAZYNIER ZIP 📦] Błąd: Brak plików w polu 'file'.");
             return NextResponse.json({ error: "Brak plików w żądaniu (pole 'file')" }, { status: 400 });
         }
 
-        // 2. Generowanie unikalnego ID przetargu (wykorzystujemy autogenerowane ID z Firestore)
+        // 2. Generowanie unikalnego ID przetargu w bazie danych
         tenderId = adminDb.collection("tenders").doc().id;
-        console.log(`[PESAM 3.0 📦] Generuję unikalne ID przetargu: ${tenderId}`);
+        console.log(`[MAGAZYNIER ZIP 📦] Wygenerowano nowe tenderId dla projektu: ${tenderId}`);
 
-        // Odbiór i parsowanie narzutów kosztorysowych
+        // Parsowanie narzutów rynkowych przesyłanych z suwaków na frontendzie
         const marketTrends = marketTrendsRaw ? JSON.parse(marketTrendsRaw) : {
             laborAdjustment: 0,
             materialAdjustment: 0,
@@ -61,7 +57,8 @@ export async function POST(req: Request) {
             zysk: 12
         };
 
-        // 3. Inicjalizacja dokumentu głównego przetargu w bazie danych (Standard 1)
+        // 3. Rejestracja dokumentu głównego przetargu (Standard 1)
+        console.log(`[MAGAZYNIER ZIP 📦] Tworzę dokument główny tenders/${tenderId} w bazie Firestore...`);
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
         await tenderRef.set({
             status: "CLASSIFYING",
@@ -83,57 +80,67 @@ export async function POST(req: Request) {
 
         const extractedFiles: Array<{ name: string; buffer: Buffer; mime: string }> = [];
 
-        // 4. Pętla przetwarzająca każdy z przesłanych plików
+        // 4. Przetwarzanie przesłanych plików (obsługa ZIP lub pojedynczych)
         for (const file of files) {
+            console.log(`[MAGAZYNIER ZIP 📦] Przetwarzam plik: ${file.name} (Rozmiar: ${file.size} bajtów, Typ: ${file.type})`);
+
             const fileArrayBuffer = await file.arrayBuffer();
-            const fileBuffer = Buffer.from(new Uint8Array(fileArrayBuffer).buffer); // Standard 3: Bezpieczna konwersja
+            const fileBuffer = Buffer.from(new Uint8Array(fileArrayBuffer).buffer);
 
             if (file.name.endsWith(".zip") || file.type === "application/zip") {
-                console.log(`[PESAM 3.0 📦] Wykryto ZIP "${file.name}". Rozpakowywanie w pamięci...`);
+                console.log(`[MAGAZYNIER ZIP 📦] Wykryto plik ZIP: ${file.name}. Rozpakowuję w pamięci RAM...`);
 
                 const zip = new AdmZip(fileBuffer);
                 const zipEntries = zip.getEntries();
+                console.log(`[MAGAZYNIER ZIP 📦] ZIP zawiera ${zipEntries.length} wpisów.`);
 
                 for (const entry of zipEntries) {
-                    // Pomijamy foldery i pliki ukryte (np. __MACOSX, .DS_Store)
+                    // Pomijamy foldery i pliki ukryte systemowo (np. z systemów macOS)
                     if (entry.isDirectory || entry.entryName.startsWith("__MACOSX") || entry.name.startsWith(".")) {
+                        console.log(`[MAGAZYNIER ZIP 📦] Pomijam wpis katalogowy lub systemowy: ${entry.entryName}`);
                         continue;
                     }
 
+                    const extractedBuffer = entry.getData();
+                    const determinedMime = determineMimeType(entry.name);
+
+                    console.log(`[MAGAZYNIER ZIP 📦] Rozpakowano plik: ${entry.name} (${extractedBuffer.length} bajtów). Typ MIME: ${determinedMime}`);
                     extractedFiles.push({
                         name: entry.name,
-                        buffer: entry.getData(),
-                        mime: getMimeType(entry.name)
+                        buffer: extractedBuffer,
+                        mime: determinedMime
                     });
                 }
             } else {
-                console.log(`[PESAM 3.0 📦] Wykryto dokument pojedynczy "${file.name}". Przetwarzam bezpośrednio.`);
+                console.log(`[MAGAZYNIER ZIP 📦] Wykryto plik pojedynczy: ${file.name}.`);
                 extractedFiles.push({
                     name: file.name,
                     buffer: fileBuffer,
-                    mime: file.type || getMimeType(file.name)
+                    mime: file.type || determineMimeType(file.name)
                 });
             }
         }
 
         if (extractedFiles.length === 0) {
+            console.error("[MAGAZYNIER ZIP 📦] Archiwum ZIP nie zawierało żadnych poprawnych plików.");
             throw new Error("Archiwum ZIP nie zawiera żadnych poprawnych plików.");
         }
 
-        // 6. Bezpieczny zapis plików do Google Cloud Storage i Firestore
-        for (const extracted of extractedFiles) {
-            console.log(`[PESAM 3.0 📦] Zapisuję plik: ${extracted.name}`);
+        // 5. Zapis plików do Google Cloud Storage i rejestracja metadanych w Firestore
+        console.log(`[MAGAZYNIER ZIP 📦] Łącznie do zapisu w Storage przygotowano ${extractedFiles.length} plików.`);
 
+        for (const extracted of extractedFiles) {
             const storagePath = `tenders/${tenderId}/documents/${extracted.name}`;
             const fileRef = bucket.file(storagePath);
 
-            // Zapis bufora do Storage
+            console.log(`[MAGAZYNIER ZIP 📦] Zapisuję fizycznie plik w chmurze GCS: ${storagePath}`);
             await fileRef.save(extracted.buffer, {
                 metadata: { contentType: extracted.mime }
             });
 
-            // Rejestracja dokumentu w Firestore (Standard 1: documents podkolekcja)
             const docRef = adminDb.collection(`tenders/${tenderId}/documents`).doc();
+            console.log(`[MAGAZYNIER ZIP 📦] Rejestruję metadane dokumentu w Firestore: ${docRef.id} (${extracted.name})`);
+
             batch.set(docRef, {
                 fileName: extracted.name,
                 storagePath,
@@ -144,20 +151,24 @@ export async function POST(req: Request) {
             });
         }
 
+        // Zatwierdzamy transakcję zapisu Firestore w paczce (batch)
+        console.log("[MAGAZYNIER ZIP 📦] Zapisuję metadane do Firestore w paczce batch...");
         await batch.commit();
-        console.log(`[PESAM 3.0 📦] Pomyślnie przetworzono i zarejestrowano ${extractedFiles.length} plików.`);
+        console.log("[MAGAZYNIER ZIP 📦] Batch zapisany pomyślnie.");
 
-        // 7. Dynamiczne i asynchroniczne wybudzenie Fazy 0 (Inicjalizacji/Klasyfikacji)
+        // 6. Asynchroniczne wybudzenie Fazy 0 (Inicjalizatora i Klasyfikatora dokumentów)
         const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[PESAM 3.0 📦] Wybudzam Fazę 0 lokalnie przez loopback: ${localOrigin}`);
+        console.log(`[MAGAZYNIER ZIP 📦] Wybudzam asynchronicznie Klasyfikator (Fazę 0) przez loopback: ${localOrigin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`);
 
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId })
-        }).catch(e => console.error("[PESAM 3.0 📦] Błąd wybudzania Fazy 0 po rozpakowaniu:", e));
+        }).catch((err) => {
+            console.error("[MAGAZYNIER ZIP 📦] Nie udało się automatycznie wywołać loopbacka Fazy 0:", err);
+        });
 
-        // Zwracamy tenderId do frontendu
+        console.log("[MAGAZYNIER ZIP 📦] Upload zakończony sukcesem. Zwracam tenderId do klienta.");
         return NextResponse.json({
             success: true,
             tenderId,
@@ -165,13 +176,11 @@ export async function POST(req: Request) {
         });
 
     } catch (error: any) {
-        console.error("[PESAM 3.0 📦] ❌ Błąd krytyczny Magazyniera ZIP:", error);
+        console.error("[MAGAZYNIER ZIP 📦] ❌ Błąd krytyczny Magazyniera ZIP:", error);
 
-        // Zabezpieczenie: oznaczamy status jako błąd, jeśli przetarg został utworzony
         if (tenderId) {
-            try {
-                await adminDb.collection("tenders").doc(tenderId).update({ status: "ERROR" });
-            } catch (dbErr) { }
+            console.log(`[MAGAZYNIER ZIP 📦] Ze względu na błąd, oznaczam projekt ${tenderId} statusem ERROR.`);
+            await adminDb.collection("tenders").doc(tenderId).update({ status: "ERROR" }).catch(() => { });
         }
 
         return NextResponse.json({ error: error.message }, { status: 500 });
