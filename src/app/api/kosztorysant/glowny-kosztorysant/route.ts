@@ -14,6 +14,23 @@ const ai = new GoogleGenAI({
 
 const MODEL_PRO = "gemini-2.5-pro";
 
+// Pomocnicza funkcja realizująca Exponential Backoff dla błędów 429
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+
+        if (isRateLimit && retries > 0) {
+            console.warn(`[MÓZG 🧠] Wykryto limit API 429. Chmura odpoczywa. Czekam ${delay / 1000}s przed ponowieniem Mózgu... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
 // Schemat odpowiedzi Mózgu
 const BRAIN_SCHEMA = {
     type: Type.OBJECT,
@@ -106,7 +123,7 @@ export async function POST(req: Request) {
         const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
 
         const now = Date.now();
-        const TIMEOUT_MS = 10 * 60 * 1000; // 10 minut
+        const TIMEOUT_MS = 10 * 60 * 1000;
         const lockBatch = adminDb.batch();
         let trulyActiveCount = 0;
 
@@ -140,10 +157,9 @@ export async function POST(req: Request) {
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
-            tenderRef.get() // Dociągamy stan główny przetargu
+            tenderRef.get()
         ]);
 
-        // ZABEZPIECZENIE: Przerywamy działanie jeśli użytkownik wcisnął guzik STOP
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
             console.log(`[MÓZG 🧠] Przetarg ${tenderId} ma status HALTED. Natychmiast przerywam pętlę.`);
             return NextResponse.json({ message: "Brain is stopped by user." });
@@ -160,7 +176,7 @@ export async function POST(req: Request) {
         }));
 
         // ==========================================
-        // 4. RE-ACT LOOP (WYWOŁANIE LLM MÓZGU)
+        // 4. RE-ACT LOOP (WYWOŁANIE LLM MÓZGU Z ZABEZPIECZENIEM)
         // ==========================================
         const systemPrompt = `
 Jesteś Głównym Mózgiem systemu kosztorysowego. Twoim celem jest zbudowanie kompletnego kosztorysu.
@@ -186,16 +202,20 @@ ZASADY:
 4. Gdy nie ma już nic do roboty i masz wszystkie ilości, stwórz zadanie dla agenta BROKER, aby wycenił wszystko z sieci, a phase ustaw na WORKING. Gdy Broker skończy, phase na DONE.
 `;
 
-        const result = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: systemPrompt,
-            config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: BRAIN_SCHEMA as any }
+        console.log(`[MÓZG 🧠] Wysyłam zapytanie o logikę biznesową do Gemini Pro (zabezpieczone Retry)...`);
+
+        const result = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_PRO,
+                contents: systemPrompt, // Prosty ciąg znaków, unikamy błędu TS2353
+                config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: BRAIN_SCHEMA as any }
+            });
         });
 
         const parsedResult = JSON.parse(result.text ?? "{}");
         const batch = adminDb.batch();
 
-        console.log(`[MÓZG 🧠] Decyzja: ${parsedResult.reasoning}`);
+        console.log(`[MÓZG 🧠] Decyzja podjęta: ${parsedResult.reasoning}`);
 
         // ==========================================
         // 5. APLIKACJA DECYZJI DO BAZY DANYCH
@@ -231,7 +251,6 @@ ZASADY:
                 const sectionId = `sec_${safeName}`;
                 const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
 
-                // 1. Mapujemy pozycje i nadajemy im ID na poziomie Mózgu
                 const formattedItems = items.map((item: any) => ({
                     id: randomUUID(),
                     pozycja: item.pozycja,
@@ -244,17 +263,13 @@ ZASADY:
                     sourceTrack: "Mózg -> Synteza wyników"
                 }));
 
-                console.log(`[MÓZG 🧠] Zapisuję sekcję: ${sectionName} (SectionId: ${sectionId}) z tablicą ${formattedItems.length} pozycji.`);
-
-                // 2. Zapis do dokumentu nadrzędnego (dla błyskawicznego renderingu na frontendzie)
                 batch.set(sectionRef, {
                     section: sectionName,
                     status: "QUANTITY_READY",
-                    items: formattedItems, // Ta linijka ratuje Twój frontend!
+                    items: formattedItems,
                     updatedAt: new Date()
                 }, { merge: true });
 
-                // 3. Zapis do podkolekcji (dla zachowania porządku w strukturze danych)
                 formattedItems.forEach((fItem) => {
                     batch.set(sectionRef.collection("items").doc(fItem.id), fItem);
                 });
