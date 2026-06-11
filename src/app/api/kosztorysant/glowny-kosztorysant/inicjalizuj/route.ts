@@ -29,6 +29,23 @@ const CLASSIFIER_SCHEMA = {
     required: ["tags", "summary"]
 };
 
+// Pomocnicza funkcja realizująca Exponential Backoff dla błędów 429 (RESOURCE_EXHAUSTED)
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+
+        if (isRateLimit && retries > 0) {
+            console.warn(`[FAZA 0 🚀] Wykryto limit 429/RESOURCE_EXHAUSTED. Chmura jest przeciążona. Czekam ${delay / 1000}s i próbuje ponownie... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2); // Podwajamy czas oczekiwania
+        }
+        throw error;
+    }
+}
+
 export async function POST(req: Request) {
     try {
         const body = await req.json();
@@ -41,7 +58,6 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
         }
 
-        // 1. Pobranie dokumentów o statusie UPLOADED
         const docsRef = adminDb.collection(`tenders/${tenderId}/documents`);
         const snapshot = await docsRef.where("status", "==", "UPLOADED").get();
 
@@ -56,9 +72,17 @@ export async function POST(req: Request) {
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const bucket = adminStorage.bucket(bucketName);
 
-        // 2. Klasyfikator w pętli dla każdego dokumentu
-        for (const docSnap of snapshot.docs) {
+        // Klasyfikator w pętli dla każdego dokumentu
+        for (let i = 0; i < snapshot.docs.length; i++) {
+            const docSnap = snapshot.docs[i];
             const docData = docSnap.data();
+
+            // API pacing - jeśli to kolejny plik, czekamy chwilę, żeby nie bombardować chmury
+            if (i > 0) {
+                console.log("[FAZA 0 🚀] Odczekuję 3 sekundy (API Pacing) przed kolejnym dużym plikiem...");
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+
             console.log(`[FAZA 0 🚀] Rozpoczynam klasyfikację pliku: ${docData.fileName}`);
 
             try {
@@ -82,24 +106,27 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
                     }
                 };
 
-                console.log(`[FAZA 0 🚀] Wysyłam pierwszą stronę ${docData.fileName} do Gemini Flash...`);
+                console.log(`[FAZA 0 🚀] Wywołuję Gemini dla ${docData.fileName} (z zabezpieczeniem przed limitami)...`);
 
-                const result = await ai.models.generateContent({
-                    model: MODEL_FLASH,
-                    contents: [
-                        {
-                            role: "user",
-                            parts: [
-                                { text: prompt },
-                                imagePart
-                            ]
+                // Opakowujemy zapytanie do chmury w nasz system automatycznego ponawiania prób
+                const result = await callGeminiWithRetry(async () => {
+                    return await ai.models.generateContent({
+                        model: MODEL_FLASH,
+                        contents: [
+                            {
+                                role: "user",
+                                parts: [
+                                    { text: prompt },
+                                    imagePart
+                                ]
+                            }
+                        ],
+                        config: {
+                            temperature: 0.1,
+                            responseMimeType: "application/json",
+                            responseSchema: CLASSIFIER_SCHEMA as any
                         }
-                    ],
-                    config: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json",
-                        responseSchema: CLASSIFIER_SCHEMA as any
-                    }
+                    });
                 });
 
                 const responseText = result.text ?? "{}";
@@ -107,7 +134,7 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
                 const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
                 totalTokensUsed += tokensUsed;
 
-                console.log(`[FAZA 0 🚀] Plik sklasyfikowany. Tagi: ${JSON.stringify(parsedResult.tags)}. Zużyto tokenów: ${tokensUsed}`);
+                console.log(`[FAZA 0 🚀] Plik sklasyfikowany pomyślnie. Tagi: ${JSON.stringify(parsedResult.tags)}. Zużyto tokenów: ${tokensUsed}`);
 
                 // Aktualizacja metadanych dokumentu w bazie
                 await docSnap.ref.update({
@@ -119,7 +146,7 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
                 });
 
             } catch (docError: any) {
-                console.error(`[FAZA 0 🚀] ❌ Błąd klasyfikacji pliku ${docData.fileName}:`, docError);
+                console.error(`[FAZA 0 🚀] ❌ Krytyczny błąd klasyfikacji pliku ${docData.fileName} po próbach ponowienia:`, docError);
                 await docSnap.ref.update({
                     status: "ERROR_CLASSIFYING",
                     errorDetails: docError.message,
@@ -130,7 +157,7 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
 
         // 3. Aktualizacja Bezpiecznika Budżetowego (Budget Guard)
         const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000015;
-        console.log(`[FAZA 0 🚀] Łączny koszt tokenów Flash: ${estimatedCostUSD.toFixed(6)} USD. Aktualizuję Budget Guard transakcyjnie.`);
+        console.log(`[FAZA 0 🚀] Łączny koszt tokenów Flash: ${estimatedCostUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
 
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
         await adminDb.runTransaction(async (t) => {
@@ -151,7 +178,7 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
         });
 
         // 4. Inicjalizacja Stanu Umysłu (Brain State)
-        console.log("[FAZA 0 🚀] Inicjalizuję pusty stan pamięci i umysłu Mózgu (brain/main)...");
+        console.log("[FAZA 0 🚀] Inicjalizuję podstawowy stan pamięci Mózgu (brain/main)...");
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         await brainRef.set({
             phase: "PLANNING",
@@ -166,7 +193,7 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
 
         // 5. Dynamiczne i asynchroniczne wybudzenie Głównego Orkiestratora (Mózgu)
         const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[FAZA 0 🚀] Wybudzam właściwy Mózg (ReAct Loop) przez loopback: ${localOrigin}/api/kosztorysant/glowny-kosztorysant`);
+        console.log(`[FAZA 0 🚀] Wybudzam Mózg przez loopback: ${localOrigin}/api/kosztorysant/glowny-kosztorysant`);
 
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST",
@@ -174,7 +201,7 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
         }).catch(e => console.error("[FAZA 0 🚀] Błąd wybudzania Mózgu po klasyfikacji:", e));
 
-        console.log("[FAZA 0 🚀] Faza 0 zakończona sukcesem. Klasyfikacja dopięta.");
+        console.log("[FAZA 0 🚀] Inicjalizacja i klasyfikacja zakończona.");
         return NextResponse.json({
             success: true,
             message: "Faza 0 zakończona. Mózg został wybudzony.",
