@@ -11,6 +11,23 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
+// Pomocnicza funkcja realizująca Exponential Backoff dla błędów 429 (RESOURCE_EXHAUSTED) u Agenta
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+
+        if (isRateLimit && retries > 0) {
+            console.warn(`[LEGAL EXPERT ⚖️] Wykryto limit API 429. Chmura przeciążona. Czekam ${delay / 1000}s przed próbą ponowienia... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2); // Exponential backoff
+        }
+        throw error;
+    }
+}
+
 export async function POST(req: Request) {
     let tenderId: string | undefined;
     let taskId: string | undefined;
@@ -78,7 +95,7 @@ export async function POST(req: Request) {
             }
 
             const docData = docSnap.data()!;
-            console.log(`[LEGAL EXPERT ⚖️] Pobieram plik z Google Cloud Storage: ${docData.storagePath}`);
+            console.log(`[LEGAL EXPERT ⚖️] Pobieram plik ze Storage: ${docData.storagePath}`);
 
             try {
                 const fileRef = bucket.file(docData.storagePath);
@@ -104,7 +121,7 @@ export async function POST(req: Request) {
         // Składanie dynamicznego promptu od Mózgu
         const prompt = `
 Jesteś Ekspertem Prawnym i Analitykiem Umów Przetargowych w Polsce.
-Przeanalizuj załączone pliki w oparciu o poniższą instrukcję:
+Przeanalizuj załączone pliki w oparciu o poniższą instrukcję od Mózgu:
 
 ${taskData.instruction}
 
@@ -115,15 +132,18 @@ Ważne zasady:
 `;
 
         parts.unshift({ text: prompt });
-        console.log(`[LEGAL EXPERT ⚖️] Wysyłam zapytanie do Gemini z ${parts.length - 1} plikami jako wsad multimedialny...`);
+        console.log(`[LEGAL EXPERT ⚖️] Wysyłam zapytanie do Gemini z ${parts.length - 1} plikami jako wsad multimedialny (z zabezpieczeniem przed limitami)...`);
 
-        const result = await ai.models.generateContent({
-            model: taskData.modelOverride || "gemini-2.5-flash", // Domyślnie Flash
-            contents: [{ role: "user", parts }],
-            config: {
-                temperature: 0.1,
-                responseMimeType: "application/json"
-            }
+        // Wywołanie z systemem Exponential Backoff
+        const result = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: taskData.modelOverride || "gemini-2.5-flash", // Domyślnie Flash
+                contents: parts, // Direct, clean typesafe Turn array (Part[])
+                config: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json"
+                }
+            });
         });
 
         console.log("[LEGAL EXPERT ⚖️] Odebrano odpowiedź z Gemini. Parsuję wynik JSON...");
@@ -140,11 +160,11 @@ Ważne zasady:
             updatedAt: new Date()
         });
 
-        // Koszt tokenów (Flash: ~$0.000015 / 1k, Pro: ~$0.002 / 1k)
+        // Koszt tokenów
         const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
         const costUSD = (tokensUsed / 1000) * costPerThousand;
 
-        console.log(`[LEGAL EXPERT ⚖️] Naliczyłem koszt: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        console.log(`[LEGAL EXPERT ⚖️] Koszt: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
         await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
