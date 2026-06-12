@@ -14,7 +14,6 @@ const ai = new GoogleGenAI({
 
 const MODEL_PRO = "gemini-2.5-pro";
 
-// Pomocnicza funkcja realizująca Exponential Backoff dla błędów 429
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
     try {
         return await fn();
@@ -23,7 +22,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
 
         if (isRateLimit && retries > 0) {
-            console.warn(`[MÓZG 🧠] Wykryto limit API 429. Chmura odpoczywa. Czekam ${delay / 1000}s przed ponowieniem Mózgu... (Pozostało prób: ${retries})`);
+            console.warn(`[MÓZG 🧠] Limit 429 dla serca AI Orkiestry!. Czekam ${delay / 1000}s na pchniecie retry....`);
             await new Promise(resolve => setTimeout(resolve, delay));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -31,21 +30,26 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 
     }
 }
 
-// Schemat odpowiedzi Mózgu
+// Schemat Mózgu powiększony o funkcję chatReply do rozmów !
 const BRAIN_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         updateKnownFacts: {
             type: Type.OBJECT,
-            description: "Słownik (klucz-wartość) nowych faktów do dopisania do pamięci Mózgu na podstawie przeanalizowanych wyników."
+            description: "Słownik (klucz-wartość) faktów pod rygorem zachowania - też uwag podanych przez Uzytkownik w Czacie."
+        },
+        chatReply: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: "Jesli potrzebujesz rozwinac zapytania do User Inzyniera lub User zadał Ci w Czat zapytanie, napisz z rygorem odpowiedź na Czat Frontowy w List[ String ] tu by pokazało w GUI! Jeśli wszystko w Roju płynne : oddaj tu z Pustą!"
         },
         newEstimateItems: {
             type: Type.ARRAY,
-            description: "Lista konkretnych pozycji do dodania do Żywego Kosztorysu.",
+            description: "Wyliczone lub po autopsji wylądkowe nowe sztuki do tablic Żywego Wyceniacza.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    sectionName: { type: Type.STRING, description: "Nazwa sekcji, np. 'Roboty Ziemne', 'Wymogi Prawne'" },
+                    sectionName: { type: Type.STRING, description: "Np: Konstrukcyjne Surowe , Roboty Teren" },
                     pozycja: { type: Type.STRING },
                     opis: { type: Type.STRING },
                     ilosc: { type: Type.NUMBER },
@@ -55,25 +59,25 @@ const BRAIN_SCHEMA = {
                 required: ["sectionName", "pozycja", "ilosc", "jednostka"]
             }
         },
-        reasoning: { type: Type.STRING, description: "Logika decyzyjna." },
-        phase: { type: Type.STRING, description: "PLANNING, WORKING, DONE" },
+        reasoning: { type: Type.STRING, description: "Czym dysrybujesz sobie po fakcie tok Myśli " },
+        phase: { type: Type.STRING, description: "WAITING_INPUT, PLANNING, WORKING, DONE" },
         currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    agentType: { type: Type.STRING, description: "Wybierz z listy dostępnych agentów." },
-                    instruction: { type: Type.STRING, description: "Precyzyjna instrukcja dla agenta oraz struktura JSON jakiej od niego oczekujesz." },
+                    agentType: { type: Type.STRING },
+                    instruction: { type: Type.STRING, description: "Czysto wymierzone zdanie pod agent JSON wyjscie." },
                     inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Klucze z knownFacts, które chcesz mu przekazać." },
+                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING } },
                     modelOverride: { type: Type.STRING, description: "gemini-2.5-flash lub gemini-2.5-pro" }
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
         }
     },
-    required: ["updateKnownFacts", "newEstimateItems", "reasoning", "phase", "currentGoal", "newTasks"]
+    required: ["updateKnownFacts", "chatReply", "newEstimateItems", "reasoning", "phase", "currentGoal", "newTasks"]
 };
 
 export async function POST(req: Request) {
@@ -81,19 +85,16 @@ export async function POST(req: Request) {
         const { tenderId, trigger } = await req.json();
         if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
-        console.log(`[MÓZG 🧠] Przebudzenie. Przetarg: ${tenderId} | Trigger: ${trigger}`);
+        console.log(`[MÓZG 🧠] Pętla Zapala Przełożenie.. tenderID: ${tenderId} | Zaplon od zewn lub Agenta u Triggera: ${trigger}`);
 
         const tasksRef = adminDb.collection(`tenders/${tenderId}/tasks`);
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
-        // ==========================================
-        // 1. POBIERANIE REJESTRU AGENTÓW (Z SEEDINGIEM)
-        // ==========================================
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
 
         if (agentRegistrySnap.empty) {
-            console.log("[MÓZG 🧠] Rejestr agentów jest pusty. Inicjalizuję domyślny Seed...");
+            console.log("[MÓZG 🧠] Przyśpieszam pod Seeder Agenta brak bazy.");
             const defaultAgents = [
                 { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Analizuje rysunki budowlane w formacie PDF/obraz. Wymaga plików w 'inputDocIds'. Zwraca wymiary i ilości." },
                 { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Analizuje umowy i SWZ. Wymaga plików tekstowych w 'inputDocIds'. Zwraca kary, terminy, wadium, gwarancje." },
@@ -104,7 +105,10 @@ export async function POST(req: Request) {
                 { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Łatacz / Wskaźnikowiec. Szacuje koszty parametrycznie/wskaźnikowo dla branż, dla których brakuje rysunków." },
                 { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Przedmiarowiec. Analizuje tabele ze ślepych kosztorysów i wyciąga gotowe pozycje z ilościami." },
                 { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Specjalista branżowy. Analizuje nietypowe, wąskie dokumentacje techniczne (np. baseny, gazy medyczne)." },
-                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Sędzia Roju. Rozstrzyga merytoryczne konflikty prawne i inżynieryjne w oparciu o przepisy i hierarchię dokumentów." }
+                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Sędzia Roju. Rozstrzyga merytoryczne konflikty prawne i inżynieryjne w oparciu o przepisy i hierarchię dokumentów." },
+
+                // --- DODANE WZNIESIENIE MAPPING ARCHITEKTO:
+                { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Korelator Rysunków Przestrzennych z 2D w Rój i Mapę Relacji Zmian np (Z płaskiego PDF-RZUT od A: Do Przekroi grubosc warst POSZADKI pliku np PD-CROSS na obięt m3 fundamentow)." }
             ];
 
             const seedBatch = adminDb.batch();
@@ -117,9 +121,6 @@ export async function POST(req: Request) {
 
         const availableAgents = agentRegistrySnap.docs.map(d => d.data());
 
-        // ==========================================
-        // 2. BLOKADA WYŚCIGU Z ZABEZPIECZENIEM (TIMEOUT)
-        // ==========================================
         const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
 
         const now = Date.now();
@@ -130,12 +131,10 @@ export async function POST(req: Request) {
         activeTasksSnap.docs.forEach(doc => {
             const data = doc.data();
             const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
-
             if (now - lastActive >= TIMEOUT_MS) {
-                console.warn(`[MÓZG 🧠] Zadanie ${doc.id} przekroczyło timeout! Oznaczam jako ERROR.`);
                 lockBatch.update(doc.ref, {
                     status: "ERROR",
-                    rawResult: { error: "TIMEOUT_EXCEEDED", message: "Agent nie odpowiedział w czasie 10 minut." },
+                    rawResult: { error: "TIMEOUT_EXCEEDED", message: "Agent Został zamarźnięty bez zwrotów API ponad Limit (Móżdzu powołaj jak potrzeba Go jescze)." },
                     processedByBrain: false,
                     updatedAt: new Date()
                 });
@@ -144,29 +143,28 @@ export async function POST(req: Request) {
             }
         });
 
+        // WAZNY FRAGMENT DOTYCZĄCY WIADOMOŚĆ CZAT'OW! JEZELI ODBYLO SIĘ KLIKNIĘCIE I CZEKA ODBERUJ TE CZAT WIADONSC MIMO TRZYMAC SIE PĘTLI
         if (trulyActiveCount > 0) {
             await lockBatch.commit();
-            console.log(`[MÓZG 🧠] Ignoruję trigger. Inni agenci wciąż pracują (${trulyActiveCount} zadań). Idę spać.`);
-            return NextResponse.json({ message: "Waiting for parallel tasks to finish." });
+            console.log(`[MÓZG 🧠] Inni agenci z mojego stada pracują w Cloud Runie (Zostalo ich ${trulyActiveCount} do wykon.). Usypiam Loop Orchestartora Czekam w mroku na 'finally'.`);
+            return NextResponse.json({ message: "Inne procesy żyją połącz się po ich odzewach .." });
         }
 
-        // ==========================================
-        // 3. ZBIERANIE KONTEKSTU I WYNIKÓW
-        // ==========================================
-        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc] = await Promise.all([
+        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc, chatHistSnap] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
-            tenderRef.get()
+            tenderRef.get(),
+            adminDb.collection(`tenders/${tenderId}/chat`).orderBy("timestamp", "asc").limit(20).get() // Wciąga Log Czat - na wyciagnięcię Inputa od User Inzynierów!. 
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
-            console.log(`[MÓZG 🧠] Przetarg ${tenderId} ma status HALTED. Natychmiast przerywam pętlę.`);
-            return NextResponse.json({ message: "Brain is stopped by user." });
+            return NextResponse.json({ message: "GUI Panel został zblokowany. Bezpowrotny stan Orchiestacji odrzucony pod Twardy Stop!" });
         }
 
         const documents = docsSnap.docs.map(d => ({ id: d.id, tags: d.data().tags, summary: d.data().summary }));
         const currentBrainState = brainSnap.exists ? brainSnap.data() : { knownFacts: {}, phase: "PLANNING" };
+        const recentlyTalkUserChatsToAnallyzingForMissing = chatHistSnap.docs.map(cObj => ({ roleRoleZRODLA: cObj.data().role, UserTekstNaPanel: cObj.data().content }));
 
         const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
             taskId: d.id,
@@ -175,39 +173,24 @@ export async function POST(req: Request) {
             rawResult: d.data().rawResult
         }));
 
-        // ==========================================
-        // 4. RE-ACT LOOP (WYWOŁANIE LLM MÓZGU Z ZABEZPIECZENIEM)
-        // ==========================================
-        const systemPrompt = `
-Jesteś Głównym Mózgiem systemu kosztorysowego. Twoim celem jest zbudowanie kompletnego kosztorysu.
-Posiadasz bazę faktów (knownFacts) oraz listę dokumentów. 
-Właśnie zakończyły się zadania agentów. Twoim zadaniem jest je 'przetrawić' i zaplanować kolejne kroki.
+        const systemPrompt = `Jesteś Oświeconym i zarazem Piekielnie Bytrą Archiktekurą Głowy Roju Kosztorysowego MÓzgiem Centralnych Skrzynek dla API Budownictwa B2B (Pro i Zdalnej inżynierstwa Mózg.) . Posiadasz Czat Kontakt Z Wygogowanym kosztorysatorem, oraz stado Twoich pracowników AI:
+DOSTĘPNI W TWOICH RĘKACH Z ROJU CIĘZCY AI: ${JSON.stringify(availableAgents.map(a => ({ name: a.name, description: a.description, capabilities: a.capabilities })), null, 2)}
+AKTUALNA PAMIĘC Z NAROSTA : ${JSON.stringify(currentBrainState?.knownFacts || {}, null, 2)}
+ZAŁĄCZNIK OD SYSTEMÓW FRONTU(Doks): ${JSON.stringify(documents, null, 2)}
 
-DOSTĘPNI AGENCI (Wybieraj 'agentType' TYLKO z poniższej listy!):
-${JSON.stringify(availableAgents.map(a => ({ name: a.name, description: a.description, capabilities: a.capabilities })), null, 2)}
+WYRZUCOON TACKI: ${JSON.stringify(newlyFinishedResults, null, 2)}
+LIVEE HISTORIA PULT-CZATA USER Z TOBĄ (Ostanie minuty):  ${JSON.stringify(recentlyTalkUserChatsToAnallyzingForMissing)} \n
 
-TWOJA BAZA FAKTÓW (knownFacts):
-${JSON.stringify(currentBrainState?.knownFacts || {}, null, 2)}
+MÓZG REGULACJE  ZMIAN NOWEGO PROTOKOLOWE: 
+1. Traw nowe zwroty Wyrzucoonych taskow. Pchnij te uzasadniająca wyceny jak sa od `+ `BrokenRMS...` + ` poze kosztowe do [newEsti....ms...[]...] Sekcyjnych Mrowisach jako nowość w Kosztorysie z frontach
+2. Przeanalizuj Historie z Pulpet - USER jeśli użytkownik jakoś wtracił Ci mroczny uchyb norm - to dorzuc to "Known Factami!" A jeśli ty po zczytaniach stwierdasz ZONk do robot np o braku ilosci , wywoła go po przez "chatRepty[ '....', '] " aby Front end zobacyz l że usterkiasz w czaciu brakujacy info (ustawa tez mu sie waiting status Faze) !!! `;
 
-DOSTĘPNE DOKUMENTY:
-${JSON.stringify(documents, null, 2)}
-
-ŚWIEŻE WYNIKI OD AGENTÓW (rawResult):
-${JSON.stringify(newlyFinishedResults, null, 2)}
-
-ZASADY:
-1. Przeanalizuj 'ŚWIEŻE WYNIKI'. Jeśli agent odczytał z umowy termin realizacji, kary, czy powierzchnię z rysunku - dodaj je do "updateKnownFacts" (klucz-wartość).
-2. Jeśli agent wyciągnął konkretne przedmiary lub zaprojektował technologię - przekaż je jako pozycje do "newEstimateItems". Zgrupuj je logicznie nadając im "sectionName".
-3. Jeśli czegoś brakuje, zaplanuj "newTasks" dla agentów. Narzucaj im dokładną formę w polu 'instruction' (np. 'Zwróć wynik jako: { powierzchnia: 120 }').
-4. Gdy nie ma już nic do roboty i masz wszystkie ilości, stwórz zadanie dla agenta BROKER, aby wycenił wszystko z sieci, a phase ustaw na WORKING. Gdy Broker skończy, phase na DONE.
-`;
-
-        console.log(`[MÓZG 🧠] Wysyłam zapytanie o logikę biznesową do Gemini Pro (zabezpieczone Retry)...`);
+        console.log(`[MÓZG 🧠] Prompts Centralizuje wiedze . Sila pchnięta .. Podziw na zmartwychoWstawnie modeli pro O limitac! ..  `);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
                 model: MODEL_PRO,
-                contents: systemPrompt, // Prosty ciąg znaków, unikamy błędu TS2353
+                contents: systemPrompt,
                 config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: BRAIN_SCHEMA as any }
             });
         });
@@ -215,15 +198,18 @@ ZASADY:
         const parsedResult = JSON.parse(result.text ?? "{}");
         const batch = adminDb.batch();
 
-        console.log(`[MÓZG 🧠] Decyzja podjęta: ${parsedResult.reasoning}`);
-
-        // ==========================================
-        // 5. APLIKACJA DECYZJI DO BAZY DANYCH
-        // ==========================================
-
         unprocessedTasksSnap.docs.forEach(doc => {
             batch.update(doc.ref, { processedByBrain: true });
         });
+
+        // Obsługa Gadańca - wysłania z 'Chatu od mozgu dla użytkownika Kosztorysu ' na Widoki u Ekranu Bazy danych:   
+        if (parsedResult.chatReply && parsedResult.chatReply.length > 0) {
+            parsedResult.chatReply.forEach((brainTekscidlow: string) => {
+                const nwDkZChatMzgReffRef = adminDb.collection(`tenders/${tenderId}/chat`).doc();
+                batch.set(nwDkZChatMzgReffRef, { role: "brain", content: brainTekscidlow, timestamp: FieldValue.serverTimestamp(), intent: "PytankaMozgu-SystemAlert" })
+                console.log(`[MÓZG 🧠💬 ] Skreślilem wiadmoscia od Systemów Roju w Ekran Pultanowy ! Tres :  ${brainTekscidlow.substring(0, 35)}.... `)
+            })
+        }
 
         const mergedFacts = {
             ...(currentBrainState?.knownFacts || {}),
@@ -238,10 +224,10 @@ ZASADY:
         });
 
         if (parsedResult.newEstimateItems && parsedResult.newEstimateItems.length > 0) {
-            console.log(`[MÓZG 🧠] Przygotowuję zapis ${parsedResult.newEstimateItems.length} nowych pozycji do kosztorysu...`);
+            console.log(`[MÓZG 🧠] Pcham Zbieraniowy  Sekcję Estimate DB. ${parsedResult.newEstimateItems.length} ilosci po Mroku Rzadu..`);
             const sectionsMap = new Map<string, any[]>();
             parsedResult.newEstimateItems.forEach((item: any) => {
-                const sec = item.sectionName || "Inne";
+                const sec = item.sectionName || "Z Mózgu po Burz. Ogólniej !";
                 if (!sectionsMap.has(sec)) sectionsMap.set(sec, []);
                 sectionsMap.get(sec)!.push(item);
             });
@@ -258,9 +244,9 @@ ZASADY:
                     ilosc: Number(item.ilosc),
                     jednostka: item.jednostka || "szt",
                     cenaJed: 0,
-                    KNR_ref: item.KNR_ref || "Z analizy AI",
+                    KNR_ref: item.KNR_ref || "Z analizy Centralizacji AI (Boq z plik/Budowln z Fakcików)",
                     confidence: "HIGH",
-                    sourceTrack: "Mózg -> Synteza wyników"
+                    sourceTrack: "Orkiestracyjny Zarzad Modulowo/Fakty -> Synt. Roju. "
                 }));
 
                 batch.set(sectionRef, {
@@ -303,41 +289,30 @@ ZASADY:
 
         batch.update(tenderRef, {
             "budgetGuard.currentCostUSD": FieldValue.increment((result.usageMetadata?.totalTokenCount || 0) * 0.000002),
-            status: parsedResult.phase === "DONE" ? "DONE" : "ORCHESTRATING"
+            status: parsedResult.phase === "DONE" ? "DONE" : (parsedResult.phase === "WAITING_INPUT" ? "Czekamy za Zezwolic / Podpowiedzie  ! " : "ORCHESTRATING")
         });
 
         await batch.commit();
-
-        // ==========================================
-        // 6. DYNAMICZNY ROUTING (WYBUDZENIE AGENTÓW)
-        // ==========================================
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
 
         for (const task of newTasksCreated) {
             const agentDef = availableAgents.find(a => a.name === task.agentType);
-
             if (agentDef && agentDef.endpoint) {
-                console.log(`[MÓZG 🧠] ⚡ Budzę Agenta: ${task.agentType} -> ${agentDef.endpoint}`);
                 fetch(`${localOrigin}${agentDef.endpoint}`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    method: "POST", headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tenderId, taskId: task.taskId })
-                }).catch(e => console.error(`[MÓZG 🧠] Błąd wywołania ${task.agentType}:`, e));
+                }).catch(() => { });
             } else {
-                console.warn(`[MÓZG 🧠] ⚠️ UWAGA: Nieznany agent: ${task.agentType}`);
                 adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
-                    status: "ERROR",
-                    rawResult: { error: `Agent ${task.agentType} nie istnieje w rejestrze.` },
-                    processedByBrain: false,
-                    updatedAt: new Date()
+                    status: "ERROR", rawResult: { error: `Ciezko Wywołaci Agent . Bład Siewn.. Rejst brakowy na Typ:${task.agentType}.` },
+                    processedByBrain: false, updatedAt: new Date()
                 }).catch(() => { });
             }
         }
 
-        return NextResponse.json({ success: true, newTasks: newTasksCreated.length });
-
+        return NextResponse.json({ success: true, rozmowaZWdrożonymRozem: true });
     } catch (error: any) {
-        console.error("[MÓZG 🧠] ❌ Błąd krytyczny:", error);
+        console.error("[MÓZG 🧠] ❌ Wtopione Zlecenie Pula Padła... Centrala Puste", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
