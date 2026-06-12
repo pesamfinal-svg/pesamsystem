@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
 
@@ -11,9 +13,23 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-const MODEL_FLASH = "gemini-2.5-flash"; // Model Flash świetnie radzi sobie z szybkim audytem rynkowym
+const MODEL_FLASH = "gemini-2.5-flash";
 
-// Schemat ustrukturyzowanego wyjścia z audytu
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[SILENT AUDITOR 🕵️] Limit 429. Czekam ${delay / 1000}s...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
 const AUDITOR_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -23,7 +39,7 @@ const AUDITOR_SCHEMA = {
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującego elementu, np. 'Drzwi ppoż EI60', 'Separator tłuszczu'" },
+                    pozycja: { type: Type.STRING, description: "Nazwa brakującego elementu" },
                     opis: { type: Type.STRING, description: "Szczegółowe uzasadnienie technologiczne lub prawne (np. wymóg WT 2021, PPOŻ, Sanepid)" },
                     ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
                     jednostka: { type: Type.STRING, description: "Jednostka miary, np. szt, kpl, m" },
@@ -32,7 +48,7 @@ const AUDITOR_SCHEMA = {
                 required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
             }
         },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie wykonanego audytu technicznego." }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie." }
     },
     required: ["missingItems", "summary"]
 };
@@ -47,122 +63,110 @@ export async function POST(req: Request) {
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        console.log(`[SILENT AUDITOR 🕵️] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
+        console.log(`[SILENT AUDITOR 🕵️] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        if (!tenderId || !taskId) {
-            console.error("[SILENT AUDITOR 🕵️] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
-            return NextResponse.json({ error: "Brak danych" }, { status: 400 });
-        }
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-
-        if (!taskDoc.exists) {
-            console.error(`[SILENT AUDITOR 🕵️] Zadanie o ID ${taskId} nie istnieje w bazie.`);
-            throw new Error("Zadanie nie istnieje.");
-        }
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
 
         const taskData = taskDoc.data()!;
-        console.log(`[SILENT AUDITOR 🕵️] Wczytano zadanie. Status w bazie: ${taskData.status}`);
+        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Task processed." });
 
-        if (taskData.status !== "PENDING") {
-            console.log(`[SILENT AUDITOR 🕵️] Zadanie ma status ${taskData.status}. Pomijam.`);
-            return NextResponse.json({ message: "Task processed." });
-        }
-
-        // Zmiana statusu na IN_PROGRESS
-        console.log("[SILENT AUDITOR 🕵️] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // Pobieramy informacje kontekstowe przekazane przez Mózg
         const existingItems = taskData.inputFacts?.existingItems || [];
         const objectType = taskData.inputFacts?.objectType || "Obiekt budowlany";
 
-        console.log(`[SILENT AUDITOR 🕵️] Projekt dotyczy obiektu typu: ${objectType}. Liczba dotychczasowych pozycji w kosztorysie: ${existingItems.length}`);
-
-        // Kompilujemy prompt z wyszukiwarką
-        const prompt = `
-Jesteś Głównym Inspektorem Nadzoru i Audytorem Technologicznym w Polsce.
+        // KROK 1: Wyszukiwanie z Google Search (Surowy tekst)
+        console.log("[SILENT AUDITOR 🕵️] KROK 1: Analiza przepisów z Google Search...");
+        const searchPrompt = `
 Analizujemy kosztorys dla obiektu typu: ${objectType}.
 Obecnie w kosztorysie mamy m.in. następujące pozycje: 
 ${JSON.stringify(existingItems.slice(0, 50))}
 
-Twoje polecenie od Mózgu:
-${taskData.instruction}
+Zadanie: ${taskData.instruction}
 
-Zasady audytu:
-1. Użyj wyszukiwarki Google Search, aby sprawdzić aktualne, restrykcyjne przepisy budowlane w Polsce (Warunki Techniczne WT 2021, wymogi PPOŻ dla tej kategorii budynków, wymogi Sanepidu).
-2. Zidentyfikuj, czy w dotychczasowym kosztorysie nie zapomniano o krytycznych, obowiązkowych elementach (np. instalacja odgromowa, separatory, drzwi pożarowe, klapy dymowe, zabezpieczenia BHP).
-3. Zwróć wykryte braki jako poprawny obiekt JSON, pasujący dokładnie do zdefiniowanego schematu.
-4. Nie dodawaj żadnego innego tekstu poza czystym JSON-em.
+Użyj wyszukiwarki Google Search, aby sprawdzić aktualne, restrykcyjne przepisy budowlane w Polsce (Warunki Techniczne WT 2021, wymogi PPOŻ dla tej kategorii budynków, wymogi Sanepidu).
+Zidentyfikuj, czy w dotychczasowym kosztorysie nie zapomniano o krytycznych, obowiązkowych elementach. 
+Napisz techniczny raport z audytu.
 `;
 
-        console.log("[SILENT AUDITOR 🕵️] Wysyłam zapytanie do Gemini z włączonym Google Search Grounding...");
-
-        const result = await ai.models.generateContent({
-            model: taskData.modelOverride || MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            config: {
-                tools: [{ googleSearch: {} }], // Grounding techniczny i prawny
-                temperature: 0.1,
-                responseMimeType: "application/json",
-                responseSchema: AUDITOR_SCHEMA as any
-            }
+        const searchResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: searchPrompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.1
+                }
+            });
         });
 
-        console.log("[SILENT AUDITOR 🕵️] Odebrano odpowiedź z Gemini. Parsuję JSON...");
-        const parsedResult = JSON.parse(result.text ?? "{}");
-        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
-        console.log(`[SILENT AUDITOR 🕵️] Zużyto tokenów: ${tokensUsed}. Zapisuję rawResult w bazie.`);
+        const rawReport = searchResult.text ?? "";
+        let totalTokensUsed = searchResult.usageMetadata?.totalTokenCount || 0;
 
-        // Zapisujemy czysty JSON do rawResult i oznaczamy zadanie jako DONE
+        // KROK 2: Strukturyzacja na JSON (Bez Search)
+        console.log("[SILENT AUDITOR 🕵️] KROK 2: Strukturyzacja wyników audytu na JSON...");
+        const structurePrompt = `
+Na podstawie poniższego raportu z audytu technicznego, wyodrębnij brakujące pozycje zgodnie ze schematem JSON.
+
+Raport z audytu:
+${rawReport}
+`;
+
+        const structureResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: structurePrompt,
+                config: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: AUDITOR_SCHEMA as any
+                }
+            });
+        });
+
+        const parsedResult = JSON.parse(structureResult.text ?? "{}");
+        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
+
         await taskRef.update({
             status: "DONE",
             rawResult: parsedResult,
             processedByBrain: false,
-            costTokens: tokensUsed,
+            costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        // Koszt tokenów (Flash: ~$0.000015 / 1k, Pro: ~$0.002 / 1k)
-        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
-        const costUSD = (tokensUsed / 1000) * costPerThousand;
-
-        console.log(`[SILENT AUDITOR 🕵️] Koszt tokenów: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
         await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
         isSuccess = true;
-        console.log("[SILENT AUDITOR 🕵️] Audyt zakończony pomyślnie.");
+        console.log("[SILENT AUDITOR 🕵️] Sukces.");
         return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[SILENT AUDITOR 🕵️] ❌ Błąd krytyczny w audytorze:", error);
+        console.error("[SILENT AUDITOR 🕵️] ❌ Błąd:", error);
         if (tenderId && taskId) {
-            console.log("[SILENT AUDITOR 🕵️] Zapisuję status błędu (ERROR) do bazy.");
             await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
                 status: "ERROR",
                 rawResult: { error: error.message },
                 processedByBrain: false,
                 updatedAt: new Date()
-            }).catch((dbErr) => console.error("[SILENT AUDITOR 🕵️] Błąd zapisu błędu do Firestore:", dbErr));
+            }).catch(() => { });
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
-
     } finally {
-        // Gwarancja wybudzenia Mózgu
         if (tenderId && taskId) {
-            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-            console.log(`[SILENT AUDITOR 🕵️] Wybudzam Mózg przez loopback: ${localOrigin}`);
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    tenderId,
-                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
-                })
-            }).catch((fetchErr) => console.error("[SILENT AUDITOR 🕵️] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+            }).catch(() => { });
         }
     }
 }

@@ -16,7 +16,7 @@ const ai = new GoogleGenAI({
 
 const MODEL_PRO = "gemini-2.5-pro";
 
-async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
@@ -24,7 +24,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
 
         if (isRateLimit && retries > 0) {
-            console.warn(`[MÓZG 🧠] Limit 429 dla serca AI Orkiestry!. Czekam ${delay / 1000}s na pchniecie retry....`);
+            console.warn(`[MÓZG 🧠] Wykryto limit API 429. Chmura odpoczywa. Czekam ${delay / 1000}s przed ponowieniem Mózgu... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }

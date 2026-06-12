@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI } from "@google/genai";
 import dns from "dns";
-dns.setDefaultResultOrder("ipv4first"); // Wymuszenie stabilnego protokołu IPv4 dla całego procesu
+dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
 
@@ -13,16 +13,14 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-// Zabezpieczenie przed przeciążeniem chmury przy wysyłaniu ciężkich rysunków technicznych
-async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
         const errorText = error.toString() || "";
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
-
         if (isRateLimit && retries > 0) {
-            console.warn(`[VISION 📐] Wykryto limit API 429. Chmura przeciążona rysunkami. Czekam ${delay / 1000}s... (Pozostało prób: ${retries})`);
+            console.warn(`[VISION 📐] Limit 429. Odczekuję ${delay / 1000}s...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -40,15 +38,12 @@ export async function POST(req: Request) {
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        console.log(`[VISION 📐] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
+        console.log(`[VISION 📐] Start żądania. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        if (!tenderId || !taskId) {
-            return NextResponse.json({ error: "Brak tenderId lub taskId" }, { status: 400 });
-        }
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-
         if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
 
         const taskData = taskDoc.data()!;
@@ -58,43 +53,29 @@ export async function POST(req: Request) {
 
         const inputDocIds: string[] = taskData.inputDocIds || [];
         if (inputDocIds.length === 0) {
-            await taskRef.update({
-                status: "DONE",
-                rawResult: { message: "Brak rysunków do analizy." },
-                processedByBrain: false,
-                updatedAt: new Date()
-            });
+            await taskRef.update({ status: "DONE", rawResult: { message: "Brak rysunków." }, processedByBrain: false, updatedAt: new Date() });
             isSuccess = true;
-            return NextResponse.json({ message: "Brak dokumentów." });
+            return NextResponse.json({ message: "Brak plików." });
         }
 
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
-        const bucket = adminStorage.bucket(bucketName);
         const parts: any[] = [];
 
+        // Generujemy bezpośrednie linki GCS
         for (const docId of inputDocIds) {
             const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
             if (!docSnap.exists) continue;
 
             const docData = docSnap.data()!;
-            console.log(`[VISION 📐] Pobieram rysunek ze Storage: ${docData.storagePath}`);
+            const fileUri = `gs://${bucketName}/${docData.storagePath}`;
+            console.log(`[VISION 📐] Referencja GCS dla rysunku: ${fileUri}`);
 
-            try {
-                const fileRef = bucket.file(docData.storagePath);
-                const [downloadedBuffer] = await fileRef.download();
-                const safeArrayBuffer = new Uint8Array(downloadedBuffer).buffer;
-                const base64Data = Buffer.from(safeArrayBuffer).toString("base64");
-
-                parts.push({
-                    inlineData: {
-                        data: base64Data,
-                        mimeType: docData.mimeType || "application/pdf"
-                    }
-                });
-            } catch (err: any) {
-                console.error(`[VISION 📐] Błąd pobierania rysunku:`, err);
-                throw err;
-            }
+            parts.push({
+                fileData: {
+                    fileUri: fileUri,
+                    mimeType: docData.mimeType || "application/pdf"
+                }
+            });
         }
 
         const prompt = `
@@ -110,12 +91,12 @@ Ważne zasady:
 `;
 
         parts.unshift({ text: prompt });
-        console.log(`[VISION 📐] Wysyłam ${parts.length - 1} rysunków do analizy (zabezpieczenie 429 aktywne)...`);
+        console.log(`[VISION 📐] Wysyłam zapytanie referencyjne GCS do Gemini...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
                 model: taskData.modelOverride || "gemini-2.5-flash",
-                contents: parts, // format bezpośredniej tablicy Parts (brak błędu TS2353)
+                contents: parts,
                 config: {
                     temperature: 0.1,
                     responseMimeType: "application/json"
@@ -142,6 +123,7 @@ Ważne zasady:
         });
 
         isSuccess = true;
+        console.log("[VISION 📐] Sukces.");
         return NextResponse.json({ success: true });
 
     } catch (error: any) {
@@ -155,17 +137,13 @@ Ważne zasady:
             }).catch(() => { });
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
-
     } finally {
         if (tenderId && taskId) {
-            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    tenderId,
-                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
-                })
+                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
             }).catch(() => { });
         }
     }

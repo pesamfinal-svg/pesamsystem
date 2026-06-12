@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first"); // Zapewnienie stabilności IPv4
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +15,21 @@ const ai = new GoogleGenAI({
 
 const MODEL_FLASH = "gemini-2.5-flash";
 
-// Schemat ustrukturyzowanego wyjścia dla szacunków wskaźnikowych
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[GAP FILLER 🧩] Limit 429. Odczekuję ${delay / 1000}s... (Zostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
 const GAP_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -23,16 +39,16 @@ const GAP_SCHEMA = {
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującej branży lub elementu, np. 'Instalacja wentylacji mechanicznej'" },
-                    opis: { type: Type.STRING, description: "Uzasadnienie rynkowe oszacowanego wskaźnika (np. średnia cena za m2 powierzchni użytkowej w Polsce)" },
-                    ilosc: { type: Type.NUMBER, description: "Ilość wskaźnikowa (liczba)" },
+                    pozycja: { type: Type.STRING, description: "Nazwa brakującej branży lub elementu" },
+                    opis: { type: Type.STRING, description: "Uzasadnienie rynkowe oszacowanego wskaźnika" },
+                    ilosc: { type: Type.NUMBER, description: "Ilość wskaźnikowa" },
                     jednostka: { type: Type.STRING, description: "Jednostka miary, np. m2, kpl, ryczałt" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze wpisz 'WSKAŹNIK_RYNKOWY'" }
+                    KNR_ref: { type: Type.STRING, description: "Zawsze 'WSKAŹNIK_RYNKOWY'" }
                 },
                 required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
             }
         },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie wykonanych szacunków wskaźnikowych." }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie." }
     },
     required: ["estimatedItems", "summary"]
 };
@@ -47,121 +63,109 @@ export async function POST(req: Request) {
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        console.log(`[GAP FILLER 🧩] Otrzymano żądanie POST. tenderId: ${tenderId}, taskId: ${taskId}`);
+        console.log(`[GAP FILLER 🧩] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
 
-        if (!tenderId || !taskId) {
-            console.error("[GAP FILLER 🧩] Błąd: Brak wymaganych parametrów tenderId lub taskId.");
-            return NextResponse.json({ error: "Brak danych" }, { status: 400 });
-        }
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak danych" }, { status: 400 });
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-
-        if (!taskDoc.exists) {
-            console.error(`[GAP FILLER 🧩] Zadanie o ID ${taskId} nie istnieje w bazie.`);
-            throw new Error("Zadanie nie istnieje.");
-        }
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
 
         const taskData = taskDoc.data()!;
-        console.log(`[GAP FILLER 🧩] Wczytano zadanie. Status w bazie: ${taskData.status}`);
+        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie obsłużone." });
 
-        if (taskData.status !== "PENDING") {
-            console.log(`[GAP FILLER 🧩] Zadanie ma status ${taskData.status}. Przerywam.`);
-            return NextResponse.json({ message: "Zadanie obsłużone." });
-        }
-
-        // Zmiana statusu na IN_PROGRESS
-        console.log("[GAP FILLER 🧩] Zmieniam status zadania na IN_PROGRESS.");
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        // Pobieramy parametry przekazane przez Mózg
         const objectType = taskData.inputFacts?.objectType || "Obiekt budowlany";
         const missingScope = taskData.inputFacts?.missingScope || "Brakująca branża";
 
-        console.log(`[GAP FILLER 🧩] Szacujemy parametrycznie branżę: "${missingScope}" dla obiektu typu: ${objectType}`);
-
-        // Kompilujemy prompt z wyszukiwarką
-        const prompt = `
-Jesteś Ekspertem ds. Kosztorysowania Parametrycznego i Wskaźnikowego w Polsce.
+        // KROK 1: Wyszukiwanie rynkowe z Google Search (Bez schema JSON, zwraca surowy raport tekstowy)
+        console.log("[GAP FILLER 🧩] KROK 1: Szukanie wskaźników cenowych w sieci za pomocą Google Search...");
+        const searchPrompt = `
 Wyceniamy projekt budowy obiektu: ${objectType}.
-W dokumentacji brakuje precyzyjnych rysunków lub danych dla zakresu: "${missingScope}".
+W dokumentacji brakuje precyzyjnych rysunków dla zakresu: "${missingScope}".
 
-Twoje polecenie od Mózgu:
-${taskData.instruction}
+Zadanie: ${taskData.instruction}
 
-Zasady wyceny wskaźnikowej:
-1. Użyj wyszukiwarki Google Search, aby znaleźć aktualne (2025/2026 rok) wskaźniki cenowe Sekocenbud, GUS lub średnie rynkowe stawki wykonawcze w Polsce za m2, mb lub ryczałt dla zakresu: "${missingScope}".
-2. Dokonaj rzetelnego, bezpiecznego inżynieryjnie oszacowania kosztu i ilości wskaźnikowych.
-3. Zwróć wynik jako poprawny obiekt JSON, pasujący dokładnie do zdefiniowanego schematu.
-4. Nie dodawaj żadnego innego tekstu poza czystym JSON-em.
+Użyj wyszukiwarki Google Search, aby znaleźć aktualne (2025/2026 r.) wskaźniki cenowe Sekocenbud, GUS lub średnie rynkowe stawki wykonawcze w Polsce za m2, mb lub ryczałt dla zakresu: "${missingScope}".
+Napisz szczegółowy, techniczny raport z wyceny wskaźnikowej.
 `;
 
-        console.log("[GAP FILLER 🧩] Wysyłam zapytanie do Gemini z włączonym Google Search Grounding...");
-
-        const result = await ai.models.generateContent({
-            model: taskData.modelOverride || MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            config: {
-                tools: [{ googleSearch: {} }], // Szukamy wskaźników Sekocenbud / GUS w sieci
-                temperature: 0.1,
-                responseMimeType: "application/json",
-                responseSchema: GAP_SCHEMA as any
-            }
+        const searchResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: searchPrompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.1
+                }
+            });
         });
 
-        console.log("[GAP FILLER 🧩] Odebrano odpowiedź z Gemini. Parsuję JSON...");
-        const parsedResult = JSON.parse(result.text ?? "{}");
-        const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
-        console.log(`[GAP FILLER 🧩] Zużyto tokenów: ${tokensUsed}. Zapisuję rawResult w bazie.`);
+        const rawReport = searchResult.text ?? "";
+        let totalTokensUsed = searchResult.usageMetadata?.totalTokenCount || 0;
+        console.log(`[GAP FILLER 🧩] Krok 1 ukończony. Pobrano raport rynkowy.`);
 
-        // Zapisujemy czysty JSON do rawResult i oznaczamy zadanie jako DONE
+        // KROK 2: Strukturyzacja na JSON (Z responseSchema, bez Google Search!)
+        console.log("[GAP FILLER 🧩] KROK 2: Porządkowanie danych i nakładanie struktury JSON...");
+        const structurePrompt = `
+Na podstawie poniższego raportu z wyceny wskaźnikowej, wyodrębnij pozycje kosztorysowe zgodnie z narzuconym schematem JSON.
+
+Raport wyceny:
+${rawReport}
+`;
+
+        const structureResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: structurePrompt,
+                config: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: GAP_SCHEMA as any
+                }
+            });
+        });
+
+        const parsedResult = JSON.parse(structureResult.text ?? "{}");
+        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
+
         await taskRef.update({
             status: "DONE",
             rawResult: parsedResult,
             processedByBrain: false,
-            costTokens: tokensUsed,
+            costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        // Koszt tokenów (Flash: ~$0.000015 / 1k, Pro: ~$0.002 / 1k)
-        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
-        const costUSD = (tokensUsed / 1000) * costPerThousand;
-
-        console.log(`[GAP FILLER 🧩] Koszt tokenów: ${costUSD.toFixed(6)} USD. Aktualizuję Budget Guard.`);
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
         await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
         isSuccess = true;
-        console.log("[GAP FILLER 🧩] Szacowanie wskaźnikowe zakończone pomyślnie.");
+        console.log("[GAP FILLER 🧩] Zakończono sukcesem (Ominięto konflikt Google 400).");
         return NextResponse.json({ success: true });
 
     } catch (error: any) {
-        console.error("[GAP FILLER 🧩] ❌ Błąd krytyczny w agencie gap filler:", error);
+        console.error("[GAP FILLER 🧩] ❌ Błąd:", error);
         if (tenderId && taskId) {
-            console.log("[GAP FILLER 🧩] Zapisuję status błędu (ERROR) do bazy.");
             await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
                 status: "ERROR",
                 rawResult: { error: error.message },
                 processedByBrain: false,
                 updatedAt: new Date()
-            }).catch((dbErr) => console.error("[GAP FILLER 🧩] Błąd zapisu błędu do Firestore:", dbErr));
+            }).catch(() => { });
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
-
     } finally {
-        // Gwarancja wybudzenia Mózgu
         if (tenderId && taskId) {
-            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-            console.log(`[GAP FILLER 🧩] Wybudzam Mózg przez loopback: ${localOrigin}`);
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    tenderId,
-                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
-                })
-            }).catch((fetchErr) => console.error("[GAP FILLER 🧩] Błąd wybudzania Mózgu przez fetch:", fetchErr));
+                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+            }).catch(() => { });
         }
     }
 }
