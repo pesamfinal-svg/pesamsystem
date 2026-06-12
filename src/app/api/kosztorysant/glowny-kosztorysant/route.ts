@@ -3,6 +3,8 @@ import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
 import { randomUUID } from "crypto";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first"); // Wymuszenie stabilnego protokołu IPv4 dla całego procesu
 
 export const dynamic = "force-dynamic";
 

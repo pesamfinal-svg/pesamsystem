@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first"); // Wymuszenie stabilnego protokołu IPv4 dla całego procesu
 
 export const dynamic = "force-dynamic";
 

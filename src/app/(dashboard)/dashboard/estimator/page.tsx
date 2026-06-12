@@ -14,6 +14,8 @@ interface SwarmTask {
     id: string;
     agentType: string;
     description?: string;
+    instruction?: string; // Dodane!
+    rawResult?: any;      // Dodane!
     status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
     dependsOn?: string[];
     parentTaskId?: string;
@@ -410,11 +412,31 @@ export default function EstimatorPage() {
                             <div className="space-y-1.5 bg-slate-950 p-3 rounded-2xl border border-slate-800/40 max-h-48 overflow-y-auto custom-scrollbar">
                                 {tasks.map(t => (
                                     <div key={t.id} className="flex flex-col gap-1 border-b border-slate-800/50 pb-1.5 last:border-0 last:pb-0">
-                                        <div className="flex justify-between items-center text-[10px]">
-                                            <span className="text-blue-400 font-bold">{t.agentType}</span>
+                                        <div className="flex justify-between items-center text-[10px] mb-0.5">
+                                            <span className="text-blue-400 font-black tracking-tight">{t.agentType}</span>
                                             <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase ${t.status === "DONE" ? "bg-green-500/20 text-green-400" : t.status === "IN_PROGRESS" ? "bg-blue-500/20 text-blue-400 animate-pulse" : t.status === "ERROR" ? "bg-red-500/20 text-red-400" : "bg-slate-800 text-slate-500"}`}>{t.status}</span>
                                         </div>
-                                        <span className="text-[9px] text-slate-400 leading-tight">{t.description || "Przetwarzanie..."}</span>
+
+                                        <div className="flex flex-col gap-1 text-[9px] leading-tight">
+                                            {/* Zmiana: Odczytujemy 'instruction' zamiast 'description' */}
+                                            <span className="text-slate-400 font-mono italic">
+                                                💬 Polecenie: "{t.instruction || t.description || "Planowanie..."}"
+                                            </span>
+
+                                            {/* Wyświetlanie wyniku po zakończeniu sukcesem */}
+                                            {t.status === "DONE" && t.rawResult?.summary && (
+                                                <span className="text-green-400 font-bold bg-green-950/20 px-1.5 py-1 rounded border border-green-900/30 text-[8px] mt-0.5">
+                                                    ✓ Wynik: {t.rawResult.summary}
+                                                </span>
+                                            )}
+
+                                            {/* Wyświetlanie błędu w przypadku porażki */}
+                                            {t.status === "ERROR" && t.rawResult?.error && (
+                                                <span className="text-red-400 font-bold bg-red-950/20 px-1.5 py-1 rounded border border-red-900/30 text-[8px] mt-0.5">
+                                                    ❌ Błąd: {t.rawResult.error}
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                 ))}
                             </div>
