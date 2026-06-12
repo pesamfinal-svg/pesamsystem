@@ -189,8 +189,8 @@ Ważne zasady:
     } finally {
         // Gwarancja wybudzenia Mózgu (zawsze w finally)
         if (tenderId && taskId) {
-            const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-            console.log(`[LEGAL EXPERT ⚖️] Wybudzam Mózg przez loopback na adresie: ${localOrigin}`);
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            console.log(`[...] Wybudzam Mózg przez bezpieczny loopback: ${localOrigin}`);
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

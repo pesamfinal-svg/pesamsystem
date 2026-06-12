@@ -157,8 +157,8 @@ export async function POST(req: Request) {
         console.log("[MAGAZYNIER ZIP 📦] Batch zapisany pomyślnie.");
 
         // 6. Asynchroniczne wybudzenie Fazy 0 (Inicjalizatora i Klasyfikatora dokumentów)
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
-        console.log(`[MAGAZYNIER ZIP 📦] Wybudzam asynchronicznie Klasyfikator (Fazę 0) przez loopback: ${localOrigin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`);
+        const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+        console.log(`[MAGAZYNIER ZIP 📦] Wybudzam asynchronicznie Klasyfikator (Fazę 0) przez bezpieczny loopback: ${localOrigin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`);
 
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant/inicjalizuj`, {
             method: "POST",

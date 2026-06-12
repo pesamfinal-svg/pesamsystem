@@ -311,7 +311,7 @@ ZASADY:
         // ==========================================
         // 6. DYNAMICZNY ROUTING (WYBUDZENIE AGENTÓW)
         // ==========================================
-        const localOrigin = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+        const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
 
         for (const task of newTasksCreated) {
             const agentDef = availableAgents.find(a => a.name === task.agentType);
