@@ -7,6 +7,9 @@ dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
 
+// Definiujemy najszybszy i najnowocześniejszy model dla Wizji bezpośrednio z Twojego konta GCP!
+const MODEL_FLASH = "gemini-3.5-flash";
+
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
@@ -95,7 +98,7 @@ Ważne zasady:
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
-                model: taskData.modelOverride || "gemini-2.5-flash",
+                model: MODEL_FLASH, // Wymuszenie stałej z pliku!
                 contents: parts,
                 config: {
                     temperature: 0.1,

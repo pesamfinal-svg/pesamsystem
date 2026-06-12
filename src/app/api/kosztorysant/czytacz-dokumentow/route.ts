@@ -7,6 +7,9 @@ dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
 
+// Prawnik również dostaje najnowszy model 3.5 Flash dla błyskawicznego czytania umów!
+const MODEL_FLASH = "gemini-3.5-flash";
+
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
@@ -93,10 +96,17 @@ Ważne zasady:
         parts.unshift({ text: prompt });
         console.log(`[LEGAL EXPERT ⚖️] Wysyłam zapytanie referencyjne GCS (fileData) do Gemini...`);
 
+        // Cichy Interceptor: Jeśli Mózg zhalucynuje stary model 1.5-pro, podmieniamy go w locie na Twój stabilny 2.5-pro
+        const selectedModel = taskData.modelOverride === "gemini-1.5-pro"
+            ? "gemini-2.5-pro"
+            : (taskData.modelOverride || "gemini-2.5-flash");
+
+        console.log(`[LEGAL EXPERT ⚖️] Wybrany model do wywołania: ${selectedModel}`);
+
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
-                model: taskData.modelOverride || "gemini-2.5-flash",
-                contents: parts, // Bezpośrednie, bezpieczne przekazanie referencji plików GCS (brak błędu TS2353)
+                model: MODEL_FLASH, // Wymuszenie stałej z pliku!
+                contents: parts,
                 config: {
                     temperature: 0.1,
                     responseMimeType: "application/json"

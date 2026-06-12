@@ -72,8 +72,7 @@ const BRAIN_SCHEMA = {
                     agentType: { type: Type.STRING },
                     instruction: { type: Type.STRING, description: "Czysto wymierzone zdanie pod agent JSON wyjscie." },
                     inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    modelOverride: { type: Type.STRING, description: "gemini-2.5-flash lub gemini-2.5-pro" }
+                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING } }
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
@@ -279,7 +278,6 @@ MÓZG REGULACJE  ZMIAN NOWEGO PROTOKOLOWE:
                 instruction: task.instruction,
                 inputDocIds: task.inputDocIds || [],
                 inputFacts: inputFacts,
-                modelOverride: task.modelOverride || "gemini-2.5-flash",
                 status: "PENDING",
                 processedByBrain: false,
                 createdAt: new Date(),
