@@ -14,6 +14,23 @@ const ai = new GoogleGenAI({
 const MODEL_PRO = "gemini-2.5-pro";
 const MODEL_FLASH = "gemini-2.5-flash";
 
+// Pomocnicza funkcja realizująca Exponential Backoff dla błędów 429 (RESOURCE_EXHAUSTED) u Budowlańca
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+
+        if (isRateLimit && retries > 0) {
+            console.warn(`[BUDOWLANIEC 🧱] Wykryto limit API 429. Chmura przeciążona. Czekam ${delay / 1000}s przed próbą ponowienia... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2); // Exponential backoff
+        }
+        throw error;
+    }
+}
+
 const BUDOWLANIEC_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -69,7 +86,7 @@ export async function POST(req: Request) {
         const knownFacts = taskData.inputFacts || {};
         let totalTokensUsed = 0;
 
-        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 1...");
+        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 1: Projektowanie z Google Search (Zabezpieczone Retry)...");
         const designPrompt = `
 Jesteś Głównym Inżynierem Budowy. Twoja żelazna zasada pracy brzmi: Jesteś samodzielny. Jeśli w podanych znanych faktach ${JSON.stringify(knownFacts)} omija się szczegóły inżynieryjne (klasy betonów pod ławy w danym typie terenu, gęstości, siatki poprzeczne/podłużne), TO SAM je ustalaj pod kątem Polskiego standardu dla opisywanych obiektów.
 
@@ -79,43 +96,54 @@ Nie proś ludzi o informację: jeśli SWZ nie pisze czy rurki to 15mm czy 20mm p
 
 Daj czysty szczegółowy technologiczny wykaz od podbudów do tynku z racjonalnym rozpisaniem. Wyłącznie ostatecznie jak system lub dokument się nie spina prawnie co zrzuca miliony i to błąd specyfikacji to zjaw problem brakiem!`;
 
-        const designResult = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: designPrompt }] }],
-            config: { tools: [{ googleSearch: {} }], temperature: 0.2 }
+        const designResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_PRO,
+                contents: designPrompt, // Czysty string, brak błędu TS2353
+                config: { tools: [{ googleSearch: {} }], temperature: 0.2 }
+            });
         });
 
         const builderProposal = designResult.text ?? "";
-        totalTokensUsed += designResult.usageMetadata?.totalTokenCount || 0;
+        const tokensStep1 = designResult.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += tokensStep1;
+        console.log(`[BUDOWLANIEC 🧱] Krok 1 zakończony. Zużyto tokenów: ${tokensStep1}`);
 
-        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 2 Audytu Z Cichego Rejestratora...");
-        const auditPrompt = `Przeanalizuj autokrytycznie swoją autorską zarysowana koncepcje samodzielnie i wypunktuj niedociągniecia budowlanych procesow pobocznych logistyk roboczo ziemnej izolacyjnej, ktore mogles nie wymienic do cyklu np zwozek lub sprzetów do:
-        \n ${builderProposal}`;
+        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 2 Audytu Z Cichego Rejestratora (Zabezpieczone Retry)...");
+        const auditPrompt = `Przeanalizuj autokrytycznie swoją autorską zarysowana koncepcje samodzielnie i wypunktuj niedociągniecia budowlanych procesow pobocznych logistyk roboczo ziemnej izolacyjnej, ktore mogles nie wymienic do cyklu np zwozek lub sprzetów do:\n ${builderProposal}`;
 
-        const auditResult = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: [{ role: "user", parts: [{ text: auditPrompt }] }],
-            config: { temperature: 0.2 }
+        const auditResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_PRO,
+                contents: auditPrompt,
+                config: { temperature: 0.2 }
+            });
         });
 
         const auditorFeedback = auditResult.text ?? "";
-        totalTokensUsed += auditResult.usageMetadata?.totalTokenCount || 0;
+        const tokensStep2 = auditResult.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += tokensStep2;
+        console.log(`[BUDOWLANIEC 🧱] Krok 2 zakończony. Zużyto tokenów: ${tokensStep2}`);
 
-        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 3 - finalny autozależnościowy ustruktur JSON...");
+        console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 3 - finalny autozależnościowy ustruktur JSON (Zabezpieczone Retry)...");
         const synthesisPrompt = `Narzuc poprawki w plan technologiczny biorac i nie narzucając pytani dla czatu - sam generuj bezpieczne wymuszenia i rozbite pozycje z obu debat:\nPlan:${builderProposal} \nBledy Audytu:${auditorFeedback}. Wynik formatem jako ustrukturyzowana tabela! W pozycjach na materiały w opsach, np jeśli jest beton pisz C30 b30 czy pojęcia co zgooglowałęs normami w krok1 samemu! Brak zadawania zbędnych pytań, dopóki budowa nie upadnie przez rażące zatajenie Inwestorów do procedur (zbyt wczesnie rzec do uzytkownik i nudes!)`;
 
-        const structureResult = await ai.models.generateContent({
-            model: MODEL_FLASH,
-            contents: [{ role: "user", parts: [{ text: synthesisPrompt }] }],
-            config: {
-                temperature: 0.1,
-                responseMimeType: "application/json",
-                responseSchema: BUDOWLANIEC_SCHEMA as any
-            }
+        const structureResult = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: synthesisPrompt,
+                config: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: BUDOWLANIEC_SCHEMA as any
+                }
+            });
         });
 
         const parsedResult = JSON.parse(structureResult.text ?? "{}");
-        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
+        const tokensStep3 = structureResult.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += tokensStep3;
+        console.log(`[BUDOWLANIEC 🧱] Krok 3 zakończony. Zużyto tokenów: ${tokensStep3}`);
 
         await taskRef.update({
             status: "DONE",
