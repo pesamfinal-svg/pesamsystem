@@ -1,10 +1,12 @@
 /**
  * PESAM – Helper: uploadTenderDocument
- * Jednolity system uploadu obsługujący zarówno pojedyncze pliki PDF/XLSX, jak i paczki ZIP.
- * Przekierowuje cały ruch do Agenta Magazyniera, który inicjuje zsynchronizowany Rój PESAM.
+ * Nowoczesny, bezserwerowy system przesyłania bezpośrednio do Google Cloud Storage (Signed URLs).
+ * Eliminuje błędy pamięci serwera Next.js i limity wielkości plików.
  */
 
 import { MarketTrends, EstimateSection } from "@/app/api/kosztorysant/_shared/types";
+import { db } from "@/lib/firebase/config";
+import { collection, doc, setDoc } from "firebase/firestore";
 
 // ── Typy ─────────────────────────────────────────────────────────────────────
 
@@ -28,16 +30,10 @@ type ProgressCallback = (progress: UploadProgress) => void;
 
 // ── Stałe ────────────────────────────────────────────────────────────────────
 
-// JEDEN ENDPOINT DLA WSZYSTKIEGO! Magazynier radzi sobie z ZIP-ami i pojedynczymi plikami.
-const ENDPOINT_UNIFIED = "/api/kosztorysant/magazynier-zip";
-
-/** Limit po stronie klienta: duże pliki na projekty rozbijamy wg wagi */
-export const MAX_UPLOAD_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB dla archiwów
+export const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB na pojedynczy plik bezpośrednio do GCS
 
 export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "application/pdf": ".pdf",
-  "application/zip": ".zip",
-  "application/x-zip-compressed": ".zip",
   "application/vnd.ms-excel": ".xls",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
   "application/msword": ".doc",
@@ -47,31 +43,32 @@ export const ACCEPTED_MIME_TYPES: Record<string, string> = {
   "image/webp": ".webp",
 };
 
-// ── Walidacja po stronie klienta (przed fetch) ────────────────────────────────
+// ── Walidacja po stronie klienta (przed GCS Signed URL) ──────────────────────
 
 export function validateFileClient(file: File): string | null {
   if (file.size === 0) {
     return "Plik jest pusty.";
   }
 
-  // Osobny limit: 250 MB dla ZIP, 25 MB dla reszty (np. pojedynczych PDF)
   const isZip = file.name.toLowerCase().endsWith(".zip");
-  const limitBytes = isZip ? MAX_UPLOAD_SIZE_BYTES : 25 * 1024 * 1024;
-
-  if (file.size > limitBytes) {
-    const sizeMB = (file.size / 1024 / 1024).toFixed(1);
-    const limitMB = (limitBytes / 1024 / 1024).toFixed(1);
-    return `Plik jest za duży (${sizeMB} MB). Maksimum dla tego formatu to ${limitMB} MB.`;
+  if (isZip) {
+    return "Przesyłanie plików ZIP zostało wyłączone na rzecz stabilności serwera. Proszę zaznaczyć i przesłać pliki PDF/XLSX bezpośrednio w oknie wyboru plików.";
   }
 
-  if (!ACCEPTED_MIME_TYPES[file.type] && !isZip) {
-    return `Nieobsługiwany format pliku "${file.name}". Prześlij ZIP, PDF, Excel, Word lub obraz.`;
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+    const limitMB = (MAX_UPLOAD_SIZE_BYTES / 1024 / 1024).toFixed(1);
+    return `Plik jest za duży (${sizeMB} MB). Maksimum dla bezpośredniego przesyłu to ${limitMB} MB.`;
+  }
+
+  if (!ACCEPTED_MIME_TYPES[file.type]) {
+    return `Nieobsługiwany format pliku "${file.name}". Prześlij bezpośrednio pliki PDF, Excel, Word lub obrazy.`;
   }
 
   return null; // Wszystko OK
 }
 
-// ── Główna funkcja wysyłająca ─────────────────────────────────────────────────
+// ── Główna funkcja wysyłająca bezpośrednio do Google Cloud Storage ────────────
 
 export async function uploadTenderDocument(
   files: FileList | File[] | File,
@@ -102,112 +99,154 @@ export async function uploadTenderDocument(
     }
   }
 
-  const formData = new FormData();
-  // Dodanie każdego pliku pod klucz "file"
-  fileList.forEach(file => {
-    formData.append("file", file);
-  });
-  formData.append("trends", JSON.stringify(trends));
-
-  const fileNames = fileList.map(f => f.name).join(", ");
   onProgress?.({
     stage: "uploading",
-    percent: 0,
-    message: `Przesyłanie plików [${fileNames}]…`,
+    percent: 1,
+    message: "Inicjalizacja rejestru bazy danych dla przetargu...",
   });
 
-  let response: Response;
+  let tenderId = "";
   try {
-    response = await uploadWithProgress(ENDPOINT_UNIFIED, formData, onProgress);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Błąd sieci podczas przesyłania.";
+    // 1. Rejestracja unikalnego ID przetargu w Firestore na kliencie
+    const tendersRef = collection(db, "tenders");
+    const newTenderDocRef = doc(tendersRef);
+    tenderId = newTenderDocRef.id;
+
+    // 2. Utworzenie głównego dokumentu przetargu
+    await setDoc(newTenderDocRef, {
+      status: "CLASSIFYING",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      marketTrends: trends,
+      budgetGuard: {
+        maxBudgetUSD: 5.0,
+        currentCostUSD: 0,
+        limitReached: false,
+        iterationCount: 0,
+        maxIterations: 50
+      }
+    });
+
+    const fileNames = fileList.map(f => f.name).join(", ");
+    const totalFiles = fileList.length;
+
+    // 3. Seryjne przesyłanie plików bezpośrednio do Google Cloud Storage (Signed URLs)
+    for (let i = 0; i < totalFiles; i++) {
+      const file = fileList[i];
+      const fileIndex = i;
+
+      // KROK A: Pobranie jednorazowego klucza zapisu Signed URL z serwera
+      const urlRes = await fetch("/api/kosztorysant/generuj-url-gcs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenderId,
+          fileName: file.name,
+          mimeType: file.type
+        })
+      });
+
+      if (!urlRes.ok) {
+        const errData = await urlRes.json();
+        throw new Error(`Nie udało się wygenerować bezpiecznego linku dla ${file.name}: ${errData.error}`);
+      }
+
+      const { url, storagePath } = await urlRes.json();
+
+      // KROK B: Przesłanie pliku bezpośrednio do GCS przez XMLHttpRequest z progress barem
+      await uploadFileToSignedUrlWithProgress(url, file, (filePercent) => {
+        // Obliczanie globalnego procentu dla wszystkich przesyłanych plików
+        const globalPercent = Math.round(((fileIndex * 100) + filePercent) / totalFiles);
+        onProgress?.({
+          stage: "uploading",
+          percent: globalPercent,
+          message: `Przesyłanie bezpośrednie GCS: ${file.name} (${filePercent}%)`,
+        });
+      });
+
+      // KROK C: Rejestracja dokumentu w podkolekcji Firestore
+      const docRef = doc(collection(db, `tenders/${tenderId}/documents`));
+      await setDoc(docRef, {
+        fileName: file.name,
+        storagePath,
+        mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size,
+        status: "UPLOADED",
+        createdAt: new Date()
+      });
+    }
+
+    onProgress?.({
+      stage: "analyzing",
+      message: "Dokumenty pomyślnie zapisane w chmurze. Wybudzanie Klasyfikatora (Faza 0)...",
+    });
+
+    // 4. Asynchroniczne wybudzenie Klasyfikatora (Fazy 0)
+    const initRes = await fetch("/api/kosztorysant/glowny-kosztorysant/inicjalizuj", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenderId })
+    });
+
+    if (!initRes.ok) {
+      console.warn("[UPLOAD CLIENT] Klasyfikator nie odpowiedział synchronicznie, proces ruszy asynchronicznie w tle.");
+    }
+
+    onProgress?.({
+      stage: "done",
+      message: "Wszystkie dokumenty zainicjowane pomyślnie. Rój PESAM 3.0 aktywny!",
+    });
+
+    return {
+      tenderId,
+      projectName: `Przetarg ${tenderId.slice(0, 6)}`,
+      filesCount: totalFiles,
+      reply: `Dokumenty [${fileNames}] zostały pomyślnie przetransferowane bezpośrednio do chmury Google Cloud Storage. Rój rozpoczął pracę.`
+    };
+
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : "Błąd sieci podczas bezpośredniego przesyłania.";
     onProgress?.({ stage: "error", message });
     throw new Error(message);
   }
-
-  const hasZip = fileList.some(f => f.name.toLowerCase().endsWith(".zip"));
-  onProgress?.({
-    stage: "analyzing",
-    message: "Rejestracja w bazie i inicjalizacja Roju PESAM... (oczekuj na statusy w panelu bocznym)",
-  });
-
-  if (!response.ok) {
-    let errorMsg = `Błąd serwera: HTTP ${response.status}`;
-    try {
-      const errBody = await response.json();
-      if (errBody.error) errorMsg = errBody.error;
-    } catch {
-      // Jeśli serwer zwrócił HTML, zostaw domyślny status
-    }
-    onProgress?.({ stage: "error", message: errorMsg });
-    throw new Error(errorMsg);
-  }
-
-  let result: UploadParserResult;
-  try {
-    result = await response.json();
-  } catch {
-    const msg = "Nie udało się odczytać odpowiedzi serwera (nieprawidłowy JSON).";
-    onProgress?.({ stage: "error", message: msg });
-    throw new Error(msg);
-  }
-
-  if (!result.tenderId) {
-    const msg = "Serwer przetworzył plik, ale nie zwrócił identyfikatora przetargu.";
-    onProgress?.({ stage: "error", message: msg });
-    throw new Error(msg);
-  }
-
-  result.reply = `Pliki [${fileNames}] zostały pomyślnie zmagazynowane w bazie. Rój PESAM rozpoczął przetwarzanie zadań równoległych w tle. Statusy aktualizują się w panelu po lewej stronie.`;
-
-  onProgress?.({
-    stage: "done",
-    message: hasZip ? "Archiwum ZIP przetworzone. Rój aktywny!" : "Dokumenty pomyślnie zainicjowane. Rój aktywny!"
-  });
-
-  return result;
 }
 
-// ── XMLHttpRequest z progress bar'em dla dużych plików ────────────────────────
+// ── XMLHttpRequest dla PUT bezpośrednio do GCS ──────────────────────────────
 
-function uploadWithProgress(
-  endpoint: string,
-  formData: FormData,
-  onProgress?: ProgressCallback
-): Promise<Response> {
+function uploadFileToSignedUrlWithProgress(
+  url: string,
+  file: File,
+  onFileProgress: (percent: number) => void
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
 
     xhr.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
         const percent = Math.round((event.loaded / event.total) * 100);
-        onProgress?.({
-          stage: "uploading",
-          percent,
-          message: `Przesyłanie do chmury: ${percent}%`,
-        });
+        onFileProgress(percent);
       }
     });
 
     xhr.addEventListener("load", () => {
-      const syntheticResponse = new Response(xhr.responseText, {
-        status: xhr.status,
-        statusText: xhr.statusText,
-        headers: { "Content-Type": "application/json" },
-      });
-      resolve(syntheticResponse);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Błąd przesyłania bezpośredniego do GCS: Status HTTP ${xhr.status}`));
+      }
     });
 
     xhr.addEventListener("error", () => {
-      reject(new Error("Połączenie z serwerem zostało przerwane (Błąd Sieciowy)."));
+      reject(new Error("Połączenie z serwerem Google Cloud Storage zostało przerwane."));
     });
 
     xhr.addEventListener("timeout", () => {
-      reject(new Error("Przekroczono limit czasu połączenia (30 minut). Spróbuj ponownie."));
+      reject(new Error("Przekroczono limit czasu połączenia z Google Cloud Storage (30 minut)."));
     });
 
-    xhr.open("POST", endpoint);
-    xhr.timeout = 1800_000; // 30 minut (dla wielkich projektów)
-    xhr.send(formData);
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.timeout = 1800_000; // 30 minut
+    xhr.send(file);
   });
 }

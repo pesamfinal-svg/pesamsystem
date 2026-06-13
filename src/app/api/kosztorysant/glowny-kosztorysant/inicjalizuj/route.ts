@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
-import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { adminDb } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-2.5-flash";
+// Używamy nowego, szybkiego i ultra-taniego modelu Flash-Lite dla klasyfikacji sensorycznej
+const MODEL_LITE = "gemini-2.5-flash-lite";
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -20,14 +21,22 @@ const CLASSIFIER_SCHEMA = {
         tags: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: "Tagi dokumentu, np. [SWZ], [RYSUNEK, ARCHITEKTURA], [PRZEDMIAR, EXCEL], [UMOWA]"
+            description: "Tagi dokumentu, np. [SWZ], [UMOWA], [SPECYFIKACJA], [OPIS_TECHNICZNY]"
         },
         summary: {
             type: Type.STRING,
             description: "Maksymalnie 2-zdaniowe streszczenie zawartości pliku."
+        },
+        containsTablesWithDimensions: {
+            type: Type.BOOLEAN,
+            description: "Czy dokument zawiera tabele z przedmiarami, obmiarami lub wymiarami fizycznymi obiektu."
+        },
+        containsDrawings: {
+            type: Type.BOOLEAN,
+            description: "Czy dokument zawiera rysunki techniczne, rzuty, przekroje, schematy lub inną dokumentację graficzną."
         }
     },
-    required: ["tags", "summary"]
+    required: ["tags", "summary", "containsTablesWithDimensions", "containsDrawings"]
 };
 
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
@@ -50,16 +59,16 @@ export async function POST(req: Request) {
         const body = await req.json();
         const { tenderId } = body;
 
-        console.log(`[FAZA 0 🚀] Start inicjalizacji dla przetargu: ${tenderId}`);
+        console.log(`[FAZA 0 🚀] Start inicjalizacji sensorycznej dla: ${tenderId}`);
 
         if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
         const docsRef = adminDb.collection(`tenders/${tenderId}/documents`);
         const snapshot = await docsRef.where("status", "==", "UPLOADED").get();
 
-        if (snapshot.empty) return NextResponse.json({ message: "Brak dokumentów." });
+        if (snapshot.empty) return NextResponse.json({ message: "Brak dokumentów do klasyfikacji." });
 
-        console.log(`[FAZA 0 🚀] Skanuję ${snapshot.size} dokumentów...`);
+        console.log(`[FAZA 0 🚀] Skanuję ${snapshot.size} dokumentów przy użyciu ${MODEL_LITE}...`);
         let totalTokensUsed = 0;
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
 
@@ -68,25 +77,24 @@ export async function POST(req: Request) {
             const docData = docSnap.data();
 
             if (i > 0) {
-                console.log("[FAZA 0 🚀] API Pacing: Czekam 3 sekundy...");
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                // Krótki odstęp chroniący przed przeciążeniem API
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
 
-            console.log(`[FAZA 0 🚀] Klasyfikuję: ${docData.fileName}`);
+            console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
 
             try {
                 const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-                console.log(`[FAZA 0 🚀] Generuję ścieżkę GCS: ${fileUri}`);
 
                 const prompt = `
-Jesteś Klasyfikatorem systemu kosztorysowego PESAM 3.0. 
-Przeanalizuj pierwszą stronę tego dokumentu budowlanego. 
-Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
+Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
+Przeanalizuj pierwszą stronę lub spis treści tego dokumentu budowlanego. 
+Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy dokument zawiera tabele wymiarowe lub rysunki techniczne.
 `;
 
                 const result = await callGeminiWithRetry(async () => {
                     return await ai.models.generateContent({
-                        model: MODEL_FLASH,
+                        model: MODEL_LITE,
                         contents: [
                             {
                                 role: "user",
@@ -109,30 +117,33 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
                     });
                 });
 
-                const responseText = result.text ?? "{}";
-                const parsedResult = JSON.parse(responseText);
+                const parsedResult = JSON.parse(result.text ?? "{}");
                 const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
                 totalTokensUsed += tokensUsed;
 
+                // Zapisujemy nowe flagi bezpośrednio do metadanych dokumentu w Firestore
                 await docSnap.ref.update({
                     tags: parsedResult.tags,
                     summary: parsedResult.summary,
+                    containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
+                    containsDrawings: parsedResult.containsDrawings || false,
                     status: "CLASSIFIED",
-                    classifyModel: MODEL_FLASH,
+                    classifyModel: MODEL_LITE,
                     updatedAt: new Date()
                 });
 
-                console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}.`);
+                console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
 
             } catch (docError: any) {
-                console.error(`[FAZA 0 🚀] Błąd:`, docError);
+                console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
                 await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
             }
         }
 
-        // Zapis do bezpiecznika i budzenie mózgu (bez zmian)
-        const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000015;
+        // Koszt tokenów dla Flash-Lite jest drastycznie niższy (około $0.000075 za 1k input tokenów)
+        const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000075;
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
+
         await adminDb.runTransaction(async (t) => {
             const tenderDoc = await t.get(tenderRef);
             if (tenderDoc.exists) {
@@ -148,12 +159,12 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         await brainRef.set({
             phase: "PLANNING",
-            currentGoal: "Analiza tagów i planowanie.",
+            currentGoal: "Analiza struktury dokumentów i planowanie podziału prac.",
             knownFacts: {},
             missingData: [],
             activeTaskIds: [],
             pendingDecisions: [],
-            reasoningLog: ["Inicjalizacja."],
+            reasoningLog: ["Inicjalizacja sensoryczna zakończona pomyślnie."],
             totalCostUSD: estimatedCostUSD
         }, { merge: true });
 
@@ -164,9 +175,10 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
         }).catch(() => { });
 
-        return NextResponse.json({ success: true, tokensUsed: totalTokensUsed });
+        return NextResponse.json({ success: true, tokensUsed: totalTokensUsed, modelUsed: MODEL_LITE });
 
     } catch (error: any) {
+        console.error("[FAZA 0 🚀] Błąd krytyczny inicjalizacji:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
