@@ -102,19 +102,18 @@ export async function POST(req: Request) {
 
             try {
                 const fileRef = bucket.file(docData.storagePath);
-                const [downloadedBuffer] = await fileRef.download();
-                console.log(`[BOQ PARSER 📊] Pobrano : ${downloadedBuffer.length} B`);
 
-                const safeBuffer = Buffer.from(new Uint8Array(downloadedBuffer).buffer);
-
-                // GIGANTYCZNA OPTYMALIZACJA BIZNESOWA! PRAWIDZIWE PARSOWANIE Z PAKIETOW TABELI ! ( BEZVISION. API Z CENNIKA $ FLASH O POZIOM SPADŁ NAWET KROTNOSCI 98%!  !  
                 if (isExcel) {
-                    console.log(`[BOQ PARSER 📊] To Plik Typu Przedmiar Cyfrowego Nativ EXEL (Krzywy ubytek). Pcham jako wstrzykniecia parser! Zero modeli halucygnogennego Oczka! (Suma czystego szaleńczego formatowacza Czystości FLASH AI) `);
+                    // EXCEL: Pobieramy do pamięci, bo biblioteka xlsx musi go fizycznie przeczytać
+                    const [downloadedBuffer] = await fileRef.download();
+                    console.log(`[BOQ PARSER 📊] Pobrano : ${downloadedBuffer.length} B (Plik Excel - Parsowanie Pamięciowe)`);
+                    const safeBuffer = Buffer.from(new Uint8Array(downloadedBuffer).buffer);
+
+                    console.log(`[BOQ PARSER 📊] To Plik Typu Przedmiar Cyfrowego Nativ EXEL (Krzywy ubytek). Pcham jako wstrzykniecia parser!`);
 
                     const workbook = xlsx.read(safeBuffer, { type: "buffer" });
-                    const sheetName = workbook.SheetNames[0]; // Pierwsza Strona zazwyczaj (Przedmiaru - Boq w zakładach Exela)
+                    const sheetName = workbook.SheetNames[0];
 
-                    // Bezstratne zrzuty ze komórek C6 - F20, ignorujący nieinżynieryjne "ramki okienka z nagłówkami na Logo urzędu miasteczka u ZP. Wrzucanie tekstu dla Umiaru dla AI... ".
                     const rawJsonText = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
                     const promptExcelToNormalize = `Działa Twój Moduł Normalizator Tabulacyjny JSON od Inżynierów Odbioru Rządowych PZP ! 
 Dostaniesz Surowe bezstratne rzutki po API, z programu Natywnego EXcel. Uzywaj instrukcj MOZGU : "${taskData.instruction}" - sfiltruj to jako ludzką predyktywą  AI (Uważając ! I odrzuc z ukladem brudy pustki , okna naglowkow Gmina  Miasto XYZ i dat wczesnych pod rzetelną bazową kosztorysa przedmiarem formatow i zepnij odpowiedz sztywnym w schemat ! Zrób to u struktury i zostaw z opisu sam R-G , M-j. \n Surowe dane (Szarpanego na klatki Json text - Exella ) : ${JSON.stringify(rawJsonText).substring(0, 30000)} ...  (ucinamy jeśli plik to całe puste loga dla Oszczedności). Uzywaj FLASH AI O Niskim koszcie...`;
@@ -132,9 +131,9 @@ Dostaniesz Surowe bezstratne rzutki po API, z programu Natywnego EXcel. Uzywaj i
                     if (parsedExResult.items) allExtractedItems.push(...parsedExResult.items);
 
                 } else {
-                    // 1- GENERACYJNA STARO - SZTUKA. Ręczna z optyką dla Skankowych ślepych od gmina plików przedmiarnie stęplowanego... Wchodzimy przez BASE. Męczymy sie by Gemini nam PRO Modelem Vision rozdzielało wzdłóż kropek dla kolumn : !
-                    console.log(`[BOQ PARSER 📊] Podłożyło u Pliku Ograniczajaca Oczy RZUCIE Z WIDENCA DO ROZDZIELA! PRZYSZLO "Zeskanowane od urzędu PDF' z przedmiaram.... !. Droższe lecz od biedy i z pro model `);
-                    const base64Data = safeBuffer.toString("base64");
+                    // PDF: Przechodzimy na nowoczesny, referencyjny format chmurowy gs:// BEZ POBIERANIA DO RAM!
+                    console.log(`[BOQ PARSER 📊] Użyto nowoczesnego linku gs:// dla przedmiaru PDF (Eliminacja UND_ERR_HEADERS_TIMEOUT).`);
+                    const fileUri = `gs://${bucketName}/${docData.storagePath}`;
                     const promptPDF = `Odślepiaj formatami RZECZ Z MODELO'a Przedmiarów Dokumentów Urzędniczo budowlańca : Wykorzystuj z instrukcja : ${taskData.instruction}`;
 
                     const resultPDF = await callGeminiWithRetry(async () => {
@@ -145,7 +144,7 @@ Dostaniesz Surowe bezstratne rzutki po API, z programu Natywnego EXcel. Uzywaj i
                                     role: "user",
                                     parts: [
                                         { text: promptPDF },
-                                        { inlineData: { data: base64Data, mimeType: docData.mimeType || "application/pdf" } }
+                                        { fileData: { fileUri: fileUri, mimeType: docData.mimeType || "application/pdf" } }
                                     ]
                                 }
                             ],
