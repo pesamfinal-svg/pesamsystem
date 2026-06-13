@@ -46,6 +46,14 @@ const BRAIN_SCHEMA = {
             type: Type.STRING,
             description: `Jaka pojedyncza informacja/akcja najbardziej zwiększy w tym momencie jakość kosztorysu? Zdefiniuj JEDEN najważniejszy cel na teraz.`
         },
+        assumptionMode: {
+            type: Type.BOOLEAN,
+            description: `Ustaw na TRUE TYLKO jeśli świadomie decydujesz się na wycenę koncepcyjną z powodu braku dokumentacji technicznej.`
+        },
+        assumptionDisclaimer: {
+            type: Type.STRING,
+            description: `Wyraźne, profesjonalne ostrzeżenie dla Kosztorysanta – z jakich źródeł i norm korzystasz oraz jakie ryzyko niesie ten tryb.`
+        },
         cognitiveState: {
             type: Type.OBJECT,
             description: `Twój wewnętrzny stan poznawczy inwestycji. Ewoluuje z każdym cyklem. Nie masz zakodowanych sztywno branż – sam je budujesz.`,
@@ -128,7 +136,7 @@ const BRAIN_SCHEMA = {
         },
         newEstimateItems: {
             type: Type.ARRAY,
-            description: `KRYTYCZNE: Możesz wygenerować pozycję kosztorysową TYLKO, gdy 'confidence' hipotezy/założenia dla tej roboty wynosi MINIMUM 75. Jeśli masz mniejszą pewność, wstrzymaj się i zleć narzędziom zbadanie luki (knowledgeGap).`,
+            description: `KRYTYCZNE: Generuj pozycje TYLKO jeśli confidence >= 75% LUB (assumptionMode === true). W trybie assumptionMode każda pozycja MUSI zawierać prefiks [ZAŁOŻENIE RYNKOWE] w polu 'opis'.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
@@ -165,7 +173,7 @@ const BRAIN_SCHEMA = {
             }
         }
     },
-    required: ["reasoning", "selfCritique", "nextBestAction", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
+    required: ["reasoning", "selfCritique", "nextBestAction", "assumptionMode", "assumptionDisclaimer", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
 };
 
 export async function POST(req: Request) {
@@ -275,7 +283,7 @@ export async function POST(req: Request) {
         const estimateState = estimateSnap.docs.map(d => ({ sekcja: d.data().section, liczba_pozycji: d.data().items?.length || 0, wartosc_zl: d.data().totalValue || 0 }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
 
-        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem), jedynym Inżynierem i Architektem systemu. 
+        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem), jedynym Inżynierem i Architektem systemu PESAM 3.0. 
 
 === ZASADA DZIAŁANIA (COGNITIVE ARCHITECTURE) ===
 Nie jesteś tu by ślepo delegować zadania do ekspertów. TO TY JESTEŚ JEDYNYM EKSPERTEM.
@@ -285,6 +293,14 @@ Twój proces myślowy to:
 3. Wykrywanie luk w Twojej wiedzy. Oblicz ich Wpływ Ekonomiczny (Economic Impact Score 1-100).
 4. Wysyłanie "Głupich Narzędzi" TYLKO by zweryfikować luki o najwyższym ryzyku finansowym.
 5. Generowanie pozycji do kosztorysu WYŁĄCZNIE, gdy masz pewność (confidence) danego faktu/założenia na poziomie MINIMUM 75%.
+
+=== TRYB ZAŁOŻEŃ RYNKOWYCH (ASSUMPTION_MODE) ===
+Jeśli brakuje krytycznej dokumentacji (np. Załącznik nr 5, rysunki, szczegółowe przedmiary):
+- Możesz rozważyć włączenie assumptionMode: true.
+- W takim przypadku przygotuj klarowny 'assumptionDisclaimer'.
+- Używaj agresywnie BUDOWLANIEC + GAP_FILLER.
+- Każdą pozycję wygenerowaną w tym trybie oznacz w opisie jako **[ZAŁOŻENIE RYNKOWE]**.
+- Pamiętaj o pełnej transparentności – Kosztorysant musi wiedzieć, co jest faktem, a co Twoją koncepcją.
 
 === TWOJE NARZĘDZIA ===
 ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, mozliwosci: a.capabilities })), null, 2)}
@@ -340,15 +356,18 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             });
         }
 
+        // Zapis zaktualizowanego stanu Mózgu wraz z trybem założeń koncepcyjnych
         batch.update(brainRef, {
             phase: parsedResult.phase,
             currentGoal: parsedResult.currentGoal,
             cognitiveState: parsedResult.cognitiveState,
+            assumptionMode: parsedResult.assumptionMode || false,
+            assumptionDisclaimer: parsedResult.assumptionDisclaimer || null,
             reasoningLog: FieldValue.arrayUnion(`Reasoning: ${parsedResult.reasoning || ""} | Next Action: ${parsedResult.nextBestAction || ""}`)
         });
 
         if (parsedResult.newEstimateItems?.length > 0) {
-            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} zweryfikowanych pozycji (>75% pewności).`);
+            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} zweryfikowanych pozycji (>75% pewności lub tryb założeń).`);
             const sectionsMap = new Map<string, any[]>();
             parsedResult.newEstimateItems.forEach((item: any) => {
                 const sec = item.sectionName || "Ogólne";
@@ -368,8 +387,8 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                     jednostka: item.jednostka || "szt",
                     cenaJed: 0,
                     KNR_ref: item.KNR_ref || "",
-                    confidence: "AI_COGNITIVE_MODEL",
-                    sourceTrack: `Model Poznawczy Mózgu`
+                    confidence: parsedResult.assumptionMode ? "ASSUMPTION_MODE" : "AI_COGNITIVE_MODEL",
+                    sourceTrack: parsedResult.assumptionMode ? `Konceptualizacja Mózgu` : `Model Poznawczy Mózgu`
                 }));
 
                 batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", items: formattedItems, totalValue: 0, updatedAt: new Date() }, { merge: true });

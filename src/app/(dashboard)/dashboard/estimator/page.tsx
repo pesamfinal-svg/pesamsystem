@@ -14,8 +14,8 @@ interface SwarmTask {
     id: string;
     agentType: string;
     description?: string;
-    instruction?: string; // Dodane!
-    rawResult?: any;      // Dodane!
+    instruction?: string;
+    rawResult?: any;
     status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
     dependsOn?: string[];
     parentTaskId?: string;
@@ -76,6 +76,8 @@ interface BrainState {
     phase: string;
     currentGoal: string;
     totalCostUSD: number;
+    assumptionMode?: boolean;
+    assumptionDisclaimer?: string;
 }
 
 export default function EstimatorPage() {
@@ -110,6 +112,7 @@ export default function EstimatorPage() {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadMsg, setUploadMsg] = useState("");
     const [savedTendersList, setSavedTendersList] = useState<Array<{ id: string; name: string }>>([]);
+    const [assumptionsAccepted, setAssumptionsAccepted] = useState(false);
 
     const chatEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -117,6 +120,11 @@ export default function EstimatorPage() {
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [chatMessages]);
+
+    // Resetowanie stanu akceptacji przy zmianie przetargu
+    useEffect(() => {
+        setAssumptionsAccepted(false);
+    }, [activeTenderId]);
 
     // 1. Pobieranie listy dostępnych przetargów na starcie
     useEffect(() => {
@@ -184,7 +192,6 @@ export default function EstimatorPage() {
         // G. Nasłuch Stanu Umysłu (Mózg)
         const unsubBrain = onSnapshot(collection(db, `tenders/${activeTenderId}/brain`), (snap) => {
             if (!snap.empty) {
-                // Zakładamy, że jest jeden główny dokument sesji mózgu
                 setBrainState(snap.docs[0].data() as BrainState);
             }
         });
@@ -203,11 +210,8 @@ export default function EstimatorPage() {
             const result = await uploadTenderDocument(files, { laborAdjustment: 0, materialAdjustment: 0, equipmentAdjustment: 0, kp: 65, zysk: 12 }, (p: UploadProgress) => {
                 setUploadMsg(p.message);
             });
-
             if (result.tenderId) {
                 setActiveTenderId(result.tenderId);
-                // ZMIANA: Usunięto nadmiarowy fetch do /api/kosztorysant/glowny-kosztorysant/inicjalizuj.
-                // Backendowy "magazynier-zip" wywołuje inicjalizację bezpiecznie i asynchronicznie po swojej stronie.
             }
         } catch (err: any) {
             alert("Błąd przesyłania: " + err.message);
@@ -223,7 +227,6 @@ export default function EstimatorPage() {
         const text = inputText;
         setInputText("");
 
-        // 1. Zapisz wiadomość użytkownika do Firestore
         await addDoc(collection(db, `tenders/${activeTenderId}/chat`), {
             role: "user",
             content: text,
@@ -231,7 +234,6 @@ export default function EstimatorPage() {
             intent: "GENERAL"
         });
 
-        // 2. Wybudź Orkiestratora (Mózg)
         try {
             await fetch('/api/kosztorysant/glowny-kosztorysant', {
                 method: 'POST',
@@ -242,6 +244,42 @@ export default function EstimatorPage() {
             console.error("Błąd komunikacji z Mózgiem:", e);
         }
     };
+
+    const handleAcceptAssumptions = async () => {
+        if (!activeTenderId) return;
+        setAssumptionsAccepted(true); // Natychmiastowe ukrycie na UI przed wywołaniem API
+
+        await addDoc(collection(db, `tenders/${activeTenderId}/chat`), {
+            role: "user",
+            content: "AKCEPTUJĘ TRYB ZAŁOŻEŃ RYNKOWYCH. Proszę o kontynuację wyceny koncepcyjnej na podstawie norm rynkowych.",
+            timestamp: serverTimestamp(),
+            intent: "ACCEPT_ASSUMPTIONS"
+        });
+
+        fetch('/api/kosztorysant/glowny-kosztorysant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenderId: activeTenderId, trigger: "USER_MESSAGE" })
+        }).catch(console.error);
+    };
+
+    const handleRejectAssumptions = async () => {
+        if (!activeTenderId) return;
+
+        await addDoc(collection(db, `tenders/${activeTenderId}/chat`), {
+            role: "user",
+            content: "NIE AKCEPTUJĘ TRYBU ZAŁOŻEŃ. Proszę wstrzymać prace do czasu dostarczenia rzetelnej dokumentacji.",
+            timestamp: serverTimestamp(),
+            intent: "REJECT_ASSUMPTIONS"
+        });
+
+        fetch('/api/kosztorysant/glowny-kosztorysant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenderId: activeTenderId, trigger: "USER_MESSAGE" })
+        }).catch(console.error);
+    };
+
     const handleStopTender = async () => {
         if (!activeTenderId) return;
         if (!confirm("Czy na pewno chcesz zatrzymać ten przetarg i anulować aktywne zadania agentów?")) return;
@@ -275,6 +313,7 @@ export default function EstimatorPage() {
             alert("Błąd podczas usuwania dokumentacji z bazy.");
         }
     };
+
     const resolveConflict = async (conflictId: string, decision: string, justification: string) => {
         try {
             await fetch(`/api/kosztorysant/scope-manifest/resolve-conflict`, {
@@ -386,7 +425,7 @@ export default function EstimatorPage() {
                         </div>
                     </div>
 
-                    {/* Lista Dokumentów (Klasyfikator) */}
+                    {/* Lista Dokumentów */}
                     {documents.length > 0 && (
                         <div className="space-y-1.5">
                             {documents.map(doc => (
@@ -418,19 +457,16 @@ export default function EstimatorPage() {
                                         </div>
 
                                         <div className="flex flex-col gap-1 text-[9px] leading-tight">
-                                            {/* Zmiana: Odczytujemy 'instruction' zamiast 'description' */}
                                             <span className="text-slate-400 font-mono italic">
                                                 💬 Polecenie: "{t.instruction || t.description || "Planowanie..."}"
                                             </span>
 
-                                            {/* Wyświetlanie wyniku po zakończeniu sukcesem */}
                                             {t.status === "DONE" && t.rawResult?.summary && (
                                                 <span className="text-green-400 font-bold bg-green-950/20 px-1.5 py-1 rounded border border-green-900/30 text-[8px] mt-0.5">
                                                     ✓ Wynik: {t.rawResult.summary}
                                                 </span>
                                             )}
 
-                                            {/* Wyświetlanie błędu w przypadku porażki */}
                                             {t.status === "ERROR" && t.rawResult?.error && (
                                                 <span className="text-red-400 font-bold bg-red-950/20 px-1.5 py-1 rounded border border-red-900/30 text-[8px] mt-0.5">
                                                     ❌ Błąd: {t.rawResult.error}
@@ -467,7 +503,7 @@ export default function EstimatorPage() {
                                                 {c.parties.map((p, idx) => (
                                                     <button
                                                         key={idx}
-                                                        onClick={() => resolveConflict(c.id, p.claim, `Decyzja Kosztorysanta: ${p.claim}`)}
+                                                        onClick={() => resolveConflict(c.id, p.claim, `Decyzja: ${p.claim}`)}
                                                         className="bg-red-900/30 hover:bg-red-900/60 border border-red-900/50 text-red-200 px-2 py-1.5 rounded-lg text-[9px] font-bold transition-colors text-left"
                                                     >
                                                         Zatwierdź: {p.claim}
@@ -505,6 +541,33 @@ export default function EstimatorPage() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-950/40 custom-scrollbar">
+                        {/* BANER DLA TRYBU WYCENY KONCEPCYJNEJ */}
+                        {brainState?.assumptionMode && !assumptionsAccepted && (
+                            <div className="bg-amber-950/95 border-2 border-amber-500/50 p-5 rounded-3xl text-amber-200 text-xs mb-6 shadow-[0_0_20px_rgba(245,158,11,0.2)] animate-in fade-in zoom-in duration-300 flex-shrink-0">
+                                <div className="font-black mb-3 uppercase flex items-center gap-2 text-amber-400">
+                                    <span className="text-lg">⚠️</span> TRYB WYCENY KONCEPCYJNEJ AKTYWNY
+                                </div>
+                                <p className="leading-relaxed mb-4 font-medium italic opacity-90 border-l-2 border-amber-500/30 pl-3">
+                                    "{brainState.assumptionDisclaimer}"
+                                </p>
+
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={handleAcceptAssumptions}
+                                        className="flex-1 bg-amber-600 hover:bg-amber-500 text-white px-4 py-3 rounded-2xl text-[10px] font-black uppercase transition-all shadow-md active:scale-95"
+                                    >
+                                        ✅ Akceptuję założenia
+                                    </button>
+                                    <button
+                                        onClick={handleRejectAssumptions}
+                                        className="bg-slate-900 hover:bg-red-950 border border-slate-700 hover:border-red-500/50 px-4 py-3 rounded-2xl text-[10px] font-black uppercase text-slate-400 hover:text-red-400 transition-all active:scale-95"
+                                    >
+                                        🛑 Wstrzymaj
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         {chatMessages.length === 0 && (
                             <div className="text-center text-slate-500 text-xs mt-10">
                                 Wgraj dokumentację lub zadaj pytanie, aby wybudzić Mózg.
@@ -527,7 +590,7 @@ export default function EstimatorPage() {
                             value={inputText}
                             onChange={e => setInputText(e.target.value)}
                             onKeyDown={e => e.key === 'Enter' && handleSendMessage()}
-                            placeholder="Wydaj polecenie Mózgowi (np. 'Sprawdź kary umowne w SWZ')..."
+                            placeholder="Wydaj polecenie Mózgowi..."
                             className="flex-1 bg-slate-900 text-white border border-slate-700 rounded-xl px-3 py-2.5 text-xs outline-none focus:border-blue-500 transition-colors"
                         />
                         <button onClick={handleSendMessage} className="bg-blue-600 hover:bg-blue-500 text-white font-black text-xs px-5 rounded-xl transition-all shadow-md">WYŚLIJ</button>

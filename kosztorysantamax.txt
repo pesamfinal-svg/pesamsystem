@@ -632,43 +632,110 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
     }
 }
 
-// ZMIANA 1: Schema z opisami które faktycznie prowadzą model, nie go wiążą
 const BRAIN_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         reasoning: {
             type: Type.STRING,
-            description: `Twój wewnętrzny tok myślenia — wypełnij PRZED podjęciem decyzji o zadaniach.
-Odpowiedz tu na: Jaki to obiekt i co z dokumentów/czatu o nim wiem? Co agenci już zrobili i co z tego wynika?
-Czy kosztorys jest kompletny czy ma dziury? Jakich branż brakuje? Kogo wezwę i dlaczego właśnie ich?
-Minimum 5 zdań. To twój dziennik rozumowania — im lepszy, tym lepsze decyzje.`
+            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które z założeń są najbardziej ryzykowne i co musisz zrobić, by zmniejszyć niepewność kosztorysu.`
         },
-        updateKnownFacts: {
+        selfCritique: {
+            type: Type.STRING,
+            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które z moich założeń mogłyby wywrócić budżet o ponad 10% jeśli są mylne?`
+        },
+        nextBestAction: {
+            type: Type.STRING,
+            description: `Jaka pojedyncza informacja/akcja najbardziej zwiększy w tym momencie jakość kosztorysu? Zdefiniuj JEDEN najważniejszy cel na teraz.`
+        },
+        cognitiveState: {
             type: Type.OBJECT,
-            description: `Twarda encyklopedia faktów o projekcie. Wyciągaj z rawResult agentów i z dokumentów.
-Klucze opisowe, np: "typ_obiektu", "powierzchnia_m2", "liczba_kondygnacji", "wadium_kwota", "termin_realizacji_dni",
-"branze_z_dokumentow", "kary_umowne_procent", "standard_wykonczenia". Dorzucaj fakty z każdej tury.`
+            description: `Twój wewnętrzny stan poznawczy inwestycji. Ewoluuje z każdym cyklem. Nie masz zakodowanych sztywno branż – sam je budujesz.`,
+            properties: {
+                worldModel: {
+                    type: Type.ARRAY,
+                    description: `Opisz tu hierarchiczny, strukturalny model obiektu, który wyłania się z danych.`,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            entity: { type: Type.STRING, description: "Nazwa elementu, np. 'Budynek główny', 'Dach', 'Instalacja elektryczna'" },
+                            confidence: { type: Type.NUMBER, description: "Pewność istnienia i struktury (0-100)" },
+                            attributes: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Cechy, np. 'Powierzchnia: 2500m2', 'Konstrukcja: Żelbet'" },
+                            subElements: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Lista nazw elementów podrzędnych" }
+                        },
+                        required: ["entity", "confidence", "attributes", "subElements"]
+                    }
+                },
+                knownFacts: {
+                    type: Type.OBJECT,
+                    description: `Słownik twardych faktów bez cienia wątpliwości (np. nazwa inwestora, dokładny adres, wymiar z rysunku).`
+                },
+                hypotheses: {
+                    type: Type.ARRAY,
+                    description: `Twoje hipotezy (np. "To prawdopodobnie budynek pasywny"). Zawsze weryfikuj (Belief Revision).`,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            statement: { type: Type.STRING },
+                            confidence: { type: Type.NUMBER, description: "Pewność (0-100)" },
+                            evidence: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Lista twardych dowodów (np. 'Wzmianka w SWZ str. 5')" }
+                        },
+                        required: ["statement", "confidence", "evidence"]
+                    }
+                },
+                assumptions: {
+                    type: Type.ARRAY,
+                    description: `Twarde założenia by wycenić braki (np. "Zakładam fundamenty żelbetowe ciągłe").`,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            statement: { type: Type.STRING },
+                            confidence: { type: Type.NUMBER, description: "Pewność (0-100)" },
+                            evidence: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Z czego to wywnioskowałeś? (np. 'Typowy standard dla szkół wg norm')" }
+                        },
+                        required: ["statement", "confidence", "evidence"]
+                    }
+                },
+                knowledgeGaps: {
+                    type: Type.ARRAY,
+                    description: `Luki w wiedzy. ZAWSZE oceniaj ich 'economicImpactScore' – jak bardzo ten brak wiedzy rozsadzi kosztorys. Skupiaj się tylko na 80-100 pkt.`,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            topic: { type: Type.STRING },
+                            economicImpactScore: { type: Type.NUMBER, description: "Wpływ na kosztorys w skali 1-100" }
+                        },
+                        required: ["topic", "economicImpactScore"]
+                    }
+                },
+                failedStrategies: {
+                    type: Type.ARRAY,
+                    description: `Pamięć błędów i ślepych uliczek. Co nie zadziałało? Zapisz by tego nie powtarzać.`,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            strategy: { type: Type.STRING, description: "Np. 'Szukanie powierzchni dachu w dokumencie SWZ'" },
+                            reason: { type: Type.STRING, description: "Np. 'Agent nie znalazł, brak zapisu w tekście'" }
+                        },
+                        required: ["strategy", "reason"]
+                    }
+                }
+            },
+            required: ["worldModel", "knownFacts", "hypotheses", "assumptions", "knowledgeGaps", "failedStrategies"]
         },
         chatReply: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: `Wiadomości do kosztorysanta. UŻYJ TYLKO gdy brakuje informacji prawnie krytycznej,
-której NIE MA w żadnym dokumencie i której NIE DA SIĘ wywnioskować ani wyszukać w normach.
-Przykłady uzasadniające użycie: brak kwoty wadium w SWZ, sprzeczne zapisy umowy wymagające decyzji inwestora.
-Przykłady NIE uzasadniające: brak rysunków (→ BUDOWLANIEC), brak obmiarów (→ BOQ_PARSER lub BUDOWLANIEC),
-nieznane ceny materiałów (→ BROKER). Zostaw puste jeśli Rój może działać samodzielnie.`
+            description: `Komunikacja z użytkownikiem. UŻYwaj TYLKO ostateczności (spór prawny, brak finansowania). Nie pytaj o braki techniczne (masz hipotezy i narzędzia).`
         },
         newEstimateItems: {
             type: Type.ARRAY,
-            description: `Pozycje kosztorysowe wyciągnięte lub zagregowane z wyników agentów.
-Wypełniaj gdy masz konkretne ilości z BOQ_PARSER, VISION lub PYTHON_CALC.
-Nie wymyślaj ilości — jeśli ich nie masz, zleć właściwego agenta w newTasks.`,
+            description: `KRYTYCZNE: Możesz wygenerować pozycję kosztorysową TYLKO, gdy 'confidence' hipotezy/założenia dla tej roboty wynosi MINIMUM 75. Jeśli masz mniejszą pewność, wstrzymaj się i zleć narzędziom zbadanie luki (knowledgeGap).`,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    sectionName: { type: Type.STRING, description: "Branża/dział kosztorysu, np: 'Roboty ziemne', 'Konstrukcja', 'Instalacje elektryczne'" },
+                    sectionName: { type: Type.STRING },
                     pozycja: { type: Type.STRING },
-                    opis: { type: Type.STRING },
+                    opis: { type: Type.STRING, description: `Opis roboty. Oznacz w nim wyraźnie procent pewności (np. "Izolacja fundamentów [Pewność: 85%]").` },
                     ilosc: { type: Type.NUMBER },
                     jednostka: { type: Type.STRING },
                     KNR_ref: { type: Type.STRING }
@@ -678,50 +745,28 @@ Nie wymyślaj ilości — jeśli ich nie masz, zleć właściwego agenta w newTa
         },
         phase: {
             type: Type.STRING,
-            description: `Stan pracy Roju:
-PLANNING — zbierasz info, planujesz pierwsze zadania (użyj gdy dopiero startujesz lub trawiłeś wyniki).
-WORKING — zadania są w toku lub właśnie zlecasz nowe.
-WAITING_INPUT — TYLKO gdy czekasz na odpowiedź kosztorysanta (użyj razem z chatReply).
-DONE — kosztorys jest kompletny, wszystkie branże wycenione, nic nie brakuje.`
+            description: `PLANNING, WORKING, WAITING_INPUT lub DONE.`
         },
         currentGoal: {
             type: Type.STRING,
-            description: "Jedno zdanie: co aktualnie próbujesz osiągnąć. Widoczne w panelu kosztorysanta."
+            description: "Jedno zdanie: co próbujesz udowodnić / zweryfikować w tej turze."
         },
         newTasks: {
             type: Type.ARRAY,
-            description: `Zadania dla agentów. ZASADA: jeśli phase != DONE i != WAITING_INPUT, ta lista nie może być pusta.
-Możesz i powinieneś zlecać wiele zadań równolegle — każde trafia do innego agenta jednocześnie.
-Nie wzywaj agenta którego już widzisz w historii wykonanych zadań, chyba że masz nowe dane dla niego.`,
+            description: `Zadania dla Narzędzi. Wyślij narzędzie do zbadania 'knowledgeGaps' o najwyższym 'economicImpactScore'. Nigdy nie powtarzaj akcji z 'failedStrategies'.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    agentType: {
-                        type: Type.STRING,
-                        description: "Dokładna nazwa agenta z listy dostępnych, np: BUDOWLANIEC, BOQ_PARSER, LEGAL_EXPERT"
-                    },
-                    instruction: {
-                        type: Type.STRING,
-                        description: `Szczegółowa instrukcja dla agenta. Napisz co ma przeanalizować, jakie informacje wyciągnąć,
-w jakim formacie zwrócić wynik. Im dokładniejsza instrukcja, tym lepszy wynik agenta.
-Podaj mu też kontekst: typ obiektu, standard, lokalizacja — wszystko co wiesz.`
-                    },
-                    inputDocIds: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                        description: "ID dokumentów z listy DOKUMENTY PROJEKTU które agent ma przeanalizować. Pusta tablica jeśli agent korzysta tylko z faktów."
-                    },
-                    inputFactsKeys: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                        description: "Klucze z updateKnownFacts które mają trafić do agenta jako kontekst."
-                    }
+                    agentType: { type: Type.STRING, description: "Wybierz nazwę dostępnego narzędzia." },
+                    instruction: { type: Type.STRING, description: `Rozkaz dla narzędzia. Czego konkretnie ma szukać by potwierdzić/obalić Twoją Hipotezę.` },
+                    inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Klucze z knownFacts potrzebne narzędziu." }
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
         }
     },
-    required: ["reasoning", "updateKnownFacts", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
+    required: ["reasoning", "selfCritique", "nextBestAction", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
 };
 
 export async function POST(req: Request) {
@@ -729,27 +774,26 @@ export async function POST(req: Request) {
         const { tenderId, trigger } = await req.json();
         if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
-        console.log(`[MÓZG 🧠] Przebudzenie. tenderID: ${tenderId} | Trigger: ${trigger}`);
+        console.log(`[MÓZG 🧠] Cognitive Wake-up. tenderID: ${tenderId} | Trigger: ${trigger}`);
 
         const tasksRef = adminDb.collection(`tenders/${tenderId}/tasks`);
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
-        // Seeding agentów (bez zmian w stosunku do oryginału)
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         if (agentRegistrySnap.empty) {
             const defaultAgents = [
-                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Analizuje rysunki budowlane i techniczne w PDF/obraz. Wyciąga wymiary, rzuty, przekroje, powierzchnie, ilości z dokumentacji graficznej." },
-                { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Czyta umowy, SWZ, specyfikacje techniczne. Wyciąga: kary umowne, termin realizacji, zakres robót, standard wykonania, wadium, gwarancję, wymagania materiałowe." },
-                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Kalkulator. Oblicza dokładne ilości: powierzchnie, objętości, długości — na podstawie wymiarów z faktów. Używaj po VISION lub gdy masz surowe dane liczbowe." },
-                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Wyceniacz rynkowy. Szuka aktualnych cen B2B w Polsce dla gotowych pozycji kosztorysowych. Rozbija na R/M/S. Używaj gdy masz pozycje z ilościami ale bez cen." },
-                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Inżynier budowy z dostępem do norm i wyszukiwarki. Projektuje kompletną technologię robót od zera — stan zerowy, surowy, wykończenie, instalacje. IDEALNY gdy brakuje obmiarów, rysunków lub przedmiaru. Podaj mu typ obiektu i fakty z umowy, sam doliczy resztę z norm." },
-                { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Weryfikuje gotowy kosztorys pod kątem przepisów: WT 2021, Sanepid, PPOŻ, PZP. Używaj na końcu, gdy masz już pozycje." },
-                { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Szacuje wskaźnikowo/parametrycznie koszty branż instalacyjnych gdy brakuje rysunków. Użyj dla: wod-kan, elektryki, wentylacji, ogrzewania — gdy nie ma rysunków instalacyjnych." },
-                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Czyta ślepe przedmiary: Excel (natywnie, bezbłędnie) i PDF (przez model Pro). Wyciąga pozycje z ilościami. Używaj gdy jest plik przedmiaru lub kosztorysu do przepisania." },
-                { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Specjalista od wąskich branż: technologia basenowa, gazy medyczne, windy, systemy BMS, fotowoltaika. Używaj gdy dokumentacja jest bardzo techniczna i niszowa." },
-                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Sędzia Roju. Rozstrzyga spory między agentami, weryfikuje spójność kosztorysu z PZP i hierarchią dokumentów." },
-                { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Koreluje rzuty 2D z przekrojami pionowymi. Buduje mapę powiązań między rysunkami. Używaj gdy jest wiele rysunków technicznych i trzeba je ze sobą połączyć." }
+                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Narzędzie (Skaner). Czyta wymiary, przekroje i legendy z PDF z rysunkami." },
+                { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Narzędzie (Skaner tekstu). Szuka słów kluczowych o umowach, karach i SWZ." },
+                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Odpal by przemnożyć setki liczb wyciągniętych przez inne narzędzia." },
+                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wezwij by wrzucił ceny R/M/S do gotowych pozycji." },
+                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla np. szkół czy bloków, gdy masz lukę." },
+                { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Narzędzie (Audytor Prawny). Waliduje gotowe pozycje z WT2021 i PPOŻ." },
+                { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo to, co ma 'economicImpactScore' wysoki a brakuje rysunków." },
+                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów." },
+                { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta dziwne i wąskie opisy technologii." },
+                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Narzędzie (Solver konfliktów)." },
+                { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki pdf w wymiar 3D." }
             ];
             const seedBatch = adminDb.batch();
             for (const agent of defaultAgents) seedBatch.set(adminDb.collection("agentRegistry").doc(agent.name), agent);
@@ -758,7 +802,6 @@ export async function POST(req: Request) {
         }
         const availableAgents = agentRegistrySnap.docs.map(d => d.data());
 
-        // ZMIANA 2: Timeout detection — zamrożone zadania nie blokują Mózgu w nieskończoność
         const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
         const now = Date.now();
         const TIMEOUT_MS = 10 * 60 * 1000;
@@ -769,10 +812,9 @@ export async function POST(req: Request) {
             const data = doc.data();
             const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
             if (now - lastActive >= TIMEOUT_MS) {
-                console.warn(`[MÓZG 🧠] Zadanie ${doc.id} (${data.agentType}) przekroczyło timeout. Oznaczam jako ERROR.`);
                 lockBatch.update(doc.ref, {
                     status: "ERROR",
-                    rawResult: { error: "TIMEOUT_EXCEEDED", message: "Agent nie odpowiedział w ciągu 10 minut." },
+                    rawResult: { error: "TIMEOUT_EXCEEDED" },
                     processedByBrain: false,
                     updatedAt: new Date()
                 });
@@ -783,12 +825,11 @@ export async function POST(req: Request) {
 
         if (trulyActiveCount > 0) {
             await lockBatch.commit();
-            console.log(`[MÓZG 🧠] ${trulyActiveCount} agentów wciąż pracuje. Usypiam do ich odzewu.`);
-            return NextResponse.json({ message: "Agenci pracują..." });
+            console.log(`[MÓZG 🧠] Czekam... Narzędzia przetwarzają dane (${trulyActiveCount} aktywnych).`);
+            return NextResponse.json({ message: "Narzędzia pracują..." });
         }
         await lockBatch.commit();
 
-        // ZMIANA 3: Pełny zestaw danych dla Mózgu — wszystko w jednym Promise.all
         const [
             docsSnap,
             brainSnap,
@@ -804,7 +845,7 @@ export async function POST(req: Request) {
             tenderRef.get(),
             adminDb.collection(`tenders/${tenderId}/chat`).orderBy("timestamp", "asc").limit(20).get(),
             adminDb.collection(`tenders/${tenderId}/estimate`).get(),
-            tasksRef.get() // Pełna historia wszystkich zadań
+            tasksRef.get()
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
@@ -815,93 +856,70 @@ export async function POST(req: Request) {
             id: d.id,
             fileName: d.data().fileName,
             tags: d.data().tags || [],
-            summary: d.data().summary || "(brak streszczenia)"
+            summary: d.data().summary || "(brak)"
         }));
 
-        const currentBrainState = brainSnap.exists ? brainSnap.data() : { knownFacts: {}, phase: "PLANNING" };
+        const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
+        const currentCognitiveState = currentBrainData?.cognitiveState || {
+            worldModel: [],
+            knownFacts: {},
+            hypotheses: [],
+            assumptions: [],
+            knowledgeGaps: [],
+            failedStrategies: []
+        };
 
-        const chatHistory = chatHistSnap.docs.map(c => ({
-            rola: c.data().role,
-            treść: c.data().content
-        }));
+        const chatHistory = chatHistSnap.docs.map(c => ({ rola: c.data().role, treść: c.data().content }));
+        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({ taskId: d.id, agentType: d.data().agentType, status: d.data().status, instruction: d.data().instruction, rawResult: d.data().rawResult }));
+        const taskHistory = allTasksHistorySnap.docs.map(d => ({ agentType: d.data().agentType, status: d.data().status, resultSummary: d.data().status === "DONE" ? (d.data().rawResult?.summary || `Wykonano`) : (d.data().rawResult?.error || "BŁĄD") }));
 
-        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
-            taskId: d.id,
-            agentType: d.data().agentType,
-            status: d.data().status,
-            instruction: d.data().instruction,
-            rawResult: d.data().rawResult
-        }));
-
-        // ZMIANA 4: Historia zadań z pełnym statusem — Mózg wie co się stało z każdym zadaniem
-        const taskHistory = allTasksHistorySnap.docs.map(d => ({
-            agentType: d.data().agentType,
-            status: d.data().status,
-            // Skracamy rawResult żeby nie zapychać kontekstu — Mózg dostaje summary
-            resultSummary: d.data().status === "DONE"
-                ? (d.data().rawResult?.summary || `${d.data().agentType} zakończył pracę`)
-                : (d.data().rawResult?.error || "BŁĄD")
-        }));
-
-        // Stan kosztorysu — co już jest wycenione
-        const estimateState = estimateSnap.docs.map(d => ({
-            sekcja: d.data().section,
-            status: d.data().status,
-            liczba_pozycji: d.data().items?.length || 0,
-            wartosc_zl: d.data().totalValue || 0
-        }));
-
+        const estimateState = estimateSnap.docs.map(d => ({ sekcja: d.data().section, liczba_pozycji: d.data().items?.length || 0, wartosc_zl: d.data().totalValue || 0 }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
 
-        // ZMIANA 5: Prompt skupiony na celu i autonomii, nie na regułach
-        const systemPrompt = `Jesteś autonomicznym ekspertem ds. kosztorysowania budowlanego — Mózgiem systemu PESAM 3.0.
+        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem), jedynym Inżynierem i Architektem systemu. 
 
-Twój jedyny cel: zorganizować pracę zespołu AI i doprowadzić do kompletnego kosztorysu tej inwestycji.
-Nie dostajesz gotowych reguł co robić. Sam analizujesz sytuację i podejmujesz decyzje jak doświadczony kierownik projektu.
+=== ZASADA DZIAŁANIA (COGNITIVE ARCHITECTURE) ===
+Nie jesteś tu by ślepo delegować zadania do ekspertów. TO TY JESTEŚ JEDYNYM EKSPERTEM.
+Twój proces myślowy to: 
+1. Budowa hipotezy czym jest inwestycja (Cognitive State -> worldModel).
+2. BELIEF REVISION (Rewizja Przekonań): Konfrontuj nowe dane od narzędzi ze starymi hipotezami. Obniżaj lub podnoś pewność, żądaj dowodów (evidence).
+3. Wykrywanie luk w Twojej wiedzy. Oblicz ich Wpływ Ekonomiczny (Economic Impact Score 1-100).
+4. Wysyłanie "Głupich Narzędzi" TYLKO by zweryfikować luki o najwyższym ryzyku finansowym.
+5. Generowanie pozycji do kosztorysu WYŁĄCZNIE, gdy masz pewność (confidence) danego faktu/założenia na poziomie MINIMUM 75%.
 
-=== DOSTĘPNI AGENCI ===
+=== TWOJE NARZĘDZIA ===
 ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, mozliwosci: a.capabilities })), null, 2)}
 
-=== DOKUMENTY PROJEKTU ===
+=== DOKUMENTY (Wejście sensoryczne) ===
 ${JSON.stringify(documents, null, 2)}
 
-=== CO JUŻ WIESZ O PROJEKCIE ===
-${JSON.stringify(currentBrainState?.knownFacts || {}, null, 2)}
+=== TWÓJ AKTUALNY STAN POZNAWCZY (Z poprzedniej tury) ===
+${JSON.stringify(currentCognitiveState, null, 2)}
 
-=== WYNIKI AGENTÓW DO STRAWIENIA (nowe, nieprzetworzone) ===
+=== ODPOWIEDZI OD NARZĘDZI (Świeże dane do strawienia) ===
 ${JSON.stringify(newlyFinishedResults, null, 2)}
 
-=== HISTORIA WSZYSTKICH ZADAŃ (co już zrobiono) ===
+=== HISTORIA URUCHOMIONYCH NARZĘDZI ===
 ${JSON.stringify(taskHistory, null, 2)}
 
 === AKTUALNY STAN KOSZTORYSU ===
-${isEstimateEmpty ? "⚠️ KOSZTORYS JEST PUSTY — żadna pozycja nie została jeszcze wyceniona." : JSON.stringify(estimateState, null, 2)}
+${isEstimateEmpty ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów." : JSON.stringify(estimateState, null, 2)}
 
 === HISTORIA CZATU Z KOSZTORYSANTEM ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
 
-=== JAK MYŚLEĆ ===
-W polu "reasoning" przerób sobie te pytania zanim cokolwiek zaplanujesz:
-- Jaki to obiekt budowlany? Co wynika z dokumentów i czatu?
-- Co agenci już zrobili i jakie fakty z tego wyciągam?
-- Czy kosztorys jest kompletny? Jakich branż brakuje?
-- Jakie jest moje następne posunięcie i dlaczego?
+=== CO MASZ ZROBIĆ ===
+Zaktualizuj swój CognitiveState. Przerób nowe wyniki w fakty, zweryfikuj stare hipotezy (Belief Revision).
+Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies' by nie kręcić się w kółko!`;
 
-Pamiętaj o autonomii:
-- Brak rysunków lub obmiarów NIE JEST powodem do pytania kosztorysanta — masz BUDOWLANIEC i GAP_FILLER.
-- Brak cen NIE JEST powodem do pytania — masz BROKER.
-- Pytaj kosztorysanta TYLKO o decyzje prawne/biznesowe których nie ma w żadnym dokumencie.
-- Możesz zlecać wielu agentów równolegle — rób to gdy zadania są od siebie niezależne.`;
-
-        console.log(`[MÓZG 🧠] Prompt gotowy. Wysyłam do ${MODEL_PRO}. Nieprzetworzone zadania: ${newlyFinishedResults.length}. Kosztorys pusty: ${isEstimateEmpty}.`);
+        console.log(`[MÓZG 🧠] Prompt Poznawczy wygenerowany. Trawienie danych...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
                 model: MODEL_PRO,
                 contents: systemPrompt,
                 config: {
-                    // ZMIANA 6: temperatura 0.6 — daje kreatywność w planowaniu bez halucynacji w danych
-                    temperature: 0.6,
+                    temperature: 0.4, // Analityczny chłód i konsekwencja 
                     responseMimeType: "application/json",
                     responseSchema: BRAIN_SCHEMA as any
                 }
@@ -909,43 +927,29 @@ Pamiętaj o autonomii:
         });
 
         const parsedResult = JSON.parse(result.text ?? "{}");
-        console.log(`[MÓZG 🧠] Reasoning: ${parsedResult.reasoning?.substring(0, 200)}...`);
-        console.log(`[MÓZG 🧠] Faza: ${parsedResult.phase}. Nowe zadania: ${parsedResult.newTasks?.length || 0}. Pozycje kosztorysu: ${parsedResult.newEstimateItems?.length || 0}.`);
+        console.log(`[MÓZG 🧠] Next Best Action: ${parsedResult.nextBestAction}`);
+        console.log(`[MÓZG 🧠] Self-Critique: ${parsedResult.selfCritique?.substring(0, 80)}...`);
 
         const batch = adminDb.batch();
 
-        // Oznacz przetworzone zadania
         unprocessedTasksSnap.docs.forEach(doc => batch.update(doc.ref, { processedByBrain: true }));
 
-        // Wiadomości na czat
         if (parsedResult.chatReply?.length > 0) {
             parsedResult.chatReply.forEach((msg: string) => {
                 const ref = adminDb.collection(`tenders/${tenderId}/chat`).doc();
-                batch.set(ref, {
-                    role: "brain",
-                    content: msg,
-                    timestamp: FieldValue.serverTimestamp(),
-                    intent: "BRAIN_MESSAGE"
-                });
+                batch.set(ref, { role: "brain", content: msg, timestamp: FieldValue.serverTimestamp(), intent: "BRAIN_MESSAGE" });
             });
         }
-
-        // Aktualizacja stanu Mózgu
-        const mergedFacts = {
-            ...(currentBrainState?.knownFacts || {}),
-            ...(parsedResult.updateKnownFacts || {})
-        };
 
         batch.update(brainRef, {
             phase: parsedResult.phase,
             currentGoal: parsedResult.currentGoal,
-            knownFacts: mergedFacts,
-            reasoningLog: FieldValue.arrayUnion(parsedResult.reasoning || "")
+            cognitiveState: parsedResult.cognitiveState,
+            reasoningLog: FieldValue.arrayUnion(`Reasoning: ${parsedResult.reasoning || ""} | Next Action: ${parsedResult.nextBestAction || ""}`)
         });
 
-        // Zapis pozycji kosztorysowych
         if (parsedResult.newEstimateItems?.length > 0) {
-            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} nowych pozycji do kosztorysu.`);
+            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} zweryfikowanych pozycji (>75% pewności).`);
             const sectionsMap = new Map<string, any[]>();
             parsedResult.newEstimateItems.forEach((item: any) => {
                 const sec = item.sectionName || "Ogólne";
@@ -965,31 +969,23 @@ Pamiętaj o autonomii:
                     jednostka: item.jednostka || "szt",
                     cenaJed: 0,
                     KNR_ref: item.KNR_ref || "",
-                    confidence: "BRAIN_ESTIMATE",
-                    sourceTrack: `Mózg → ${parsedResult.reasoning?.substring(0, 60) || "orkiestracja"}`
+                    confidence: "AI_COGNITIVE_MODEL",
+                    sourceTrack: `Model Poznawczy Mózgu`
                 }));
 
-                batch.set(sectionRef, {
-                    section: sectionName,
-                    status: "QUANTITY_READY",
-                    items: formattedItems,
-                    totalValue: 0,
-                    updatedAt: new Date()
-                }, { merge: true });
-
-                formattedItems.forEach(fItem => {
-                    batch.set(sectionRef.collection("items").doc(fItem.id), fItem);
-                });
+                batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", items: formattedItems, totalValue: 0, updatedAt: new Date() }, { merge: true });
+                formattedItems.forEach(fItem => { batch.set(sectionRef.collection("items").doc(fItem.id), fItem); });
             }
         }
 
-        // Tworzenie nowych zadań
         const newTasksCreated: any[] = [];
         (parsedResult.newTasks || []).forEach((task: any) => {
             const taskRef = tasksRef.doc();
             const inputFacts: Record<string, any> = {};
             (task.inputFactsKeys || []).forEach((key: string) => {
-                if (mergedFacts[key] !== undefined) inputFacts[key] = mergedFacts[key];
+                if (parsedResult.cognitiveState?.knownFacts && parsedResult.cognitiveState.knownFacts[key] !== undefined) {
+                    inputFacts[key] = parsedResult.cognitiveState.knownFacts[key];
+                }
             });
 
             const taskData = {
@@ -1007,51 +1003,34 @@ Pamiętaj o autonomii:
             newTasksCreated.push(taskData);
         });
 
-        // Aktualizacja statusu przetargu
-        const newTenderStatus =
-            parsedResult.phase === "DONE" ? "DONE" :
-                parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT" :
-                    "ORCHESTRATING";
+        const newTenderStatus = parsedResult.phase === "DONE" ? "DONE" : parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT" : "ORCHESTRATING";
 
         batch.update(tenderRef, {
-            "budgetGuard.currentCostUSD": FieldValue.increment(
-                ((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.002
-            ),
+            "budgetGuard.currentCostUSD": FieldValue.increment(((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.002),
             status: newTenderStatus,
             updatedAt: new Date()
         });
 
         await batch.commit();
-        console.log(`[MÓZG 🧠] Batch zapisany. Status przetargu: ${newTenderStatus}. Uruchamiam ${newTasksCreated.length} agentów.`);
+        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Wysyłam ${newTasksCreated.length} narzędzi na zwiady.`);
 
-        // Uruchomienie agentów (fire-and-forget)
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
         for (const task of newTasksCreated) {
             const agentDef = availableAgents.find(a => a.name === task.agentType);
             if (agentDef?.endpoint) {
-                console.log(`[MÓZG 🧠] Uruchamiam agenta: ${task.agentType} (task: ${task.taskId})`);
                 fetch(`${localOrigin}${agentDef.endpoint}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tenderId, taskId: task.taskId })
-                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania ${task.agentType}:`, err.message));
+                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania narzędzia ${task.agentType}:`, err.message));
             } else {
-                console.error(`[MÓZG 🧠] ⚠️ Nieznany agent: "${task.agentType}" — nie ma go w rejestrze!`);
                 await adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
-                    status: "ERROR",
-                    rawResult: { error: `Agent "${task.agentType}" nie istnieje w rejestrze.` },
-                    processedByBrain: false,
-                    updatedAt: new Date()
+                    status: "ERROR", rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` }, processedByBrain: false, updatedAt: new Date()
                 }).catch(() => { });
             }
         }
 
-        return NextResponse.json({
-            success: true,
-            phase: parsedResult.phase,
-            tasksCreated: newTasksCreated.length,
-            estimateItemsAdded: parsedResult.newEstimateItems?.length || 0
-        });
+        return NextResponse.json({ success: true, phase: parsedResult.phase, tasksCreated: newTasksCreated.length, estimateItemsAdded: parsedResult.newEstimateItems?.length || 0 });
 
     } catch (error: any) {
         console.error("[MÓZG 🧠] ❌ Krytyczny błąd Mózgu:", error);
