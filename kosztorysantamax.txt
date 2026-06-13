@@ -16,8 +16,8 @@ interface SwarmTask {
     id: string;
     agentType: string;
     description?: string;
-    instruction?: string; // Dodane!
-    rawResult?: any;      // Dodane!
+    instruction?: string;
+    rawResult?: any;
     status: "PENDING" | "IN_PROGRESS" | "DONE" | "ERROR";
     dependsOn?: string[];
     parentTaskId?: string;
@@ -72,12 +72,15 @@ interface TenderDocument {
     status: string;
     tags: string[];
     summary?: string;
+    detailedElement?: string;
 }
 
 interface BrainState {
     phase: string;
     currentGoal: string;
     totalCostUSD: number;
+    assumptionMode?: boolean;
+    assumptionDisclaimer?: string;
 }
 
 export default function EstimatorPage() {
@@ -112,6 +115,7 @@ export default function EstimatorPage() {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadMsg, setUploadMsg] = useState("");
     const [savedTendersList, setSavedTendersList] = useState<Array<{ id: string; name: string }>>([]);
+    const [assumptionsAccepted, setAssumptionsAccepted] = useState(false);
 
     const chatEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -119,6 +123,11 @@ export default function EstimatorPage() {
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [chatMessages]);
+
+    // Resetowanie stanu akceptacji przy zmianie przetargu
+    useEffect(() => {
+        setAssumptionsAccepted(false);
+    }, [activeTenderId]);
 
     // 1. Pobieranie listy dostępnych przetargów na starcie
     useEffect(() => {
@@ -186,7 +195,6 @@ export default function EstimatorPage() {
         // G. Nasłuch Stanu Umysłu (Mózg)
         const unsubBrain = onSnapshot(collection(db, `tenders/${activeTenderId}/brain`), (snap) => {
             if (!snap.empty) {
-                // Zakładamy, że jest jeden główny dokument sesji mózgu
                 setBrainState(snap.docs[0].data() as BrainState);
             }
         });
@@ -205,11 +213,8 @@ export default function EstimatorPage() {
             const result = await uploadTenderDocument(files, { laborAdjustment: 0, materialAdjustment: 0, equipmentAdjustment: 0, kp: 65, zysk: 12 }, (p: UploadProgress) => {
                 setUploadMsg(p.message);
             });
-
             if (result.tenderId) {
                 setActiveTenderId(result.tenderId);
-                // ZMIANA: Usunięto nadmiarowy fetch do /api/kosztorysant/glowny-kosztorysant/inicjalizuj.
-                // Backendowy "magazynier-zip" wywołuje inicjalizację bezpiecznie i asynchronicznie po swojej stronie.
             }
         } catch (err: any) {
             alert("Błąd przesyłania: " + err.message);
@@ -225,7 +230,6 @@ export default function EstimatorPage() {
         const text = inputText;
         setInputText("");
 
-        // 1. Zapisz wiadomość użytkownika do Firestore
         await addDoc(collection(db, `tenders/${activeTenderId}/chat`), {
             role: "user",
             content: text,
@@ -233,7 +237,6 @@ export default function EstimatorPage() {
             intent: "GENERAL"
         });
 
-        // 2. Wybudź Orkiestratora (Mózg)
         try {
             await fetch('/api/kosztorysant/glowny-kosztorysant', {
                 method: 'POST',
@@ -244,6 +247,42 @@ export default function EstimatorPage() {
             console.error("Błąd komunikacji z Mózgiem:", e);
         }
     };
+
+    const handleAcceptAssumptions = async () => {
+        if (!activeTenderId) return;
+        setAssumptionsAccepted(true); // Natychmiastowe ukrycie na UI przed wywołaniem API
+
+        await addDoc(collection(db, `tenders/${activeTenderId}/chat`), {
+            role: "user",
+            content: "AKCEPTUJĘ TRYB ZAŁOŻEŃ RYNKOWYCH. Proszę o kontynuację wyceny koncepcyjnej na podstawie norm rynkowych.",
+            timestamp: serverTimestamp(),
+            intent: "ACCEPT_ASSUMPTIONS"
+        });
+
+        fetch('/api/kosztorysant/glowny-kosztorysant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenderId: activeTenderId, trigger: "USER_MESSAGE" })
+        }).catch(console.error);
+    };
+
+    const handleRejectAssumptions = async () => {
+        if (!activeTenderId) return;
+
+        await addDoc(collection(db, `tenders/${activeTenderId}/chat`), {
+            role: "user",
+            content: "NIE AKCEPTUJĘ TRYBU ZAŁOŻEŃ. Proszę wstrzymać prace do czasu dostarczenia rzetelnej dokumentacji.",
+            timestamp: serverTimestamp(),
+            intent: "REJECT_ASSUMPTIONS"
+        });
+
+        fetch('/api/kosztorysant/glowny-kosztorysant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenderId: activeTenderId, trigger: "USER_MESSAGE" })
+        }).catch(console.error);
+    };
+
     const handleStopTender = async () => {
         if (!activeTenderId) return;
         if (!confirm("Czy na pewno chcesz zatrzymać ten przetarg i anulować aktywne zadania agentów?")) return;
@@ -277,6 +316,7 @@ export default function EstimatorPage() {
             alert("Błąd podczas usuwania dokumentacji z bazy.");
         }
     };
+
     const resolveConflict = async (conflictId: string, decision: string, justification: string) => {
         try {
             await fetch(`/api/kosztorysant/scope-manifest/resolve-conflict`, {
@@ -388,7 +428,7 @@ export default function EstimatorPage() {
                         </div>
                     </div>
 
-                    {/* Lista Dokumentów (Klasyfikator) */}
+                    {/* Lista Dokumentów */}
                     {documents.length > 0 && (
                         <div className="space-y-1.5">
                             {documents.map(doc => (
@@ -397,10 +437,15 @@ export default function EstimatorPage() {
                                         <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[180px]">{doc.fileName}</span>
                                         <span className="text-[8px] text-slate-500 uppercase">{doc.status}</span>
                                     </div>
-                                    <div className="flex gap-1 flex-wrap">
+                                    <div className="flex gap-1 flex-wrap items-center">
                                         {doc.tags?.map(tag => (
                                             <span key={tag} className="text-[8px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">{tag}</span>
                                         ))}
+                                        {doc.detailedElement && doc.detailedElement !== "NIE_DOTYCZY" && (
+                                            <span className="text-[8px] bg-blue-950/60 text-blue-300 border border-blue-900/40 px-1.5 py-0.5 rounded font-bold uppercase tracking-tight flex items-center gap-1">
+                                                🔍 {doc.detailedElement}
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             ))}
@@ -420,19 +465,16 @@ export default function EstimatorPage() {
                                         </div>
 
                                         <div className="flex flex-col gap-1 text-[9px] leading-tight">
-                                            {/* Zmiana: Odczytujemy 'instruction' zamiast 'description' */}
                                             <span className="text-slate-400 font-mono italic">
                                                 💬 Polecenie: "{t.instruction || t.description || "Planowanie..."}"
                                             </span>
 
-                                            {/* Wyświetlanie wyniku po zakończeniu sukcesem */}
                                             {t.status === "DONE" && t.rawResult?.summary && (
                                                 <span className="text-green-400 font-bold bg-green-950/20 px-1.5 py-1 rounded border border-green-900/30 text-[8px] mt-0.5">
                                                     ✓ Wynik: {t.rawResult.summary}
                                                 </span>
                                             )}
 
-                                            {/* Wyświetlanie błędu w przypadku porażki */}
                                             {t.status === "ERROR" && t.rawResult?.error && (
                                                 <span className="text-red-400 font-bold bg-red-950/20 px-1.5 py-1 rounded border border-red-900/30 text-[8px] mt-0.5">
                                                     ❌ Błąd: {t.rawResult.error}
@@ -469,7 +511,7 @@ export default function EstimatorPage() {
                                                 {c.parties.map((p, idx) => (
                                                     <button
                                                         key={idx}
-                                                        onClick={() => resolveConflict(c.id, p.claim, `Decyzja Kosztorysanta: ${p.claim}`)}
+                                                        onClick={() => resolveConflict(c.id, p.claim, `Decyzja: ${p.claim}`)}
                                                         className="bg-red-900/30 hover:bg-red-900/60 border border-red-900/50 text-red-200 px-2 py-1.5 rounded-lg text-[9px] font-bold transition-colors text-left"
                                                     >
                                                         Zatwierdź: {p.claim}
@@ -507,6 +549,33 @@ export default function EstimatorPage() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-950/40 custom-scrollbar">
+                        {/* BANER DLA TRYBU WYCENY KONCEPCYJNEJ */}
+                        {brainState?.assumptionMode && !assumptionsAccepted && (
+                            <div className="bg-amber-950/95 border-2 border-amber-500/50 p-5 rounded-3xl text-amber-200 text-xs mb-6 shadow-[0_0_20px_rgba(245,158,11,0.2)] animate-in fade-in zoom-in duration-300 flex-shrink-0">
+                                <div className="font-black mb-3 uppercase flex items-center gap-2 text-amber-400">
+                                    <span className="text-lg">⚠️</span> TRYB WYCENY KONCEPCYJNEJ AKTYWNY
+                                </div>
+                                <p className="leading-relaxed mb-4 font-medium italic opacity-90 border-l-2 border-amber-500/30 pl-3">
+                                    "{brainState.assumptionDisclaimer}"
+                                </p>
+
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={handleAcceptAssumptions}
+                                        className="flex-1 bg-amber-600 hover:bg-amber-500 text-white px-4 py-3 rounded-2xl text-[10px] font-black uppercase transition-all shadow-md active:scale-95"
+                                    >
+                                        ✅ Akceptuję założenia
+                                    </button>
+                                    <button
+                                        onClick={handleRejectAssumptions}
+                                        className="bg-slate-900 hover:bg-red-950 border border-slate-700 hover:border-red-500/50 px-4 py-3 rounded-2xl text-[10px] font-black uppercase text-slate-400 hover:text-red-400 transition-all active:scale-95"
+                                    >
+                                        🛑 Wstrzymaj
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         {chatMessages.length === 0 && (
                             <div className="text-center text-slate-500 text-xs mt-10">
                                 Wgraj dokumentację lub zadaj pytanie, aby wybudzić Mózg.
@@ -529,7 +598,7 @@ export default function EstimatorPage() {
                             value={inputText}
                             onChange={e => setInputText(e.target.value)}
                             onKeyDown={e => e.key === 'Enter' && handleSendMessage()}
-                            placeholder="Wydaj polecenie Mózgowi (np. 'Sprawdź kary umowne w SWZ')..."
+                            placeholder="Wydaj polecenie Mózgowi..."
                             className="flex-1 bg-slate-900 text-white border border-slate-700 rounded-xl px-3 py-2.5 text-xs outline-none focus:border-blue-500 transition-colors"
                         />
                         <button onClick={handleSendMessage} className="bg-blue-600 hover:bg-blue-500 text-white font-black text-xs px-5 rounded-xl transition-all shadow-md">WYŚLIJ</button>
@@ -632,6 +701,10 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
     }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// BRAIN SCHEMA — dynamiczny extractionProfile w newTasks
+// ─────────────────────────────────────────────────────────────────
+
 const BRAIN_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -647,74 +720,74 @@ const BRAIN_SCHEMA = {
             type: Type.STRING,
             description: `Jaka pojedyncza informacja/akcja najbardziej zwiększy w tym momencie jakość kosztorysu? Zdefiniuj JEDEN najważniejszy cel na teraz.`
         },
+        assumptionMode: {
+            type: Type.BOOLEAN,
+            description: `Ustaw na TRUE TYLKO jeśli świadomie decydujesz się na wycenę koncepcyjną z powodu braku dokumentacji technicznej.`
+        },
+        assumptionDisclaimer: {
+            type: Type.STRING,
+            description: `Wyraźne, profesjonalne ostrzeżenie dla Kosztorysanta – z jakich źródeł i norm korzystasz oraz jakie ryzyko niesie ten tryb.`
+        },
         cognitiveState: {
             type: Type.OBJECT,
-            description: `Twój wewnętrzny stan poznawczy inwestycji. Ewoluuje z każdym cyklem. Nie masz zakodowanych sztywno branż – sam je budujesz.`,
+            description: `Twój wewnętrzny stan poznawczy inwestycji. Ewoluuje z każdym cyklem.`,
             properties: {
                 worldModel: {
                     type: Type.ARRAY,
-                    description: `Opisz tu hierarchiczny, strukturalny model obiektu, który wyłania się z danych.`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
-                            entity: { type: Type.STRING, description: "Nazwa elementu, np. 'Budynek główny', 'Dach', 'Instalacja elektryczna'" },
-                            confidence: { type: Type.NUMBER, description: "Pewność istnienia i struktury (0-100)" },
-                            attributes: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Cechy, np. 'Powierzchnia: 2500m2', 'Konstrukcja: Żelbet'" },
-                            subElements: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Lista nazw elementów podrzędnych" }
+                            entity: { type: Type.STRING },
+                            confidence: { type: Type.NUMBER },
+                            attributes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                            subElements: { type: Type.ARRAY, items: { type: Type.STRING } }
                         },
                         required: ["entity", "confidence", "attributes", "subElements"]
                     }
                 },
-                knownFacts: {
-                    type: Type.OBJECT,
-                    description: `Słownik twardych faktów bez cienia wątpliwości (np. nazwa inwestora, dokładny adres, wymiar z rysunku).`
-                },
+                knownFacts: { type: Type.OBJECT },
                 hypotheses: {
                     type: Type.ARRAY,
-                    description: `Twoje hipotezy (np. "To prawdopodobnie budynek pasywny"). Zawsze weryfikuj (Belief Revision).`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             statement: { type: Type.STRING },
-                            confidence: { type: Type.NUMBER, description: "Pewność (0-100)" },
-                            evidence: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Lista twardych dowodów (np. 'Wzmianka w SWZ str. 5')" }
+                            confidence: { type: Type.NUMBER },
+                            evidence: { type: Type.ARRAY, items: { type: Type.STRING } }
                         },
                         required: ["statement", "confidence", "evidence"]
                     }
                 },
                 assumptions: {
                     type: Type.ARRAY,
-                    description: `Twarde założenia by wycenić braki (np. "Zakładam fundamenty żelbetowe ciągłe").`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             statement: { type: Type.STRING },
-                            confidence: { type: Type.NUMBER, description: "Pewność (0-100)" },
-                            evidence: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Z czego to wywnioskowałeś? (np. 'Typowy standard dla szkół wg norm')" }
+                            confidence: { type: Type.NUMBER },
+                            evidence: { type: Type.ARRAY, items: { type: Type.STRING } }
                         },
                         required: ["statement", "confidence", "evidence"]
                     }
                 },
                 knowledgeGaps: {
                     type: Type.ARRAY,
-                    description: `Luki w wiedzy. ZAWSZE oceniaj ich 'economicImpactScore' – jak bardzo ten brak wiedzy rozsadzi kosztorys. Skupiaj się tylko na 80-100 pkt.`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             topic: { type: Type.STRING },
-                            economicImpactScore: { type: Type.NUMBER, description: "Wpływ na kosztorys w skali 1-100" }
+                            economicImpactScore: { type: Type.NUMBER }
                         },
                         required: ["topic", "economicImpactScore"]
                     }
                 },
                 failedStrategies: {
                     type: Type.ARRAY,
-                    description: `Pamięć błędów i ślepych uliczek. Co nie zadziałało? Zapisz by tego nie powtarzać.`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
-                            strategy: { type: Type.STRING, description: "Np. 'Szukanie powierzchni dachu w dokumencie SWZ'" },
-                            reason: { type: Type.STRING, description: "Np. 'Agent nie znalazł, brak zapisu w tekście'" }
+                            strategy: { type: Type.STRING },
+                            reason: { type: Type.STRING }
                         },
                         required: ["strategy", "reason"]
                     }
@@ -725,17 +798,16 @@ const BRAIN_SCHEMA = {
         chatReply: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: `Komunikacja z użytkownikiem. UŻYwaj TYLKO ostateczności (spór prawny, brak finansowania). Nie pytaj o braki techniczne (masz hipotezy i narzędzia).`
+            description: `Komunikacja z użytkownikiem. Używaj TYLKO w ostateczności.`
         },
         newEstimateItems: {
             type: Type.ARRAY,
-            description: `KRYTYCZNE: Możesz wygenerować pozycję kosztorysową TYLKO, gdy 'confidence' hipotezy/założenia dla tej roboty wynosi MINIMUM 75. Jeśli masz mniejszą pewność, wstrzymaj się i zleć narzędziom zbadanie luki (knowledgeGap).`,
             items: {
                 type: Type.OBJECT,
                 properties: {
                     sectionName: { type: Type.STRING },
                     pozycja: { type: Type.STRING },
-                    opis: { type: Type.STRING, description: `Opis roboty. Oznacz w nim wyraźnie procent pewności (np. "Izolacja fundamentów [Pewność: 85%]").` },
+                    opis: { type: Type.STRING },
                     ilosc: { type: Type.NUMBER },
                     jednostka: { type: Type.STRING },
                     KNR_ref: { type: Type.STRING }
@@ -747,27 +819,83 @@ const BRAIN_SCHEMA = {
             type: Type.STRING,
             description: `PLANNING, WORKING, WAITING_INPUT lub DONE.`
         },
-        currentGoal: {
-            type: Type.STRING,
-            description: "Jedno zdanie: co próbujesz udowodnić / zweryfikować w tej turze."
-        },
+        currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
-            description: `Zadania dla Narzędzi. Wyślij narzędzie do zbadania 'knowledgeGaps' o najwyższym 'economicImpactScore'. Nigdy nie powtarzaj akcji z 'failedStrategies'.`,
+            description: `Zadania dla narzędzi. KLUCZOWE: dla BOQ_PARSER i VISION zawsze dołącz pole extractionProfile z niestandardowymi polami dopasowanymi do luki w wiedzy.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    agentType: { type: Type.STRING, description: "Wybierz nazwę dostępnego narzędzia." },
-                    instruction: { type: Type.STRING, description: `Rozkaz dla narzędzia. Czego konkretnie ma szukać by potwierdzić/obalić Twoją Hipotezę.` },
+                    agentType: { type: Type.STRING },
+                    instruction: { type: Type.STRING },
                     inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Klucze z knownFacts potrzebne narzędziu." }
+                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING } },
+
+                    // ── DYNAMICZNY PROFIL EKSTRAKCJI (Zaprojektowany przez Mózg) ──
+                    extractionProfile: {
+                        type: Type.OBJECT,
+                        description: `WYMAGANE dla BOQ_PARSER i VISION. Określa dynamiczny kontrakt pól, które agent ma wyciągnąć z dokumentu.`,
+                        properties: {
+                            contextLabel: {
+                                type: Type.STRING,
+                                description: "Nazwa kontekstu branżowego pisana dużymi literami z podkreśleniami, np. 'ZBROJENIE_SLUPOW', 'INSTALACJA_PV', 'NAWIERZCHNIA_ASPO'"
+                            },
+                            modelHint: {
+                                type: Type.STRING,
+                                description: "Rekomendacja modelu: 'PRO' dla rysunków/planów graficznych, 'FLASH' dla czystych tabel i tekstów."
+                            },
+                            customFields: {
+                                type: Type.ARRAY,
+                                description: "Dynamicznie zaprojektowane przez Ciebie zmienne, które chcesz wyciągnąć z pliku w tym zadaniu.",
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        name: { type: Type.STRING, description: "Unikalna nazwa zmiennej w camelCase, np. mocInstalacjiKwp, klasaStali, gruboscPodbudowyCm" },
+                                        type: { type: Type.STRING, description: "STRING, NUMBER lub BOOLEAN" },
+                                        description: { type: Type.STRING, description: "Precyzyjna instrukcja dla agenta, czego konkretnie ma szukać w pliku na potrzeby tego pola" }
+                                    },
+                                    required: ["name", "type", "description"]
+                                }
+                            }
+                        },
+                        required: ["contextLabel", "modelHint", "customFields"]
+                    }
+                    // ─────────────────────────────────────────────────────────
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
         }
     },
-    required: ["reasoning", "selfCritique", "nextBestAction", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
+    required: ["reasoning", "selfCritique", "nextBestAction", "assumptionMode", "assumptionDisclaimer", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
 };
+
+// Przewodnik projektowania pól na podstawie niepewności
+const EXTRACTION_PROFILES_GUIDE = `
+=== DYNAMICZNE PROFILE EKSTRAKCJI (extractionProfile) ===
+
+Kiedy zlecasz zadanie do BOQ_PARSER lub VISION, ZAWSZE dynamicznie projektuj strukturę bazy danych przez 'extractionProfile'. Ty decydujesz, jakie pola są kluczowe dla załatania luk (knowledgeGaps).
+
+ZASADY TWORZENIA PÓL (customFields):
+1. Dopasuj pola do specyfiki elementu w worldModel.
+2. Zmienne nazywaj w camelCase, określaj typ (STRING/NUMBER/BOOLEAN) i daj precyzyjny opis instrukcji.
+
+Przykład dla Instalacji Fotowoltaicznej:
+  contextLabel: "INSTALACJA_PV",
+  modelHint: "PRO",
+  customFields: [
+    { name: "mocModuluWp", type: "NUMBER", description: "Moc pojedynczego panelu w Wp" },
+    { name: "liczbaModulow", type: "NUMBER", description: "Łączna ilość modułów" },
+    { name: "typInwertera", type: "STRING", description: "Dokładny model/moc falownika" }
+  ]
+
+Przykład dla Robót Drogowych:
+  contextLabel: "ROBOTY_DROGOWE",
+  modelHint: "FLASH",
+  customFields: [
+    { name: "szerokoscJezdniM", type: "NUMBER", description: "Szerokość projektowanej jezdni w metrach" },
+    { name: "gruboscAsfaltuCm", type: "NUMBER", description: "Grubość warstwy ścieralnej w centymetrach" }
+  ]
+`;
 
 export async function POST(req: Request) {
     try {
@@ -780,28 +908,32 @@ export async function POST(req: Request) {
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
+        // Seeding agentów
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         if (agentRegistrySnap.empty) {
+            console.log("[MÓZG 🧠] Seeding bazy agentów...");
             const defaultAgents = [
-                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Narzędzie (Skaner). Czyta wymiary, przekroje i legendy z PDF z rysunkami." },
+                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Narzędzie (Skaner). Czyta wymiary, przekroje i legendy z PDF z rysunkami. WYMAGA extractionProfile." },
                 { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Narzędzie (Skaner tekstu). Szuka słów kluczowych o umowach, karach i SWZ." },
                 { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Odpal by przemnożyć setki liczb wyciągniętych przez inne narzędzia." },
                 { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wezwij by wrzucił ceny R/M/S do gotowych pozycji." },
                 { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla np. szkół czy bloków, gdy masz lukę." },
                 { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Narzędzie (Audytor Prawny). Waliduje gotowe pozycje z WT2021 i PPOŻ." },
                 { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo to, co ma 'economicImpactScore' wysoki a brakuje rysunków." },
-                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów." },
+                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów. WYMAGA extractionProfile." },
                 { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta dziwne i wąskie opisy technologii." },
                 { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Narzędzie (Solver konfliktów)." },
                 { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki pdf w wymiar 3D." }
             ];
             const seedBatch = adminDb.batch();
-            for (const agent of defaultAgents) seedBatch.set(adminDb.collection("agentRegistry").doc(agent.name), agent);
+            for (const agent of defaultAgents)
+                seedBatch.set(adminDb.collection("agentRegistry").doc(agent.name), agent);
             await seedBatch.commit();
             agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         }
         const availableAgents = agentRegistrySnap.docs.map(d => d.data());
 
+        // Sprawdzanie timeoutów zadań
         const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
         const now = Date.now();
         const TIMEOUT_MS = 10 * 60 * 1000;
@@ -812,12 +944,8 @@ export async function POST(req: Request) {
             const data = doc.data();
             const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
             if (now - lastActive >= TIMEOUT_MS) {
-                lockBatch.update(doc.ref, {
-                    status: "ERROR",
-                    rawResult: { error: "TIMEOUT_EXCEEDED" },
-                    processedByBrain: false,
-                    updatedAt: new Date()
-                });
+                console.log(`[MÓZG 🧠] Oznaczam zawieszone zadanie ${doc.id} jako ERROR.`);
+                lockBatch.update(doc.ref, { status: "ERROR", rawResult: { error: "TIMEOUT_EXCEEDED" }, processedByBrain: false, updatedAt: new Date() });
             } else {
                 trulyActiveCount++;
             }
@@ -830,15 +958,8 @@ export async function POST(req: Request) {
         }
         await lockBatch.commit();
 
-        const [
-            docsSnap,
-            brainSnap,
-            unprocessedTasksSnap,
-            tenderDoc,
-            chatHistSnap,
-            estimateSnap,
-            allTasksHistorySnap
-        ] = await Promise.all([
+        // Pobieranie danych wejściowych i stanu Roju
+        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc, chatHistSnap, estimateSnap, allTasksHistorySnap] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
@@ -861,22 +982,27 @@ export async function POST(req: Request) {
 
         const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
         const currentCognitiveState = currentBrainData?.cognitiveState || {
-            worldModel: [],
-            knownFacts: {},
-            hypotheses: [],
-            assumptions: [],
-            knowledgeGaps: [],
-            failedStrategies: []
+            worldModel: [], knownFacts: {}, hypotheses: [], assumptions: [], knowledgeGaps: [], failedStrategies: []
         };
 
         const chatHistory = chatHistSnap.docs.map(c => ({ rola: c.data().role, treść: c.data().content }));
-        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({ taskId: d.id, agentType: d.data().agentType, status: d.data().status, instruction: d.data().instruction, rawResult: d.data().rawResult }));
-        const taskHistory = allTasksHistorySnap.docs.map(d => ({ agentType: d.data().agentType, status: d.data().status, resultSummary: d.data().status === "DONE" ? (d.data().rawResult?.summary || `Wykonano`) : (d.data().rawResult?.error || "BŁĄD") }));
+        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
+            taskId: d.id, agentType: d.data().agentType, status: d.data().status,
+            instruction: d.data().instruction, rawResult: d.data().rawResult,
+            extractionProfile: d.data().extractionProfile || null
+        }));
+        const taskHistory = allTasksHistorySnap.docs.map(d => ({
+            agentType: d.data().agentType, status: d.data().status,
+            resultSummary: d.data().status === "DONE"
+                ? (d.data().rawResult?.summary || "Wykonano")
+                : (d.data().rawResult?.error || "BŁĄD"),
+            extractionProfile: d.data().extractionProfile || null
+        }));
 
         const estimateState = estimateSnap.docs.map(d => ({ sekcja: d.data().section, liczba_pozycji: d.data().items?.length || 0, wartosc_zl: d.data().totalValue || 0 }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
 
-        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem), jedynym Inżynierem i Architektem systemu. 
+        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem), jedynym Inżynierem i Architektem systemu PESAM 3.0. 
 
 === ZASADA DZIAŁANIA (COGNITIVE ARCHITECTURE) ===
 Nie jesteś tu by ślepo delegować zadania do ekspertów. TO TY JESTEŚ JEDYNYM EKSPERTEM.
@@ -887,8 +1013,17 @@ Twój proces myślowy to:
 4. Wysyłanie "Głupich Narzędzi" TYLKO by zweryfikować luki o najwyższym ryzyku finansowym.
 5. Generowanie pozycji do kosztorysu WYŁĄCZNIE, gdy masz pewność (confidence) danego faktu/założenia na poziomie MINIMUM 75%.
 
+=== TRYB ZAŁOŻEŃ RYNKOWYCH (ASSUMPTION_MODE) ===
+Jeśli brakuje krytycznej dokumentacji (np. Załącznik nr 5, rysunki, szczegółowe przedmiary):
+- Możesz rozważyć włączenie assumptionMode: true.
+- W takim przypadku przygotuj klarowny 'assumptionDisclaimer'.
+- Używaj agresywnie BUDOWLANIEC + GAP_FILLER.
+- Każdą pozycję wygenerowaną w tym trybie oznacz w opisie jako **[ZAŁOŻENIE RYNKOWE]**.
+
 === TWOJE NARZĘDZIA ===
 ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, mozliwosci: a.capabilities })), null, 2)}
+
+${EXTRACTION_PROFILES_GUIDE}
 
 === DOKUMENTY (Wejście sensoryczne) ===
 ${JSON.stringify(documents, null, 2)}
@@ -910,7 +1045,9 @@ ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomo
 
 === CO MASZ ZROBIĆ ===
 Zaktualizuj swój CognitiveState. Przerób nowe wyniki w fakty, zweryfikuj stare hipotezy (Belief Revision).
-Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies' by nie kręcić się w kółko!`;
+Przeprowadź Samokrytykę. Ustal 'nextBestAction'. 
+Pamiętaj o 'failedStrategies' by nie kręcić się w kółko!
+Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektuj i wypełnij 'extractionProfile'.`;
 
         console.log(`[MÓZG 🧠] Prompt Poznawczy wygenerowany. Trawienie danych...`);
 
@@ -919,7 +1056,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                 model: MODEL_PRO,
                 contents: systemPrompt,
                 config: {
-                    temperature: 0.4, // Analityczny chłód i konsekwencja 
+                    temperature: 0.4,
                     responseMimeType: "application/json",
                     responseSchema: BRAIN_SCHEMA as any
                 }
@@ -945,11 +1082,13 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             phase: parsedResult.phase,
             currentGoal: parsedResult.currentGoal,
             cognitiveState: parsedResult.cognitiveState,
+            assumptionMode: parsedResult.assumptionMode || false,
+            assumptionDisclaimer: parsedResult.assumptionDisclaimer || null,
             reasoningLog: FieldValue.arrayUnion(`Reasoning: ${parsedResult.reasoning || ""} | Next Action: ${parsedResult.nextBestAction || ""}`)
         });
 
         if (parsedResult.newEstimateItems?.length > 0) {
-            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} zweryfikowanych pozycji (>75% pewności).`);
+            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} pozycji (>75% pewności lub tryb założeń).`);
             const sectionsMap = new Map<string, any[]>();
             parsedResult.newEstimateItems.forEach((item: any) => {
                 const sec = item.sectionName || "Ogólne";
@@ -960,7 +1099,6 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             for (const [sectionName, items] of sectionsMap.entries()) {
                 const sectionId = `sec_${sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30)}`;
                 const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
-
                 const formattedItems = items.map((item: any) => ({
                     id: randomUUID(),
                     pozycja: item.pozycja || "",
@@ -969,12 +1107,13 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                     jednostka: item.jednostka || "szt",
                     cenaJed: 0,
                     KNR_ref: item.KNR_ref || "",
-                    confidence: "AI_COGNITIVE_MODEL",
-                    sourceTrack: `Model Poznawczy Mózgu`
+                    confidence: parsedResult.assumptionMode ? "ASSUMPTION_MODE" : "AI_COGNITIVE_MODEL",
+                    sourceTrack: parsedResult.assumptionMode ? "Konceptualizacja Mózgu" : "Model Poznawczy Mózgu"
                 }));
-
                 batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", items: formattedItems, totalValue: 0, updatedAt: new Date() }, { merge: true });
-                formattedItems.forEach(fItem => { batch.set(sectionRef.collection("items").doc(fItem.id), fItem); });
+                formattedItems.forEach(fItem => {
+                    batch.set(sectionRef.collection("items").doc(fItem.id), fItem);
+                });
             }
         }
 
@@ -983,10 +1122,18 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             const taskRef = tasksRef.doc();
             const inputFacts: Record<string, any> = {};
             (task.inputFactsKeys || []).forEach((key: string) => {
-                if (parsedResult.cognitiveState?.knownFacts && parsedResult.cognitiveState.knownFacts[key] !== undefined) {
+                if (parsedResult.cognitiveState?.knownFacts?.[key] !== undefined) {
                     inputFacts[key] = parsedResult.cognitiveState.knownFacts[key];
                 }
             });
+
+            if (task.extractionProfile) {
+                console.log(`[MÓZG 🧠 LOG] Tworzę zadanie z DYNAMICZNYM PROFILEM EKSTRAKCJI:`);
+                console.log(`[MÓZG 🧠 LOG]   - Agent: ${task.agentType}`);
+                console.log(`[MÓZG 🧠 LOG]   - Kontekst: ${task.extractionProfile.contextLabel}`);
+                console.log(`[MÓZG 🧠 LOG]   - Rekomendowany model: ${task.extractionProfile.modelHint}`);
+                console.log(`[MÓZG 🧠 LOG]   - Zaprojektowane pola: ${task.extractionProfile.customFields?.map((f: any) => `${f.name} (${f.type})`).join(", ") || "brak"}`);
+            }
 
             const taskData = {
                 taskId: taskRef.id,
@@ -994,6 +1141,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                 instruction: task.instruction,
                 inputDocIds: task.inputDocIds || [],
                 inputFacts,
+                extractionProfile: task.extractionProfile || null,
                 status: "PENDING",
                 processedByBrain: false,
                 createdAt: new Date(),
@@ -1003,7 +1151,9 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             newTasksCreated.push(taskData);
         });
 
-        const newTenderStatus = parsedResult.phase === "DONE" ? "DONE" : parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT" : "ORCHESTRATING";
+        const newTenderStatus = parsedResult.phase === "DONE" ? "DONE"
+            : parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT"
+                : "ORCHESTRATING";
 
         batch.update(tenderRef, {
             "budgetGuard.currentCostUSD": FieldValue.increment(((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.002),
@@ -1012,7 +1162,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
         });
 
         await batch.commit();
-        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Wysyłam ${newTasksCreated.length} narzędzi na zwiady.`);
+        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Narzędzi: ${newTasksCreated.length}.`);
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
         for (const task of newTasksCreated) {
@@ -1022,7 +1172,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tenderId, taskId: task.taskId })
-                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania narzędzia ${task.agentType}:`, err.message));
+                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania ${task.agentType}:`, err.message));
             } else {
                 await adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
                     status: "ERROR", rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` }, processedByBrain: false, updatedAt: new Date()
@@ -1030,7 +1180,12 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             }
         }
 
-        return NextResponse.json({ success: true, phase: parsedResult.phase, tasksCreated: newTasksCreated.length, estimateItemsAdded: parsedResult.newEstimateItems?.length || 0 });
+        return NextResponse.json({
+            success: true,
+            phase: parsedResult.phase,
+            tasksCreated: newTasksCreated.length,
+            estimateItemsAdded: parsedResult.newEstimateItems?.length || 0
+        });
 
     } catch (error: any) {
         console.error("[MÓZG 🧠] ❌ Krytyczny błąd Mózgu:", error);
@@ -1044,14 +1199,15 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
 --- START OF FILE src/app/api/kosztorysant/glowny-kosztorysant/inicjalizuj/route.ts ---
 
 import { NextResponse } from "next/server";
-import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { adminDb } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
 
-const MODEL_FLASH = "gemini-2.5-flash";
+// Używamy nowego, szybkiego i ultra-taniego modelu Flash-Lite dla klasyfikacji sensorycznej
+const MODEL_LITE = "gemini-2.5-flash-lite";
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -1065,14 +1221,26 @@ const CLASSIFIER_SCHEMA = {
         tags: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: "Tagi dokumentu, np. [SWZ], [RYSUNEK, ARCHITEKTURA], [PRZEDMIAR, EXCEL], [UMOWA]"
+            description: "Tagi dokumentu, np. [SWZ], [UMOWA], [SPECYFIKACJA], [OPIS_TECHNICZNY]"
         },
         summary: {
             type: Type.STRING,
             description: "Maksymalnie 2-zdaniowe streszczenie zawartości pliku."
+        },
+        detailedElement: {
+            type: Type.STRING,
+            description: "Konkretny, szczegółowy element budowlany, którego dotyczy rysunek/dokument wyciągnięty z tabelki rysunkowej (np. 'płyta fundamentowa', 'strop nad parterem', 'zbrojenie słupów', 'elewacja południowa', 'szczegół dachu', 'winda'). Wpisz 'NIE_DOTYCZY' jeśli to ogólny dokument tekstowy jak SWZ."
+        },
+        containsTablesWithDimensions: {
+            type: Type.BOOLEAN,
+            description: "Czy dokument zawiera tabele z przedmiarami, obmiarami lub wymiarami fizycznymi obiektu."
+        },
+        containsDrawings: {
+            type: Type.BOOLEAN,
+            description: "Czy dokument zawiera rysunki techniczne, rzuty, przekroje, schematy lub inną dokumentację graficzną."
         }
     },
-    required: ["tags", "summary"]
+    required: ["tags", "summary", "detailedElement", "containsTablesWithDimensions", "containsDrawings"]
 };
 
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
@@ -1095,16 +1263,16 @@ export async function POST(req: Request) {
         const body = await req.json();
         const { tenderId } = body;
 
-        console.log(`[FAZA 0 🚀] Start inicjalizacji dla przetargu: ${tenderId}`);
+        console.log(`[FAZA 0 🚀] Start inicjalizacji sensorycznej dla: ${tenderId}`);
 
         if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
         const docsRef = adminDb.collection(`tenders/${tenderId}/documents`);
         const snapshot = await docsRef.where("status", "==", "UPLOADED").get();
 
-        if (snapshot.empty) return NextResponse.json({ message: "Brak dokumentów." });
+        if (snapshot.empty) return NextResponse.json({ message: "Brak dokumentów do klasyfikacji." });
 
-        console.log(`[FAZA 0 🚀] Skanuję ${snapshot.size} dokumentów...`);
+        console.log(`[FAZA 0 🚀] Skanuję ${snapshot.size} dokumentów przy użyciu ${MODEL_LITE}...`);
         let totalTokensUsed = 0;
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
 
@@ -1113,25 +1281,24 @@ export async function POST(req: Request) {
             const docData = docSnap.data();
 
             if (i > 0) {
-                console.log("[FAZA 0 🚀] API Pacing: Czekam 3 sekundy...");
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                // Krótki odstęp chroniący przed przeciążeniem API
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
 
-            console.log(`[FAZA 0 🚀] Klasyfikuję: ${docData.fileName}`);
+            console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
 
             try {
                 const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-                console.log(`[FAZA 0 🚀] Generuję ścieżkę GCS: ${fileUri}`);
 
                 const prompt = `
-Jesteś Klasyfikatorem systemu kosztorysowego PESAM 3.0. 
-Przeanalizuj pierwszą stronę tego dokumentu budowlanego. 
-Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
+Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
+Przeanalizuj pierwszą stronę lub spis treści tego dokumentu budowlanego. 
+Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy dokument zawiera tabele wymiarowe lub rysunki techniczne.
 `;
 
                 const result = await callGeminiWithRetry(async () => {
                     return await ai.models.generateContent({
-                        model: MODEL_FLASH,
+                        model: MODEL_LITE,
                         contents: [
                             {
                                 role: "user",
@@ -1154,30 +1321,34 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
                     });
                 });
 
-                const responseText = result.text ?? "{}";
-                const parsedResult = JSON.parse(responseText);
+                const parsedResult = JSON.parse(result.text ?? "{}");
                 const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
                 totalTokensUsed += tokensUsed;
 
+                // Zapisujemy nowe flagi bezpośrednio do metadanych dokumentu w Firestore
                 await docSnap.ref.update({
                     tags: parsedResult.tags,
                     summary: parsedResult.summary,
+                    detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
+                    containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
+                    containsDrawings: parsedResult.containsDrawings || false,
                     status: "CLASSIFIED",
-                    classifyModel: MODEL_FLASH,
+                    classifyModel: MODEL_LITE,
                     updatedAt: new Date()
                 });
 
-                console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}.`);
+                console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
 
             } catch (docError: any) {
-                console.error(`[FAZA 0 🚀] Błąd:`, docError);
+                console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
                 await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
             }
         }
 
-        // Zapis do bezpiecznika i budzenie mózgu (bez zmian)
-        const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000015;
+        // Koszt tokenów dla Flash-Lite jest drastycznie niższy (około $0.000075 za 1k input tokenów)
+        const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000075;
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
+
         await adminDb.runTransaction(async (t) => {
             const tenderDoc = await t.get(tenderRef);
             if (tenderDoc.exists) {
@@ -1193,12 +1364,12 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         await brainRef.set({
             phase: "PLANNING",
-            currentGoal: "Analiza tagów i planowanie.",
+            currentGoal: "Analiza struktury dokumentów i planowanie podziału prac.",
             knownFacts: {},
             missingData: [],
             activeTaskIds: [],
             pendingDecisions: [],
-            reasoningLog: ["Inicjalizacja."],
+            reasoningLog: ["Inicjalizacja sensoryczna zakończona pomyślnie."],
             totalCostUSD: estimatedCostUSD
         }, { merge: true });
 
@@ -1209,9 +1380,10 @@ Zwróć JSON z odpowiednimi tagami i krótkim streszczeniem.
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
         }).catch(() => { });
 
-        return NextResponse.json({ success: true, tokensUsed: totalTokensUsed });
+        return NextResponse.json({ success: true, tokensUsed: totalTokensUsed, modelUsed: MODEL_LITE });
 
     } catch (error: any) {
+        console.error("[FAZA 0 🚀] Błąd krytyczny inicjalizacji:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
@@ -1694,8 +1866,12 @@ Daj czysty szczegółowy technologiczny wykaz od podbudów do tynku z racjonalny
 import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
+import { Agent, setGlobalDispatcher } from "undici";
+
+// Zwiększenie limitu oczekiwania na odpowiedź z API Gemini do 5 minut (300 000 ms)
+setGlobalDispatcher(new Agent({ headersTimeout: 300000, bodyTimeout: 300000 }));
 import { GoogleGenAI, Type } from "@google/genai";
-import * as xlsx from "xlsx"; // NATYWNY MODUŁ PARSUJĄCY SUROWE PRZEDMIARY Z EXCEL
+import * as xlsx from "xlsx";
 
 export const dynamic = "force-dynamic";
 
@@ -1705,47 +1881,172 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
-const MODEL_PRO = "gemini-2.5-pro"; // Zarezerwowany dla skanów przedmiarow-PDF
-const MODEL_FLASH = "gemini-2.5-flash"; // Wystarczający, bardzo wydajny w filtrowaniu gotowych i oczyszczonych tekstów exela
+const MODEL_PRO = "gemini-2.5-pro";
+const MODEL_FLASH = "gemini-2.5-flash";
 
-// Zabezpieczenie chmury u Agenta BOQ 429 API EXHAUSTION Limits
-async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+// ─────────────────────────────────────────────────────────────────
+// TYPY — extractionProfile jest teraz w pełni dynamiczny
+// ─────────────────────────────────────────────────────────────────
+
+type FieldType = "STRING" | "NUMBER" | "BOOLEAN";
+
+interface CustomField {
+    name: string;          // nazwa właściwości w JSON, np. "srednicaMm"
+    type: FieldType;       // typ danych
+    description: string;    // opis dla Gemini, co tu wpisać
+}
+
+interface ExtractionProfile {
+    contextLabel: string;        // dowolna etykieta od Mózgu, np. "RYSUNEK_ZBROJENIA"
+    modelHint: "PRO" | "FLASH";  // rekomendacja modelu od Mózgu
+    customFields: CustomField[]; // pola, które Mózg chce dynamicznie wyciągnąć
+}
+
+// ─────────────────────────────────────────────────────────────────
+// BEZPIECZNY RETRY DLA ODPORNOŚCI NA LIMIT 429
+// ─────────────────────────────────────────────────────────────────
+
+async function callGeminiWithRetry(
+    fn: () => Promise<any>,
+    retries = 3,
+    delay = 3000
+): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
-        const errorText = error.toString() || "";
-        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+        const isRateLimit =
+            error.toString().includes("429") ||
+            error.toString().includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
-            console.warn(`[BOQ PARSER 📊] Wykryto limit API 429... Czekam ${delay / 1000}s na przestygniecie przeplywu limitow. (Zostaly prob: ${retries})`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            console.warn(
+                `[ILOŚCIOWIEC 📊] Wykryto limit API 429. Odczekuję ${delay / 1000}s... (Pozostało prób: ${retries})`
+            );
+            await new Promise((r) => setTimeout(r, delay));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
     }
 }
 
-const BOQ_SCHEMA = {
-    type: Type.OBJECT,
-    properties: {
-        items: {
-            type: Type.ARRAY,
-            description: "Lista wyizolowanych twardych pozycji ze ślepego przedmiaru",
+// ─────────────────────────────────────────────────────────────────
+// BAZOWE POLA — zawsze obecne w kosztorysie, niezależnie od Mózgu
+// ─────────────────────────────────────────────────────────────────
+
+const BASE_ITEM_PROPERTIES = {
+    pozycja: { type: Type.STRING, description: "Numer referencyjny pozycji kosztorysowej, np. '1.1', '2.3.1'" },
+    opis: { type: Type.STRING, description: "Dokładny opis roboty budowlanej, elementu lub urządzenia." },
+    ilosc: { type: Type.NUMBER, description: "Ilość / wartość przedmiarowa" },
+    jednostka: { type: Type.STRING, description: "Jednostka miary, np. szt., mb, m2, m3, kg, t, r-godz" },
+    KNR_ref: { type: Type.STRING, description: "Referencja do katalogu norm, np. KNR 2-01, jeśli widoczna w dokumencie" }
+};
+
+const BASE_REQUIRED = ["pozycja", "opis", "ilosc", "jednostka"];
+
+const TYPE_MAP: Record<FieldType, any> = {
+    STRING: Type.STRING,
+    NUMBER: Type.NUMBER,
+    BOOLEAN: Type.BOOLEAN
+};
+
+// ─────────────────────────────────────────────────────────────────
+// BUDOWANIE DYNAMICZNEGO SCHEMATU W LOCIE (RUNTIME SCHEMA SYNTHESIS)
+// ─────────────────────────────────────────────────────────────────
+
+function buildDynamicSchema(customFields: CustomField[]): any {
+    const itemProperties: Record<string, any> = { ...BASE_ITEM_PROPERTIES };
+
+    for (const field of customFields) {
+        if (!field?.name || typeof field.name !== "string") continue;
+        const safeName = field.name.trim();
+
+        // Zabezpieczenie: walidacja poprawności nazwy zmiennej dla schematu JSON
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(safeName)) {
+            console.warn(`[ILOŚCIOWIEC 📊] Ignoruję niepoprawną nazwę pola: "${safeName}"`);
+            continue;
+        }
+        // Zabezpieczenie: nie pozwalamy Mózgowi nadpisać pól bazowych
+        if (safeName in BASE_ITEM_PROPERTIES) {
+            console.warn(`[ILOŚCIOWIEC 📊] Ignoruję próbę nadpisania pola bazowego: "${safeName}"`);
+            continue;
+        }
+
+        itemProperties[safeName] = {
+            type: TYPE_MAP[field.type.toUpperCase() as FieldType] || Type.STRING,
+            description: field.description || `Dynamiczne pole: ${safeName}`
+        };
+    }
+
+    return {
+        type: Type.OBJECT,
+        properties: {
             items: {
-                type: Type.OBJECT,
-                properties: {
-                    pozycja: { type: Type.STRING, description: "Numer referencyjny np. '1.1'" },
-                    opis: { type: Type.STRING, description: "Konkretny, inżynieryjny tytuł prac odcięty z ewentualnej 'od biedy - pustki' ze struktur surowego pliku!" },
-                    ilosc: { type: Type.NUMBER, description: "Zestawienie twarde z liczby całkowitej lub ułamka na wykonastwo" },
-                    jednostka: { type: Type.STRING, description: "np: szt., mb, r-godz itp" },
-                    KNR_ref: { type: Type.STRING, description: "podstawy z katalogu dla ujednoliceń norm od Inwestora. (Podstawowy znacznik referencyjny)." }
-                },
-                required: ["pozycja", "opis", "ilosc", "jednostka"]
+                type: Type.ARRAY,
+                description: "Lista wyizolowanych pozycji/elementów kosztorysowych wyciągniętych z dokumentu",
+                items: {
+                    type: Type.OBJECT,
+                    properties: itemProperties,
+                    required: BASE_REQUIRED
+                }
+            },
+            summary: {
+                type: Type.STRING,
+                description: "Krótkie podsumowanie przeanalizowanego dokumentu."
             }
         },
-        summary: { type: Type.STRING, description: "Pojemność Przedmiarowanego frontu" }
-    },
-    required: ["items", "summary"]
-};
+        required: ["items", "summary"]
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// BUDOWANIE DYNAMICZNEGO PROMPTU WEJŚCIOWEGO
+// ─────────────────────────────────────────────────────────────────
+
+function buildExtractionPrompt(
+    profile: ExtractionProfile,
+    baseInstruction: string,
+    isExcel: boolean
+): string {
+    const { contextLabel, customFields } = profile;
+
+    const fieldsList = customFields.length > 0
+        ? `\nZidentyfikuj i wyciągnij następujące pola specyficzne dla kontekstu [${contextLabel}]:\n` +
+        customFields.map((f) => `  - ${f.name} (${f.type}): ${f.description}`).join("\n") + "\n"
+        : "";
+
+    const excelNote = isExcel
+        ? "\nUWAGA: Dane wejściowe to surowy JSON z arkusza Excel. Ignoruj puste wiersze, nagłówki i metadane dokumentu."
+        : "";
+
+    return `=== KONTRAKT DYNAMICZNEJ EKSTRAKCJI DANYCH (PESAM 3.0) ===
+Etykieta kontekstowa zadania: ${contextLabel}
+${fieldsList}
+Szczegółowa instrukcja od Mózgu: ${baseInstruction}
+${excelNote}
+
+ZASADY KRYTYCZNE:
+- Zwróć TYLKO te dane, które faktycznie widzisz w dokumencie. Nie zgaduj wartości.
+- Jeśli jakiegoś opcjonalnego pola nie ma dla danej pozycji — pomiń je w strukturze (nie halucynuj).
+- Jeśli dokument nie zawiera żadnych danych zgodnych z instrukcją — zwróć pustą tablicę "items".
+- Zachowaj polskie znaki diakrytyczne. Numeruj pozycje hierarchicznie np. 1.1, 1.2, 2.1.`;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MODEL RESOLVER (KORZYSTA Z SUGEROWANEGO PROFILU)
+// ─────────────────────────────────────────────────────────────────
+
+function resolveModel(
+    profile: ExtractionProfile,
+    taskModelOverride?: string
+): string {
+    if (taskModelOverride) return taskModelOverride;
+    if (profile.modelHint === "PRO") return MODEL_PRO;
+    if (profile.modelHint === "FLASH") return MODEL_FLASH;
+    return MODEL_PRO; // Bezpieczny fallback
+}
+
+// ─────────────────────────────────────────────────────────────────
+// POST HANDLER (GŁÓWNY PUNKT WEJŚCIA)
+// ─────────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
     let tenderId: string | undefined;
@@ -1757,125 +2058,196 @@ export async function POST(req: Request) {
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        console.log(`[BOQ PARSER 📊] Start żądania parsowania Ilości. Przetarg: ${tenderId}, TaskId: ${taskId}`);
+        console.log(`[ILOŚCIOWIEC 📊] Start procesu. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        if (!tenderId || !taskId) {
+            return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
-        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje w bazie.");
 
         const taskData = taskDoc.data()!;
-        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie Przetworzone wcześniej." });
+        if (taskData.status !== "PENDING") {
+            return NextResponse.json({ message: "Zadanie zostało już przetworzone." });
+        }
 
-        console.log("[BOQ PARSER 📊] Zmieniam status zadania na IN_PROGRESS");
+        // Zmiana statusu na roboczy
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        const inputDocIds: string[] = taskData.inputDocIds || [];
+        // Odczyt profilu ekstrakcji przesłanego przez Mózg
+        const rawProfile = taskData.extractionProfile;
+        const profile: ExtractionProfile = {
+            contextLabel: rawProfile?.contextLabel || "NIEOKREŚLONY",
+            modelHint: rawProfile?.modelHint === "FLASH" ? "FLASH" : "PRO",
+            customFields: Array.isArray(rawProfile?.customFields) ? rawProfile.customFields : []
+        };
 
+        console.log(`[ILOŚCIOWIEC 📊] [LOG] Otrzymano profil ekstrakcji:`);
+        console.log(`[ILOŚCIOWIEC 📊]   - Kontekst: ${profile.contextLabel}`);
+        console.log(`[ILOŚCIOWIEC 📊]   - Sugerowany model: ${profile.modelHint}`);
+        console.log(`[ILOŚCIOWIEC 📊]   - Dynamiczne pola (${profile.customFields.length} szt.): ${profile.customFields.map(f => f.name).join(", ") || "(brak)"}`);
+
+        const inputDocIds: string[] = taskData.inputDocIds || [];
         if (inputDocIds.length === 0) {
-            console.warn("[BOQ PARSER 📊] Brak Dokumentów. Agresor nie działa pusty. Status -> DONE z braku załącznika.");
-            await taskRef.update({ status: "DONE", rawResult: { message: "Brak Rysunku Wskazanego u Doc." }, processedByBrain: false, updatedAt: new Date() });
+            console.warn("[ILOŚCIOWIEC 📊] Brak dokumentów przypisanych do zadania. Kończę ze statusem DONE.");
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { message: "Brak dokumentów wejściowych." },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
             isSuccess = true;
-            return NextResponse.json({ message: "Brak wskazan do Plikow. Omija Procesora z biedy!" });
+            return NextResponse.json({ message: "Brak dokumentów." });
         }
+
+        // SYNTEZA SCHEMATU W RUNTIME (Kluczowy element architektury kognitywnej)
+        const dynamicSchema = buildDynamicSchema(profile.customFields);
+        console.log(`[ILOŚCIOWIEC 📊] [LOG] Dynamiczny schemat wyjściowy skompilowany pomyślnie.`);
 
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const bucket = adminStorage.bucket(bucketName);
         const allExtractedItems: any[] = [];
         let totalTokensUsed = 0;
+        const processingLog: string[] = [];
 
-        for (const docId of inputDocIds) {
+        // Przetwarzanie plików
+        for (let idx = 0; idx < inputDocIds.length; idx++) {
+            const docId = inputDocIds[idx];
             const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
-            if (!docSnap.exists) continue;
+
+            if (!docSnap.exists) {
+                console.warn(`[ILOŚCIOWIEC 📊] Dokument ${docId} nie istnieje w bazie. Pomijam.`);
+                continue;
+            }
 
             const docData = docSnap.data()!;
-            console.log(`[BOQ PARSER 📊] Sprawdzam podłoża pod Rzut dla przedmiaru... MimeType : ${docData.mimeType}`);
-            const isExcel = docData.mimeType?.includes("excel") || docData.mimeType?.includes("spreadsheetml") || docData.fileName.toLowerCase().endsWith(".xlsx") || docData.fileName.toLowerCase().endsWith(".xls");
+            const sizeMB = (docData.sizeBytes / 1024 / 1024).toFixed(2);
+            const isExcel =
+                docData.mimeType?.includes("excel") ||
+                docData.mimeType?.includes("spreadsheetml") ||
+                docData.fileName.toLowerCase().endsWith(".xlsx") ||
+                docData.fileName.toLowerCase().endsWith(".xls");
+
+            console.log(`[ILOŚCIOWIEC 📊] Skanuję plik [${idx + 1}/${inputDocIds.length}]: "${docData.fileName}" (${sizeMB} MB)`);
+
+            // Excel jest parsowany natywnie w Node, więc zawsze używamy tańszego i szybszego Flasha
+            const modelToUse = isExcel ? MODEL_FLASH : resolveModel(profile, taskData.modelOverride);
+            const prompt = buildExtractionPrompt(profile, taskData.instruction, isExcel);
 
             try {
-                const fileRef = bucket.file(docData.storagePath);
-
                 if (isExcel) {
-                    // EXCEL: Pobieramy do pamięci, bo biblioteka xlsx musi go fizycznie przeczytać
+                    // ── ŚCIEŻKA NATYWNA DLA EXCELA ─────────────────────────────
+                    const fileRef = bucket.file(docData.storagePath);
                     const [downloadedBuffer] = await fileRef.download();
-                    console.log(`[BOQ PARSER 📊] Pobrano : ${downloadedBuffer.length} B (Plik Excel - Parsowanie Pamięciowe)`);
                     const safeBuffer = Buffer.from(new Uint8Array(downloadedBuffer).buffer);
-
-                    console.log(`[BOQ PARSER 📊] To Plik Typu Przedmiar Cyfrowego Nativ EXEL (Krzywy ubytek). Pcham jako wstrzykniecia parser!`);
 
                     const workbook = xlsx.read(safeBuffer, { type: "buffer" });
                     const sheetName = workbook.SheetNames[0];
-
                     const rawJsonText = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
-                    const promptExcelToNormalize = `Działa Twój Moduł Normalizator Tabulacyjny JSON od Inżynierów Odbioru Rządowych PZP ! 
-Dostaniesz Surowe bezstratne rzutki po API, z programu Natywnego EXcel. Uzywaj instrukcj MOZGU : "${taskData.instruction}" - sfiltruj to jako ludzką predyktywą  AI (Uważając ! I odrzuc z ukladem brudy pustki , okna naglowkow Gmina  Miasto XYZ i dat wczesnych pod rzetelną bazową kosztorysa przedmiarem formatow i zepnij odpowiedz sztywnym w schemat ! Zrób to u struktury i zostaw z opisu sam R-G , M-j. \n Surowe dane (Szarpanego na klatki Json text - Exella ) : ${JSON.stringify(rawJsonText).substring(0, 30000)} ...  (ucinamy jeśli plik to całe puste loga dla Oszczedności). Uzywaj FLASH AI O Niskim koszcie...`;
 
-                    const result = await callGeminiWithRetry(async () => {
-                        return await ai.models.generateContent({
+                    const fullPrompt = `${prompt}\n\nSurowe dane z Excela (JSON):\n${JSON.stringify(rawJsonText).substring(0, 30000)}`;
+
+                    const result = await callGeminiWithRetry(() =>
+                        ai.models.generateContent({
                             model: MODEL_FLASH,
-                            contents: promptExcelToNormalize,
-                            config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: BOQ_SCHEMA as any }
-                        });
-                    });
+                            contents: fullPrompt,
+                            config: {
+                                temperature: 0.1,
+                                responseMimeType: "application/json",
+                                responseSchema: dynamicSchema
+                            }
+                        })
+                    );
 
-                    const parsedExResult = JSON.parse(result.text ?? "{}");
+                    const parsed = JSON.parse(result.text ?? "{}");
                     totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
-                    if (parsedExResult.items) allExtractedItems.push(...parsedExResult.items);
+                    if (parsed.items) allExtractedItems.push(...parsed.items);
+                    processingLog.push(`✅ Excel "${docData.fileName}": wyciągnięto ${parsed.items?.length || 0} pozycji (model: ${MODEL_FLASH})`);
 
                 } else {
-                    // PDF: Przechodzimy na nowoczesny, referencyjny format chmurowy gs:// BEZ POBIERANIA DO RAM!
-                    console.log(`[BOQ PARSER 📊] Użyto nowoczesnego linku gs:// dla przedmiaru PDF (Eliminacja UND_ERR_HEADERS_TIMEOUT).`);
+                    // ── BEZSERWEROWA ŚCIEŻKA GCS DLA PDF / WIZJI ───────────────
                     const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-                    const promptPDF = `Odślepiaj formatami RZECZ Z MODELO'a Przedmiarów Dokumentów Urzędniczo budowlańca : Wykorzystuj z instrukcja : ${taskData.instruction}`;
 
-                    const resultPDF = await callGeminiWithRetry(async () => {
-                        return await ai.models.generateContent({
-                            model: taskData.modelOverride || MODEL_PRO,
+                    const result = await callGeminiWithRetry(() =>
+                        ai.models.generateContent({
+                            model: modelToUse,
                             contents: [
                                 {
                                     role: "user",
                                     parts: [
-                                        { text: promptPDF },
-                                        { fileData: { fileUri: fileUri, mimeType: docData.mimeType || "application/pdf" } }
+                                        { text: prompt },
+                                        {
+                                            fileData: {
+                                                fileUri,
+                                                mimeType: docData.mimeType || "application/pdf"
+                                            }
+                                        }
                                     ]
                                 }
                             ],
-                            config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: BOQ_SCHEMA as any }
-                        });
-                    });
+                            config: {
+                                temperature: 0.1,
+                                responseMimeType: "application/json",
+                                responseSchema: dynamicSchema
+                            }
+                        })
+                    );
 
-                    const parsedPDFResult = JSON.parse(resultPDF.text ?? "{}");
-                    totalTokensUsed += resultPDF.usageMetadata?.totalTokenCount || 0;
-                    if (parsedPDFResult.items) allExtractedItems.push(...parsedPDFResult.items);
+                    const parsed = JSON.parse(result.text ?? "{}");
+                    totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+                    if (parsed.items) allExtractedItems.push(...parsed.items);
+                    processingLog.push(`✅ PDF "${docData.fileName}": wyciągnięto ${parsed.items?.length || 0} pozycji (model: ${modelToUse})`);
                 }
 
             } catch (err: any) {
-                console.error(`[BOQ PARSER 📊] Nieoczekiwa wina czytniku Odtwarzacza od doc pliku ${docData.fileName}:`, err);
+                console.error(`[ILOŚCIOWIEC 📊] ❌ Błąd krytyczny podczas skanowania pliku "${docData.fileName}":`, err.message);
+                processingLog.push(`❌ "${docData.fileName}": ${err.message}`);
                 throw err;
             }
         }
 
+        // Zapis zaimplementowanych, w pełni dynamicznych wyników do Firestore
         await taskRef.update({
             status: "DONE",
-            rawResult: { items: allExtractedItems, summary: `Skasowane Odczytane Pół Prowincjonlnego exela i Sklejona Przedmiar` },
+            rawResult: {
+                items: allExtractedItems,
+                summary: `Pomyślnie zakończono ekstrakcję. Wyodrębniono ${allExtractedItems.length} pozycji kosztorysowych w kontekście [${profile.contextLabel}].`,
+                processingLog,
+                contextLabel: profile.contextLabel,
+                fieldsRequested: profile.customFields.map(f => f.name)
+            },
             processedByBrain: false,
             costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
+        // Koszt tokenów (0.002 $ za 1k dla Pro i 0.000075 $ za 1k dla Flash-Lite/Flash)
         const costUSD = (totalTokensUsed / 1000) * 0.002;
-        await adminDb.collection("tenders").doc(tenderId).update({ "budgetGuard.currentCostUSD": FieldValue.increment(costUSD) });
+        await adminDb.collection("tenders").doc(tenderId).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        });
 
         isSuccess = true;
-        console.log(`[BOQ PARSER 📊] Niskokaloryczny, spowolniasz na portfel u Excel/PDF zoptymalizowan !! Koszty miedzi. Konczy sukcesnie BOQ !!`);
-        return NextResponse.json({ success: true });
+        console.log(`[ILOŚCIOWIEC 📊] Sukces. Zapisano ${allExtractedItems.length} pozycji.`);
+        processingLog.forEach(logLine => console.log(`[ILOŚCIOWIEC 📊]   ${logLine}`));
+
+        return NextResponse.json({
+            success: true,
+            itemsExtracted: allExtractedItems.length,
+            contextLabel: profile.contextLabel,
+            customFieldsUsed: profile.customFields.map(f => f.name)
+        });
 
     } catch (error: any) {
-        console.error("[BOQ PARSER 📊] ❌ Brak Biedy / Brak Powodzen w Pliku przedmiarze / Przetrawka błąd!", error);
+        console.error("[ILOŚCIOWIEC 📊] ❌ Błąd krytyczny Agenta:", error);
         if (tenderId && taskId) {
             await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                status: "ERROR", rawResult: { error: error.message }, processedByBrain: false, updatedAt: new Date()
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
             }).catch(() => { });
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
@@ -1883,8 +2255,12 @@ Dostaniesz Surowe bezstratne rzutki po API, z programu Natywnego EXcel. Uzywaj i
         if (tenderId && taskId) {
             const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
             }).catch(() => { });
         }
     }

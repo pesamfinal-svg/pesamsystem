@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 
 export const dynamic = "force-dynamic";
 
@@ -140,7 +141,7 @@ Daj czysty szczegółowy technologiczny wykaz od podbudów do tynku z racjonalny
             });
         });
 
-        const parsedResult = JSON.parse(structureResult.text ?? "{}");
+        const parsedResult = JSON.parse(jsonrepair(structureResult.text ?? "{}"));
         const tokensStep3 = structureResult.usageMetadata?.totalTokenCount || 0;
         totalTokensUsed += tokensStep3;
         console.log(`[BUDOWLANIEC 🧱] Krok 3 zakończony. Zużyto tokenów: ${tokensStep3}`);

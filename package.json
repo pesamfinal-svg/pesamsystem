@@ -12,13 +12,13 @@
     "@google-cloud/vertexai": "^1.12.0",
     "@google/genai": "^2.0.0",
     "@google/generative-ai": "^0.24.1",
-    "undici": "^6.13.0",
     "@pdf-lib/fontkit": "^1.1.1",
     "adm-zip": "^0.5.17",
     "chart.js": "^4.5.1",
     "dexie": "^4.4.3",
     "firebase": "^12.13.0",
     "firebase-admin": "^13.9.0",
+    "jsonrepair": "^3.14.0",
     "jszip": "^3.10.1",
     "lib": "^5.1.0",
     "next": "16.2.6",
@@ -28,6 +28,7 @@
     "react": "19.2.4",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "19.2.4",
+    "undici": "^6.13.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

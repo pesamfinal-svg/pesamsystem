@@ -3,6 +3,7 @@ import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
 import { randomUUID } from "crypto";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -238,7 +239,7 @@ export async function POST(req: Request) {
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
-        // Seeding agentów
+        // Seeding agentów (wzbogacone o PDF_SPLITTER i zaktualizowanego sędziego REVISOR_JUDGE)
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         if (agentRegistrySnap.empty) {
             console.log("[MÓZG 🧠] Seeding bazy agentów...");
@@ -247,12 +248,23 @@ export async function POST(req: Request) {
                 { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Narzędzie (Skaner tekstu). Szuka słów kluczowych o umowach, karach i SWZ." },
                 { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Odpal by przemnożyć setki liczb wyciągniętych przez inne narzędzia." },
                 { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wezwij by wrzucił ceny R/M/S do gotowych pozycji." },
-                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla np. szkół czy bloków, gdy masz lukę." },
+                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla obiektu, gdy masz lukę." },
                 { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Narzędzie (Audytor Prawny). Waliduje gotowe pozycje z WT2021 i PPOŻ." },
                 { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo to, co ma 'economicImpactScore' wysoki a brakuje rysunków." },
                 { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów. WYMAGA extractionProfile." },
                 { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta dziwne i wąskie opisy technologii." },
-                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Narzędzie (Solver konfliktów)." },
+                {
+                    name: "REVISOR_JUDGE",
+                    endpoint: "/api/kosztorysant/agent-rewident",
+                    capabilities: ["legal_reasoning", "googleSearch", "conflict_resolution"],
+                    description: "Narzędzie (Sędzia Roju). Skanuje kolekcję 'conflicts', rozstrzyga spory technologiczne i prawne w oparciu o PZP, WT 2021 i hierarchię dokumentów SWZ. Zapisuje werdykt (decision, justification) do konfliktu i zmienia status na RESOLVED lub ESCALATED_TO_USER. Wywołuj gdy conflicts.status == OPEN lub INVESTIGATING."
+                },
+                {
+                    name: "PDF_SPLITTER",
+                    endpoint: "/api/kosztorysant/agent-pdf-splitter",
+                    capabilities: ["pdf_parsing", "semantic_chunking"],
+                    description: "Narzędzie (Semantyczny Skaner Struktury). Używaj jako PIERWSZY KROK przed wysłaniem dużego PDF do VISION lub BOQ_PARSER. Mapuje logiczne granice dokumentu (strony X-Y = nierozrywalna jednostka) używając Flash-Lite. Zwraca gotową mapę segmentów z rekomendowanym agentem i zakresem stron dla każdego. Zapobiega rozrywaniu rysunków technicznych. ZAWSZE wywołuj dla dokumentów > 5 stron."
+                },
                 { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki pdf w wymiar 3D." }
             ];
             const seedBatch = adminDb.batch();
@@ -355,6 +367,20 @@ ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, 
 
 ${EXTRACTION_PROFILES_GUIDE}
 
+=== ZASADY UŻYWANIA PDF_SPLITTER ===
+- Gdy dokument ma > 5 stron i containsDrawings === true → ZAWSZE najpierw wywołaj PDF_SPLITTER.
+- Wyniki PDF_SPLITTER znajdziesz w rawResult.segments agenta. Każdy segment ma:
+  - segmentId, label, pageFrom, pageTo, recommendedAgent, agentInstruction
+- Tworząc zadania dla VISION/BOQ_PARSER po splitterze, użyj agentInstruction z segmentu jako instruction.
+- Nie mieszaj segmentów różnych typów w jednym zadaniu.
+
+=== ZASADY UŻYWANIA REVISOR_JUDGE ===
+- Wywołuj gdy w kolekcji conflicts istnieje dokument ze status == "OPEN" lub "INVESTIGATING".
+- Nie podawaj inputDocIds – agent sam pobierze konflikty z Firestore.
+- W instruction opisz kontekst sporu i co jest finansowo najważniejsze.
+- Po wykonaniu sprawdź czy status konfliktów zmienił się na RESOLVED lub ESCALATED_TO_USER.
+- Jeśli ESCALATED_TO_USER – poinformuj użytkownika przez chatReply i ustaw phase = "WAITING_INPUT".
+
 === DOKUMENTY (Wejście sensoryczne) ===
 ${JSON.stringify(documents, null, 2)}
 
@@ -369,6 +395,12 @@ ${JSON.stringify(taskHistory, null, 2)}
 
 === AKTUALNY STAN KOSZTORYSU ===
 ${isEstimateEmpty ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów." : JSON.stringify(estimateState, null, 2)}
+
+=== ŚLEDZENIE OBLICZEŃ (CALCULATION TRAIL) ===
+Każda nowa pozycja w "newEstimateItems" musi być w pełni audytowalna.
+Gdy generujesz pole "opis" dla pozycji, DODAJ na jego końcu wyraźny dowód matematyczny i źródłowy w nawiasie kwadratowym.
+Przykład oczekiwanego opisu: "Zbrojenie płyty fundamentowej. [WYLICZENIE: 25400 kg (z pliku K-03 str. 1) + 12100 kg (z K-04 str. 1)]".
+Nigdy nie generuj liczb bez pokrycia w dokumentacji. Jeśli musisz zgadywać normą, opisz to jako [ZAŁOŻENIE RYNKOWE].
 
 === HISTORIA CZATU Z KOSZTORYSANTEM ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
@@ -393,7 +425,12 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
             });
         });
 
-        const parsedResult = JSON.parse(result.text ?? "{}");
+        let parsedResult: any = {};
+        try {
+            parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
+        } catch (e) {
+            console.error("[MÓZG 🧠] Krytyczny błąd parsowania JSON:", e);
+        }
         console.log(`[MÓZG 🧠] Next Best Action: ${parsedResult.nextBestAction}`);
         console.log(`[MÓZG 🧠] Self-Critique: ${parsedResult.selfCritique?.substring(0, 80)}...`);
 

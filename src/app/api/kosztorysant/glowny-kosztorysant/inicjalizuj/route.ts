@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -76,72 +77,73 @@ export async function POST(req: Request) {
         let totalTokensUsed = 0;
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
 
-        for (let i = 0; i < snapshot.docs.length; i++) {
-            const docSnap = snapshot.docs[i];
-            const docData = docSnap.data();
+        const BATCH_SIZE = 6;
+        for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
+            const batch = snapshot.docs.slice(i, i + BATCH_SIZE);
+            console.log(`[FAZA 0 🚀] Skanuję paczkę plików ${i + 1} do ${Math.min(i + BATCH_SIZE, snapshot.docs.length)}...`);
 
-            if (i > 0) {
-                // Krótki odstęp chroniący przed przeciążeniem API
-                await new Promise(resolve => setTimeout(resolve, 1500));
-            }
+            await Promise.all(batch.map(async (docSnap) => {
+                const docData = docSnap.data();
+                console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
 
-            console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
-
-            try {
-                const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-
-                const prompt = `
+                try {
+                    const fileUri = `gs://${bucketName}/${docData.storagePath}`;
+                    const prompt = `
 Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
 Przeanalizuj pierwszą stronę lub spis treści tego dokumentu budowlanego. 
 Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy dokument zawiera tabele wymiarowe lub rysunki techniczne.
 `;
 
-                const result = await callGeminiWithRetry(async () => {
-                    return await ai.models.generateContent({
-                        model: MODEL_LITE,
-                        contents: [
-                            {
+                    const result = await callGeminiWithRetry(async () => {
+                        return await ai.models.generateContent({
+                            model: MODEL_LITE,
+                            contents: [{
                                 role: "user",
                                 parts: [
                                     { text: prompt },
-                                    {
-                                        fileData: {
-                                            fileUri: fileUri,
-                                            mimeType: docData.mimeType || "application/pdf"
-                                        }
-                                    }
+                                    { fileData: { fileUri: fileUri, mimeType: docData.mimeType || "application/pdf" } }
                                 ]
+                            }],
+                            config: {
+                                temperature: 0.1,
+                                responseMimeType: "application/json",
+                                responseSchema: CLASSIFIER_SCHEMA as any
                             }
-                        ],
-                        config: {
-                            temperature: 0.1,
-                            responseMimeType: "application/json",
-                            responseSchema: CLASSIFIER_SCHEMA as any
-                        }
+                        });
                     });
-                });
 
-                const parsedResult = JSON.parse(result.text ?? "{}");
-                const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
-                totalTokensUsed += tokensUsed;
+                    let parsedResult: any = {};
+                    try {
+                        parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
+                    } catch (e) {
+                        console.error(`[FAZA 0 🚀] Błąd parsowania JSON dla ${docData.fileName}`);
+                    }
 
-                // Zapisujemy nowe flagi bezpośrednio do metadanych dokumentu w Firestore
-                await docSnap.ref.update({
-                    tags: parsedResult.tags,
-                    summary: parsedResult.summary,
-                    detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
-                    containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
-                    containsDrawings: parsedResult.containsDrawings || false,
-                    status: "CLASSIFIED",
-                    classifyModel: MODEL_LITE,
-                    updatedAt: new Date()
-                });
+                    const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+                    totalTokensUsed += tokensUsed;
 
-                console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
+                    await docSnap.ref.update({
+                        tags: parsedResult.tags || [],
+                        summary: parsedResult.summary || "(brak)",
+                        detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
+                        containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
+                        containsDrawings: parsedResult.containsDrawings || false,
+                        status: "CLASSIFIED",
+                        classifyModel: MODEL_LITE,
+                        updatedAt: new Date()
+                    });
 
-            } catch (docError: any) {
-                console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
-                await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
+                    console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
+
+                } catch (docError: any) {
+                    console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
+                    await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
+                }
+            }));
+
+            // Przerwa tylko między paczkami, a nie pojedynczymi plikami
+            if (i + BATCH_SIZE < snapshot.docs.length) {
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
 

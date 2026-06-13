@@ -115,6 +115,10 @@ export default function EstimatorPage() {
     const [savedTendersList, setSavedTendersList] = useState<Array<{ id: string; name: string }>>([]);
     const [assumptionsAccepted, setAssumptionsAccepted] = useState(false);
 
+    // Stany dla Podglądu PDF
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+
     const chatEndRef = useRef<HTMLDivElement | null>(null);
 
     // Automatyczne przewijanie czatu
@@ -430,8 +434,29 @@ export default function EstimatorPage() {
                     {documents.length > 0 && (
                         <div className="space-y-1.5">
                             {documents.map(doc => (
-                                <div key={doc.id} className="bg-slate-950 p-2 rounded-xl border border-slate-800/50 flex flex-col gap-1">
+                                <div
+                                    key={doc.id}
+                                    onClick={async () => {
+                                        if (doc.tags.includes("INNY")) return; // Zabezpieczenie przed dziwnymi plikami
+                                        setIsLoadingPreview(true);
+                                        setPreviewUrl(null); // Reset
+                                        try {
+                                            const res = await fetch("/api/kosztorysant/dokumenty/podglad", {
+                                                method: "POST", headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ storagePath: `tenders/${activeTenderId}/documents/${doc.fileName}` })
+                                            });
+                                            const data = await res.json();
+                                            if (data.url) setPreviewUrl(data.url);
+                                        } catch (e) { alert("Nie udało się pobrać podglądu."); }
+                                        setIsLoadingPreview(false);
+                                    }}
+                                    className="bg-slate-950 p-2 rounded-xl border border-slate-800/50 flex flex-col gap-1 cursor-pointer hover:border-blue-500/50 transition-colors group"
+                                >
                                     <div className="flex justify-between items-center">
+                                        <div className="flex items-center gap-1.5 truncate">
+                                            <span className="text-[10px] group-hover:text-blue-400 transition-colors">📄</span>
+                                            <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[150px] group-hover:text-blue-300">{doc.fileName}</span>
+                                        </div>
                                         <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[180px]">{doc.fileName}</span>
                                         <span className="text-[8px] text-slate-500 uppercase">{doc.status}</span>
                                     </div>
@@ -646,6 +671,36 @@ export default function EstimatorPage() {
                             </div>
                         ))}
                     </div>
+                </div>
+            </div>
+
+            {/* BOCZNY DRAWER PODGLĄDU PDF */}
+            <div className={`absolute top-0 right-0 h-full bg-slate-900 border-l border-slate-700 shadow-2xl transition-all duration-300 ease-in-out z-50 flex flex-col ${previewUrl || isLoadingPreview ? 'w-1/2 translate-x-0' : 'w-0 translate-x-full'}`}>
+                <div className="flex justify-between items-center p-3 border-b border-slate-800 bg-slate-950 flex-shrink-0">
+                    <h3 className="text-xs font-black uppercase text-blue-400 flex items-center gap-2">
+                        👁️ Podgląd Dokumentu
+                    </h3>
+                    <button
+                        onClick={() => setPreviewUrl(null)}
+                        className="bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors"
+                    >
+                        Zamknij ✕
+                    </button>
+                </div>
+                <div className="flex-1 bg-slate-950/50 flex items-center justify-center relative">
+                    {isLoadingPreview && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                            <span className="text-3xl animate-spin mb-3">⚙️</span>
+                            <span className="text-xs font-bold uppercase">Pobieranie pliku z chmury...</span>
+                        </div>
+                    )}
+                    {previewUrl && (
+                        <iframe
+                            src={previewUrl}
+                            className="w-full h-full border-none"
+                            title="PDF Preview"
+                        />
+                    )}
                 </div>
             </div>
 

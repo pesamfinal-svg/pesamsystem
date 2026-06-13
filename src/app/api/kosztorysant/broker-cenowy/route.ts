@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 
 export const dynamic = "force-dynamic";
 
@@ -127,7 +128,7 @@ Miej na uchu by oddalać sklepy OBI Casto za nie-inzynieryjne odleglości marz h
             });
 
             console.log("[BROKER R-M-S 💰] Uzykał rynnę kwotowania od hurtowieni! Ukladam je wg id...");
-            const structuredResponses = JSON.parse(searchResult.text ?? "{}");
+            const structuredResponses = JSON.parse(jsonrepair(searchResult.text ?? "{}"));
             totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
 
             const responseMapDict = new Map<string, any>(

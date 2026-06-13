@@ -6,6 +6,7 @@ import { Agent, setGlobalDispatcher } from "undici";
 // Zwiększenie limitu oczekiwania na odpowiedź z API Gemini do 5 minut (300 000 ms)
 setGlobalDispatcher(new Agent({ headersTimeout: 300000, bodyTimeout: 300000 }));
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 import * as xlsx from "xlsx";
 
 export const dynamic = "force-dynamic";
@@ -296,7 +297,9 @@ export async function POST(req: Request) {
                         })
                     );
 
-                    const parsed = JSON.parse(result.text ?? "{}");
+                    let parsed: any = {};
+                    try { parsed = JSON.parse(jsonrepair(result.text ?? "{}")); }
+                    catch (e) { console.error("Błąd parsowania:", e); }
                     totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
                     if (parsed.items) allExtractedItems.push(...parsed.items);
                     processingLog.push(`✅ Excel "${docData.fileName}": wyciągnięto ${parsed.items?.length || 0} pozycji (model: ${MODEL_FLASH})`);
@@ -330,7 +333,9 @@ export async function POST(req: Request) {
                         })
                     );
 
-                    const parsed = JSON.parse(result.text ?? "{}");
+                    let parsed: any = {};
+                    try { parsed = JSON.parse(jsonrepair(result.text ?? "{}")); }
+                    catch (e) { console.error("Błąd parsowania:", e); }
                     totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
                     if (parsed.items) allExtractedItems.push(...parsed.items);
                     processingLog.push(`✅ PDF "${docData.fileName}": wyciągnięto ${parsed.items?.length || 0} pozycji (model: ${modelToUse})`);

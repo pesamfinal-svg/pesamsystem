@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 
 export const dynamic = "force-dynamic";
 
@@ -149,7 +150,7 @@ Ważne zasady:
                 });
 
                 console.log(`[KAMELEON 🦎] Odebrano odpowiedź z Gemini dla pliku: ${docData.fileName}. Parsuję JSON...`);
-                const parsedResult = JSON.parse(result.text ?? "{}");
+                const parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
                 const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
                 totalTokensUsed += tokensUsed;
 

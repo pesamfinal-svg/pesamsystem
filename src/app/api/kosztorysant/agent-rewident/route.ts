@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
-import { randomUUID } from "crypto";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -14,6 +14,8 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
+// Sędzia wykonuje skomplikowaną analizę prawno-techniczną, dlatego używa modelu PRO
+const MODEL_PRO = "gemini-2.5-pro";
 const MODEL_FLASH = "gemini-2.5-flash";
 
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
@@ -23,7 +25,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const errorText = error.toString() || "";
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
-            console.warn(`[BROKER 💰] Limit 429. Odczekuję ${delay / 1000}s...`);
+            console.warn(`[REVISOR_JUDGE ⚖️] Limit 429. Czekam ${delay / 1000}s... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -31,26 +33,36 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
     }
 }
 
-const BROKER_RMS_SCHEMA = {
+// Rygorystyczny schemat wyjściowy werdyktu sędziowskiego
+const VERDICT_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        prices: {
-            type: Type.ARRAY,
-            description: "Odłowiona paleta wycen dla hurtownego lub parametrycznie wykonanego składu rynków (Polska).",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    id: { type: Type.STRING },
-                    R_KosztNetto: { type: Type.NUMBER, description: "Taryfikacja Pracy i brygady [Robocizna na 1 JEDNOSTKĘ] zł" },
-                    M_KosztHurtowyNetto: { type: Type.NUMBER, description: "B2B [Materiał]: Czysto materiał bez prac narzutowych z katalogów KNR" },
-                    S_KosztSprzetuNetto: { type: Type.NUMBER, description: "[Sprzęt ciężki lub elektronarzedzi do tego procesu]" },
-                    bazaCennikowZrodla: { type: Type.STRING, description: "Link lub krótka adnotacja katalogu norm dla audytu." }
-                },
-                required: ["id", "R_KosztNetto", "M_KosztHurtowyNetto", "S_KosztSprzetuNetto", "bazaCennikowZrodla"]
-            }
+        decision: {
+            type: Type.STRING,
+            description: "Jednoznaczna decyzja merytoryczna rozstrzygająca spór (które twierdzenie jest prawidłowe i dlaczego w 1 zdaniu)."
+        },
+        justification: {
+            type: Type.STRING,
+            description: "Pełne uzasadnienie prawne i techniczne z powołaniem na przepisy (WT 2021, PZP, Polskie Normy)."
+        },
+        winningParty: {
+            type: Type.STRING,
+            description: "Nazwa agenta, którego twierdzenie wygrało (np. 'VISION', 'BUDOWLANIEC'), lub 'ESCALATE' jeśli sprawa wymaga interwencji człowieka."
+        },
+        confidence: {
+            type: Type.NUMBER,
+            description: "Pewność wyroku w skali 0-100."
+        },
+        requiresUserDecision: {
+            type: Type.BOOLEAN,
+            description: "Ustaw na true, jeśli sprawa jest zbyt niejednoznaczna lub wymaga decyzji biznesowej użytkownika."
+        },
+        additionalFindings: {
+            type: Type.STRING,
+            description: "Opcjonalne dodatkowe ustalenia faktyczne przydatne dla kosztorysu."
         }
     },
-    required: ["prices"]
+    required: ["decision", "justification", "winningParty", "confidence", "requiresUserDecision"]
 };
 
 export async function POST(req: Request) {
@@ -63,156 +75,235 @@ export async function POST(req: Request) {
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        console.log(`[BROKER 💰] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
+        console.log(`[REVISOR_JUDGE ⚖️] Start sesji orzekania. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak Danych" }, { status: 400 });
+        if (!tenderId || !taskId) {
+            return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
         if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
 
         const taskData = taskDoc.data()!;
-        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie już obsłużone." });
+        if (taskData.status !== "PENDING") {
+            return NextResponse.json({ message: "Zadanie zostało już obsłużone." });
+        }
 
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`);
-        const sectionsSnap = await estimateRef.where("status", "==", "QUANTITY_READY").get();
+        // 1. Pobieranie otwartych konfliktów z bazy danych
+        const conflictsRef = adminDb.collection(`tenders/${tenderId}/conflicts`);
+        const openConflictsSnap = await conflictsRef
+            .where("status", "in", ["OPEN", "INVESTIGATING"])
+            .get();
 
-        if (sectionsSnap.empty) {
-            await taskRef.update({ status: "DONE", rawResult: { message: "Brak sekcji do wyceny." }, processedByBrain: false, updatedAt: new Date() });
+        if (openConflictsSnap.empty) {
+            console.log("[REVISOR_JUDGE ⚖️] Brak otwartych konfliktów do rozstrzygnięcia. Zamykam sesję.");
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { summary: "Brak otwartych konfliktów do rozpatrzenia.", resolvedCount: 0 },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
             isSuccess = true;
-            return NextResponse.json({ message: "Sekcje Empty!" });
+            return NextResponse.json({ success: true, resolvedCount: 0 });
         }
 
+        console.log(`[REVISOR_JUDGE ⚖️] Znaleziono ${openConflictsSnap.size} otwartych konfliktów do zbadania.`);
+
+        // 2. Pobieranie kontekstu poznawczego z Mózgu i GCS
+        const [docsSnap, brainSnap] = await Promise.all([
+            adminDb.collection(`tenders/${tenderId}/documents`).get(),
+            adminDb.collection(`tenders/${tenderId}/brain`).doc("main").get()
+        ]);
+
+        const documentsList = docsSnap.docs.map(d => ({
+            id: d.id,
+            fileName: d.data().fileName,
+            tags: d.data().tags || [],
+            summary: d.data().summary || "(brak)",
+            detailedElement: d.data().detailedElement || "NIE_DOTYCZY"
+        }));
+
+        const brainKnownFacts = brainSnap.exists
+            ? (brainSnap.data()?.cognitiveState?.knownFacts || {})
+            : {};
+
         let totalTokensUsed = 0;
-        let pricedItemsCount = 0;
-        const globalBatch = adminDb.batch();
+        let resolvedCount = 0;
+        let escalatedCount = 0;
 
-        for (const sectionDoc of sectionsSnap.docs) {
-            const sectionId = sectionDoc.id;
-            const itemsSnap = await estimateRef.doc(sectionId).collection("items").get();
-            const itemsInDB = itemsSnap.docs.map(d => ({ dbId: d.id, ...d.data() }));
+        // 3. Pętla rozstrzygania spraw
+        for (const conflictDoc of openConflictsSnap.docs) {
+            const conflict = conflictDoc.data();
+            console.log(`[REVISOR_JUDGE ⚖️] ──────────────────────────────────────────────────`);
+            console.log(`[REVISOR_JUDGE ⚖️] Rozpatruję sprawę: "${conflict.topic}" (ID: ${conflictDoc.id})`);
 
-            if (itemsInDB.length === 0) continue;
+            await conflictDoc.ref.update({ status: "INVESTIGATING", updatedAt: new Date() });
 
-            const searchQueryInput = itemsInDB.map((i: any) =>
-                `Dok_ID: ${i.dbId} | Norma/Typ: ${i.KNR_ref || i.pozycja} | Robota Inż.: ${i.opis.substring(0, 60)} | Unit: ${i.jednostka}`
-            ).join("\n");
-
-            // KROK 1: Szukanie cen w sieci (Surowy tekst)
-            console.log("[BROKER 💰] KROK 1: Przeszukiwanie sieci (Google Search)...");
+            // Krok 3a: Analiza prawno-techniczna z wyszukiwarką Google (Model PRO)
             const searchPrompt = `
-Jesteś Brokerem Wycen w sieci Polskich Dystrybucji Norm / Używającym B2B standardu rynkowego.
-Użyj wyszukiwarki Google Search, aby znaleźć aktualne rynkowe stawki wykonawcze (Robocizna, Materiały, Sprzęt) w Polsce dla pozycji:
-${searchQueryInput}
+Jesteś Sędzią Techniczno-Prawnym (REVISOR_JUDGE) w polskim systemie zamówień publicznych.
+Musisz rozstrzygnąć następujący spór merytoryczny w kosztorysie budowlanym:
 
-Zadanie: ${taskData.instruction}
+=== TEMAT SPORU ===
+${conflict.topic}
 
-Napisz szczegółowy raport cenowy rynkowy dla każdej pozycji.
+=== STANOWISKA STRON ===
+${(conflict.parties || []).map((p: any, i: number) => `
+Strona ${i + 1} – Agent "${p.agent}":
+  Twierdzenie: "${p.claim}"
+  Dokument źródłowy: "${p.sourceDoc || "brak"}"
+`).join("\n")}
+
+=== ZNANY KONTEKST PROJEKTU ===
+Fakty poznawcze: ${JSON.stringify(brainKnownFacts).substring(0, 1500)}
+Wykaz dokumentów: ${documentsList.map(d => `[${d.tags.join(",")}] ${d.fileName} (${d.detailedElement}): ${d.summary}`).join("\n").substring(0, 1500)}
+
+=== INSTRUKCJA OD MÓZGU ===
+${taskData.instruction || "Rozstrzygnij spór zgodnie z hierarchią ważności dokumentów."}
+
+=== ZASADY ORZEKANIA (HIERARCHIA WAŻNOŚCI) ===
+1. Zapisy SWZ (Specyfikacja Warunków Zamówienia) mają BEZWZGLĘDNE pierwszeństwo przed innymi plikami.
+2. Projekt Budowlany / Projekt Zagospodarowania Terenu (PZT).
+3. Warunki Techniczne (WT 2021) oraz Polskie Normy (PN-EN).
+4. Rysunki pomocnicze i opisy technologii.
+5. Ogólne standardy branżowe.
+
+Użyj wyszukiwarki Google Search aby:
+- Sprawdzić aktualne przepisy techniczno-budowlane (WT 2021) dla tego sporu.
+- Zweryfikować normy i interpretacje Urzędu Zamówień Publicznych (UZP) / KIO.
+
+Napisz szczegółowe uzasadnienie wyroku z powołaniem na konkretne dokumenty i paragrafy ustaw.
 `;
 
-            const searchResult = await callGeminiWithRetry(async () => {
-                return await ai.models.generateContent({
-                    model: taskData.modelOverride || MODEL_FLASH,
+            const searchResult = await callGeminiWithRetry(() =>
+                ai.models.generateContent({
+                    model: MODEL_PRO,
                     contents: searchPrompt,
                     config: {
                         tools: [{ googleSearch: {} }],
                         temperature: 0.1
                     }
-                });
-            });
-
-            const rawReport = searchResult.text ?? "";
-            totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
-
-            // KROK 2: Strukturyzacja cen na JSON (Bez Search)
-            console.log("[BROKER 💰] KROK 2: Strukturyzacja wycen na JSON...");
-            const structurePrompt = `
-Na podstawie poniższego raportu z badania cen rynkowych, wyodrębnij wyceny i sformatuj je zgodnie ze schematem JSON.
-
-Raport z cenami:
-${rawReport}
-`;
-
-            const structureResult = await callGeminiWithRetry(async () => {
-                return await ai.models.generateContent({
-                    model: MODEL_FLASH,
-                    contents: structurePrompt,
-                    config: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json",
-                        responseSchema: BROKER_RMS_SCHEMA as any
-                    }
-                });
-            });
-
-            const structuredResponses = JSON.parse(structureResult.text ?? "{}");
-            totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
-
-            const responseMapDict = new Map<string, any>(
-                (structuredResponses.prices || []).map((bData: any) => [bData.id, bData])
+                })
             );
 
-            let calculatedTotalValue = 0;
+            const legalAnalysis = searchResult.text ?? "";
+            totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
+            console.log(`[REVISOR_JUDGE ⚖️] Analiza dowodowa i prawna ukończona pomyślnie.`);
 
-            for (const itemDBCache of itemsSnap.docs) {
-                const liveObj = itemDBCache.data();
-                const fetchedAgentBreak = responseMapDict.get(itemDBCache.id) || null;
+            // Krok 3b: Kognitywna synteza werdyktu do ustrukturyzowanego formatu JSON
+            const verdictPrompt = `
+Na podstawie poniższej analizy prawnej, wydaj ostateczny werdykt dla sporu.
 
-                if (fetchedAgentBreak) {
-                    const jnTotNetto = (Number(fetchedAgentBreak.R_KosztNetto) || 0) + (Number(fetchedAgentBreak.M_KosztHurtowyNetto) || 0) + (Number(fetchedAgentBreak.S_KosztSprzetuNetto) || 0);
-                    calculatedTotalValue += (Number(liveObj.ilosc) || 0) * jnTotNetto;
+=== ANALIZA PRAWNO-TECHNICZNA ===
+${legalAnalysis}
 
-                    const modifiedDescription = `${liveObj.opis || ""} | [WYCENA WSK. HURT RMS/B2B: R:${fetchedAgentBreak.R_KosztNetto || 0}zł / M:${fetchedAgentBreak.M_KosztHurtowyNetto || 0}zł / S:${fetchedAgentBreak.S_KosztSprzetuNetto || 0}zł | Z:(Goo Search Baza -> ${fetchedAgentBreak.bazaCennikowZrodla})].`;
+=== STRONY SPORU ===
+${JSON.stringify(conflict.parties || [])}
 
-                    globalBatch.update(itemDBCache.ref, {
-                        cenaJed: jnTotNetto,
-                        opis: modifiedDescription,
-                        confidence: "HIGH",
-                        sourceTrack: `${liveObj.sourceTrack || "Z narzuta B2B"} 💰 Pieniądze B2B`
-                    });
-                    pricedItemsCount++;
-                }
+Zwróć czysty obiekt JSON pasujący dokładnie do schematu.
+`;
+
+            const verdictResult = await callGeminiWithRetry(() =>
+                ai.models.generateContent({
+                    model: MODEL_FLASH,
+                    contents: verdictPrompt,
+                    config: {
+                        temperature: 0.05,
+                        responseMimeType: "application/json",
+                        responseSchema: VERDICT_SCHEMA as any
+                    }
+                })
+            );
+
+            totalTokensUsed += verdictResult.usageMetadata?.totalTokenCount || 0;
+
+            let verdict: any = {};
+            try {
+                verdict = JSON.parse(jsonrepair(verdictResult.text ?? "{}"));
+            } catch (parseErr) {
+                console.error(`[REVISOR_JUDGE ⚖️] Błąd parsowania wyroku dla "${conflict.topic}":`, parseErr);
+                verdict = {
+                    decision: "Wymaga ręcznej weryfikacji ze względu na błąd techniczny generatora.",
+                    justification: legalAnalysis.substring(0, 500),
+                    winningParty: "ESCALATE",
+                    confidence: 0,
+                    requiresUserDecision: true
+                };
             }
 
-            globalBatch.update(sectionDoc.ref, {
-                totalValue: calculatedTotalValue,
-                status: "PRICED",
+            const newStatus = verdict.requiresUserDecision ? "ESCALATED_TO_USER" : "RESOLVED";
+
+            // Krok 3c: Zapis werdyktu bezpośrednio do dokumentu konfliktu w Firestore
+            await conflictDoc.ref.update({
+                status: newStatus,
+                resolution: {
+                    decision: verdict.decision || "Brak jednoznacznej decyzji",
+                    justification: verdict.justification || legalAnalysis.substring(0, 1000),
+                    winningParty: verdict.winningParty || "UNKNOWN",
+                    confidence: verdict.confidence || 0,
+                    additionalFindings: verdict.additionalFindings || null,
+                    resolvedBy: "REVISOR_JUDGE",
+                    resolvedAt: new Date()
+                },
                 updatedAt: new Date()
             });
+
+            if (newStatus === "RESOLVED") {
+                resolvedCount++;
+                console.log(`[REVISOR_JUDGE ⚖️] Sprawa ROZSTRZYGNIĘTA. Wygrany: ${verdict.winningParty} (pewność: ${verdict.confidence}%)`);
+            } else {
+                escalatedCount++;
+                console.log(`[REVISOR_JUDGE ⚖️] Sprawa ESKALOWANA do Kosztorysanta ze względu na niejednoznaczność.`);
+            }
         }
 
-        globalBatch.update(taskRef, {
+        // 4. Zamykanie zadania dla Mózgu
+        await taskRef.update({
             status: "DONE",
-            rawResult: { pricedOutQuant: pricedItemsCount },
+            rawResult: {
+                summary: `Sesja orzekania zakończona. Spraw rozpatrzonych: ${openConflictsSnap.size}. Rozstrzygnięto: ${resolvedCount}. Eskalowano: ${escalatedCount}.`,
+                resolvedCount,
+                escalatedCount,
+                totalConflicts: openConflictsSnap.size
+            },
             processedByBrain: false,
             costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        const costToDBStore = (totalTokensUsed / 1000) * 0.000015;
-        globalBatch.update(adminDb.collection("tenders").doc(tenderId), { "budgetGuard.currentCostUSD": FieldValue.increment(costToDBStore) });
+        const costUSD = (totalTokensUsed / 1000) * 0.002;
+        await adminDb.collection("tenders").doc(tenderId).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        });
 
-        await globalBatch.commit();
         isSuccess = true;
-        console.log("[BROKER 💰] Sukces.");
-        return NextResponse.json({ success: true, billedItemZ: pricedItemsCount });
+        console.log(`[REVISOR_JUDGE ⚖️] ✅ Protokół podpisany. Rozstrzygnięto: ${resolvedCount}.`);
+        return NextResponse.json({ success: true, resolvedCount, escalatedCount });
 
-    } catch (errx: any) {
-        console.error("[BROKER 💰] ❌ Błąd:", errx);
+    } catch (error: any) {
+        console.error("[REVISOR_JUDGE ⚖️] ❌ Krytyczny błąd posiedzenia sądu:", error);
         if (tenderId && taskId) {
             await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                status: "ERROR", rawResult: { error: errx.message }, processedByBrain: false, updatedAt: new Date()
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
             }).catch(() => { });
         }
-        return NextResponse.json({ error: errx.message }, { status: 500 });
+        return NextResponse.json({ error: error.message }, { status: 500 });
     } finally {
         if (tenderId && taskId) {
             const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
             }).catch(() => { });
         }
     }
