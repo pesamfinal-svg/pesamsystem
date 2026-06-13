@@ -27,6 +27,10 @@ const CLASSIFIER_SCHEMA = {
             type: Type.STRING,
             description: "Maksymalnie 2-zdaniowe streszczenie zawartości pliku."
         },
+        detailedElement: {
+            type: Type.STRING,
+            description: "Konkretny, szczegółowy element budowlany, którego dotyczy rysunek/dokument wyciągnięty z tabelki rysunkowej (np. 'płyta fundamentowa', 'strop nad parterem', 'zbrojenie słupów', 'elewacja południowa', 'szczegół dachu', 'winda'). Wpisz 'NIE_DOTYCZY' jeśli to ogólny dokument tekstowy jak SWZ."
+        },
         containsTablesWithDimensions: {
             type: Type.BOOLEAN,
             description: "Czy dokument zawiera tabele z przedmiarami, obmiarami lub wymiarami fizycznymi obiektu."
@@ -36,7 +40,7 @@ const CLASSIFIER_SCHEMA = {
             description: "Czy dokument zawiera rysunki techniczne, rzuty, przekroje, schematy lub inną dokumentację graficzną."
         }
     },
-    required: ["tags", "summary", "containsTablesWithDimensions", "containsDrawings"]
+    required: ["tags", "summary", "detailedElement", "containsTablesWithDimensions", "containsDrawings"]
 };
 
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
@@ -125,6 +129,7 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy 
                 await docSnap.ref.update({
                     tags: parsedResult.tags,
                     summary: parsedResult.summary,
+                    detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
                     containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
                     containsDrawings: parsedResult.containsDrawings || false,
                     status: "CLASSIFIED",

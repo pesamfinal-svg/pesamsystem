@@ -31,6 +31,10 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
     }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// BRAIN SCHEMA — dynamiczny extractionProfile w newTasks
+// ─────────────────────────────────────────────────────────────────
+
 const BRAIN_SCHEMA = {
     type: Type.OBJECT,
     properties: {
@@ -56,72 +60,64 @@ const BRAIN_SCHEMA = {
         },
         cognitiveState: {
             type: Type.OBJECT,
-            description: `Twój wewnętrzny stan poznawczy inwestycji. Ewoluuje z każdym cyklem. Nie masz zakodowanych sztywno branż – sam je budujesz.`,
+            description: `Twój wewnętrzny stan poznawczy inwestycji. Ewoluuje z każdym cyklem.`,
             properties: {
                 worldModel: {
                     type: Type.ARRAY,
-                    description: `Opisz tu hierarchiczny, strukturalny model obiektu, który wyłania się z danych.`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
-                            entity: { type: Type.STRING, description: "Nazwa elementu, np. 'Budynek główny', 'Dach', 'Instalacja elektryczna'" },
-                            confidence: { type: Type.NUMBER, description: "Pewność istnienia i struktury (0-100)" },
-                            attributes: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Cechy, np. 'Powierzchnia: 2500m2', 'Konstrukcja: Żelbet'" },
-                            subElements: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Lista nazw elementów podrzędnych" }
+                            entity: { type: Type.STRING },
+                            confidence: { type: Type.NUMBER },
+                            attributes: { type: Type.ARRAY, items: { type: Type.STRING } },
+                            subElements: { type: Type.ARRAY, items: { type: Type.STRING } }
                         },
                         required: ["entity", "confidence", "attributes", "subElements"]
                     }
                 },
-                knownFacts: {
-                    type: Type.OBJECT,
-                    description: `Słownik twardych faktów bez cienia wątpliwości (np. nazwa inwestora, dokładny adres, wymiar z rysunku).`
-                },
+                knownFacts: { type: Type.OBJECT },
                 hypotheses: {
                     type: Type.ARRAY,
-                    description: `Twoje hipotezy (np. "To prawdopodobnie budynek pasywny"). Zawsze weryfikuj (Belief Revision).`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             statement: { type: Type.STRING },
-                            confidence: { type: Type.NUMBER, description: "Pewność (0-100)" },
-                            evidence: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Lista twardych dowodów (np. 'Wzmianka w SWZ str. 5')" }
+                            confidence: { type: Type.NUMBER },
+                            evidence: { type: Type.ARRAY, items: { type: Type.STRING } }
                         },
                         required: ["statement", "confidence", "evidence"]
                     }
                 },
                 assumptions: {
                     type: Type.ARRAY,
-                    description: `Twarde założenia by wycenić braki (np. "Zakładam fundamenty żelbetowe ciągłe").`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             statement: { type: Type.STRING },
-                            confidence: { type: Type.NUMBER, description: "Pewność (0-100)" },
-                            evidence: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Z czego to wywnioskowałeś? (np. 'Typowy standard dla szkół wg norm')" }
+                            confidence: { type: Type.NUMBER },
+                            evidence: { type: Type.ARRAY, items: { type: Type.STRING } }
                         },
                         required: ["statement", "confidence", "evidence"]
                     }
                 },
                 knowledgeGaps: {
                     type: Type.ARRAY,
-                    description: `Luki w wiedzy. ZAWSZE oceniaj ich 'economicImpactScore' – jak bardzo ten brak wiedzy rozsadzi kosztorys. Skupiaj się tylko na 80-100 pkt.`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             topic: { type: Type.STRING },
-                            economicImpactScore: { type: Type.NUMBER, description: "Wpływ na kosztorys w skali 1-100" }
+                            economicImpactScore: { type: Type.NUMBER }
                         },
                         required: ["topic", "economicImpactScore"]
                     }
                 },
                 failedStrategies: {
                     type: Type.ARRAY,
-                    description: `Pamięć błędów i ślepych uliczek. Co nie zadziałało? Zapisz by tego nie powtarzać.`,
                     items: {
                         type: Type.OBJECT,
                         properties: {
-                            strategy: { type: Type.STRING, description: "Np. 'Szukanie powierzchni dachu w dokumencie SWZ'" },
-                            reason: { type: Type.STRING, description: "Np. 'Agent nie znalazł, brak zapisu w tekście'" }
+                            strategy: { type: Type.STRING },
+                            reason: { type: Type.STRING }
                         },
                         required: ["strategy", "reason"]
                     }
@@ -132,17 +128,16 @@ const BRAIN_SCHEMA = {
         chatReply: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: `Komunikacja z użytkownikiem. UŻYwaj TYLKO ostateczności (spór prawny, brak finansowania). Nie pytaj o braki techniczne (masz hipotezy i narzędzia).`
+            description: `Komunikacja z użytkownikiem. Używaj TYLKO w ostateczności.`
         },
         newEstimateItems: {
             type: Type.ARRAY,
-            description: `KRYTYCZNE: Generuj pozycje TYLKO jeśli confidence >= 75% LUB (assumptionMode === true). W trybie assumptionMode każda pozycja MUSI zawierać prefiks [ZAŁOŻENIE RYNKOWE] w polu 'opis'.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
                     sectionName: { type: Type.STRING },
                     pozycja: { type: Type.STRING },
-                    opis: { type: Type.STRING, description: `Opis roboty. Oznacz w nim wyraźnie procent pewności (np. "Izolacja fundamentów [Pewność: 85%]").` },
+                    opis: { type: Type.STRING },
                     ilosc: { type: Type.NUMBER },
                     jednostka: { type: Type.STRING },
                     KNR_ref: { type: Type.STRING }
@@ -154,20 +149,48 @@ const BRAIN_SCHEMA = {
             type: Type.STRING,
             description: `PLANNING, WORKING, WAITING_INPUT lub DONE.`
         },
-        currentGoal: {
-            type: Type.STRING,
-            description: "Jedno zdanie: co próbujesz udowodnić / zweryfikować w tej turze."
-        },
+        currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
-            description: `Zadania dla Narzędzi. Wyślij narzędzie do zbadania 'knowledgeGaps' o najwyższym 'economicImpactScore'. Nigdy nie powtarzaj akcji z 'failedStrategies'.`,
+            description: `Zadania dla narzędzi. KLUCZOWE: dla BOQ_PARSER i VISION zawsze dołącz pole extractionProfile z niestandardowymi polami dopasowanymi do luki w wiedzy.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    agentType: { type: Type.STRING, description: "Wybierz nazwę dostępnego narzędzia." },
-                    instruction: { type: Type.STRING, description: `Rozkaz dla narzędzia. Czego konkretnie ma szukać by potwierdzić/obalić Twoją Hipotezę.` },
+                    agentType: { type: Type.STRING },
+                    instruction: { type: Type.STRING },
                     inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Klucze z knownFacts potrzebne narzędziu." }
+                    inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING } },
+
+                    // ── DYNAMICZNY PROFIL EKSTRAKCJI (Zaprojektowany przez Mózg) ──
+                    extractionProfile: {
+                        type: Type.OBJECT,
+                        description: `WYMAGANE dla BOQ_PARSER i VISION. Określa dynamiczny kontrakt pól, które agent ma wyciągnąć z dokumentu.`,
+                        properties: {
+                            contextLabel: {
+                                type: Type.STRING,
+                                description: "Nazwa kontekstu branżowego pisana dużymi literami z podkreśleniami, np. 'ZBROJENIE_SLUPOW', 'INSTALACJA_PV', 'NAWIERZCHNIA_ASPO'"
+                            },
+                            modelHint: {
+                                type: Type.STRING,
+                                description: "Rekomendacja modelu: 'PRO' dla rysunków/planów graficznych, 'FLASH' dla czystych tabel i tekstów."
+                            },
+                            customFields: {
+                                type: Type.ARRAY,
+                                description: "Dynamicznie zaprojektowane przez Ciebie zmienne, które chcesz wyciągnąć z pliku w tym zadaniu.",
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        name: { type: Type.STRING, description: "Unikalna nazwa zmiennej w camelCase, np. mocInstalacjiKwp, klasaStali, gruboscPodbudowyCm" },
+                                        type: { type: Type.STRING, description: "STRING, NUMBER lub BOOLEAN" },
+                                        description: { type: Type.STRING, description: "Precyzyjna instrukcja dla agenta, czego konkretnie ma szukać w pliku na potrzeby tego pola" }
+                                    },
+                                    required: ["name", "type", "description"]
+                                }
+                            }
+                        },
+                        required: ["contextLabel", "modelHint", "customFields"]
+                    }
+                    // ─────────────────────────────────────────────────────────
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
@@ -175,6 +198,34 @@ const BRAIN_SCHEMA = {
     },
     required: ["reasoning", "selfCritique", "nextBestAction", "assumptionMode", "assumptionDisclaimer", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
 };
+
+// Przewodnik projektowania pól na podstawie niepewności
+const EXTRACTION_PROFILES_GUIDE = `
+=== DYNAMICZNE PROFILE EKSTRAKCJI (extractionProfile) ===
+
+Kiedy zlecasz zadanie do BOQ_PARSER lub VISION, ZAWSZE dynamicznie projektuj strukturę bazy danych przez 'extractionProfile'. Ty decydujesz, jakie pola są kluczowe dla załatania luk (knowledgeGaps).
+
+ZASADY TWORZENIA PÓL (customFields):
+1. Dopasuj pola do specyfiki elementu w worldModel.
+2. Zmienne nazywaj w camelCase, określaj typ (STRING/NUMBER/BOOLEAN) i daj precyzyjny opis instrukcji.
+
+Przykład dla Instalacji Fotowoltaicznej:
+  contextLabel: "INSTALACJA_PV",
+  modelHint: "PRO",
+  customFields: [
+    { name: "mocModuluWp", type: "NUMBER", description: "Moc pojedynczego panelu w Wp" },
+    { name: "liczbaModulow", type: "NUMBER", description: "Łączna ilość modułów" },
+    { name: "typInwertera", type: "STRING", description: "Dokładny model/moc falownika" }
+  ]
+
+Przykład dla Robót Drogowych:
+  contextLabel: "ROBOTY_DROGOWE",
+  modelHint: "FLASH",
+  customFields: [
+    { name: "szerokoscJezdniM", type: "NUMBER", description: "Szerokość projektowanej jezdni w metrach" },
+    { name: "gruboscAsfaltuCm", type: "NUMBER", description: "Grubość warstwy ścieralnej w centymetrach" }
+  ]
+`;
 
 export async function POST(req: Request) {
     try {
@@ -187,28 +238,32 @@ export async function POST(req: Request) {
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
+        // Seeding agentów
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         if (agentRegistrySnap.empty) {
+            console.log("[MÓZG 🧠] Seeding bazy agentów...");
             const defaultAgents = [
-                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Narzędzie (Skaner). Czyta wymiary, przekroje i legendy z PDF z rysunkami." },
+                { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Narzędzie (Skaner). Czyta wymiary, przekroje i legendy z PDF z rysunkami. WYMAGA extractionProfile." },
                 { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Narzędzie (Skaner tekstu). Szuka słów kluczowych o umowach, karach i SWZ." },
                 { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Odpal by przemnożyć setki liczb wyciągniętych przez inne narzędzia." },
                 { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wezwij by wrzucił ceny R/M/S do gotowych pozycji." },
                 { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla np. szkół czy bloków, gdy masz lukę." },
                 { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Narzędzie (Audytor Prawny). Waliduje gotowe pozycje z WT2021 i PPOŻ." },
                 { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo to, co ma 'economicImpactScore' wysoki a brakuje rysunków." },
-                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów." },
+                { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów. WYMAGA extractionProfile." },
                 { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta dziwne i wąskie opisy technologii." },
                 { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Narzędzie (Solver konfliktów)." },
                 { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki pdf w wymiar 3D." }
             ];
             const seedBatch = adminDb.batch();
-            for (const agent of defaultAgents) seedBatch.set(adminDb.collection("agentRegistry").doc(agent.name), agent);
+            for (const agent of defaultAgents)
+                seedBatch.set(adminDb.collection("agentRegistry").doc(agent.name), agent);
             await seedBatch.commit();
             agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         }
         const availableAgents = agentRegistrySnap.docs.map(d => d.data());
 
+        // Sprawdzanie timeoutów zadań
         const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
         const now = Date.now();
         const TIMEOUT_MS = 10 * 60 * 1000;
@@ -219,12 +274,8 @@ export async function POST(req: Request) {
             const data = doc.data();
             const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
             if (now - lastActive >= TIMEOUT_MS) {
-                lockBatch.update(doc.ref, {
-                    status: "ERROR",
-                    rawResult: { error: "TIMEOUT_EXCEEDED" },
-                    processedByBrain: false,
-                    updatedAt: new Date()
-                });
+                console.log(`[MÓZG 🧠] Oznaczam zawieszone zadanie ${doc.id} jako ERROR.`);
+                lockBatch.update(doc.ref, { status: "ERROR", rawResult: { error: "TIMEOUT_EXCEEDED" }, processedByBrain: false, updatedAt: new Date() });
             } else {
                 trulyActiveCount++;
             }
@@ -237,15 +288,8 @@ export async function POST(req: Request) {
         }
         await lockBatch.commit();
 
-        const [
-            docsSnap,
-            brainSnap,
-            unprocessedTasksSnap,
-            tenderDoc,
-            chatHistSnap,
-            estimateSnap,
-            allTasksHistorySnap
-        ] = await Promise.all([
+        // Pobieranie danych wejściowych i stanu Roju
+        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc, chatHistSnap, estimateSnap, allTasksHistorySnap] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
@@ -268,17 +312,22 @@ export async function POST(req: Request) {
 
         const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
         const currentCognitiveState = currentBrainData?.cognitiveState || {
-            worldModel: [],
-            knownFacts: {},
-            hypotheses: [],
-            assumptions: [],
-            knowledgeGaps: [],
-            failedStrategies: []
+            worldModel: [], knownFacts: {}, hypotheses: [], assumptions: [], knowledgeGaps: [], failedStrategies: []
         };
 
         const chatHistory = chatHistSnap.docs.map(c => ({ rola: c.data().role, treść: c.data().content }));
-        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({ taskId: d.id, agentType: d.data().agentType, status: d.data().status, instruction: d.data().instruction, rawResult: d.data().rawResult }));
-        const taskHistory = allTasksHistorySnap.docs.map(d => ({ agentType: d.data().agentType, status: d.data().status, resultSummary: d.data().status === "DONE" ? (d.data().rawResult?.summary || `Wykonano`) : (d.data().rawResult?.error || "BŁĄD") }));
+        const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
+            taskId: d.id, agentType: d.data().agentType, status: d.data().status,
+            instruction: d.data().instruction, rawResult: d.data().rawResult,
+            extractionProfile: d.data().extractionProfile || null
+        }));
+        const taskHistory = allTasksHistorySnap.docs.map(d => ({
+            agentType: d.data().agentType, status: d.data().status,
+            resultSummary: d.data().status === "DONE"
+                ? (d.data().rawResult?.summary || "Wykonano")
+                : (d.data().rawResult?.error || "BŁĄD"),
+            extractionProfile: d.data().extractionProfile || null
+        }));
 
         const estimateState = estimateSnap.docs.map(d => ({ sekcja: d.data().section, liczba_pozycji: d.data().items?.length || 0, wartosc_zl: d.data().totalValue || 0 }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
@@ -300,10 +349,11 @@ Jeśli brakuje krytycznej dokumentacji (np. Załącznik nr 5, rysunki, szczegó�
 - W takim przypadku przygotuj klarowny 'assumptionDisclaimer'.
 - Używaj agresywnie BUDOWLANIEC + GAP_FILLER.
 - Każdą pozycję wygenerowaną w tym trybie oznacz w opisie jako **[ZAŁOŻENIE RYNKOWE]**.
-- Pamiętaj o pełnej transparentności – Kosztorysant musi wiedzieć, co jest faktem, a co Twoją koncepcją.
 
 === TWOJE NARZĘDZIA ===
 ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, mozliwosci: a.capabilities })), null, 2)}
+
+${EXTRACTION_PROFILES_GUIDE}
 
 === DOKUMENTY (Wejście sensoryczne) ===
 ${JSON.stringify(documents, null, 2)}
@@ -325,7 +375,9 @@ ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomo
 
 === CO MASZ ZROBIĆ ===
 Zaktualizuj swój CognitiveState. Przerób nowe wyniki w fakty, zweryfikuj stare hipotezy (Belief Revision).
-Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies' by nie kręcić się w kółko!`;
+Przeprowadź Samokrytykę. Ustal 'nextBestAction'. 
+Pamiętaj o 'failedStrategies' by nie kręcić się w kółko!
+Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektuj i wypełnij 'extractionProfile'.`;
 
         console.log(`[MÓZG 🧠] Prompt Poznawczy wygenerowany. Trawienie danych...`);
 
@@ -334,7 +386,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                 model: MODEL_PRO,
                 contents: systemPrompt,
                 config: {
-                    temperature: 0.4, // Analityczny chłód i konsekwencja 
+                    temperature: 0.4,
                     responseMimeType: "application/json",
                     responseSchema: BRAIN_SCHEMA as any
                 }
@@ -356,7 +408,6 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             });
         }
 
-        // Zapis zaktualizowanego stanu Mózgu wraz z trybem założeń koncepcyjnych
         batch.update(brainRef, {
             phase: parsedResult.phase,
             currentGoal: parsedResult.currentGoal,
@@ -367,7 +418,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
         });
 
         if (parsedResult.newEstimateItems?.length > 0) {
-            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} zweryfikowanych pozycji (>75% pewności lub tryb założeń).`);
+            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} pozycji (>75% pewności lub tryb założeń).`);
             const sectionsMap = new Map<string, any[]>();
             parsedResult.newEstimateItems.forEach((item: any) => {
                 const sec = item.sectionName || "Ogólne";
@@ -378,7 +429,6 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             for (const [sectionName, items] of sectionsMap.entries()) {
                 const sectionId = `sec_${sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30)}`;
                 const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
-
                 const formattedItems = items.map((item: any) => ({
                     id: randomUUID(),
                     pozycja: item.pozycja || "",
@@ -388,11 +438,12 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                     cenaJed: 0,
                     KNR_ref: item.KNR_ref || "",
                     confidence: parsedResult.assumptionMode ? "ASSUMPTION_MODE" : "AI_COGNITIVE_MODEL",
-                    sourceTrack: parsedResult.assumptionMode ? `Konceptualizacja Mózgu` : `Model Poznawczy Mózgu`
+                    sourceTrack: parsedResult.assumptionMode ? "Konceptualizacja Mózgu" : "Model Poznawczy Mózgu"
                 }));
-
                 batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", items: formattedItems, totalValue: 0, updatedAt: new Date() }, { merge: true });
-                formattedItems.forEach(fItem => { batch.set(sectionRef.collection("items").doc(fItem.id), fItem); });
+                formattedItems.forEach(fItem => {
+                    batch.set(sectionRef.collection("items").doc(fItem.id), fItem);
+                });
             }
         }
 
@@ -401,10 +452,18 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             const taskRef = tasksRef.doc();
             const inputFacts: Record<string, any> = {};
             (task.inputFactsKeys || []).forEach((key: string) => {
-                if (parsedResult.cognitiveState?.knownFacts && parsedResult.cognitiveState.knownFacts[key] !== undefined) {
+                if (parsedResult.cognitiveState?.knownFacts?.[key] !== undefined) {
                     inputFacts[key] = parsedResult.cognitiveState.knownFacts[key];
                 }
             });
+
+            if (task.extractionProfile) {
+                console.log(`[MÓZG 🧠 LOG] Tworzę zadanie z DYNAMICZNYM PROFILEM EKSTRAKCJI:`);
+                console.log(`[MÓZG 🧠 LOG]   - Agent: ${task.agentType}`);
+                console.log(`[MÓZG 🧠 LOG]   - Kontekst: ${task.extractionProfile.contextLabel}`);
+                console.log(`[MÓZG 🧠 LOG]   - Rekomendowany model: ${task.extractionProfile.modelHint}`);
+                console.log(`[MÓZG 🧠 LOG]   - Zaprojektowane pola: ${task.extractionProfile.customFields?.map((f: any) => `${f.name} (${f.type})`).join(", ") || "brak"}`);
+            }
 
             const taskData = {
                 taskId: taskRef.id,
@@ -412,6 +471,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                 instruction: task.instruction,
                 inputDocIds: task.inputDocIds || [],
                 inputFacts,
+                extractionProfile: task.extractionProfile || null,
                 status: "PENDING",
                 processedByBrain: false,
                 createdAt: new Date(),
@@ -421,7 +481,9 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             newTasksCreated.push(taskData);
         });
 
-        const newTenderStatus = parsedResult.phase === "DONE" ? "DONE" : parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT" : "ORCHESTRATING";
+        const newTenderStatus = parsedResult.phase === "DONE" ? "DONE"
+            : parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT"
+                : "ORCHESTRATING";
 
         batch.update(tenderRef, {
             "budgetGuard.currentCostUSD": FieldValue.increment(((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.002),
@@ -430,7 +492,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
         });
 
         await batch.commit();
-        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Wysyłam ${newTasksCreated.length} narzędzi na zwiady.`);
+        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Narzędzi: ${newTasksCreated.length}.`);
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
         for (const task of newTasksCreated) {
@@ -440,7 +502,7 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tenderId, taskId: task.taskId })
-                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania narzędzia ${task.agentType}:`, err.message));
+                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania ${task.agentType}:`, err.message));
             } else {
                 await adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
                     status: "ERROR", rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` }, processedByBrain: false, updatedAt: new Date()
@@ -448,7 +510,12 @@ Przeprowadź Samokrytykę. Ustal 'nextBestAction'. Pamiętaj o 'failedStrategies
             }
         }
 
-        return NextResponse.json({ success: true, phase: parsedResult.phase, tasksCreated: newTasksCreated.length, estimateItemsAdded: parsedResult.newEstimateItems?.length || 0 });
+        return NextResponse.json({
+            success: true,
+            phase: parsedResult.phase,
+            tasksCreated: newTasksCreated.length,
+            estimateItemsAdded: parsedResult.newEstimateItems?.length || 0
+        });
 
     } catch (error: any) {
         console.error("[MÓZG 🧠] ❌ Krytyczny błąd Mózgu:", error);

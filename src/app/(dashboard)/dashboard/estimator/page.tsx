@@ -70,6 +70,7 @@ interface TenderDocument {
     status: string;
     tags: string[];
     summary?: string;
+    detailedElement?: string;
 }
 
 interface BrainState {
@@ -434,10 +435,15 @@ export default function EstimatorPage() {
                                         <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[180px]">{doc.fileName}</span>
                                         <span className="text-[8px] text-slate-500 uppercase">{doc.status}</span>
                                     </div>
-                                    <div className="flex gap-1 flex-wrap">
+                                    <div className="flex gap-1 flex-wrap items-center">
                                         {doc.tags?.map(tag => (
                                             <span key={tag} className="text-[8px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">{tag}</span>
                                         ))}
+                                        {doc.detailedElement && doc.detailedElement !== "NIE_DOTYCZY" && (
+                                            <span className="text-[8px] bg-blue-950/60 text-blue-300 border border-blue-900/40 px-1.5 py-0.5 rounded font-bold uppercase tracking-tight flex items-center gap-1">
+                                                🔍 {doc.detailedElement}
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             ))}

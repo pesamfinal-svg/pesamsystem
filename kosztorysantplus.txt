@@ -1,255 +1,43 @@
-Oto zaktualizowana, niezwykle szczegółowa i inżynierska "Biała Księga" (White
-Paper) systemu PESAM. Dokument ten opisuje stan systemu po wdrożeniu
-dynamicznego silnika szacowania zakresu, mapy ciepła wiarygodności kosztorysu
-oraz autonomicznego mechanizmu łatania luk.
-
-📘 BIAŁA KSIĘGA ARCHITEKTURY SYSTEMU PESAM – KOSZTORYSANT AI
-
-Wielomodalny, Autonomiczny System Kosztorysowania i Analizy Ryzyk w Zamówieniach Publicznych
-
-PESAM nie jest prostym parserem dokumentacji opartym na jednej pętli LLM. To
-przemysłowej klasy System Wieloagentowy (Multi-Agent System - MAS) pracujący w
-modelu deklaratywnym. Rdzeniem systemu jest ScopeManifest – żywy, reaktywny
-dokument stanu, który definiuje wymagany zakres robót i steruje zachowaniem
-poszczególnych agentów za pośrednictwem bazy danych czasu rzeczywistego
-(real-time Event-Driven Architecture).
-
-1. ZAKTUALIZOWANA STRUKTURA PLIKÓW
-
-Projekt jest w pełni ustrukturyzowany i podzielony na izolowane warstwy
-logiczne: interfejs użytkownika (Frontend), moduły połączeniowe (Hooks i
-Helpers) oraz rozproszone mikroserwisy (Backend API).
-
-src/
-├── app/
-│   ├── dashboard/estimator/
-│   │   └── page.tsx                 <-- [FRONTEND] Panel sterowania. Koordynuje pętlę Roju, nasłuchuje statusów zadań i renderuje dynamiczny layout.
-│   │
-│   ├── api/kosztorysant/            <-- [BACKEND] Rdzeń Roju (Mikroserwisy Agentów)
-│   │   ├── _shared/
-│   │   │   ├── types.ts             <-- Podstawowe typy i interfejsy RMS
-│   │   │   ├── scopeManifest.types.ts <-- [NOWE] Struktura 5-poziomowego manifestu zakresu
-│   │   │   └── heurystyki.ts        <-- [NOWE] Dynamiczny Mózg Systemu. Odpowiada za pobieranie i zasilanie szablonów w Firestore (Self-Seeding)
-│   │   │
-│   │   ├── magazynier-zip/          <-- Szybki importer. Rozpakowuje ZIP, wrzuca PDF na Storage i wywołuje Inicjalizator.
-│   │   ├── glowny-kosztorysant/     
-│   │   │   ├── route.ts             <-- Orkiestrator czatu (RMS, Python, KNNR)
-│   │   │   └── inicjalizuj/         <-- [ZMODYFIKOWANY] Inicjalizator zadań. Klasyfikuje dokumenty i tworzy kolejkę (Analityk -> Rój -> Gap Filler -> Rewident)
-│   │   │
-│   │   ├── agent-analityk-zakresu/  <-- [NOWY] Agent Fazy 2. Czyta SWZ/PFU i generuje ScopeManifest w oparciu o baze heurystyk.
-│   │   ├── agent-gap-filler/        <-- [NOWY] Agent Fazy 3. Porównuje kosztorys z manifestem i uzupełnia braki normatywnie (Sekocenbud/Eurokody/GUS).
-│   │   ├── agent-vision-konstruktor/ <-- Analiza rysunków technicznych i przekrojów.
-│   │   ├── agent-knr/               <-- Przedmiarowanie (Python Code Execution).
-│   │   ├── agent-normatywne-zbrojenie/ <-- Szacuje stal ze wskaźnika kg/m3 betonu.
-│   │   ├── agent-broker-cenowy/     <-- Wyszukuje ceny online (Google Search) i narzuca marże złożoności.
-│   │   │
-│   │   ├── agent-rewident/          
-│   │   │   ├── route.ts             <-- [ZMODYFIKOWANY] Główny audytor finansowo-technologiczny.
-│   │   │   └── coverageAudit.ts     <-- [NOWY] Audytor szczelności zakresu. Weryfikuje pokrycie manifestu i wylicza budżet rezerwowy.
-│   │   │
-│   │   └── scope-manifest/          <-- [NOWE] Moduły modyfikacji manifestu
-│   │       ├── update-coverage/     <-- Obsługuje oznaczanie pozycji do weryfikacji manualnej
-│   │       └── answer-question/     <-- Przetwarza odpowiedzi na zapytania ASK_USER i dolicza je do kosztorysu
-│   │
-│   └── components/
-│       └── ScopeHeatMap.tsx         <-- [NOWY COMPONENT] Interaktywny, reaktywny panel boczny mapy ciepła z wbudowanymi kartami pytań (ASK_USER).
-│
-│   └── hooks/
-│       └── useScopeManifest.ts      <-- [NOWY HOOK] Łącznik czasu rzeczywistego (onSnapshot) między Firestore a interfejsem mapy ciepła.
-
-2. REAKTYWNA BAZA DANYCH (Firestore, Storage & settings)
-
-PESAM przechowuje stan w sposób zdecentralizowany, co gwarantuje wysoką
-wydajność, bezpieczeństwo danych i minimalizuje liczbę zbędnych
-odczytów/zapisów (Firestore Read/Write quota).
-
-📁 Cloud Storage
- └── 📂 kosztorysy/{tenderId}/
-      └── [Pliki źródłowe: SWZ.pdf, PFU.pdf, Rzuty.pdf, Umowa.pdf]
-
-📁 Firestore Database
- ├── 📂 settings/
- │    └── 📂 estimatorTemplates/      <-- [PESAM BRAIN] Dynamiczne szablony typów obiektów (Modyfikowalne)
- │         ├── 📄 universal           <-- Uniwersalne działy (fundamenty, ściany, tynki itp.)
- │         ├── 📄 przedszkole         <-- Specyficzne wymagania (PPOŻ, plac zabaw, kuchnia)
- │         └── 📄 hala_produkcyjna    <-- Specyficzne wymagania (posadzka, wentylacja odciągowa)
- │
- └── 📂 tenders/                      <-- Główna kolekcja przetargów
-      └── 📄 {tenderId}/              <-- Pojedynczy projekt przetargowy
-           ├── Pola główne: name, status, finalScore, sections[] (Główny Kosztorys), rewidentReport{}
-           │
-           ├── 📂 files/              <-- Podkolekcja zaimportowanych plików z ZIP
-           │    └── 📄 {fileId}       <-- Metadane pliku (fileName, category, extractedText)
-           │
-           ├── 📂 tasks/              <-- Podkolekcja zadań dla Roju (Kolejka)
-           │    └── 📄 {taskId}       <-- Pojedyncze zadanie (agentType, status: PENDING|IN_PROGRESS|DONE)
-           │
-           └── 📂 scopeManifest/      <-- [NOWA PODKOLEKCJA] Deklaratywny zakres projektu
-                └── 📄 main           <-- Dokument główny ScopeManifestu (Poziomy 1-5)
-
-3. SZCZEGÓŁOWY PRZEPŁYW DANYCH (WORKFLOW)
-
-Dzięki wdrożeniu ScopeManifestu oraz Agenta Gap Filler (Łatacza), workflow
-systemu uległ ewolucji, stając się procesem w pełni weryfikowalnym i zamkniętym
-logicznie.
-
-   [ PACZKA ZIP ]
-         │
-         ▼
- 1. MAGAZYNIER ZIP  ───► Zapis plików w Storage & files[] w Firestore
-         │
-         ▼ (Autostart)
- 2. INICJALIZATOR   ───► Skanowanie plików, docLevel (0-4), budowanie Kolejki Zadań w Firestore
-         │
-         ▼ (Task 0)
- 3. ANALITYK ZAKRESU───► Pobiera szablony z Firestore "PESAM Brain" + czyta SWZ/PFU ───► Tworzy ScopeManifest (Wszystkie statusy: MISSING)
-         │
-         ├─────────────────────────────────────────┐ (Pętla Roju czasu rzeczywistego)
-         ▼                                         ▼
- 4. AGENT VISION (Oczy)                    5. AGENT LEGAL (Prawo)
-   - Czyta rysunki                          - Analizuje SWZ i umowę
-   - Wylicza metraże                        - Wyciąga ryzyka kontraktowe
-   - Zapisuje wymiary w Manifestu           - Wpisuje twarde wymagania w Manifestu
-         │                                         │
-         └────────────────────┬────────────────────┘
-                              ▼
- 6. AGENT KNR (Przedmiarowanie)
-   - Buduje kosztorys z norm na podstawie metraży z rysunków
-   - Oznacza pozycje w ScopeManifest jako COVERED
-                              │
-                              ▼
- 7. BROKER CENOWY
-   - Weryfikuje ceny w Google Search na bazie złożoności z Vision
-   - Aktualizuje ceny rynkowe i ustawia dataQuality na MARKET_VERIFIED
-                              │
-                              ▼
- 8. GAP FILLER (Łatacz)
-   - Skanuje ScopeManifest. Wykrywa elementy o statusie MISSING.
-   - Aplikuje dedykowane strategie (Sekocenbud, Eurokody, GUS).
-   - Jeśli wykryje ASK_USER -> Pauzuje Rój i wyświetla pytanie na czacie.
-   - Uzupełnia brakujące pozycje w kosztorysie (Sections) jako GAP- elementy.
-                              │
-                              ▼
- 9. REWIDENT (Audytor Końcowy)
-   - Pobiera zaktualizowany kosztorys i ScopeManifest.
-   - Przeprowadza audyt deterministyczny (TypeScript) i audyt inżynierski (Gemini Pro).
-   - Wylicza finalny Score Wiarygodności (0-100) i dolicza rezerwę finansową na ryzyka.
-   - Zamyka proces Roju, dając zielone (READY) lub czerwone (NEEDS_CORRECTION) światło.
-
-4. NOWI KONTRAKTORZY ROJU (ZESPÓŁ AGENTÓW PESAM)
-
-Do dotychczasowego zespołu dołączyły trzy wyspecjalizowane jednostki, które
-odpowiadają za jakość i szczelność kosztorysu.
-
-🗺️ Agent Analityk Zakresu
-
-  - Odpowiedzialność: Inicjowanie planu kosztorysu.
-  - Dane wejściowe (Input): Wyekstrahowana treść dokumentów tekstowych (SWZ,
-    PFU, OPZ) oraz parametry techniczne z Klasyfikatora.
-  - Działanie:
-    1.  Przeprowadza wielostronicową analizę tekstu w poszukiwaniu opisu
-        przedmiotu zamówienia.
-    2.  Odpytuje dynamiczną bazę heurystyk (Firestore estimatorTemplates) o
-        obligatoryjne działy dla danego typu obiektu (np. szkola).
-    3.  Tworzy dokument ScopeManifest na poziomie 1 (meta), 2 (wymagania
-        twarde), 3 (obowiązkowe działy), 4 (ryzyka braków) oraz 5 (początkowy
-        status pokrycia ustawiony jako MISSING).
-  - Efekt (Output): Zapisuje dokument scopeManifest/main w Firestore.
-  - Główny Log: [Analityk Zakresu] ✅ Manifest dla {tenderId}: X działów, Y
-    elementów, objectType: Z.
-
-🏗️ Agent Gap Filler (Łatacz Luk)
-
-  - Odpowiedzialność: Wykrywanie pominiętych branż i ich automatyczne,
-    bezpieczne uzupełnianie.
-  - Dane wejściowe (Input): ScopeManifest (Poziomy 1-5) + dotychczasowe sekcje
-    kosztorysu (sections).
-  - Działanie:
-    1.  Porównuje wymagany zakres z wycenionym. Znajduje pozycje o statusie
-        MISSING.
-    2.  Pobiera z manifestu przypisaną strategię ratunkową (EUROKOD_NORM,
-        SEKOCENBUD_M2, GUS_PERCENT).
-    3.  Przelicza koszt na bazie metrażu z rysunków lub wskaźników
-        makroekonomicznych i generuje scalone pozycje kosztorysu (GAP-).
-    4.  Jeśli napotka strategię ASK_USER – generuje blokadę, publikuje
-        precyzyjne pytanie na czacie i wstrzymuje automatyczne wycenianie tego
-        konkretnego elementu.
-  - Efekt (Output): Zapisuje wyliczone sekcje w głównym dokumencie kosztorysu
-    oraz zmienia statusy pokrycia w manifeście na GAP_FILLED.
-  - Główny Log: [Gap Filler] ✅ {tenderId}: Wyliczone=A, Uzupełnione=B,
-    Blokady=C, Doliczono: X PLN.
-
-🕵️‍♂️ Agent Rewident i Coverage Audit
-
-  - Odpowiedzialność: Końcowy audyt finansowo-technologiczny oraz audyt
-    szczelności zakresu.
-  - Dane wejściowe (Input): Całkowity kosztorys (sections) + ScopeManifest
-    (Poziom 5).
-  - Działanie:
-    1.  Audyt Pokrycia (TypeScript): Wylicza Coverage Score (procent pokrycia
-        zakresu). Sprawdza czy pozycje wymagane przez polskie prawo (np. BHP,
-        PPOŻ, Odgromówka) zostały uwzględnione. Weryfikuje twarde zapisy z SWZ.
-    2.  Kalkulacja Buforu: Sumuje narzuty i rezerwy za brakujące dokumenty (np.
-        brak badań gruntu) i wylicza zalecany budżet rezerwowy.
-    3.  Audyt Proporcji (TypeScript): Sprawdza czy proporcje branż mieszczą się
-        w normach Sekocenbudu.
-    4.  Audyt AI (Gemini Pro): Wychwytuje anomalie inżynierskie (błędy
-        konstrukcyjne, brak spójności materiałowej).
-  - Efekt (Output): Zwraca kompletny raport audytowy, nadaje ostateczny Punkt
-    Wiarygodności (Score 0-100) i zmienia status projektu w bazie.
-  - Główny Log: [Rewident] ✅ {tenderId}: Score=X/100, Coverage=Y%, Alerty: Z.
-
-5. FILOZOFIA BEZPIECZEŃSTWA KOSZTORYSOWEGO (3 DECYZJE PROJEKTOWE)
-
-Wdrożenie nowej architektury oparte jest o trzy twarde reguły logiczne, które
-eliminują ryzyko krytycznych błędów przy szacowaniu:
-
-Decyzja 1: Zamrożenie Poziomu 3 (requiredDivisions) po Fazie 2
-
-Rój agentów (KNR, Vision, Broker) ma bezwzględny zakaz edycji struktury wymagań
-w requiredDivisions. Zakres ten jest generowany raz na początku i stanowi
-"Siatkę Kontrolną". Agenci mogą jedynie raportować stan realizacji
-poszczególnych komórek w tabeli coverageStatus. Zapobiega to sytuacji, w której
-Agent Vision nie "zobaczy" dachu na rysunku i usunie go z wyceny. Dach
-pozostanie w siatce jako MISSING, a system doliczy go automatycznie na etapie
-Gap Fillera.
-
-Decyzja 2: Kaskadowy "Reset" przy zmianie objectType
-
-Typ obiektu (np. przedszkole, hala_produkcyjna) to "Słownik i Gramatyka"
-inwestycji. Zmiana typu obiektu przez użytkownika na frontendzie automatycznie
-usuwa aktualny ScopeManifest i generuje go od nowa w oparciu o nowy szablon z
-bazy Firestore (settings/estimatorTemplates). Chroni to przed zmieszaniem
-odmiennych technologii (np. próba wyceny trybun sportowych w szpitalu). System w
-UI wymusza akceptację ostrzeżenia przed wykonaniem tej operacji.
-
-Decyzja 3: Blokada ASK_USER jako Bezpiecznik Finansowy
-
-Sztucznej inteligencji nie wolno zgadywać danych kluczowych dla bezpieczeństwa
-konstrukcji i finansów firmy budowlanej (np. warunków gruntowych, głębokości
-posadowienia pale). Jeśli w manifeście pozycja ma przypisaną strategię ASK_USER,
-Rój wylicza 95% kosztorysu, ale ostateczny budżet zostaje oznaczony jako
-niekompletny (NEEDS_REVIEW). Na czacie i w lewym panelu pojawia się czerwona
-karta pytania. Dopiero gdy podasz dane (np. kategoria gruntu III), system
-zdejmuje blokadę, odblokowuje pozostałe obliczenia i przelicza finalną cenę.
-
-6. PRZYSZŁOŚĆ ROJU PESAM – POMYSŁY NA KOLEJNE ETAPY
-
-System osiągnął pełną dojrzałość technologiczną i inżynierską. Oto kierunki, w
-których możemy rozwijać PESAM w kolejnych krokach:
-
-1.  Multi-Threading Roju (Współbieżność): Obecnie Frontend przetwarza zadania
-    sekwencyjnie (jedno po drugim). Zadania takie jak LEGAL (Analiza SWZ) oraz
-    VISION (Analiza rysunków) nie zależą od siebie nawzajem. Możemy wdrożyć
-    przetwarzanie współbieżne (Promise.all na poziomie pętli Roju), co pozwoli
-    skrócić całkowity czas wyceny dużego projektu o kolejne 40%.
-2.  Szybki Eksport do MS Excel (.xlsx): Wykorzystanie biblioteki exceljs do
-    wygenerowania w pełni sformatowanego, profesjonalnego Kosztorysu Ofertowego
-    (z podziałem na działy, sumami, marżami i narzutami Kp oraz Z) bezpośrednio
-    z tabeli kosztorysu. Plik będzie gotowy do załączenia jako oferta w
-    zamówieniach publicznych.
-3.  UI Ustawień "PESAM Brain": Stworzenie nowej zakładki "Ustawienia Wycen AI" w
-    Twoim pulpicie, gdzie za pomocą czytelnych formularzy będziecie mogli
-    modyfikować ceny scalone z Sekocenbudu, wskaźniki procentowe GUS oraz
-    dodawać własne obowiązkowe pozycje dla nowych typów budynków w bazie
-    Firestore, bez zaglądania do kodu źródłowego.
+{
+"name": "pesam-system",
+"version": "0.1.0",
+"private": true,
+"scripts": {
+"dev": "next dev",
+"build": "next build",
+"start": "next start",
+"lint": "eslint"
+},
+"dependencies": {
+"@google-cloud/vertexai": "^1.12.0",
+"@google/generative-ai": "^0.24.1",
+"@pdf-lib/fontkit": "^1.1.1",
+"adm-zip": "^0.5.17",
+"chart.js": "^4.5.1",
+"dexie": "^4.4.3",
+"firebase": "^12.13.0",
+"firebase-admin": "^13.9.0",
+"jszip": "^3.10.1",
+"lib": "^5.1.0",
+"next": "16.2.6",
+"nodemailer": "^8.0.7",
+"pdf": "^0.1.0",
+"pdf-lib": "^1.17.1",
+"react": "19.2.4",
+"react-chartjs-2": "^5.3.1",
+"react-dom": "19.2.4",
+"xlsx": "^0.18.5"
+},
+"devDependencies": {
+"@tailwindcss/postcss": "^4",
+"@types/jszip": "^3.4.0",
+"@types/node": "^20",
+"@types/nodemailer": "^8.0.0",
+"@types/react": "^19",
+"@types/react-dom": "^19",
+"eslint": "^9",
+"eslint-config-next": "16.2.6",
+"tailwindcss": "^4",
+"typescript": "^5"
+}
+}
