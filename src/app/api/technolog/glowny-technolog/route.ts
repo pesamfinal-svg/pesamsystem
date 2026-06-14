@@ -363,7 +363,7 @@ Zaktualizuj technologicalState. Jeśli masz pewne fakty (>70%), zapisz je do fin
                 if (agentDef?.endpoint) {
                     if (i > 0) await new Promise(r => setTimeout(r, 3000)); // Bezpieczna pauza
 
-                    fetch(`${localOrigin}${agentDef.endpoint}`, {
+                    await fetch(`${localOrigin}${agentDef.endpoint}`, {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ tenderId, taskId: task.taskId })
                     }).catch(() => { });
@@ -371,10 +371,11 @@ Zaktualizuj technologicalState. Jeśli masz pewne fakty (>70%), zapisz je do fin
             }
         };
 
-        triggerTechAgentsWithPacing(); // Odpalamy w tle
+        // Oczekujemy na wybudzenie wszystkich agentów, aby Cloud Run nie zamroził kontenera przed rozesłaniem żądań!
+        await triggerTechAgentsWithPacing();
 
         if (parsed.findingsForPESAM?.length > 0 && parsed.phase !== "DONE") {
-            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+            await fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ tenderId, trigger: "TECHNOLOGIST_NEW_FINDINGS" })
             }).catch(() => { });

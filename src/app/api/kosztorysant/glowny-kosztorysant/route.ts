@@ -604,7 +604,7 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
                 if (agentDef?.endpoint) {
                     if (i > 0) await new Promise(r => setTimeout(r, 3000)); // Bezpieczna pauza
 
-                    fetch(`${localOrigin}${agentDef.endpoint}`, {
+                    await fetch(`${localOrigin}${agentDef.endpoint}`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ tenderId, taskId: task.taskId })
@@ -617,7 +617,8 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
             }
         };
 
-        triggerAgentsWithPacing(); // Odpalamy w tle, nie blokując głównej odpowiedzi HTTP
+        // Oczekujemy na wybudzenie wszystkich agentów, aby Cloud Run nie zamroził kontenera przed wysłaniem żądań!
+        await triggerAgentsWithPacing();
 
         return NextResponse.json({
             success: true,
