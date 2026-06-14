@@ -27,6 +27,7 @@ interface EstimateItem {
     pozycja: string;
     opis: string;
     ilosc: number;
+    jednostka?: string;   // <--- DODANA LINIJKA
     cenaJed: number;
     KNR_ref?: string;
     confidence?: string;
@@ -71,6 +72,7 @@ interface TenderDocument {
     tags: string[];
     summary?: string;
     detailedElement?: string;
+    storagePath?: string;
 }
 
 interface BrainState {
@@ -443,7 +445,7 @@ export default function EstimatorPage() {
                                         try {
                                             const res = await fetch("/api/kosztorysant/dokumenty/podglad", {
                                                 method: "POST", headers: { "Content-Type": "application/json" },
-                                                body: JSON.stringify({ storagePath: `tenders/${activeTenderId}/documents/${doc.fileName}` })
+                                                body: JSON.stringify({ storagePath: doc.storagePath })
                                             });
                                             const data = await res.json();
                                             if (data.url) setPreviewUrl(data.url);
@@ -661,8 +663,10 @@ export default function EstimatorPage() {
                                                     <p className="text-[8px] text-slate-500 mt-1.5 font-mono truncate">Źródło: {item.sourceTrack}</p>
                                                 )}
                                             </div>
-                                            <div className="text-right flex-shrink-0 bg-slate-900 p-2 rounded-xl border border-slate-800/50">
-                                                <span className="text-xs font-bold text-white block">{item.ilosc}</span>
+                                            <div className="text-right flex-shrink-0 bg-slate-900 p-2 rounded-xl border border-slate-800/50 min-w-[80px]">
+                                                <span className="text-xs font-bold text-white block">
+                                                    {item.ilosc} <span className="text-[10px] text-slate-400 font-normal">{item.jednostka || 'j.m.'}</span>
+                                                </span>
                                                 <span className="text-[9px] text-slate-400 font-medium block mt-0.5">x {item.cenaJed} zł</span>
                                             </div>
                                         </div>

@@ -399,8 +399,9 @@ ${isEstimateEmpty ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (8
 === ŚLEDZENIE OBLICZEŃ (CALCULATION TRAIL) ===
 Każda nowa pozycja w "newEstimateItems" musi być w pełni audytowalna.
 Gdy generujesz pole "opis" dla pozycji, DODAJ na jego końcu wyraźny dowód matematyczny i źródłowy w nawiasie kwadratowym.
-Przykład oczekiwanego opisu: "Zbrojenie płyty fundamentowej. [WYLICZENIE: 25400 kg (z pliku K-03 str. 1) + 12100 kg (z K-04 str. 1)]".
-Nigdy nie generuj liczb bez pokrycia w dokumentacji. Jeśli musisz zgadywać normą, opisz to jako [ZAŁOŻENIE RYNKOWE].
+
+UWAGA KRYTYCZNA: Pozycje wyciągnięte przez narzędzie BOQ_PARSER zapisują się do bazy AUTOMATYCZNIE. 
+Jeśli w historii zadań widzisz, że BOQ_PARSER zwrócił pozycje w rawResult.items, ABSOLUTNIE NIE PRZEPISUJ ICH do "newEstimateItems". Uznaj je za załatwione i skup się na innych zadaniach. "newEstimateItems" używaj tylko do dodawania własnych, dedykowanych pozycji z innych przemyśleń (np. luk).
 
 === HISTORIA CZATU Z KOSZTORYSANTEM ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
@@ -436,7 +437,36 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
 
         const batch = adminDb.batch();
 
-        unprocessedTasksSnap.docs.forEach(doc => batch.update(doc.ref, { processedByBrain: true }));
+        unprocessedTasksSnap.docs.forEach(doc => {
+            batch.update(doc.ref, { processedByBrain: true });
+
+            // AUTO-COMMITTER: Bezpośredni zapis tysięcy pozycji z przedmiarów z ominięciem limitu tokenów Mózgu
+            const taskData = doc.data();
+            if (taskData.agentType === "BOQ_PARSER" && taskData.status === "DONE" && taskData.rawResult?.items?.length > 0) {
+                const items = taskData.rawResult.items;
+                const sectionName = taskData.rawResult.contextLabel || "Przedmiar Zaimportowany";
+                const sectionId = `sec_${sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30)}`;
+                const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+
+                batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", totalValue: 0, updatedAt: new Date() }, { merge: true });
+
+                items.forEach((item: any) => {
+                    const id = randomUUID();
+                    batch.set(sectionRef.collection("items").doc(id), {
+                        id,
+                        pozycja: item.pozycja || "",
+                        opis: item.opis || "",
+                        ilosc: Number(item.ilosc) || 0,
+                        jednostka: item.jednostka || "j.m.",
+                        cenaJed: 0,
+                        KNR_ref: item.KNR_ref || "",
+                        confidence: "HIGH",
+                        sourceTrack: `Wydobyte natywnie przez BOQ_PARSER (${sectionName})`
+                    });
+                });
+                console.log(`[MÓZG 🧠 LOG] Auto-Commit: Bezpośrednio zapisano ${items.length} pozycji do sekcji "${sectionName}".`);
+            }
+        });
 
         if (parsedResult.chatReply?.length > 0) {
             parsedResult.chatReply.forEach((msg: string) => {
