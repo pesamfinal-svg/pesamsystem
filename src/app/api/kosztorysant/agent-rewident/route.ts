@@ -7,6 +7,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
 
 const ai = new GoogleGenAI({
     vertexai: true,
