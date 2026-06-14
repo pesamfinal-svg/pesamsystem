@@ -181,8 +181,44 @@ export default function EstimatorPage() {
 
         // D. Nasłuch Kosztorysu (Żywy Kosztorys)
         const unsubEstimate = onSnapshot(collection(db, `tenders/${activeTenderId}/estimate`), (snap) => {
-            const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as EstimateSection));
-            setSections(list);
+            const initialSections: EstimateSection[] = snap.docs.map(d => {
+                const data = d.data();
+                return {
+                    id: d.id,
+                    section: data.section || "Brak nazwy",
+                    status: data.status || "UNKNOWN",
+                    totalValue: data.totalValue || 0,
+                    items: [] // Inicjalizacja pustej tablicy na start
+                };
+            });
+
+            // Ustawiamy główny szkielet sekcji w interfejsie
+            setSections(initialSections);
+
+            // Reaktywny nasłuch podkolekcji 'items' dla KAŻDEJ z sekcji
+            initialSections.forEach(section => {
+                onSnapshot(collection(db, `tenders/${activeTenderId}/estimate/${section.id}/items`), (itemsSnap) => {
+                    const fetchedItems: EstimateItem[] = itemsSnap.docs.map(itemDoc => {
+                        const itemData = itemDoc.data();
+                        return {
+                            id: itemDoc.id,
+                            pozycja: itemData.pozycja || "",
+                            opis: itemData.opis || "",
+                            ilosc: itemData.ilosc || 0,
+                            jednostka: itemData.jednostka || "j.m.",
+                            cenaJed: itemData.cenaJed || 0,
+                            KNR_ref: itemData.KNR_ref || "",
+                            confidence: itemData.confidence || "",
+                            sourceTrack: itemData.sourceTrack || ""
+                        };
+                    });
+
+                    // Podmieniamy tylko pozycje wewnątrz konkretnej sekcji
+                    setSections(prevSections => prevSections.map(s =>
+                        s.id === section.id ? { ...s, items: fetchedItems } : s
+                    ));
+                });
+            });
         });
 
         // E. Nasłuch Czatu (Interfejs z Użytkownikiem)
@@ -737,6 +773,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -938,6 +975,11 @@ Kiedy zlecasz zadanie do BOQ_PARSER lub VISION, ZAWSZE dynamicznie projektuj str
 ZASADY TWORZENIA PÓL (customFields):
 1. Dopasuj pola do specyfiki elementu w worldModel.
 2. Zmienne nazywaj w camelCase, określaj typ (STRING/NUMBER/BOOLEAN) i daj precyzyjny opis instrukcji.
+
+ŻELAZNA ZASADA BEZPRAWNEGO DUBLOWANIA:
+Pola: 'pozycja', 'opis', 'ilosc', 'jednostka', 'KNR_ref' są ZAWSZE automatycznie obecne w bazie każdego zadania.
+NIGDY nie twórz dla nich zamienników jako customFields (np. nie twórz 'numerPozycji', 'opisRoboty', 'jednostkaMiary' czy 'ilosc'). To marnuje pamięć wyjściową modelu! 
+Jako customFields projektuj wyłącznie DODATKOWE parametry techniczne (np. mocFalownika, gruboscAsfaltu, klasaBetonu), których nie ma w standardowym kosztorysie, a są kluczowe do wyceny.
 
 Przykład dla Instalacji Fotowoltaicznej:
   contextLabel: "INSTALACJA_PV",
@@ -1992,6 +2034,7 @@ import { jsonrepair } from "jsonrepair";
 import * as xlsx from "xlsx";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -2789,6 +2832,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
 
 // Definiujemy najszybszy i najnowocześniejszy model dla Wizji bezpośrednio z Twojego konta GCP!
 const MODEL_FLASH = "gemini-3.5-flash";
@@ -3307,6 +3351,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
 
 const ai = new GoogleGenAI({
     vertexai: true,

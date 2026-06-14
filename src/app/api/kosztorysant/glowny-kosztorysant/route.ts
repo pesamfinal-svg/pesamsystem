@@ -306,20 +306,35 @@ export async function POST(req: Request) {
         }
         await lockBatch.commit();
 
+        // Obsługa reakcji na wybudzenie przez Technologa
+        if (trigger === "TECHNOLOGIST_NEW_FINDINGS") {
+            await tenderRef.update({ hasNewTechnologistFindings: false });
+            console.log("[MÓZG 🧠] Wybudzony przez Technologa – nowe fakty technologiczne są już dostępne.");
+        }
+
         // Pobieranie danych wejściowych i stanu Roju
-        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc, chatHistSnap, estimateSnap, allTasksHistorySnap] = await Promise.all([
+        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc, chatHistSnap, estimateSnap, allTasksHistorySnap, technologistFindingsSnap] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
             tenderRef.get(),
             adminDb.collection(`tenders/${tenderId}/chat`).orderBy("timestamp", "asc").limit(20).get(),
             adminDb.collection(`tenders/${tenderId}/estimate`).get(),
-            tasksRef.get()
+            tasksRef.get(),
+            adminDb.collection(`tenders/${tenderId}/technologistFindings`).get() // NOWE: Odczyt ustaleń Technologa
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
             return NextResponse.json({ message: "Przetarg zatrzymany (HALTED)." });
         }
+
+        // Mapowanie rad technologicznych od drugiego Mózgu
+        const technologistFindings = technologistFindingsSnap.docs.map(d => ({
+            category: d.data().category,
+            facts: d.data().facts,
+            confidence: d.data().confidence,
+            normBasis: d.data().normBasis || null
+        }));
 
         const documents = docsSnap.docs.map(d => ({
             id: d.id,
@@ -411,6 +426,18 @@ Jeśli w historii zadań widzisz, że BOQ_PARSER zwrócił pozycje w rawResult.i
 
 === HISTORIA CZATU Z KOSZTORYSANTEM ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
+
+=== FAKTY I REKOMENDACJE OD TECHNOLOGA BUDOWLANEGO ===
+Równoległy Mózg Technologa przeanalizował dokumentację i dostarczył twarde fakty technologiczne oraz normowe:
+${technologistFindings.length > 0
+                ? JSON.stringify(technologistFindings, null, 2)
+                : "Technolog jeszcze nie przekazał danych. Możesz go wybudzić triggerem TECHNOLOGIST_NEW_FINDINGS."}
+
+ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
+- Jeśli pewność (confidence) danych od Technologa > 70%, traktuj je jako twarde fakty i zapisuj w knownFacts.
+- Wykorzystaj wyliczone przez niego ilości wskaźnikowe (np. powierzchnie ścian, kubatury betonu) do tworzenia brakujących głównych pozycji w kosztorysie (newEstimateItems).
+- Używaj dołączonych norm (np. WT2021) jako uzasadnienia dla wyceny wskaźnikowej (GAP_FILLER).
+- Nie duplikuj pracy – jeśli Technolog podał kompletną technologię przegród, skup się wyłącznie na ich kosztorysowaniu.
 
 === CO MASZ ZROBIĆ ===
 Zaktualizuj swój CognitiveState. Przerób nowe wyniki w fakty, zweryfikuj stare hipotezy (Belief Revision).

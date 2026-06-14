@@ -176,7 +176,16 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy 
         }, { merge: true });
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+
+        // Wybudzenie Głównego Kosztorysanta (PESAM)
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
+        }).catch(() => { });
+
+        // NOWE: Jednoczesne wybudzenie Głównego Technologa Budowlanego
+        fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
