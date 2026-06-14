@@ -210,6 +210,11 @@ ZASADY TWORZENIA PÓL (customFields):
 1. Dopasuj pola do specyfiki elementu w worldModel.
 2. Zmienne nazywaj w camelCase, określaj typ (STRING/NUMBER/BOOLEAN) i daj precyzyjny opis instrukcji.
 
+ŻELAZNA ZASADA BEZPRAWNEGO DUBLOWANIA:
+Pola: 'pozycja', 'opis', 'ilosc', 'jednostka', 'KNR_ref' są ZAWSZE automatycznie obecne w bazie każdego zadania.
+NIGDY nie twórz dla nich zamienników jako customFields (np. nie twórz 'numerPozycji', 'opisRoboty', 'jednostkaMiary' czy 'ilosc'). To marnuje pamięć wyjściową modelu! 
+Jako customFields projektuj wyłącznie DODATKOWE parametry techniczne (np. mocFalownika, gruboscAsfaltu, klasaBetonu), których nie ma w standardowym kosztorysie, a są kluczowe do wyceny.
+
 Przykład dla Instalacji Fotowoltaicznej:
   contextLabel: "INSTALACJA_PV",
   modelHint: "PRO",
