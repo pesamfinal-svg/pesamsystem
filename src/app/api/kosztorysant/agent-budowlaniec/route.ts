@@ -35,29 +35,17 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 
 const BUDOWLANIEC_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        missingQuestions: {
+        rawFindings: {
+            type: Type.STRING,
+            description: "Pełny, szczegółowy raport technologiczny zawierający proponowane procesy budowlane, normy zużycia materiałów, wymagane klasy betonu, stali, grubości warstw i parametry inżynieryjne wyliczone dla tego obiektu."
+        },
+        assumedParameters: {
             type: Type.ARRAY,
-            description: "Puste. NIE ZADAWAJ PYTAŃ do Kosztorysanta, chyba że dotyczy to nietypowej/krytycznej prawnie sprawy bez ujednoliconego rynkowego standardu (np. specyficznych metod renowacji zabytku). Jeśli brakuje standardowych danych, wyzeruj tę listę i poczyń własne bezpieczne założenia.",
+            description: "Lista twardych założeń inżynieryjnych (parametrów), które przyjąłeś jako bezpieczne domyślne dla tego typu obiektu.",
             items: { type: Type.STRING }
-        },
-        items: {
-            type: Type.ARRAY,
-            description: "Wygenerowane pozycje robót budowlanych w oparciu o projekt lub standard rynkowy dla obiektu tego typu.",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa roboty" },
-                    opis: { type: Type.STRING, description: "Opis. Jeśli założyłeś cyfry sam (np. pręty fi12 zamiast brakującej zmiennej z SWZ) DODAJ do opisu: '(Założenie rynkowe AI)'." },
-                    ilosc: { type: Type.NUMBER },
-                    jednostka: { type: Type.STRING },
-                    KNR_ref: { type: Type.STRING }
-                },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
-            }
-        },
-        summary: { type: Type.STRING, description: "Wymień założone samodzielnie parametry techniczne wprost (betony, stalaże) dla wiedzy Roju." }
+        }
     },
-    required: ["missingQuestions", "items", "summary"]
+    required: ["rawFindings", "assumedParameters"]
 };
 
 export async function POST(req: Request) {
@@ -127,7 +115,7 @@ Daj czysty szczegółowy technologiczny wykaz od podbudów do tynku z racjonalny
         console.log(`[BUDOWLANIEC 🧱] Krok 2 zakończony. Zużyto tokenów: ${tokensStep2}`);
 
         console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 3 - finalny autozależnościowy ustruktur JSON (Zabezpieczone Retry)...");
-        const synthesisPrompt = `Narzuc poprawki w plan technologiczny biorac i nie narzucając pytani dla czatu - sam generuj bezpieczne wymuszenia i rozbite pozycje z obu debat:\nPlan:${builderProposal} \nBledy Audytu:${auditorFeedback}. Wynik formatem jako ustrukturyzowana tabela! W pozycjach na materiały w opsach, np jeśli jest beton pisz C30 b30 czy pojęcia co zgooglowałęs normami w krok1 samemu! Brak zadawania zbędnych pytań, dopóki budowa nie upadnie przez rażące zatajenie Inwestorów do procedur (zbyt wczesnie rzec do uzytkownik i nudes!)`;
+        const synthesisPrompt = `Przeanalizuj plan technologiczny oraz błędy audytu. Przygotuj spójny, inżynieryjny zestaw surowych danych i założeń technologicznych w formacie JSON.\nPlan:${builderProposal} \nBledy Audytu:${auditorFeedback}. Wymień szczegółowo parametry techniczne materiałów i procesów (np. klasy betonu, normy KNR), które Mózg powinien wykorzystać do stworzenia kosztorysu.`;
 
         const structureResult = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -33,24 +34,23 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
 const AUDITOR_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        missingItems: {
+        complianceIssues: {
             type: Type.ARRAY,
-            description: "Lista brakujących elementów technologicznych, prawnych, BHP lub sanitarnych.",
+            description: "Zidentyfikowane braki prawne lub technologiczne w kosztorysie na podstawie WT2021, PPOŻ, Sanepid itp.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującego elementu" },
-                    opis: { type: Type.STRING, description: "Szczegółowe uzasadnienie technologiczne lub prawne (np. wymóg WT 2021, PPOŻ, Sanepid)" },
-                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. szt, kpl, m" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze wpisz 'TECH_REQUIRED'" }
+                    issueCategory: { type: Type.STRING, description: "Kategoria problemu (np. PPOŻ, BHP, Konstrukcja, WT2021)" },
+                    legalReference: { type: Type.STRING, description: "Podstawa prawna lub norma (np. konkretny paragraf)" },
+                    missingTechnology: { type: Type.STRING, description: "Czego fizycznie brakuje w obiekcie (np. klapy dymowe, hydranty, balustrady)" },
+                    impactDescription: { type: Type.STRING, description: "Uzasadnienie dlaczego ten element jest krytyczny prawnie" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["issueCategory", "legalReference", "missingTechnology", "impactDescription"]
             }
         },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie." }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie audytu prawnego." }
     },
-    required: ["missingItems", "summary"]
+    required: ["complianceIssues", "summary"]
 };
 
 export async function POST(req: Request) {
@@ -110,7 +110,7 @@ Napisz techniczny raport z audytu.
         // KROK 2: Strukturyzacja na JSON (Bez Search)
         console.log("[SILENT AUDITOR 🕵️] KROK 2: Strukturyzacja wyników audytu na JSON...");
         const structurePrompt = `
-Na podstawie poniższego raportu z audytu technicznego, wyodrębnij brakujące pozycje zgodnie ze schematem JSON.
+Na podstawie poniższego raportu z audytu technicznego, wyodrębnij surowe fakty o brakach prawno-technologicznych (zgodnie ze schematem JSON), aby Mózg mógł podjąć na ich podstawie decyzję o rozszerzeniu kosztorysu.
 
 Raport z audytu:
 ${rawReport}
@@ -128,7 +128,12 @@ ${rawReport}
             });
         });
 
-        const parsedResult = JSON.parse(structureResult.text ?? "{}");
+        let parsedResult: any = {};
+        try {
+            parsedResult = JSON.parse(jsonrepair(structureResult.text ?? "{}"));
+        } catch (e) {
+            console.error("[SILENT AUDITOR 🕵️] Błąd naprawy JSON:", e);
+        }
         totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
 
         await taskRef.update({

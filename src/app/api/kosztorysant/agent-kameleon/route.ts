@@ -18,24 +18,22 @@ const MODEL_PRO = "gemini-2.5-pro"; // Specjalistyczna analiza niszowych branż 
 const KAMELEON_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        items: {
+        specialistSpecs: {
             type: Type.ARRAY,
-            description: "Lista wyciągniętych pozycji specjalistycznych.",
+            description: "Zidentyfikowane specyficzne urządzenia, technologie i ich parametry fizyczne.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa lub indeks pozycji specjalistycznej" },
-                    opis: { type: Type.STRING, description: "Pełny techniczny opis pozycji kosztorysowej" },
-                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. kpl, szt, m" },
-                    KNR_ref: { type: Type.STRING, description: "Zapisz 'WYCENA_INDYWIDUALNA' lub sugerowany kod normy" }
+                    deviceNameOrTech: { type: Type.STRING, description: "Nazwa urządzenia lub niszowej technologii" },
+                    quantity: { type: Type.NUMBER, description: "Wykryta ilość" },
+                    unit: { type: Type.STRING, description: "Jednostka miary" },
+                    rawSpecifications: { type: Type.STRING, description: "Pełna specyfikacja techniczna z pliku" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["deviceNameOrTech", "quantity", "unit", "rawSpecifications"]
             }
-        },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie techniczne analizy specjalistycznej." }
+        }
     },
-    required: ["items", "summary"]
+    required: ["specialistSpecs"]
 };
 
 export async function POST(req: Request) {

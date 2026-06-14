@@ -33,24 +33,22 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
 const GAP_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        estimatedItems: {
+        marketRates: {
             type: Type.ARRAY,
-            description: "Lista oszacowanych pozycji wskaźnikowych rynkowych.",
+            description: "Zidentyfikowane wskaźniki rynkowe, jednostki i stawki referencyjne dla brakującego zakresu.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującej branży lub elementu" },
-                    opis: { type: Type.STRING, description: "Uzasadnienie rynkowe oszacowanego wskaźnika" },
-                    ilosc: { type: Type.NUMBER, description: "Ilość wskaźnikowa" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. m2, kpl, ryczałt" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze 'WSKAŹNIK_RYNKOWY'" }
+                    scope: { type: Type.STRING, description: "Nazwa brakującego zakresu lub branży" },
+                    metric: { type: Type.STRING, description: "Miernik wskaźnikowy, np. m2 p.u., kWp, ryczałt" },
+                    averageRatePLN: { type: Type.NUMBER, description: "Średnia stawka za jednostkę miary netto w PLN" },
+                    justification: { type: Type.STRING, description: "Źródło i uzasadnienie stawki (np. Sekocenbud, GUS, dane rynkowe)" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["scope", "metric", "averageRatePLN", "justification"]
             }
-        },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie." }
+        }
     },
-    required: ["estimatedItems", "summary"]
+    required: ["marketRates"]
 };
 
 export async function POST(req: Request) {
