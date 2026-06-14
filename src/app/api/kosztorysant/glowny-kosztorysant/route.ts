@@ -595,20 +595,29 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
         console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Narzędzi: ${newTasksCreated.length}.`);
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
-        for (const task of newTasksCreated) {
-            const agentDef = availableAgents.find(a => a.name === task.agentType);
-            if (agentDef?.endpoint) {
-                fetch(`${localOrigin}${agentDef.endpoint}`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ tenderId, taskId: task.taskId })
-                }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania ${task.agentType}:`, err.message));
-            } else {
-                await adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
-                    status: "ERROR", rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` }, processedByBrain: false, updatedAt: new Date()
-                }).catch(() => { });
+
+        // Pancerne, asynchroniczne wywoływanie agentów z odstępem 3 sekund, aby nie przeciążyć CPU i gniazd chmury
+        const triggerAgentsWithPacing = async () => {
+            for (let i = 0; i < newTasksCreated.length; i++) {
+                const task = newTasksCreated[i];
+                const agentDef = availableAgents.find(a => a.name === task.agentType);
+                if (agentDef?.endpoint) {
+                    if (i > 0) await new Promise(r => setTimeout(r, 3000)); // Bezpieczna pauza
+
+                    fetch(`${localOrigin}${agentDef.endpoint}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ tenderId, taskId: task.taskId })
+                    }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania ${task.agentType}:`, err.message));
+                } else {
+                    await adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
+                        status: "ERROR", rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` }, processedByBrain: false, updatedAt: new Date()
+                    }).catch(() => { });
+                }
             }
-        }
+        };
+
+        triggerAgentsWithPacing(); // Odpalamy w tle, nie blokując głównej odpowiedzi HTTP
 
         return NextResponse.json({
             success: true,

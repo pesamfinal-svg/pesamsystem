@@ -354,15 +354,24 @@ Zaktualizuj technologicalState. Jeśli masz pewne fakty (>70%), zapisz je do fin
         await batch.commit();
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
-        for (const task of newTasksCreated) {
-            const agentDef = TECHNOLOG_AGENTS.find(a => a.name === task.agentType);
-            if (agentDef?.endpoint) {
-                fetch(`${localOrigin}${agentDef.endpoint}`, {
-                    method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ tenderId, taskId: task.taskId })
-                }).catch(() => { });
+
+        // Pancerne, asynchroniczne wywoływanie agentów z odstępem 3 sekund dla drugiego Mózgu
+        const triggerTechAgentsWithPacing = async () => {
+            for (let i = 0; i < newTasksCreated.length; i++) {
+                const task = newTasksCreated[i];
+                const agentDef = TECHNOLOG_AGENTS.find(a => a.name === task.agentType);
+                if (agentDef?.endpoint) {
+                    if (i > 0) await new Promise(r => setTimeout(r, 3000)); // Bezpieczna pauza
+
+                    fetch(`${localOrigin}${agentDef.endpoint}`, {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ tenderId, taskId: task.taskId })
+                    }).catch(() => { });
+                }
             }
-        }
+        };
+
+        triggerTechAgentsWithPacing(); // Odpalamy w tle
 
         if (parsed.findingsForPESAM?.length > 0 && parsed.phase !== "DONE") {
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {

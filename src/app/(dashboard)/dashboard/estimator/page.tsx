@@ -83,6 +83,15 @@ interface BrainState {
     assumptionDisclaimer?: string;
 }
 
+interface TechnologistFinding {
+    id: string;
+    category: string;
+    facts: Record<string, any>;
+    confidence: number;
+    normBasis?: string;
+    source?: string;
+}
+
 export default function EstimatorPage() {
     const { user } = useAuth();
     const router = useRouter();
@@ -109,6 +118,7 @@ export default function EstimatorPage() {
     const [conflicts, setConflicts] = useState<Conflict[]>([]);
     const [documents, setDocuments] = useState<TenderDocument[]>([]);
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+    const [technologistFindings, setTechnologistFindings] = useState<TechnologistFinding[]>([]);
 
     const [inputText, setInputText] = useState("");
     const [isLoading, setIsLoading] = useState(false);
@@ -239,8 +249,14 @@ export default function EstimatorPage() {
             }
         });
 
+        // H. Nasłuch Ustaleń Technologa (Nowość!)
+        const unsubFindings = onSnapshot(collection(db, `tenders/${activeTenderId}/technologistFindings`), (snap) => {
+            const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as TechnologistFinding));
+            setTechnologistFindings(list);
+        });
+
         return () => {
-            unsubTender(); unsubTasks(); unsubConflicts(); unsubEstimate(); unsubChat(); unsubDocs(); unsubBrain();
+            unsubTender(); unsubTasks(); unsubConflicts(); unsubEstimate(); unsubChat(); unsubDocs(); unsubBrain(); unsubFindings();
         };
     }, [activeTenderId]);
 
@@ -542,6 +558,44 @@ export default function EstimatorPage() {
                                                 </span>
                                             )}
                                         </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Kognitywna Checklista Technologa */}
+                    {technologistFindings.length > 0 && (
+                        <div className="space-y-2 border-t border-slate-800/60 pt-3">
+                            <span className="text-[9px] font-black uppercase text-blue-400 block flex items-center gap-1">
+                                🏗️ Checklista Technologa (Wymogi Projektu)
+                            </span>
+                            <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
+                                {technologistFindings.map(finding => (
+                                    <div key={finding.id} className="p-3 bg-slate-950/80 border border-slate-800/80 rounded-2xl text-[10px] flex flex-col gap-1.5 hover:border-blue-500/30 transition-colors">
+                                        <div className="flex justify-between items-center">
+                                            <span className="font-black text-blue-400 uppercase text-[8px] tracking-wider px-1.5 py-0.5 bg-blue-950/40 rounded border border-blue-900/30">
+                                                {finding.category}
+                                            </span>
+                                            <span className="text-[8px] text-slate-500 font-bold font-mono">
+                                                Pewność: {finding.confidence}%
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-1 text-slate-300">
+                                            {Object.entries(finding.facts || {}).map(([key, val]) => (
+                                                <div key={key} className="flex justify-between border-b border-slate-900/50 py-0.5 last:border-0 last:pb-0">
+                                                    <span className="text-slate-500 font-mono text-[8px]">{key}:</span>
+                                                    <span className="text-slate-200 font-medium font-sans truncate max-w-[120px]">{String(val)}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        {finding.normBasis && (
+                                            <div className="text-[8px] text-slate-500 italic mt-1 border-t border-slate-900/50 pt-1 flex items-center gap-1">
+                                                ⚖️ Podstawa: {finding.normBasis}
+                                            </div>
+                                        )}
                                     </div>
                                 ))}
                             </div>
