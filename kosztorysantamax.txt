@@ -29,6 +29,7 @@ interface EstimateItem {
     pozycja: string;
     opis: string;
     ilosc: number;
+    jednostka?: string;   // <--- DODANA LINIJKA
     cenaJed: number;
     KNR_ref?: string;
     confidence?: string;
@@ -73,6 +74,7 @@ interface TenderDocument {
     tags: string[];
     summary?: string;
     detailedElement?: string;
+    storagePath?: string;
 }
 
 interface BrainState {
@@ -116,6 +118,10 @@ export default function EstimatorPage() {
     const [uploadMsg, setUploadMsg] = useState("");
     const [savedTendersList, setSavedTendersList] = useState<Array<{ id: string; name: string }>>([]);
     const [assumptionsAccepted, setAssumptionsAccepted] = useState(false);
+
+    // Stany dla Podglądu PDF
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [isLoadingPreview, setIsLoadingPreview] = useState(false);
 
     const chatEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -432,8 +438,29 @@ export default function EstimatorPage() {
                     {documents.length > 0 && (
                         <div className="space-y-1.5">
                             {documents.map(doc => (
-                                <div key={doc.id} className="bg-slate-950 p-2 rounded-xl border border-slate-800/50 flex flex-col gap-1">
+                                <div
+                                    key={doc.id}
+                                    onClick={async () => {
+                                        if (doc.tags.includes("INNY")) return; // Zabezpieczenie przed dziwnymi plikami
+                                        setIsLoadingPreview(true);
+                                        setPreviewUrl(null); // Reset
+                                        try {
+                                            const res = await fetch("/api/kosztorysant/dokumenty/podglad", {
+                                                method: "POST", headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ storagePath: doc.storagePath })
+                                            });
+                                            const data = await res.json();
+                                            if (data.url) setPreviewUrl(data.url);
+                                        } catch (e) { alert("Nie udało się pobrać podglądu."); }
+                                        setIsLoadingPreview(false);
+                                    }}
+                                    className="bg-slate-950 p-2 rounded-xl border border-slate-800/50 flex flex-col gap-1 cursor-pointer hover:border-blue-500/50 transition-colors group"
+                                >
                                     <div className="flex justify-between items-center">
+                                        <div className="flex items-center gap-1.5 truncate">
+                                            <span className="text-[10px] group-hover:text-blue-400 transition-colors">📄</span>
+                                            <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[150px] group-hover:text-blue-300">{doc.fileName}</span>
+                                        </div>
                                         <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[180px]">{doc.fileName}</span>
                                         <span className="text-[8px] text-slate-500 uppercase">{doc.status}</span>
                                     </div>
@@ -638,8 +665,10 @@ export default function EstimatorPage() {
                                                     <p className="text-[8px] text-slate-500 mt-1.5 font-mono truncate">Źródło: {item.sourceTrack}</p>
                                                 )}
                                             </div>
-                                            <div className="text-right flex-shrink-0 bg-slate-900 p-2 rounded-xl border border-slate-800/50">
-                                                <span className="text-xs font-bold text-white block">{item.ilosc}</span>
+                                            <div className="text-right flex-shrink-0 bg-slate-900 p-2 rounded-xl border border-slate-800/50 min-w-[80px]">
+                                                <span className="text-xs font-bold text-white block">
+                                                    {item.ilosc} <span className="text-[10px] text-slate-400 font-normal">{item.jednostka || 'j.m.'}</span>
+                                                </span>
                                                 <span className="text-[9px] text-slate-400 font-medium block mt-0.5">x {item.cenaJed} zł</span>
                                             </div>
                                         </div>
@@ -648,6 +677,36 @@ export default function EstimatorPage() {
                             </div>
                         ))}
                     </div>
+                </div>
+            </div>
+
+            {/* BOCZNY DRAWER PODGLĄDU PDF */}
+            <div className={`absolute top-0 right-0 h-full bg-slate-900 border-l border-slate-700 shadow-2xl transition-all duration-300 ease-in-out z-50 flex flex-col ${previewUrl || isLoadingPreview ? 'w-1/2 translate-x-0' : 'w-0 translate-x-full'}`}>
+                <div className="flex justify-between items-center p-3 border-b border-slate-800 bg-slate-950 flex-shrink-0">
+                    <h3 className="text-xs font-black uppercase text-blue-400 flex items-center gap-2">
+                        👁️ Podgląd Dokumentu
+                    </h3>
+                    <button
+                        onClick={() => setPreviewUrl(null)}
+                        className="bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors"
+                    >
+                        Zamknij ✕
+                    </button>
+                </div>
+                <div className="flex-1 bg-slate-950/50 flex items-center justify-center relative">
+                    {isLoadingPreview && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                            <span className="text-3xl animate-spin mb-3">⚙️</span>
+                            <span className="text-xs font-bold uppercase">Pobieranie pliku z chmury...</span>
+                        </div>
+                    )}
+                    {previewUrl && (
+                        <iframe
+                            src={previewUrl}
+                            className="w-full h-full border-none"
+                            title="PDF Preview"
+                        />
+                    )}
                 </div>
             </div>
 
@@ -673,6 +732,7 @@ import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
 import { randomUUID } from "crypto";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -908,7 +968,7 @@ export async function POST(req: Request) {
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
-        // Seeding agentów
+        // Seeding agentów (wzbogacone o PDF_SPLITTER i zaktualizowanego sędziego REVISOR_JUDGE)
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         if (agentRegistrySnap.empty) {
             console.log("[MÓZG 🧠] Seeding bazy agentów...");
@@ -917,12 +977,23 @@ export async function POST(req: Request) {
                 { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Narzędzie (Skaner tekstu). Szuka słów kluczowych o umowach, karach i SWZ." },
                 { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Odpal by przemnożyć setki liczb wyciągniętych przez inne narzędzia." },
                 { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wezwij by wrzucił ceny R/M/S do gotowych pozycji." },
-                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla np. szkół czy bloków, gdy masz lukę." },
+                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla obiektu, gdy masz lukę." },
                 { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Narzędzie (Audytor Prawny). Waliduje gotowe pozycje z WT2021 i PPOŻ." },
                 { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo to, co ma 'economicImpactScore' wysoki a brakuje rysunków." },
                 { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów. WYMAGA extractionProfile." },
                 { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta dziwne i wąskie opisy technologii." },
-                { name: "REVISOR_JUDGE", endpoint: "/api/kosztorysant/agent-rewident", capabilities: ["legal_reasoning", "googleSearch"], description: "Narzędzie (Solver konfliktów)." },
+                {
+                    name: "REVISOR_JUDGE",
+                    endpoint: "/api/kosztorysant/agent-rewident",
+                    capabilities: ["legal_reasoning", "googleSearch", "conflict_resolution"],
+                    description: "Narzędzie (Sędzia Roju). Skanuje kolekcję 'conflicts', rozstrzyga spory technologiczne i prawne w oparciu o PZP, WT 2021 i hierarchię dokumentów SWZ. Zapisuje werdykt (decision, justification) do konfliktu i zmienia status na RESOLVED lub ESCALATED_TO_USER. Wywołuj gdy conflicts.status == OPEN lub INVESTIGATING."
+                },
+                {
+                    name: "PDF_SPLITTER",
+                    endpoint: "/api/kosztorysant/agent-pdf-splitter",
+                    capabilities: ["pdf_parsing", "semantic_chunking"],
+                    description: "Narzędzie (Semantyczny Skaner Struktury). Używaj jako PIERWSZY KROK przed wysłaniem dużego PDF do VISION lub BOQ_PARSER. Mapuje logiczne granice dokumentu (strony X-Y = nierozrywalna jednostka) używając Flash-Lite. Zwraca gotową mapę segmentów z rekomendowanym agentem i zakresem stron dla każdego. Zapobiega rozrywaniu rysunków technicznych. ZAWSZE wywołuj dla dokumentów > 5 stron."
+                },
                 { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki pdf w wymiar 3D." }
             ];
             const seedBatch = adminDb.batch();
@@ -1025,6 +1096,20 @@ ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, 
 
 ${EXTRACTION_PROFILES_GUIDE}
 
+=== ZASADY UŻYWANIA PDF_SPLITTER ===
+- Gdy dokument ma > 5 stron i containsDrawings === true → ZAWSZE najpierw wywołaj PDF_SPLITTER.
+- Wyniki PDF_SPLITTER znajdziesz w rawResult.segments agenta. Każdy segment ma:
+  - segmentId, label, pageFrom, pageTo, recommendedAgent, agentInstruction
+- Tworząc zadania dla VISION/BOQ_PARSER po splitterze, użyj agentInstruction z segmentu jako instruction.
+- Nie mieszaj segmentów różnych typów w jednym zadaniu.
+
+=== ZASADY UŻYWANIA REVISOR_JUDGE ===
+- Wywołuj gdy w kolekcji conflicts istnieje dokument ze status == "OPEN" lub "INVESTIGATING".
+- Nie podawaj inputDocIds – agent sam pobierze konflikty z Firestore.
+- W instruction opisz kontekst sporu i co jest finansowo najważniejsze.
+- Po wykonaniu sprawdź czy status konfliktów zmienił się na RESOLVED lub ESCALATED_TO_USER.
+- Jeśli ESCALATED_TO_USER – poinformuj użytkownika przez chatReply i ustaw phase = "WAITING_INPUT".
+
 === DOKUMENTY (Wejście sensoryczne) ===
 ${JSON.stringify(documents, null, 2)}
 
@@ -1039,6 +1124,13 @@ ${JSON.stringify(taskHistory, null, 2)}
 
 === AKTUALNY STAN KOSZTORYSU ===
 ${isEstimateEmpty ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów." : JSON.stringify(estimateState, null, 2)}
+
+=== ŚLEDZENIE OBLICZEŃ (CALCULATION TRAIL) ===
+Każda nowa pozycja w "newEstimateItems" musi być w pełni audytowalna.
+Gdy generujesz pole "opis" dla pozycji, DODAJ na jego końcu wyraźny dowód matematyczny i źródłowy w nawiasie kwadratowym.
+
+UWAGA KRYTYCZNA: Pozycje wyciągnięte przez narzędzie BOQ_PARSER zapisują się do bazy AUTOMATYCZNIE. 
+Jeśli w historii zadań widzisz, że BOQ_PARSER zwrócił pozycje w rawResult.items, ABSOLUTNIE NIE PRZEPISUJ ICH do "newEstimateItems". Uznaj je za załatwione i skup się na innych zadaniach. "newEstimateItems" używaj tylko do dodawania własnych, dedykowanych pozycji z innych przemyśleń (np. luk).
 
 === HISTORIA CZATU Z KOSZTORYSANTEM ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
@@ -1063,13 +1155,47 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
             });
         });
 
-        const parsedResult = JSON.parse(result.text ?? "{}");
+        let parsedResult: any = {};
+        try {
+            parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
+        } catch (e) {
+            console.error("[MÓZG 🧠] Krytyczny błąd parsowania JSON:", e);
+        }
         console.log(`[MÓZG 🧠] Next Best Action: ${parsedResult.nextBestAction}`);
         console.log(`[MÓZG 🧠] Self-Critique: ${parsedResult.selfCritique?.substring(0, 80)}...`);
 
         const batch = adminDb.batch();
 
-        unprocessedTasksSnap.docs.forEach(doc => batch.update(doc.ref, { processedByBrain: true }));
+        unprocessedTasksSnap.docs.forEach(doc => {
+            batch.update(doc.ref, { processedByBrain: true });
+
+            // AUTO-COMMITTER: Bezpośredni zapis tysięcy pozycji z przedmiarów z ominięciem limitu tokenów Mózgu
+            const taskData = doc.data();
+            if (taskData.agentType === "BOQ_PARSER" && taskData.status === "DONE" && taskData.rawResult?.items?.length > 0) {
+                const items = taskData.rawResult.items;
+                const sectionName = taskData.rawResult.contextLabel || "Przedmiar Zaimportowany";
+                const sectionId = `sec_${sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30)}`;
+                const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+
+                batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", totalValue: 0, updatedAt: new Date() }, { merge: true });
+
+                items.forEach((item: any) => {
+                    const id = randomUUID();
+                    batch.set(sectionRef.collection("items").doc(id), {
+                        id,
+                        pozycja: item.pozycja || "",
+                        opis: item.opis || "",
+                        ilosc: Number(item.ilosc) || 0,
+                        jednostka: item.jednostka || "j.m.",
+                        cenaJed: 0,
+                        KNR_ref: item.KNR_ref || "",
+                        confidence: "HIGH",
+                        sourceTrack: `Wydobyte natywnie przez BOQ_PARSER (${sectionName})`
+                    });
+                });
+                console.log(`[MÓZG 🧠 LOG] Auto-Commit: Bezpośrednio zapisano ${items.length} pozycji do sekcji "${sectionName}".`);
+            }
+        });
 
         if (parsedResult.chatReply?.length > 0) {
             parsedResult.chatReply.forEach((msg: string) => {
@@ -1201,6 +1327,7 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -1276,72 +1403,73 @@ export async function POST(req: Request) {
         let totalTokensUsed = 0;
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
 
-        for (let i = 0; i < snapshot.docs.length; i++) {
-            const docSnap = snapshot.docs[i];
-            const docData = docSnap.data();
+        const BATCH_SIZE = 6;
+        for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
+            const batch = snapshot.docs.slice(i, i + BATCH_SIZE);
+            console.log(`[FAZA 0 🚀] Skanuję paczkę plików ${i + 1} do ${Math.min(i + BATCH_SIZE, snapshot.docs.length)}...`);
 
-            if (i > 0) {
-                // Krótki odstęp chroniący przed przeciążeniem API
-                await new Promise(resolve => setTimeout(resolve, 1500));
-            }
+            await Promise.all(batch.map(async (docSnap) => {
+                const docData = docSnap.data();
+                console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
 
-            console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
-
-            try {
-                const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-
-                const prompt = `
+                try {
+                    const fileUri = `gs://${bucketName}/${docData.storagePath}`;
+                    const prompt = `
 Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
 Przeanalizuj pierwszą stronę lub spis treści tego dokumentu budowlanego. 
 Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy dokument zawiera tabele wymiarowe lub rysunki techniczne.
 `;
 
-                const result = await callGeminiWithRetry(async () => {
-                    return await ai.models.generateContent({
-                        model: MODEL_LITE,
-                        contents: [
-                            {
+                    const result = await callGeminiWithRetry(async () => {
+                        return await ai.models.generateContent({
+                            model: MODEL_LITE,
+                            contents: [{
                                 role: "user",
                                 parts: [
                                     { text: prompt },
-                                    {
-                                        fileData: {
-                                            fileUri: fileUri,
-                                            mimeType: docData.mimeType || "application/pdf"
-                                        }
-                                    }
+                                    { fileData: { fileUri: fileUri, mimeType: docData.mimeType || "application/pdf" } }
                                 ]
+                            }],
+                            config: {
+                                temperature: 0.1,
+                                responseMimeType: "application/json",
+                                responseSchema: CLASSIFIER_SCHEMA as any
                             }
-                        ],
-                        config: {
-                            temperature: 0.1,
-                            responseMimeType: "application/json",
-                            responseSchema: CLASSIFIER_SCHEMA as any
-                        }
+                        });
                     });
-                });
 
-                const parsedResult = JSON.parse(result.text ?? "{}");
-                const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
-                totalTokensUsed += tokensUsed;
+                    let parsedResult: any = {};
+                    try {
+                        parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
+                    } catch (e) {
+                        console.error(`[FAZA 0 🚀] Błąd parsowania JSON dla ${docData.fileName}`);
+                    }
 
-                // Zapisujemy nowe flagi bezpośrednio do metadanych dokumentu w Firestore
-                await docSnap.ref.update({
-                    tags: parsedResult.tags,
-                    summary: parsedResult.summary,
-                    detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
-                    containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
-                    containsDrawings: parsedResult.containsDrawings || false,
-                    status: "CLASSIFIED",
-                    classifyModel: MODEL_LITE,
-                    updatedAt: new Date()
-                });
+                    const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
+                    totalTokensUsed += tokensUsed;
 
-                console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
+                    await docSnap.ref.update({
+                        tags: parsedResult.tags || [],
+                        summary: parsedResult.summary || "(brak)",
+                        detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
+                        containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
+                        containsDrawings: parsedResult.containsDrawings || false,
+                        status: "CLASSIFIED",
+                        classifyModel: MODEL_LITE,
+                        updatedAt: new Date()
+                    });
 
-            } catch (docError: any) {
-                console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
-                await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
+                    console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
+
+                } catch (docError: any) {
+                    console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
+                    await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
+                }
+            }));
+
+            // Przerwa tylko między paczkami, a nie pojedynczymi plikami
+            if (i + BATCH_SIZE < snapshot.docs.length) {
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
 
@@ -1678,6 +1806,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 
 export const dynamic = "force-dynamic";
 
@@ -1710,29 +1839,17 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 
 const BUDOWLANIEC_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        missingQuestions: {
+        rawFindings: {
+            type: Type.STRING,
+            description: "Pełny, szczegółowy raport technologiczny zawierający proponowane procesy budowlane, normy zużycia materiałów, wymagane klasy betonu, stali, grubości warstw i parametry inżynieryjne wyliczone dla tego obiektu."
+        },
+        assumedParameters: {
             type: Type.ARRAY,
-            description: "Puste. NIE ZADAWAJ PYTAŃ do Kosztorysanta, chyba że dotyczy to nietypowej/krytycznej prawnie sprawy bez ujednoliconego rynkowego standardu (np. specyficznych metod renowacji zabytku). Jeśli brakuje standardowych danych, wyzeruj tę listę i poczyń własne bezpieczne założenia.",
+            description: "Lista twardych założeń inżynieryjnych (parametrów), które przyjąłeś jako bezpieczne domyślne dla tego typu obiektu.",
             items: { type: Type.STRING }
-        },
-        items: {
-            type: Type.ARRAY,
-            description: "Wygenerowane pozycje robót budowlanych w oparciu o projekt lub standard rynkowy dla obiektu tego typu.",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa roboty" },
-                    opis: { type: Type.STRING, description: "Opis. Jeśli założyłeś cyfry sam (np. pręty fi12 zamiast brakującej zmiennej z SWZ) DODAJ do opisu: '(Założenie rynkowe AI)'." },
-                    ilosc: { type: Type.NUMBER },
-                    jednostka: { type: Type.STRING },
-                    KNR_ref: { type: Type.STRING }
-                },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
-            }
-        },
-        summary: { type: Type.STRING, description: "Wymień założone samodzielnie parametry techniczne wprost (betony, stalaże) dla wiedzy Roju." }
+        }
     },
-    required: ["missingQuestions", "items", "summary"]
+    required: ["rawFindings", "assumedParameters"]
 };
 
 export async function POST(req: Request) {
@@ -1802,7 +1919,7 @@ Daj czysty szczegółowy technologiczny wykaz od podbudów do tynku z racjonalny
         console.log(`[BUDOWLANIEC 🧱] Krok 2 zakończony. Zużyto tokenów: ${tokensStep2}`);
 
         console.log("[BUDOWLANIEC 🧱] Rozpoczynam KROK 3 - finalny autozależnościowy ustruktur JSON (Zabezpieczone Retry)...");
-        const synthesisPrompt = `Narzuc poprawki w plan technologiczny biorac i nie narzucając pytani dla czatu - sam generuj bezpieczne wymuszenia i rozbite pozycje z obu debat:\nPlan:${builderProposal} \nBledy Audytu:${auditorFeedback}. Wynik formatem jako ustrukturyzowana tabela! W pozycjach na materiały w opsach, np jeśli jest beton pisz C30 b30 czy pojęcia co zgooglowałęs normami w krok1 samemu! Brak zadawania zbędnych pytań, dopóki budowa nie upadnie przez rażące zatajenie Inwestorów do procedur (zbyt wczesnie rzec do uzytkownik i nudes!)`;
+        const synthesisPrompt = `Przeanalizuj plan technologiczny oraz błędy audytu. Przygotuj spójny, inżynieryjny zestaw surowych danych i założeń technologicznych w formacie JSON.\nPlan:${builderProposal} \nBledy Audytu:${auditorFeedback}. Wymień szczegółowo parametry techniczne materiałów i procesów (np. klasy betonu, normy KNR), które Mózg powinien wykorzystać do stworzenia kosztorysu.`;
 
         const structureResult = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
@@ -1816,7 +1933,7 @@ Daj czysty szczegółowy technologiczny wykaz od podbudów do tynku z racjonalny
             });
         });
 
-        const parsedResult = JSON.parse(structureResult.text ?? "{}");
+        const parsedResult = JSON.parse(jsonrepair(structureResult.text ?? "{}"));
         const tokensStep3 = structureResult.usageMetadata?.totalTokenCount || 0;
         totalTokensUsed += tokensStep3;
         console.log(`[BUDOWLANIEC 🧱] Krok 3 zakończony. Zużyto tokenów: ${tokensStep3}`);
@@ -1871,6 +1988,7 @@ import { Agent, setGlobalDispatcher } from "undici";
 // Zwiększenie limitu oczekiwania na odpowiedź z API Gemini do 5 minut (300 000 ms)
 setGlobalDispatcher(new Agent({ headersTimeout: 300000, bodyTimeout: 300000 }));
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 import * as xlsx from "xlsx";
 
 export const dynamic = "force-dynamic";
@@ -2161,7 +2279,9 @@ export async function POST(req: Request) {
                         })
                     );
 
-                    const parsed = JSON.parse(result.text ?? "{}");
+                    let parsed: any = {};
+                    try { parsed = JSON.parse(jsonrepair(result.text ?? "{}")); }
+                    catch (e) { console.error("Błąd parsowania:", e); }
                     totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
                     if (parsed.items) allExtractedItems.push(...parsed.items);
                     processingLog.push(`✅ Excel "${docData.fileName}": wyciągnięto ${parsed.items?.length || 0} pozycji (model: ${MODEL_FLASH})`);
@@ -2195,7 +2315,9 @@ export async function POST(req: Request) {
                         })
                     );
 
-                    const parsed = JSON.parse(result.text ?? "{}");
+                    let parsed: any = {};
+                    try { parsed = JSON.parse(jsonrepair(result.text ?? "{}")); }
+                    catch (e) { console.error("Błąd parsowania:", e); }
                     totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
                     if (parsed.items) allExtractedItems.push(...parsed.items);
                     processingLog.push(`✅ PDF "${docData.fileName}": wyciągnięto ${parsed.items?.length || 0} pozycji (model: ${modelToUse})`);
@@ -2275,6 +2397,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 
 export const dynamic = "force-dynamic";
 
@@ -2400,7 +2523,7 @@ Miej na uchu by oddalać sklepy OBI Casto za nie-inzynieryjne odleglości marz h
             });
 
             console.log("[BROKER R-M-S 💰] Uzykał rynnę kwotowania od hurtowieni! Ukladam je wg id...");
-            const structuredResponses = JSON.parse(searchResult.text ?? "{}");
+            const structuredResponses = JSON.parse(jsonrepair(searchResult.text ?? "{}"));
             totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
 
             const responseMapDict = new Map<string, any>(
@@ -2821,6 +2944,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -2852,24 +2976,23 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
 const AUDITOR_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        missingItems: {
+        complianceIssues: {
             type: Type.ARRAY,
-            description: "Lista brakujących elementów technologicznych, prawnych, BHP lub sanitarnych.",
+            description: "Zidentyfikowane braki prawne lub technologiczne w kosztorysie na podstawie WT2021, PPOŻ, Sanepid itp.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującego elementu" },
-                    opis: { type: Type.STRING, description: "Szczegółowe uzasadnienie technologiczne lub prawne (np. wymóg WT 2021, PPOŻ, Sanepid)" },
-                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. szt, kpl, m" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze wpisz 'TECH_REQUIRED'" }
+                    issueCategory: { type: Type.STRING, description: "Kategoria problemu (np. PPOŻ, BHP, Konstrukcja, WT2021)" },
+                    legalReference: { type: Type.STRING, description: "Podstawa prawna lub norma (np. konkretny paragraf)" },
+                    missingTechnology: { type: Type.STRING, description: "Czego fizycznie brakuje w obiekcie (np. klapy dymowe, hydranty, balustrady)" },
+                    impactDescription: { type: Type.STRING, description: "Uzasadnienie dlaczego ten element jest krytyczny prawnie" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["issueCategory", "legalReference", "missingTechnology", "impactDescription"]
             }
         },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie." }
+        summary: { type: Type.STRING, description: "Krótkie podsumowanie audytu prawnego." }
     },
-    required: ["missingItems", "summary"]
+    required: ["complianceIssues", "summary"]
 };
 
 export async function POST(req: Request) {
@@ -2929,7 +3052,7 @@ Napisz techniczny raport z audytu.
         // KROK 2: Strukturyzacja na JSON (Bez Search)
         console.log("[SILENT AUDITOR 🕵️] KROK 2: Strukturyzacja wyników audytu na JSON...");
         const structurePrompt = `
-Na podstawie poniższego raportu z audytu technicznego, wyodrębnij brakujące pozycje zgodnie ze schematem JSON.
+Na podstawie poniższego raportu z audytu technicznego, wyodrębnij surowe fakty o brakach prawno-technologicznych (zgodnie ze schematem JSON), aby Mózg mógł podjąć na ich podstawie decyzję o rozszerzeniu kosztorysu.
 
 Raport z audytu:
 ${rawReport}
@@ -2947,7 +3070,12 @@ ${rawReport}
             });
         });
 
-        const parsedResult = JSON.parse(structureResult.text ?? "{}");
+        let parsedResult: any = {};
+        try {
+            parsedResult = JSON.parse(jsonrepair(structureResult.text ?? "{}"));
+        } catch (e) {
+            console.error("[SILENT AUDITOR 🕵️] Błąd naprawy JSON:", e);
+        }
         totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
 
         await taskRef.update({
@@ -3030,24 +3158,22 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
 const GAP_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        estimatedItems: {
+        marketRates: {
             type: Type.ARRAY,
-            description: "Lista oszacowanych pozycji wskaźnikowych rynkowych.",
+            description: "Zidentyfikowane wskaźniki rynkowe, jednostki i stawki referencyjne dla brakującego zakresu.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa brakującej branży lub elementu" },
-                    opis: { type: Type.STRING, description: "Uzasadnienie rynkowe oszacowanego wskaźnika" },
-                    ilosc: { type: Type.NUMBER, description: "Ilość wskaźnikowa" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. m2, kpl, ryczałt" },
-                    KNR_ref: { type: Type.STRING, description: "Zawsze 'WSKAŹNIK_RYNKOWY'" }
+                    scope: { type: Type.STRING, description: "Nazwa brakującego zakresu lub branży" },
+                    metric: { type: Type.STRING, description: "Miernik wskaźnikowy, np. m2 p.u., kWp, ryczałt" },
+                    averageRatePLN: { type: Type.NUMBER, description: "Średnia stawka za jednostkę miary netto w PLN" },
+                    justification: { type: Type.STRING, description: "Źródło i uzasadnienie stawki (np. Sekocenbud, GUS, dane rynkowe)" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["scope", "metric", "averageRatePLN", "justification"]
             }
-        },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie." }
+        }
     },
-    required: ["estimatedItems", "summary"]
+    required: ["marketRates"]
 };
 
 export async function POST(req: Request) {
@@ -3176,7 +3302,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
-import { randomUUID } from "crypto";
+import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -3188,6 +3314,8 @@ const ai = new GoogleGenAI({
     location: "global"
 });
 
+// Sędzia wykonuje skomplikowaną analizę prawno-techniczną, dlatego używa modelu PRO
+const MODEL_PRO = "gemini-2.5-pro";
 const MODEL_FLASH = "gemini-2.5-flash";
 
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
@@ -3197,7 +3325,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const errorText = error.toString() || "";
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
-            console.warn(`[BROKER 💰] Limit 429. Odczekuję ${delay / 1000}s...`);
+            console.warn(`[REVISOR_JUDGE ⚖️] Limit 429. Czekam ${delay / 1000}s... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -3205,26 +3333,36 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
     }
 }
 
-const BROKER_RMS_SCHEMA = {
+// Rygorystyczny schemat wyjściowy werdyktu sędziowskiego
+const VERDICT_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        prices: {
-            type: Type.ARRAY,
-            description: "Odłowiona paleta wycen dla hurtownego lub parametrycznie wykonanego składu rynków (Polska).",
-            items: {
-                type: Type.OBJECT,
-                properties: {
-                    id: { type: Type.STRING },
-                    R_KosztNetto: { type: Type.NUMBER, description: "Taryfikacja Pracy i brygady [Robocizna na 1 JEDNOSTKĘ] zł" },
-                    M_KosztHurtowyNetto: { type: Type.NUMBER, description: "B2B [Materiał]: Czysto materiał bez prac narzutowych z katalogów KNR" },
-                    S_KosztSprzetuNetto: { type: Type.NUMBER, description: "[Sprzęt ciężki lub elektronarzedzi do tego procesu]" },
-                    bazaCennikowZrodla: { type: Type.STRING, description: "Link lub krótka adnotacja katalogu norm dla audytu." }
-                },
-                required: ["id", "R_KosztNetto", "M_KosztHurtowyNetto", "S_KosztSprzetuNetto", "bazaCennikowZrodla"]
-            }
+        decision: {
+            type: Type.STRING,
+            description: "Jednoznaczna decyzja merytoryczna rozstrzygająca spór (które twierdzenie jest prawidłowe i dlaczego w 1 zdaniu)."
+        },
+        justification: {
+            type: Type.STRING,
+            description: "Pełne uzasadnienie prawne i techniczne z powołaniem na przepisy (WT 2021, PZP, Polskie Normy)."
+        },
+        winningParty: {
+            type: Type.STRING,
+            description: "Nazwa agenta, którego twierdzenie wygrało (np. 'VISION', 'BUDOWLANIEC'), lub 'ESCALATE' jeśli sprawa wymaga interwencji człowieka."
+        },
+        confidence: {
+            type: Type.NUMBER,
+            description: "Pewność wyroku w skali 0-100."
+        },
+        requiresUserDecision: {
+            type: Type.BOOLEAN,
+            description: "Ustaw na true, jeśli sprawa jest zbyt niejednoznaczna lub wymaga decyzji biznesowej użytkownika."
+        },
+        additionalFindings: {
+            type: Type.STRING,
+            description: "Opcjonalne dodatkowe ustalenia faktyczne przydatne dla kosztorysu."
         }
     },
-    required: ["prices"]
+    required: ["decision", "justification", "winningParty", "confidence", "requiresUserDecision"]
 };
 
 export async function POST(req: Request) {
@@ -3237,156 +3375,235 @@ export async function POST(req: Request) {
         tenderId = body.tenderId;
         taskId = body.taskId;
 
-        console.log(`[BROKER 💰] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
+        console.log(`[REVISOR_JUDGE ⚖️] Start sesji orzekania. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
 
-        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak Danych" }, { status: 400 });
+        if (!tenderId || !taskId) {
+            return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        }
 
         const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
         const taskDoc = await taskRef.get();
         if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
 
         const taskData = taskDoc.data()!;
-        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie już obsłużone." });
+        if (taskData.status !== "PENDING") {
+            return NextResponse.json({ message: "Zadanie zostało już obsłużone." });
+        }
 
         await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
 
-        const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`);
-        const sectionsSnap = await estimateRef.where("status", "==", "QUANTITY_READY").get();
+        // 1. Pobieranie otwartych konfliktów z bazy danych
+        const conflictsRef = adminDb.collection(`tenders/${tenderId}/conflicts`);
+        const openConflictsSnap = await conflictsRef
+            .where("status", "in", ["OPEN", "INVESTIGATING"])
+            .get();
 
-        if (sectionsSnap.empty) {
-            await taskRef.update({ status: "DONE", rawResult: { message: "Brak sekcji do wyceny." }, processedByBrain: false, updatedAt: new Date() });
+        if (openConflictsSnap.empty) {
+            console.log("[REVISOR_JUDGE ⚖️] Brak otwartych konfliktów do rozstrzygnięcia. Zamykam sesję.");
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { summary: "Brak otwartych konfliktów do rozpatrzenia.", resolvedCount: 0 },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
             isSuccess = true;
-            return NextResponse.json({ message: "Sekcje Empty!" });
+            return NextResponse.json({ success: true, resolvedCount: 0 });
         }
 
+        console.log(`[REVISOR_JUDGE ⚖️] Znaleziono ${openConflictsSnap.size} otwartych konfliktów do zbadania.`);
+
+        // 2. Pobieranie kontekstu poznawczego z Mózgu i GCS
+        const [docsSnap, brainSnap] = await Promise.all([
+            adminDb.collection(`tenders/${tenderId}/documents`).get(),
+            adminDb.collection(`tenders/${tenderId}/brain`).doc("main").get()
+        ]);
+
+        const documentsList = docsSnap.docs.map(d => ({
+            id: d.id,
+            fileName: d.data().fileName,
+            tags: d.data().tags || [],
+            summary: d.data().summary || "(brak)",
+            detailedElement: d.data().detailedElement || "NIE_DOTYCZY"
+        }));
+
+        const brainKnownFacts = brainSnap.exists
+            ? (brainSnap.data()?.cognitiveState?.knownFacts || {})
+            : {};
+
         let totalTokensUsed = 0;
-        let pricedItemsCount = 0;
-        const globalBatch = adminDb.batch();
+        let resolvedCount = 0;
+        let escalatedCount = 0;
 
-        for (const sectionDoc of sectionsSnap.docs) {
-            const sectionId = sectionDoc.id;
-            const itemsSnap = await estimateRef.doc(sectionId).collection("items").get();
-            const itemsInDB = itemsSnap.docs.map(d => ({ dbId: d.id, ...d.data() }));
+        // 3. Pętla rozstrzygania spraw
+        for (const conflictDoc of openConflictsSnap.docs) {
+            const conflict = conflictDoc.data();
+            console.log(`[REVISOR_JUDGE ⚖️] ──────────────────────────────────────────────────`);
+            console.log(`[REVISOR_JUDGE ⚖️] Rozpatruję sprawę: "${conflict.topic}" (ID: ${conflictDoc.id})`);
 
-            if (itemsInDB.length === 0) continue;
+            await conflictDoc.ref.update({ status: "INVESTIGATING", updatedAt: new Date() });
 
-            const searchQueryInput = itemsInDB.map((i: any) =>
-                `Dok_ID: ${i.dbId} | Norma/Typ: ${i.KNR_ref || i.pozycja} | Robota Inż.: ${i.opis.substring(0, 60)} | Unit: ${i.jednostka}`
-            ).join("\n");
-
-            // KROK 1: Szukanie cen w sieci (Surowy tekst)
-            console.log("[BROKER 💰] KROK 1: Przeszukiwanie sieci (Google Search)...");
+            // Krok 3a: Analiza prawno-techniczna z wyszukiwarką Google (Model PRO)
             const searchPrompt = `
-Jesteś Brokerem Wycen w sieci Polskich Dystrybucji Norm / Używającym B2B standardu rynkowego.
-Użyj wyszukiwarki Google Search, aby znaleźć aktualne rynkowe stawki wykonawcze (Robocizna, Materiały, Sprzęt) w Polsce dla pozycji:
-${searchQueryInput}
+Jesteś Sędzią Techniczno-Prawnym (REVISOR_JUDGE) w polskim systemie zamówień publicznych.
+Musisz rozstrzygnąć następujący spór merytoryczny w kosztorysie budowlanym:
 
-Zadanie: ${taskData.instruction}
+=== TEMAT SPORU ===
+${conflict.topic}
 
-Napisz szczegółowy raport cenowy rynkowy dla każdej pozycji.
+=== STANOWISKA STRON ===
+${(conflict.parties || []).map((p: any, i: number) => `
+Strona ${i + 1} – Agent "${p.agent}":
+  Twierdzenie: "${p.claim}"
+  Dokument źródłowy: "${p.sourceDoc || "brak"}"
+`).join("\n")}
+
+=== ZNANY KONTEKST PROJEKTU ===
+Fakty poznawcze: ${JSON.stringify(brainKnownFacts).substring(0, 1500)}
+Wykaz dokumentów: ${documentsList.map(d => `[${d.tags.join(",")}] ${d.fileName} (${d.detailedElement}): ${d.summary}`).join("\n").substring(0, 1500)}
+
+=== INSTRUKCJA OD MÓZGU ===
+${taskData.instruction || "Rozstrzygnij spór zgodnie z hierarchią ważności dokumentów."}
+
+=== ZASADY ORZEKANIA (HIERARCHIA WAŻNOŚCI) ===
+1. Zapisy SWZ (Specyfikacja Warunków Zamówienia) mają BEZWZGLĘDNE pierwszeństwo przed innymi plikami.
+2. Projekt Budowlany / Projekt Zagospodarowania Terenu (PZT).
+3. Warunki Techniczne (WT 2021) oraz Polskie Normy (PN-EN).
+4. Rysunki pomocnicze i opisy technologii.
+5. Ogólne standardy branżowe.
+
+Użyj wyszukiwarki Google Search aby:
+- Sprawdzić aktualne przepisy techniczno-budowlane (WT 2021) dla tego sporu.
+- Zweryfikować normy i interpretacje Urzędu Zamówień Publicznych (UZP) / KIO.
+
+Napisz szczegółowe uzasadnienie wyroku z powołaniem na konkretne dokumenty i paragrafy ustaw.
 `;
 
-            const searchResult = await callGeminiWithRetry(async () => {
-                return await ai.models.generateContent({
-                    model: taskData.modelOverride || MODEL_FLASH,
+            const searchResult = await callGeminiWithRetry(() =>
+                ai.models.generateContent({
+                    model: MODEL_PRO,
                     contents: searchPrompt,
                     config: {
                         tools: [{ googleSearch: {} }],
                         temperature: 0.1
                     }
-                });
-            });
-
-            const rawReport = searchResult.text ?? "";
-            totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
-
-            // KROK 2: Strukturyzacja cen na JSON (Bez Search)
-            console.log("[BROKER 💰] KROK 2: Strukturyzacja wycen na JSON...");
-            const structurePrompt = `
-Na podstawie poniższego raportu z badania cen rynkowych, wyodrębnij wyceny i sformatuj je zgodnie ze schematem JSON.
-
-Raport z cenami:
-${rawReport}
-`;
-
-            const structureResult = await callGeminiWithRetry(async () => {
-                return await ai.models.generateContent({
-                    model: MODEL_FLASH,
-                    contents: structurePrompt,
-                    config: {
-                        temperature: 0.1,
-                        responseMimeType: "application/json",
-                        responseSchema: BROKER_RMS_SCHEMA as any
-                    }
-                });
-            });
-
-            const structuredResponses = JSON.parse(structureResult.text ?? "{}");
-            totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
-
-            const responseMapDict = new Map<string, any>(
-                (structuredResponses.prices || []).map((bData: any) => [bData.id, bData])
+                })
             );
 
-            let calculatedTotalValue = 0;
+            const legalAnalysis = searchResult.text ?? "";
+            totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
+            console.log(`[REVISOR_JUDGE ⚖️] Analiza dowodowa i prawna ukończona pomyślnie.`);
 
-            for (const itemDBCache of itemsSnap.docs) {
-                const liveObj = itemDBCache.data();
-                const fetchedAgentBreak = responseMapDict.get(itemDBCache.id) || null;
+            // Krok 3b: Kognitywna synteza werdyktu do ustrukturyzowanego formatu JSON
+            const verdictPrompt = `
+Na podstawie poniższej analizy prawnej, wydaj ostateczny werdykt dla sporu.
 
-                if (fetchedAgentBreak) {
-                    const jnTotNetto = (Number(fetchedAgentBreak.R_KosztNetto) || 0) + (Number(fetchedAgentBreak.M_KosztHurtowyNetto) || 0) + (Number(fetchedAgentBreak.S_KosztSprzetuNetto) || 0);
-                    calculatedTotalValue += (Number(liveObj.ilosc) || 0) * jnTotNetto;
+=== ANALIZA PRAWNO-TECHNICZNA ===
+${legalAnalysis}
 
-                    const modifiedDescription = `${liveObj.opis || ""} | [WYCENA WSK. HURT RMS/B2B: R:${fetchedAgentBreak.R_KosztNetto || 0}zł / M:${fetchedAgentBreak.M_KosztHurtowyNetto || 0}zł / S:${fetchedAgentBreak.S_KosztSprzetuNetto || 0}zł | Z:(Goo Search Baza -> ${fetchedAgentBreak.bazaCennikowZrodla})].`;
+=== STRONY SPORU ===
+${JSON.stringify(conflict.parties || [])}
 
-                    globalBatch.update(itemDBCache.ref, {
-                        cenaJed: jnTotNetto,
-                        opis: modifiedDescription,
-                        confidence: "HIGH",
-                        sourceTrack: `${liveObj.sourceTrack || "Z narzuta B2B"} 💰 Pieniądze B2B`
-                    });
-                    pricedItemsCount++;
-                }
+Zwróć czysty obiekt JSON pasujący dokładnie do schematu.
+`;
+
+            const verdictResult = await callGeminiWithRetry(() =>
+                ai.models.generateContent({
+                    model: MODEL_FLASH,
+                    contents: verdictPrompt,
+                    config: {
+                        temperature: 0.05,
+                        responseMimeType: "application/json",
+                        responseSchema: VERDICT_SCHEMA as any
+                    }
+                })
+            );
+
+            totalTokensUsed += verdictResult.usageMetadata?.totalTokenCount || 0;
+
+            let verdict: any = {};
+            try {
+                verdict = JSON.parse(jsonrepair(verdictResult.text ?? "{}"));
+            } catch (parseErr) {
+                console.error(`[REVISOR_JUDGE ⚖️] Błąd parsowania wyroku dla "${conflict.topic}":`, parseErr);
+                verdict = {
+                    decision: "Wymaga ręcznej weryfikacji ze względu na błąd techniczny generatora.",
+                    justification: legalAnalysis.substring(0, 500),
+                    winningParty: "ESCALATE",
+                    confidence: 0,
+                    requiresUserDecision: true
+                };
             }
 
-            globalBatch.update(sectionDoc.ref, {
-                totalValue: calculatedTotalValue,
-                status: "PRICED",
+            const newStatus = verdict.requiresUserDecision ? "ESCALATED_TO_USER" : "RESOLVED";
+
+            // Krok 3c: Zapis werdyktu bezpośrednio do dokumentu konfliktu w Firestore
+            await conflictDoc.ref.update({
+                status: newStatus,
+                resolution: {
+                    decision: verdict.decision || "Brak jednoznacznej decyzji",
+                    justification: verdict.justification || legalAnalysis.substring(0, 1000),
+                    winningParty: verdict.winningParty || "UNKNOWN",
+                    confidence: verdict.confidence || 0,
+                    additionalFindings: verdict.additionalFindings || null,
+                    resolvedBy: "REVISOR_JUDGE",
+                    resolvedAt: new Date()
+                },
                 updatedAt: new Date()
             });
+
+            if (newStatus === "RESOLVED") {
+                resolvedCount++;
+                console.log(`[REVISOR_JUDGE ⚖️] Sprawa ROZSTRZYGNIĘTA. Wygrany: ${verdict.winningParty} (pewność: ${verdict.confidence}%)`);
+            } else {
+                escalatedCount++;
+                console.log(`[REVISOR_JUDGE ⚖️] Sprawa ESKALOWANA do Kosztorysanta ze względu na niejednoznaczność.`);
+            }
         }
 
-        globalBatch.update(taskRef, {
+        // 4. Zamykanie zadania dla Mózgu
+        await taskRef.update({
             status: "DONE",
-            rawResult: { pricedOutQuant: pricedItemsCount },
+            rawResult: {
+                summary: `Sesja orzekania zakończona. Spraw rozpatrzonych: ${openConflictsSnap.size}. Rozstrzygnięto: ${resolvedCount}. Eskalowano: ${escalatedCount}.`,
+                resolvedCount,
+                escalatedCount,
+                totalConflicts: openConflictsSnap.size
+            },
             processedByBrain: false,
             costTokens: totalTokensUsed,
             updatedAt: new Date()
         });
 
-        const costToDBStore = (totalTokensUsed / 1000) * 0.000015;
-        globalBatch.update(adminDb.collection("tenders").doc(tenderId), { "budgetGuard.currentCostUSD": FieldValue.increment(costToDBStore) });
+        const costUSD = (totalTokensUsed / 1000) * 0.002;
+        await adminDb.collection("tenders").doc(tenderId).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        });
 
-        await globalBatch.commit();
         isSuccess = true;
-        console.log("[BROKER 💰] Sukces.");
-        return NextResponse.json({ success: true, billedItemZ: pricedItemsCount });
+        console.log(`[REVISOR_JUDGE ⚖️] ✅ Protokół podpisany. Rozstrzygnięto: ${resolvedCount}.`);
+        return NextResponse.json({ success: true, resolvedCount, escalatedCount });
 
-    } catch (errx: any) {
-        console.error("[BROKER 💰] ❌ Błąd:", errx);
+    } catch (error: any) {
+        console.error("[REVISOR_JUDGE ⚖️] ❌ Krytyczny błąd posiedzenia sądu:", error);
         if (tenderId && taskId) {
             await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
-                status: "ERROR", rawResult: { error: errx.message }, processedByBrain: false, updatedAt: new Date()
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
             }).catch(() => { });
         }
-        return NextResponse.json({ error: errx.message }, { status: 500 });
+        return NextResponse.json({ error: error.message }, { status: 500 });
     } finally {
         if (tenderId && taskId) {
             const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
             fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
             }).catch(() => { });
         }
     }
@@ -3401,6 +3618,7 @@ import { NextResponse } from "next/server";
 import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
 
 export const dynamic = "force-dynamic";
 
@@ -3416,24 +3634,22 @@ const MODEL_PRO = "gemini-2.5-pro"; // Specjalistyczna analiza niszowych branż 
 const KAMELEON_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        items: {
+        specialistSpecs: {
             type: Type.ARRAY,
-            description: "Lista wyciągniętych pozycji specjalistycznych.",
+            description: "Zidentyfikowane specyficzne urządzenia, technologie i ich parametry fizyczne.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    pozycja: { type: Type.STRING, description: "Nazwa lub indeks pozycji specjalistycznej" },
-                    opis: { type: Type.STRING, description: "Pełny techniczny opis pozycji kosztorysowej" },
-                    ilosc: { type: Type.NUMBER, description: "Szacowana ilość (liczba)" },
-                    jednostka: { type: Type.STRING, description: "Jednostka miary, np. kpl, szt, m" },
-                    KNR_ref: { type: Type.STRING, description: "Zapisz 'WYCENA_INDYWIDUALNA' lub sugerowany kod normy" }
+                    deviceNameOrTech: { type: Type.STRING, description: "Nazwa urządzenia lub niszowej technologii" },
+                    quantity: { type: Type.NUMBER, description: "Wykryta ilość" },
+                    unit: { type: Type.STRING, description: "Jednostka miary" },
+                    rawSpecifications: { type: Type.STRING, description: "Pełna specyfikacja techniczna z pliku" }
                 },
-                required: ["pozycja", "opis", "ilosc", "jednostka", "KNR_ref"]
+                required: ["deviceNameOrTech", "quantity", "unit", "rawSpecifications"]
             }
-        },
-        summary: { type: Type.STRING, description: "Krótkie podsumowanie techniczne analizy specjalistycznej." }
+        }
     },
-    required: ["items", "summary"]
+    required: ["specialistSpecs"]
 };
 
 export async function POST(req: Request) {
@@ -3548,7 +3764,7 @@ Ważne zasady:
                 });
 
                 console.log(`[KAMELEON 🦎] Odebrano odpowiedź z Gemini dla pliku: ${docData.fileName}. Parsuję JSON...`);
-                const parsedResult = JSON.parse(result.text ?? "{}");
+                const parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
                 const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
                 totalTokensUsed += tokensUsed;
 

@@ -179,8 +179,44 @@ export default function EstimatorPage() {
 
         // D. Nasłuch Kosztorysu (Żywy Kosztorys)
         const unsubEstimate = onSnapshot(collection(db, `tenders/${activeTenderId}/estimate`), (snap) => {
-            const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as EstimateSection));
-            setSections(list);
+            const initialSections: EstimateSection[] = snap.docs.map(d => {
+                const data = d.data();
+                return {
+                    id: d.id,
+                    section: data.section || "Brak nazwy",
+                    status: data.status || "UNKNOWN",
+                    totalValue: data.totalValue || 0,
+                    items: [] // Inicjalizacja pustej tablicy na start
+                };
+            });
+
+            // Ustawiamy główny szkielet sekcji w interfejsie
+            setSections(initialSections);
+
+            // Reaktywny nasłuch podkolekcji 'items' dla KAŻDEJ z sekcji
+            initialSections.forEach(section => {
+                onSnapshot(collection(db, `tenders/${activeTenderId}/estimate/${section.id}/items`), (itemsSnap) => {
+                    const fetchedItems: EstimateItem[] = itemsSnap.docs.map(itemDoc => {
+                        const itemData = itemDoc.data();
+                        return {
+                            id: itemDoc.id,
+                            pozycja: itemData.pozycja || "",
+                            opis: itemData.opis || "",
+                            ilosc: itemData.ilosc || 0,
+                            jednostka: itemData.jednostka || "j.m.",
+                            cenaJed: itemData.cenaJed || 0,
+                            KNR_ref: itemData.KNR_ref || "",
+                            confidence: itemData.confidence || "",
+                            sourceTrack: itemData.sourceTrack || ""
+                        };
+                    });
+
+                    // Podmieniamy tylko pozycje wewnątrz konkretnej sekcji
+                    setSections(prevSections => prevSections.map(s =>
+                        s.id === section.id ? { ...s, items: fetchedItems } : s
+                    ));
+                });
+            });
         });
 
         // E. Nasłuch Czatu (Interfejs z Użytkownikiem)
