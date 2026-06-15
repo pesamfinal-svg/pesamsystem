@@ -6,7 +6,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300; // 5 minut - bezpieczny czas na pętlę konwersji dużych plików
+export const maxDuration = 300; // 5 minut - maksymalny czas dla Cloud Run
 
 const MODEL_LITE = "gemini-2.5-flash-lite";
 const MODEL_CONVERTER = "gemini-2.5-flash";
@@ -23,7 +23,7 @@ const CLASSIFIER_SCHEMA = {
         tags: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: "Tagi dokumentu, np. [SWZ], [UMOWA], [SPECYFIKACJA]"
+            description: "Tagi dokumentu, np. [SWZ], [UMOWA], [SPECYFIKACJA], [RZUTY]"
         },
         summary: {
             type: Type.STRING,
@@ -49,55 +49,97 @@ const CLASSIFIER_SCHEMA = {
     required: ["tags", "summary", "detailedElement", "containsTablesWithDimensions", "containsDrawings", "pageCount"]
 };
 
+// 🛡️ Pancerny Retry obsługujący błędy 429 oraz wszelkie zerwania gniazd sieciowych
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
-        const errorText = error.toString() || "";
-        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
-        if (isRateLimit && retries > 0) {
-            console.warn(`[FAZA 0 🚀] Limit 429. Odczekuję ${delay / 1000}s... (Pozostało prób: ${retries})`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        const errorText = error?.toString?.() || "";
+        const causeText = error?.cause?.toString?.() || "";
+        const fullText = `${errorText} ${causeText}`;
+
+        const isRateLimit = fullText.includes("429") || fullText.includes("RESOURCE_EXHAUSTED");
+        const isSocketError =
+            fullText.includes("UND_ERR_SOCKET") ||
+            fullText.includes("fetch failed") ||
+            fullText.includes("other side closed") ||
+            fullText.includes("ECONNRESET") ||
+            fullText.includes("ETIMEDOUT") ||
+            fullText.includes("SocketError");
+
+        if ((isRateLimit || isSocketError) && retries > 0) {
+            const jitter = Math.random() * 3000;
+            const waitTime = delay + jitter;
+            const reason = isRateLimit ? "Limit API 429" : "Błąd sieci/socketu (zerwane połączenie)";
+            console.warn(`[FAZA 0/0.5 ⚠️] ${reason}. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2); // Exponential backoff
         }
         throw error;
     }
 }
 
+// 🚄 Pomocnicza funkcja do kontrolowania współbieżności (zabezpieczenie przed Timeoutem)
+async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    const executing = new Set<Promise<void>>();
+    
+    for (const task of tasks) {
+        const p = task().then(res => {
+            results.push(res);
+        });
+        executing.add(p);
+        p.finally(() => executing.delete(p));
+        
+        if (executing.size >= concurrency) {
+            await Promise.race(executing);
+        }
+    }
+    await Promise.all(executing);
+    return results;
+}
+
 /**
- * METODA DZIEL I ŁĄCZ (Chunk & Join)
- * Konwertuje PDF na Markdown dzieląc go na przedziały po 10 stron,
- * aby ominąć limity tokenów wyjściowych (Output Limit) i zapobiec ucięciu tekstu.
+ * 🚀 METODA DZIEL I ŁĄCZ 2.0 (Hybrydowa + Współbieżna)
+ * Konwertuje tekstowe pliki PDF na Markdown z użyciem zmiennego rozmiaru paczek.
  */
 async function convertPdfToMarkdownInShadow(
     docSnap: FirebaseFirestore.QueryDocumentSnapshot,
     bucketName: string,
-    pageCount: number
+    pageCount: number,
+    containsTables: boolean
 ): Promise<number> {
     const docData = docSnap.data();
     const originalPath = docData.storagePath as string;
     const mdPath = `${originalPath}.md`;
     const fileUri = `gs://${bucketName}/${originalPath}`;
 
-    const CHUNK_SIZE = 10;
-    const markdownChunks: string[] = [];
+    // INTELIGENTNY ROUTING: Zmienny rozmiar paczek
+    const CHUNK_SIZE = containsTables ? 10 : 30; 
     let totalTokensUsed = 0;
 
-    console.log(`[FAZA 0.5 🏗️] Rozpoczynam konwersję 'Dziel i Łącz' dla: ${docData.fileName} (${pageCount} str.)`);
+    console.log(`[FAZA 0.5 🏗️] Start konwersji MD: ${docData.fileName} (${pageCount} str.) | Tabele: ${containsTables} | Paczka: ${CHUNK_SIZE}`);
 
+    const chunks: { start: number, end: number }[] = [];
     for (let startPage = 1; startPage <= pageCount; startPage += CHUNK_SIZE) {
-        const endPage = Math.min(startPage + CHUNK_SIZE - 1, pageCount);
-        console.log(`[FAZA 0.5 🏗️] Przetwarzam przedział stron: ${startPage} - ${endPage}...`);
+        chunks.push({
+            start: startPage,
+            end: Math.min(startPage + CHUNK_SIZE - 1, pageCount)
+        });
+    }
 
+    const tasks = chunks.map(({ start, end }) => async () => {
+        console.log(`[FAZA 0.5 🏗️] Przetwarzam strony: ${start} - ${end}...`);
+        
         const converterPrompt = `
 Jesteś precyzyjnym konwerterem dokumentów budowlanych.
-Z załączonego dokumentu PDF przeanalizuj i przepisz na format Markdown TYLKO STRONY OD ${startPage} DO ${endPage} (włącznie).
+Przeanalizuj i przepisz na format Markdown TYLKO STRONY OD ${start} DO ${end} (włącznie).
 Zasady:
-- Skup się wyłącznie na stronach od ${startPage} do ${endPage}. Ignoruj resztę dokumentu.
-- Zachowaj tabele jako tabele Markdown (| kolumna | kolumna |)
-- Zachowaj hierarchię nagłówków (#, ##, ###)
-- Zachowaj wszystkie wartości liczbowe, jednostki i opisy bez skróceń.
-- Odpowiedz TYLKO treścią Markdown dla tego przedziału stron, bez komentarzy i wstępów.
+- Skup się wyłącznie na stronach od ${start} do ${end}.
+${containsTables 
+    ? "- ZACHOWAJ TABELE jako czyste tabele Markdown (| kolumna | kolumna |) i zachowaj wszystkie liczby, jednostki oraz przedmiary." 
+    : "- To dokument opisowy (np. SWZ, umowa). Przepisz tekst z zachowaniem oryginalnej struktury nagłówków (#, ##, ###)."}
+- Odpowiedz TYLKO i WYŁĄCZNIE treścią Markdown, bez jakichkolwiek wstępów i komentarzy.
 `;
 
         const result = await callGeminiWithRetry(async () => {
@@ -114,34 +156,39 @@ Zasady:
             });
         });
 
-        totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+        const tokens = result.usageMetadata?.totalTokenCount || 0;
         let chunkText = result.text ?? "";
         chunkText = chunkText.replace(/```markdown/gi, "").replace(/```/g, "").trim();
 
-        if (chunkText.length > 5) {
-            markdownChunks.push(`<!-- STRONY ${startPage}-${endPage} -->\n${chunkText}`);
-        }
+        return { start, end, text: chunkText, tokens };
+    });
 
-        // Mała pauza (pacing) między chunkami tego samego pliku, chroniąca przed 429
-        if (startPage + CHUNK_SIZE <= pageCount) {
-            await new Promise(r => setTimeout(r, 2000));
-        }
-    }
+    // Uruchamiamy współbieżnie (Max 3 na raz, chroni przed 429 i Timeout Cloud Run)
+    const MAX_CONCURRENCY = 3; 
+    const results = await runWithConcurrency(tasks, MAX_CONCURRENCY);
 
+    // Sortujemy wyniki, ponieważ współbieżność może zwrócić je w różnej kolejności
+    results.sort((a, b) => a.start - b.start);
+    const markdownChunks = results
+        .filter(r => r.text.length > 5)
+        .map(r => `<!-- STRONY ${r.start}-${r.end} -->\n${r.text}`);
+    
+    totalTokensUsed = results.reduce((acc, curr) => acc + curr.tokens, 0);
     const compiledMarkdown = markdownChunks.join("\n\n---\n\n");
 
     if (!compiledMarkdown.trim() || compiledMarkdown.length < 50) {
-        throw new Error("Błąd konwersji — pusty plik wynikowy.");
+         console.warn(`[FAZA 0.5 ⚠️] Wynik dla ${docData.fileName} jest zbyt krótki. Możliwy pusty dokument.`);
+         return totalTokensUsed;
     }
 
-    // Zapisujemy połączony, pełny plik Markdown do chmury Storage
+    // Zapis do Cloud Storage
     const bucket = adminStorage.bucket(bucketName);
     await bucket.file(mdPath).save(compiledMarkdown, {
         contentType: "text/markdown; charset=utf-8",
         metadata: { cacheControl: "no-cache" }
     });
 
-    // Podmieniamy ścieżkę w bazie danych — pełna przezroczystość!
+    // Aktualizacja Firestore - Przezroczysta podmiana ścieżki
     await docSnap.ref.update({
         storagePath: mdPath,
         mimeType: "text/markdown",
@@ -149,7 +196,7 @@ Zasady:
         originalStoragePath: originalPath,
     });
 
-    console.log(`[FAZA 0.5 🏗️] ✅ Pełna konwersja zakończona sukcesem dla: ${docData.fileName} (Zużyto: ${totalTokensUsed} tkn)`);
+    console.log(`[FAZA 0.5 🏗️] ✅ Zakończono konwersję MD: ${docData.fileName} (Zużyto: ${totalTokensUsed} tkn)`);
     return totalTokensUsed;
 }
 
@@ -170,7 +217,7 @@ export async function POST(req: Request) {
         let totalTokensUsed = 0;
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
 
-        // Sekwencyjność chroni pamięć RAM przed Out of Memory na Cloud Run
+        // Sekwencyjność na głównej pętli chroni pamięć RAM przed OOM na Cloud Run
         for (let j = 0; j < snapshot.docs.length; j++) {
             const docSnap = snapshot.docs[j];
             const docData = docSnap.data();
@@ -180,8 +227,8 @@ export async function POST(req: Request) {
                 const fileUri = `gs://${bucketName}/${docData.storagePath}`;
                 const prompt = `
 Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
-Przeanalizuj pierwszą stronę lub spis treści tego dokumentu budowlanego. 
-Zwróć JSON z odpowiednimi tagami, streszczeniem oraz określi liczbę stron i zawartość tabel/rysunków.
+Przeanalizuj pierwszą stronę, spis treści lub próbkę dokumentu budowlanego. 
+Zwróć JSON z odpowiednimi tagami, streszczeniem oraz dokładnie określ, czy plik zawiera tabele/przedmiary oraz rysunki/rzuty techniczne.
 `;
 
                 const result = await callGeminiWithRetry(async () => {
@@ -225,21 +272,31 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz określi liczbę stron i 
                     updatedAt: new Date()
                 });
 
-                console.log(`[FAZA 0 🚀] Sklasyfikowano: ${docData.fileName} (Strony: ${pageCount}, Rysunki: ${parsedResult.containsDrawings})`);
+                console.log(`[FAZA 0 🚀] Sklasyfikowano: ${docData.fileName} (Strony: ${pageCount}, Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings})`);
 
-                // --- KROK 2: Bezpieczna, pętlowa konwersja 'Dziel i Łącz' na Markdown ---
+                // --- KROK 2: Inteligenty Routing Dokumentów ---
                 const isPdf = (docData.mimeType || "").includes("pdf") || (docData.storagePath || "").toLowerCase().endsWith(".pdf");
-                const hasOnlyDrawings = parsedResult.containsDrawings && !parsedResult.containsTablesWithDimensions;
+                const hasDrawings = parsedResult.containsDrawings === true;
 
-                if (isPdf && !hasOnlyDrawings) {
+                if (isPdf && !hasDrawings) {
+                    // 📄 Dokument zawiera tylko tekst lub tabele (brak rysunków) -> Konwersja na Markdown
                     try {
-                        const mdTokens = await convertPdfToMarkdownInShadow(docSnap, bucketName, pageCount);
+                        const mdTokens = await convertPdfToMarkdownInShadow(
+                            docSnap, 
+                            bucketName, 
+                            pageCount, 
+                            parsedResult.containsTablesWithDimensions
+                        );
                         totalTokensUsed += mdTokens;
                     } catch (convErr: any) {
                         console.warn(`[FAZA 0.5 📄] Pomijam optymalizację Markdown dla ${docData.fileName}: ${convErr.message}`);
                     }
+                } else if (isPdf && hasDrawings) {
+                    // 📐 Dokument zawiera rysunki techniczne -> Omijamy konwersję na rzecz Agenta Vision
+                    console.log(`[FAZA 0.5 👁️] Dokument ${docData.fileName} zawiera rysunki. Pozostawiam jako natywny PDF dla Agenta Vision.`);
                 } else {
-                    console.log(`[FAZA 0.5 📄] Pomijam konwersję dla ${docData.fileName} (rysunek techniczny lub nie-PDF).`);
+                    // 📎 Inny plik (np. .docx, .xlsx, .dwg)
+                    console.log(`[FAZA 0.5 📎] Pomijam konwersję dla ${docData.fileName} (nie jest to plik PDF).`);
                 }
 
             } catch (docError: any) {
@@ -276,20 +333,20 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz określi liczbę stron i 
             missingData: [],
             activeTaskIds: [],
             pendingDecisions: [],
-            reasoningLog: ["Inicjalizacja sensoryczna i optymalizacja dokumentów 'Dziel i Łącz' zakończone pomyślnie."],
+            reasoningLog: ["Inicjalizacja sensoryczna (klasyfikacja + generowanie Markdown) zakończona pomyślnie."],
             totalCostUSD: estimatedCostUSD
         }, { merge: true });
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
 
-        // Wybudzenie Głównego Kosztorysanta (PESAM)
+        // Wybudzenie Głównego Kosztorysanta
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
         }).catch(() => { });
 
-        // Jednoczesne wybudzenie Głównego Technologa Budowlanego
+        // Wybudzenie Głównego Technologa Budowlanego
         fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -299,7 +356,7 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz określi liczbę stron i 
         return NextResponse.json({ success: true, tokensUsed: totalTokensUsed });
 
     } catch (error: any) {
-        console.error("[FAZA 0 🚀] Błąd krytyczny:", error);
+        console.error("[FAZA 0 🚀] Błąd krytyczny API:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
