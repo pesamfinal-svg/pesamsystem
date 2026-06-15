@@ -18,16 +18,33 @@ const ai = new GoogleGenAI({
 
 const MODEL_PRO = "gemini-2.5-pro";
 
+// ─────────────────────────────────────────────────────────────────
+// RETRY: 429 (rate limit) + błędy sieciowe/socketowe (UND_ERR_SOCKET,
+// "fetch failed", "other side closed", ECONNRESET, ETIMEDOUT)
+// ─────────────────────────────────────────────────────────────────
+
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
-        const errorText = error.toString() || "";
-        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
-        if (isRateLimit && retries > 0) {
+        const errorText = error?.toString?.() || "";
+        const causeText = error?.cause?.toString?.() || "";
+        const fullText = `${errorText} ${causeText}`;
+
+        const isRateLimit = fullText.includes("429") || fullText.includes("RESOURCE_EXHAUSTED");
+        const isSocketError =
+            fullText.includes("UND_ERR_SOCKET") ||
+            fullText.includes("fetch failed") ||
+            fullText.includes("other side closed") ||
+            fullText.includes("ECONNRESET") ||
+            fullText.includes("ETIMEDOUT") ||
+            fullText.includes("SocketError");
+
+        if ((isRateLimit || isSocketError) && retries > 0) {
             const jitter = Math.random() * 3000;
             const waitTime = delay + jitter;
-            console.warn(`[MÓZG 🧠] Limit API 429. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
+            const reason = isRateLimit ? "Limit API 429" : "Błąd sieci/socketu (zerwane połączenie)";
+            console.warn(`[MÓZG 🧠] ${reason}. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -44,11 +61,11 @@ const BRAIN_SCHEMA = {
     properties: {
         reasoning: {
             type: Type.STRING,
-            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które założenia są najbardziej ryzykowne i co musisz zrobić by zmniejszyć niepewność kosztorysu. UWZGLĘDNIJ: co dostarczył Technolog, które luki to pokrywa, co jeszcze brakuje.`
+            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które założenia są najbardziej ryzykowne i co musisz zrobić by zmniejszyć niepewność kosztorysu. UWZGLĘDNIJ: co dostarczył Technolog, które luki to pokrywa, co jeszcze brakuje, oraz co wynika z RZECZYWISTEGO stanu kosztorysu (sekcje + liczba pozycji) i z HISTORII ZADAŃ obu mózgów (Twojego i Technologa).`
         },
         selfCritique: {
             type: Type.STRING,
-            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które założenia mogłyby wywrócić budżet o ponad 10% jeśli są mylne? Czy w pełni wykorzystałem dane od Technologa?`
+            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które założenia mogłyby wywrócić budżet o ponad 10% jeśli są mylne? Czy w pełni wykorzystałem dane od Technologa? Czy nie zlecam ponownie czegoś, co już zostało zrobione (przez mój zespół LUB przez zespół Technologa)?`
         },
         nextBestAction: {
             type: Type.STRING,
@@ -157,7 +174,7 @@ const BRAIN_SCHEMA = {
         currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
-            description: `Zadania dla narzędzi. Dla BOQ_PARSER i VISION zawsze dołącz extractionProfile. Workery działają bez sztywnego schematu — daj im precyzyjne instrukcje tekstowe.`,
+            description: `Zadania dla narzędzi. Dla BOQ_PARSER i VISION zawsze dołącz extractionProfile. Workery działają bez sztywnego schematu — daj im precyzyjne instrukcje tekstowe. UWAGA: Przed zleceniem zadania sprawdź sekcję "HISTORIA WSZYSTKICH ZADAŃ" (Twoich i Technologa) — jeśli identyczne zadanie (ten sam agentType + te same inputDocIds) już istnieje w statusie PENDING/IN_PROGRESS/DONE, NIE twórz go ponownie. System i tak je odrzuci, ale unikaj tego na poziomie rozumowania.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
@@ -234,6 +251,9 @@ function buildTechnologistContext(findings: any[], techPhase: string): string {
     if (byCategory["MISSING_SCOPE"]?.length > 0) {
         sections.push("=== 🔴 BRAKUJĄCE DZIAŁY KOSZTORYSU (MISSING_SCOPE) ===");
         sections.push("ZASADA: Dla każdego brakującego działu MUSISZ podjąć akcję — patrz instrukcje poniżej.");
+        sections.push("UWAGA: Sprawdź sekcję 'AKTUALNY STAN KOSZTORYSU' i 'POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS' —");
+        sections.push("jeśli dany dział JUŻ MA pozycje w kosztorysie (np. dzięki BOQ_PARSER zleconemu przez Technologa");
+        sections.push("Obmiarowcowi), NIE generuj duplikatów — luka może być już częściowo lub w pełni pokryta.");
         sections.push("");
         byCategory["MISSING_SCOPE"].forEach((f: any) => {
             const facts = f.facts || {};
@@ -306,6 +326,102 @@ function buildTechnologistContext(findings: any[], techPhase: string): string {
     return sections.join("\n");
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Sygnatura zadania — do deduplikacji (agentType + zbiór inputDocIds)
+// ─────────────────────────────────────────────────────────────────
+
+function taskSignature(agentType: string, inputDocIds: string[] | undefined): string {
+    const sortedIds = [...(inputDocIds || [])].sort();
+    return `${agentType}::${sortedIds.join(",")}`;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Heurystyczne dopasowanie MISSING_SCOPE (z findings Technologa) do
+// sekcji już istniejących w kosztorysie — żeby Mózg "widział" pokrycie
+// luki, nawet jeśli pozycje wpisał tam BOQ_PARSER zlecony przez Technologa
+// (a nie przez samego Mózga).
+// ─────────────────────────────────────────────────────────────────
+
+function normalizeForMatch(s: string): string {
+    return (s || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // usuń diakrytyki
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+}
+
+function buildScopeCoverageContext(
+    technologistFindings: any[],
+    estimateState: { sekcja: string; liczba_pozycji: number; wartosc_zl: number }[]
+): string {
+    const missingScopeFindings = technologistFindings.filter((f: any) => f.category === "MISSING_SCOPE");
+    if (missingScopeFindings.length === 0) {
+        return "Technolog nie zgłosił żadnych MISSING_SCOPE — brak do skorelowania.";
+    }
+    if (estimateState.length === 0) {
+        return "Kosztorys jest całkowicie pusty — wszystkie zgłoszone MISSING_SCOPE są nadal NIEPOKRYTE.";
+    }
+
+    const normalizedSections = estimateState.map(s => ({
+        original: s.sekcja,
+        normalized: normalizeForMatch(s.sekcja),
+        liczba_pozycji: s.liczba_pozycji
+    }));
+
+    const lines: string[] = [];
+    lines.push("Korelacja MISSING_SCOPE od Technologa ze stanem kosztorysu (dopasowanie nazw — przybliżone, zweryfikuj sam):");
+    lines.push("");
+
+    missingScopeFindings.forEach((f: any) => {
+        const facts = f.facts || {};
+        const divisionName = facts.divisionName || f.findingId || "";
+        const normDivision = normalizeForMatch(divisionName);
+
+        const matches = normalizedSections.filter(s =>
+            s.normalized.includes(normDivision) ||
+            normDivision.includes(s.normalized) ||
+            (normDivision.length > 4 && s.normalized.includes(normDivision.slice(0, Math.min(8, normDivision.length))))
+        );
+
+        if (matches.length > 0) {
+            const totalItems = matches.reduce((sum, m) => sum + m.liczba_pozycji, 0);
+            if (totalItems > 0) {
+                lines.push(`▶ "${divisionName}" → ⚠️ MOŻLIWE POKRYCIE: znaleziono w kosztorysie sekcję/e [${matches.map(m => `"${m.original}" (${m.liczba_pozycji} poz.)`).join(", ")}].`);
+                lines.push(`  NIE generuj ponownie tych pozycji i NIE zlecaj ponownie BOQ_PARSER/BUDOWLANIEC dla tego zakresu bez weryfikacji — sprawdź najpierw, czy te pozycje rzeczywiście odpowiadają temu zakresowi (np. mogły zostać dodane przez Obmiarowca na zlecenie Technologa).`);
+            } else {
+                lines.push(`▶ "${divisionName}" → sekcja o podobnej nazwie istnieje [${matches.map(m => `"${m.original}"`).join(", ")}], ale ma 0 pozycji. Wciąż NIEPOKRYTE — działaj.`);
+            }
+        } else {
+            lines.push(`▶ "${divisionName}" → 🔴 NIEPOKRYTE. Brak odpowiadającej sekcji w kosztorysie. Wymaga akcji.`);
+        }
+    });
+
+    return lines.join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Wspólna historia zadań — Mózg (tasksRef) + Technolog (technologTasksRef)
+// Mózg musi widzieć, co zlecił Technolog swoim narzędziom (np. Obmiarowcowi),
+// żeby nie zlecać tego ponownie i żeby wiedzieć, że dane pochodzą "z innej ręki".
+// ─────────────────────────────────────────────────────────────────
+
+function summarizeTaskDoc(d: any, origin: "MOZG" | "TECHNOLOG"): any {
+    const data = d.data();
+    return {
+        origin,
+        taskId: d.id,
+        agentType: data.agentType,
+        status: data.status,
+        inputDocIds: data.inputDocIds || [],
+        instruction: (data.instruction || "").substring(0, 160),
+        resultSummary: data.status === "DONE"
+            ? (data.rawResult?.summary || (data.rawResult?.items ? `Zwrócono ${data.rawResult.items.length} pozycji` : "Wykonano"))
+            : (data.rawResult?.error || (data.status === "PENDING" || data.status === "IN_PROGRESS" ? "W toku" : "BŁĄD")),
+        extractionProfile: data.extractionProfile || null
+    };
+}
+
 export async function POST(req: Request) {
     try {
         const { tenderId, trigger } = await req.json();
@@ -314,6 +430,7 @@ export async function POST(req: Request) {
         console.log(`[MÓZG 🧠] Cognitive Wake-up. tenderID: ${tenderId} | Trigger: ${trigger}`);
 
         const tasksRef = adminDb.collection(`tenders/${tenderId}/tasks`);
+        const technologTasksRef = adminDb.collection(`tenders/${tenderId}/technologTasks`);
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
@@ -399,7 +516,8 @@ export async function POST(req: Request) {
             estimateSnap,
             allTasksHistorySnap,
             technologistFindingsSnap,
-            technologSnap
+            technologSnap,
+            technologTasksSnap
         ] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
@@ -409,7 +527,8 @@ export async function POST(req: Request) {
             adminDb.collection(`tenders/${tenderId}/estimate`).get(),
             tasksRef.get(),
             adminDb.collection(`tenders/${tenderId}/technologistFindings`).get(),
-            adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get()
+            adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get(),
+            technologTasksRef.get().catch(() => ({ docs: [] } as any)) // kolekcja może nie istnieć jeszcze
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
@@ -441,21 +560,28 @@ export async function POST(req: Request) {
             extractionProfile: d.data().extractionProfile || null
         }));
 
-        const taskHistory = allTasksHistorySnap.docs.map(d => ({
-            agentType: d.data().agentType,
-            status: d.data().status,
-            resultSummary: d.data().status === "DONE"
-                ? (d.data().rawResult?.summary || "Wykonano")
-                : (d.data().rawResult?.error || "BŁĄD"),
-            extractionProfile: d.data().extractionProfile || null
-        }));
-
-        const estimateState = estimateSnap.docs.map(d => ({
-            sekcja: d.data().section,
-            liczba_pozycji: d.data().items?.length || 0,
-            wartosc_zl: d.data().totalValue || 0
+        // ── POPRAWKA #2: rzeczywisty stan kosztorysu — odpytujemy subkolekcję items ──
+        const estimateState = await Promise.all(estimateSnap.docs.map(async (d) => {
+            const itemsSnap = await d.ref.collection("items").get();
+            return {
+                sekcja: d.data().section,
+                liczba_pozycji: itemsSnap.size,
+                wartosc_zl: d.data().totalValue || 0
+            };
         }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
+
+        // ── HISTORIA ZADAŃ: Mózg + Technolog połączone, do deduplikacji i świadomości ──
+        const brainTaskSummaries = allTasksHistorySnap.docs.map(d => summarizeTaskDoc(d, "MOZG"));
+        const technologTaskSummaries = (technologTasksSnap.docs || []).map((d: any) => summarizeTaskDoc(d, "TECHNOLOG"));
+        const combinedTaskHistory = [...brainTaskSummaries, ...technologTaskSummaries];
+
+        // Sygnatury zadań aktywnych/zakończonych — z OBU stron — do guard rail
+        const existingTaskSignatures = new Set<string>(
+            combinedTaskHistory
+                .filter((t: any) => ["PENDING", "IN_PROGRESS", "DONE"].includes(t.status))
+                .map((t: any) => taskSignature(t.agentType, t.inputDocIds))
+        );
 
         // Dane od Technologa
         const technologistFindings = technologistFindingsSnap.docs.map(d => ({
@@ -474,6 +600,9 @@ export async function POST(req: Request) {
         // Buduj opis stanu Technologa
         const technologistContext = buildTechnologistContext(technologistFindings, techPhase);
 
+        // ── POPRAWKA #3: korelacja MISSING_SCOPE ↔ realny stan kosztorysu ──
+        const scopeCoverageContext = buildScopeCoverageContext(technologistFindings, estimateState);
+
         // Znajdź brakujące zakresy które Technolog ma w kolejce (żeby nie duplikować)
         const technologGapsInProgress = technologSnap.exists
             ? (technologSnap.data()?.technologicalState?.technologicalGaps || []).map((g: any) => g.element)
@@ -483,7 +612,7 @@ export async function POST(req: Request) {
 
 === ZASADA DZIAŁANIA (COGNITIVE ARCHITECTURE) ===
 Nie deleguj ślepo — TY JESTEŚ JEDYNYM EKSPERTEM.
-Twój proces: 
+Twój proces:
 1. Budowa hipotezy czym jest inwestycja (worldModel).
 2. BELIEF REVISION: Konfrontuj nowe dane ze starymi hipotezami. Obniżaj/podnoś pewność.
 3. Wykrywanie luk. Oblicz Wpływ Ekonomiczny (Economic Impact Score 1-100).
@@ -491,23 +620,37 @@ Twój proces:
 5. Generowanie pozycji WYŁĄCZNIE gdy pewność (confidence) ≥ 75%.
 
 === ZASADA WSPÓŁPRACY Z TECHNOLOGIEM ===
-Masz drugiego eksperta — Technologa Budowlanego. On pracuje równolegle i dostarcza Ci:
+Masz drugiego eksperta — Technologa Budowlanego. On pracuje równolegle, ma WŁASNYCH workerów (np. może
+samodzielnie zlecić Obmiarowcowi/BOQ_PARSER ekstrakcję konkretnego przedmiaru) i dostarcza Ci dodatkowo:
 - Listę BRAKUJĄCYCH działów kosztorysowych (MISSING_SCOPE)
-- Wskaźniki kosztowe (COST_INDICATOR) 
+- Wskaźniki kosztowe (COST_INDICATOR)
 - Specyfikacje materiałów (MATERIAL_SPEC)
 - Ilości wskaźnikowe (QUANTITY_ESTIMATE)
 - Wymagania normowe (NORM_REQUIREMENT)
 
+KLUCZOWE: Sekcja "HISTORIA WSZYSTKICH ZADAŃ" zawiera zadania zlecone PRZEZ CIEBIE (origin: MOZG) ORAZ zadania
+zlecone PRZEZ TECHNOLOGA jego workerom (origin: TECHNOLOG). Jeśli widzisz tam np. że Technolog zlecił
+BOQ_PARSER dla konkretnego pliku/zakresu i ma status DONE — te dane PRAWDOPODOBNIE trafiły już do kosztorysu
+(sekcja "AKTUALNY STAN KOSZTORYSU"). NIE zlecaj tego ponownie. Pamiętaj jednak, że zadanie Technologa może
+dotyczyć tylko WYCINKA jednego działu (np. jednej branży instalacyjnej) — nie zakładaj automatycznie, że
+CAŁY dział jest pokryty tylko bo Technolog coś zlecił. Zweryfikuj zakres (inputDocIds, instruction,
+resultSummary) i porównaj z liczbą pozycji w odpowiadającej sekcji kosztorysu.
+
 ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 ▸ MISSING_SCOPE z confidence ≥ 70%:
-  Musisz ZAREAGOWAĆ. Masz dwie opcje:
-  a) Jeśli typicalItems są konkretne → generuj pozycje SAMODZIELNIE do newEstimateItems (assumptionMode: true, oznacz [ZAKRES TECHNOLOGA])
-  b) Jeśli typicalItems są ogólne → zlecaj BUDOWLANIEC z instrukcją: "Rozpisz pełny przedmiar dla działu [nazwa], typowe pozycje: [lista]. Obiekt: [typ]"
-  NIE ignoruj MISSING_SCOPE. Brak reakcji = dziura w kosztorysie.
+  Sprawdź najpierw sekcję "POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS" poniżej — mówi ona, czy dany dział ma już
+  pozycje w kosztorysie (niezależnie od tego, kto je tam wstawił — Ty, BOQ_PARSER czy worker Technologa).
+  - Jeśli dział jest oznaczony jako NIEPOKRYTE → MUSISZ ZAREAGOWAĆ:
+    a) Jeśli typicalItems są konkretne → generuj pozycje SAMODZIELNIE do newEstimateItems (assumptionMode: true, oznacz [ZAKRES TECHNOLOGA])
+    b) Jeśli typicalItems są ogólne → zlecaj BUDOWLANIEC z instrukcją: "Rozpisz pełny przedmiar dla działu [nazwa], typowe pozycje: [lista]. Obiekt: [typ]"
+  - Jeśli dział jest oznaczony jako MOŻLIWE POKRYCIE → NIE generuj duplikatów. Możesz jednak zlecić
+    SILENT_AUDITOR lub PYTHON_CALC weryfikację kompletności/wartości istniejących pozycji, jeśli uznasz to
+    za istotne, ale nie twórz nowych pozycji dla tego zakresu bez wyraźnego powodu.
+  NIE ignoruj MISSING_SCOPE oznaczonego jako NIEPOKRYTE. Brak reakcji = dziura w kosztorysie.
 
 ▸ COST_INDICATOR z confidence ≥ 65%:
   Przelicz: unitCostMin × ilość = wartość. Wpisz do opisu pozycji [WSKAŹNIK: X PLN/j.m. × Y j.m. = Z PLN].
-  Jeśli masz MISSING_SCOPE + COST_INDICATOR dla tego samego zakresu → zlecaj GAP_FILLER z oboma danymi.
+  Jeśli masz MISSING_SCOPE (NIEPOKRYTE) + COST_INDICATOR dla tego samego zakresu → zlecaj GAP_FILLER z oboma danymi.
   GAP_FILLER dostanie wskaźnik i wygeneruje pozycje z cenami.
 
 ▸ MATERIAL_SPEC z confidence ≥ 70%:
@@ -518,13 +661,22 @@ ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 
 ▸ Technolog w fazie WORKING lub ANALYZING:
   Dla zakresów które MA W KOLEJCE (technologGapsInProgress) — POCZEKAJ zanim zaczniesz zgadywać.
-  Nie twórz duplikatów. Sprawdź co Technolog już bada.
+  Nie twórz duplikatów. Sprawdź co Technolog już bada (sekcja HISTORIA WSZYSTKICH ZADAŃ, origin: TECHNOLOG,
+  status PENDING/IN_PROGRESS).
 
 ▸ Technolog w fazie DONE:
   Wszystkie jego dane są finalne. Działaj na nich w pełni.
 
+=== ZASADA DEDUPLIKACJI ZADAŃ (GUARD RAIL) ===
+Przed dodaniem zadania do newTasks, sprawdź sekcję "HISTORIA WSZYSTKICH ZADAŃ" — jeśli istnieje wpis
+(z Twojej historii LUB Technologa) z tym samym agentType i tym samym (lub podzbiorem/nadzbiorem) zestawem
+inputDocIds, w statusie PENDING, IN_PROGRESS lub DONE — NIE twórz duplikatu. System odrzuci identyczne
+sygnatury automatycznie, ale Twoim zadaniem jest nie próbować ich tworzyć w ogóle (oszczędza to cykl
+rozumowania). Jeśli potrzebujesz INNEJ części tego samego dokumentu lub innego extractionProfile —
+to NIE jest duplikat, możesz zlecić.
+
 === TRYB ZAŁOŻEŃ RYNKOWYCH (ASSUMPTION_MODE) ===
-Jeśli brakuje dokumentacji technicznej LUB reagujesz na MISSING_SCOPE bez rysunków:
+Jeśli brakuje dokumentacji technicznej LUB reagujesz na MISSING_SCOPE (NIEPOKRYTE) bez rysunków:
 - Włącz assumptionMode: true
 - Przygotuj assumptionDisclaimer
 - Każdą pozycję oznacz w opisie jako [ZAŁOŻENIE RYNKOWE] lub [ZAKRES TECHNOLOGA]
@@ -552,13 +704,16 @@ ${JSON.stringify(currentCognitiveState, null, 2)}
 === NOWE WYNIKI OD NARZĘDZI (świeże dane) ===
 ${newlyFinishedResults.length > 0 ? JSON.stringify(newlyFinishedResults, null, 2) : "(brak nowych wyników)"}
 
-=== HISTORIA URUCHOMIONYCH NARZĘDZI ===
-${JSON.stringify(taskHistory, null, 2)}
+=== HISTORIA WSZYSTKICH ZADAŃ (Twoje + Technologa, origin = MOZG | TECHNOLOG) ===
+${JSON.stringify(combinedTaskHistory, null, 2)}
 
-=== AKTUALNY STAN KOSZTORYSU ===
+=== AKTUALNY STAN KOSZTORYSU (sekcje + RZECZYWISTA liczba pozycji z subkolekcji items) ===
 ${isEstimateEmpty
                 ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów."
                 : JSON.stringify(estimateState, null, 2)}
+
+=== POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS (korelacja automatyczna — zweryfikuj) ===
+${scopeCoverageContext}
 
 === DANE OD TECHNOLOGA BUDOWLANEGO ===
 ${technologistContext}
@@ -575,20 +730,27 @@ Brakujące zakresy zidentyfikowane przez Technologa: ${techIdentifiedMissingScop
 Każda pozycja w newEstimateItems musi mieć w polu "opis" dowód matematyczny i źródłowy w nawiasie kwadratowym.
 Przykład: "Beton C25/30 fundamenty [250 m3 × 450 zł/m3 = 112 500 PLN | źródło: MATERIAL_SPEC Technologa]"
 
-UWAGA KRYTYCZNA: Pozycje BOQ_PARSER zapisują się AUTOMATYCZNIE.
-Jeśli widzisz w historii że BOQ_PARSER zwrócił rawResult.items — NIE przepisuj ich do newEstimateItems.
+UWAGA KRYTYCZNA: Pozycje BOQ_PARSER (zarówno Twoje, jak i Technologa) zapisują się AUTOMATYCZNIE do kosztorysu.
+Jeśli widzisz w HISTORII WSZYSTKICH ZADAŃ, że BOQ_PARSER (origin: MOZG lub TECHNOLOG) zwrócił pozycje
+(resultSummary "Zwrócono N pozycji") — te pozycje SĄ JUŻ w "AKTUALNY STAN KOSZTORYSU". NIE przepisuj ich
+do newEstimateItems.
 
 === HISTORIA CZATU ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
 
 === CO MASZ ZROBIĆ ===
 1. Zaktualizuj CognitiveState. Przerób wyniki narzędzi i findings Technologa w fakty. Belief Revision.
-2. Przeprowadź Samokrytykę. Sprawdź failedStrategies.
-3. REAGUJ na każde MISSING_SCOPE od Technologa — to Twój priorytet gdy kosztorys jest niepełny.
+   Uwzględnij RZECZYWISTY stan kosztorysu (estimateState) — jeśli pokazuje pozycje, których wcześniej nie
+   widziałeś (bo zlecił je Technolog), zaktualizuj worldModel/knownFacts o tym fakcie.
+2. Przeprowadź Samokrytykę. Sprawdź failedStrategies. Sprawdź, czy nie powtarzasz zadania, które już
+   wykonał Technolog (HISTORIA WSZYSTKICH ZADAŃ, origin: TECHNOLOG).
+3. REAGUJ na każde MISSING_SCOPE od Technologa oznaczone jako NIEPOKRYTE — to Twój priorytet gdy kosztorys
+   jest niepełny. Dla MOŻLIWE POKRYCIE — zweryfikuj, nie duplikuj.
 4. Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze wypełnij extractionProfile.
-5. Pamiętaj: workery (BUDOWLANIEC, GAP_FILLER, SILENT_AUDITOR itp.) działają BEZ sztywnego schematu — daj im precyzyjne instrukcje tekstowe w polu instruction.`;
+5. Pamiętaj: workery (BUDOWLANIEC, GAP_FILLER, SILENT_AUDITOR itp.) działają BEZ sztywnego schematu — daj im precyzyjne instrukcje tekstowe w polu instruction.
+6. Przed dodaniem zadania do newTasks sprawdź deduplikację (patrz ZASADA DEDUPLIKACJI ZADAŃ).`;
 
-        console.log(`[MÓZG 🧠] Prompt gotowy. Findings od Technologa: ${technologistFindings.length}. Wywołuję model...`);
+        console.log(`[MÓZG 🧠] Prompt gotowy. Findings od Technologa: ${technologistFindings.length}. Zadania Technologa w historii: ${technologTaskSummaries.length}. Wywołuję model...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
@@ -719,9 +881,18 @@ ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomo
             }
         }
 
-        // Tworzenie nowych zadań dla workerów
+        // ── POPRAWKA #3: deduplikacja newTasks (guard rail po stronie kodu) ──
         const newTasksCreated: any[] = [];
         (parsedResult.newTasks || []).forEach((task: any) => {
+            const sig = taskSignature(task.agentType, task.inputDocIds);
+
+            if (existingTaskSignatures.has(sig)) {
+                console.log(`[MÓZG 🧠] DEDUPLIKACJA: Zadanie ${task.agentType} dla [${(task.inputDocIds || []).join(", ")}] już istnieje (PENDING/IN_PROGRESS/DONE — Mózg lub Technolog) — odrzucono.`);
+                return;
+            }
+            // chroni też przed duplikatami WEWNĄTRZ tej samej odpowiedzi modelu
+            existingTaskSignatures.add(sig);
+
             const taskRef = tasksRef.doc();
             const inputFacts: Record<string, any> = {};
             (task.inputFactsKeys || []).forEach((key: string) => {
