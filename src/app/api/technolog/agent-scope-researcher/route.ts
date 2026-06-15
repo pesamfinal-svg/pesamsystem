@@ -99,22 +99,22 @@ Zwróć WYŁĄCZNIE JSON (bez komentarzy, bez markdown) w tej strukturze:
     {
       "division": "Nazwa działu kosztorysowego",
       "description": "Co obejmuje",
-      "isMandatory": true/false,
+      "isMandatory": true,
       "legalBasis": "Podstawa prawna lub norma jeśli dotyczy",
-      "isLikelyMissingInProject": true/false,
+      "isLikelyMissingInProject": true,
       "missingReason": "Dlaczego podejrzewasz że brakuje (jeśli brakuje)"
     }
   ],
   "criticalGaps": [
     {
       "gapName": "Nazwa brakującego zakresu",
-      "impactScore": 0-10,
+      "impactScore": 0,
       "estimatedCostShare": "szacunkowy % wartości inwestycji",
       "recommendation": "Co Technolog powinien zrobić"
     }
   ],
   "sourcesFound": ["url1", "url2"],
-  "confidence": 0-100
+  "confidence": 0
 }
 `;
 
@@ -124,8 +124,8 @@ Zwróć WYŁĄCZNIE JSON (bez komentarzy, bez markdown) w tej strukturze:
                 contents: researchPrompt,
                 config: {
                     tools: [{ googleSearch: {} }],
-                    temperature: 0.2,
-                    responseMimeType: "application/json"
+                    temperature: 0.2
+                    // USUNIĘTO: responseMimeType: "application/json" (Konflikt z Google Search API 400)
                 }
             })
         );
@@ -134,10 +134,13 @@ Zwróć WYŁĄCZNIE JSON (bez komentarzy, bez markdown) w tej strukturze:
 
         let parsed: any = {};
         try {
-            parsed = JSON.parse(jsonrepair(result.text ?? "{}"));
+            // Oczyszczanie z Markdown, ponieważ bez MimeType model lubi dodać ```json na początku
+            let rawText = result.text ?? "{}";
+            rawText = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
+
+            parsed = JSON.parse(jsonrepair(rawText));
         } catch (e) {
             console.warn("[SCOPE RESEARCHER 🔭] Błąd parsowania JSON, próba odzysku...");
-            // Drugi strzał bez responseMimeType jeśli parsing failuje
             parsed = { searchSummary: result.text, typicalScopeForObjectType: [], criticalGaps: [], confidence: 30 };
         }
 
