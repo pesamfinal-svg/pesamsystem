@@ -1004,7 +1004,7 @@ export default function ProtocolsHub() {
         })
         .filter(i => {
             const isLoose = i.subType === "MANUAL" || i.category === "Zaległości osprzętu" || (!i.subType && i.type === "BULK");
-            return returnSiteId && (i.availableToReturn > 0 || isLoose); // Drobnica wymusza wyświetlenie nawet jeśli jest na minusie
+            return returnSiteId && (i.availableToReturn > 0 || (isLoose && i.availableToReturn !== 0)); // Drobnica wymusza wyświetlenie na minusie, ale ukrywa nieobecne (0)
         });
 
     const filteredReturnInventory = inventoryOnSelectedSite.filter(item => {
@@ -1051,7 +1051,7 @@ export default function ProtocolsHub() {
         const availableToReturn = siteQty - lockedQty;
 
         const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || (!item.subType && item.type === "BULK");
-        return availableToReturn > 0 || isLoose;
+        return availableToReturn > 0 || (isLoose && availableToReturn !== 0);
 
     }).map(item => {
         const siteQty = item.allocations?.[paperReturnSiteId] || 0;
@@ -1112,12 +1112,27 @@ export default function ProtocolsHub() {
 
     const confirmPaperManualAdd = () => {
         if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
+
+        const cleanName = normalizeString(manualName);
+        const foundExistingItem = inventory.find(i =>
+            (i.subType === "MANUAL" || (!i.subType && i.type === "BULK")) &&
+            normalizeString(i.name) === cleanName
+        ) || null;
+
         setPaperReturnCart(prev => [...prev, {
-            cartItemId: Date.now().toString(), isManual: true, name: manualName.trim(), type: "BULK",
-            inventoryNumber: "RĘCZNY PAPIER", unit: manualUnit, maxQty: 999999,
+            cartItemId: Date.now().toString(),
+            dbId: foundExistingItem ? foundExistingItem.id : undefined,
+            isManual: !foundExistingItem,
+            name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
+            type: "BULK",
+            inventoryNumber: foundExistingItem ? (foundExistingItem.inventoryNumber || "RĘCZNY PAPIER") : "RĘCZNY PAPIER",
+            unit: manualUnit,
+            maxQty: 999999,
             declaredQty: Number(manualQty),
             receivedQty: Number(manualQty),
-            finalStatus: "sprawne", notes: "Dopisane z papieru"
+            finalStatus: "sprawne",
+            notes: foundExistingItem ? "Dopisane z papieru (istniejący)" : "Dopisane z papieru",
+            isReturningMainItem: true
         }]);
         setIsPaperManualModalOpen(false);
     };
