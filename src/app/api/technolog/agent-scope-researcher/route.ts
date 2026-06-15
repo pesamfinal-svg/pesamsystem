@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Podniesiony czas, bo robimy 2 kroki
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -29,6 +30,45 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         throw error;
     }
 }
+
+// Schemat wyjściowy dla kroku 2 (Strukturyzacja)
+const SCOPE_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        searchSummary: { type: Type.STRING },
+        typicalScopeForObjectType: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    division: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    isMandatory: { type: Type.BOOLEAN },
+                    legalBasis: { type: Type.STRING },
+                    isLikelyMissingInProject: { type: Type.BOOLEAN },
+                    missingReason: { type: Type.STRING }
+                },
+                required: ["division", "isMandatory", "isLikelyMissingInProject"]
+            }
+        },
+        criticalGaps: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    gapName: { type: Type.STRING },
+                    impactScore: { type: Type.NUMBER },
+                    estimatedCostShare: { type: Type.STRING },
+                    recommendation: { type: Type.STRING }
+                },
+                required: ["gapName", "impactScore", "recommendation"]
+            }
+        },
+        sourcesFound: { type: Type.ARRAY, items: { type: Type.STRING } },
+        confidence: { type: Type.NUMBER }
+    },
+    required: ["searchSummary", "typicalScopeForObjectType", "criticalGaps", "confidence"]
+};
 
 export async function POST(req: Request) {
     let tenderId: string | undefined;
@@ -63,13 +103,16 @@ export async function POST(req: Request) {
         const objectDescription = knownFacts.objectDescription || "";
         const brainFacts = brainSnap.exists ? (brainSnap.data()?.cognitiveState?.knownFacts || {}) : {};
 
-        // Co już mamy z dokumentów (żeby nie szukać duplikatów)
         const existingDocs = docsSnap.docs.map(d => d.data().fileName || "").join(", ");
         const existingScopes = knownFacts.confirmedScopes || [];
+        let totalTokensUsed = 0;
 
-        const researchPrompt = `
-Jesteś ekspertem kosztorysowym budownictwa w Polsce. Twoim zadaniem jest ustalenie PEŁNEGO zakresu robót 
-dla inwestycji budowlanej i znalezienie BRAKUJĄCYCH elementów w stosunku do tego co już jest w dokumentacji.
+        // ==========================================
+        // KROK 1: BADANIE SIECI (Google Search) - Zwraca czysty tekst!
+        // ==========================================
+        console.log("[SCOPE RESEARCHER 🔭] KROK 1: Szukanie informacji w sieci...");
+        const searchPrompt = `
+Jesteś ekspertem kosztorysowym budownictwa w Polsce. 
 
 === TYP INWESTYCJI ===
 ${objectType}
@@ -80,78 +123,73 @@ Dokumenty w projekcie: ${existingDocs}
 Zakresy potwierdzone: ${JSON.stringify(existingScopes)}
 Fakty z Mózgu PESAM: ${JSON.stringify(brainFacts)}
 
-=== TWOJE ZADANIE ===
-1. Wyszukaj w internecie przykładowe kosztorysy inwestorskie lub przedmiary robót dla: "${objectType}" w Polsce
-   - Szukaj na BIP gmin, eb2b.com.pl, przetargi.pl, bazakosztorysow.pl, lub inne polskie portale budowlane
-   - Szukaj fraz: "kosztorys inwestorski ${objectType} przedmiar" lub "SIWZ ${objectType} zakres robót"
+=== ZADANIE WYSZUKIWANIA ===
+1. Wyszukaj w internecie (Google Search) przykładowe kosztorysy inwestorskie lub przedmiary robót dla: "${objectType}" w Polsce. Szukaj na BIP gmin, eb2b, itp.
+2. Na podstawie wyników, sporządź szczegółowy RAPORT TEKSTOWY.
+3. W raporcie wymień: jakie działy kosztorysowe są wymagane w takim obiekcie, czego brakuje w obecnych dokumentach (wyłap luki), oraz jakie źródła (linki) znalazłeś.
 
-2. Na podstawie znalezionych przykładów ORAZ swojej wiedzy eksperckiej ustal:
-   - Jakie DZIAŁY kosztorysowe MUSZĄ wystąpić w typowym projekcie "${objectType}"
-   - Które z tych działów NIE SĄ pokryte istniejącymi dokumentami
-   - Jakie instalacje, elementy, roboty zewnętrzne są standardem dla tego typu obiektu
-
-3. Uwzględnij wymogi prawne (Prawo Budowlane, rozporządzenia branżowe) dla tego typu obiektu
-
-Zwróć WYŁĄCZNIE JSON (bez komentarzy, bez markdown) w tej strukturze:
-{
-  "searchSummary": "Co znalazłeś i skąd",
-  "typicalScopeForObjectType": [
-    {
-      "division": "Nazwa działu kosztorysowego",
-      "description": "Co obejmuje",
-      "isMandatory": true,
-      "legalBasis": "Podstawa prawna lub norma jeśli dotyczy",
-      "isLikelyMissingInProject": true,
-      "missingReason": "Dlaczego podejrzewasz że brakuje (jeśli brakuje)"
-    }
-  ],
-  "criticalGaps": [
-    {
-      "gapName": "Nazwa brakującego zakresu",
-      "impactScore": 0,
-      "estimatedCostShare": "szacunkowy % wartości inwestycji",
-      "recommendation": "Co Technolog powinien zrobić"
-    }
-  ],
-  "sourcesFound": ["url1", "url2"],
-  "confidence": 0
-}
+Napisz raport jako zwykły tekst, kategorycznie BEZ struktury JSON.
 `;
 
-        const result = await callGeminiWithRetry(() =>
+        const searchResult = await callGeminiWithRetry(() =>
             ai.models.generateContent({
                 model: MODEL_FLASH,
-                contents: researchPrompt,
+                contents: searchPrompt,
                 config: {
                     tools: [{ googleSearch: {} }],
                     temperature: 0.2
-                    // USUNIĘTO: responseMimeType: "application/json" (Konflikt z Google Search API 400)
+                    // NIE MA responseMimeType !
                 }
             })
         );
 
-        const totalTokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
+        const rawReport = searchResult.text || "Nie udało się znaleźć precyzyjnych danych.";
+        console.log("[SCOPE RESEARCHER 🔭] KROK 1: Pomyślnie zebrano raport tekstowy.");
+
+        // ==========================================
+        // KROK 2: STRUKTURYZACJA WYNIKÓW (Bez Google Search, narzucony JSON)
+        // ==========================================
+        console.log("[SCOPE RESEARCHER 🔭] KROK 2: Strukturyzacja raportu do JSON...");
+        const structurePrompt = `
+Poniżej znajduje się surowy raport z poszukiwań typowych zakresów robót w internecie.
+Zmień te informacje w ustrukturyzowany format JSON, ściśle według zadanego schematu.
+
+RAPORT BADACZA:
+${rawReport}
+`;
+
+        const structureResult = await callGeminiWithRetry(() =>
+            ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: structurePrompt,
+                config: {
+                    // BEZ narzedzia Google Search!
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: SCOPE_SCHEMA as any
+                }
+            })
+        );
+
+        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
 
         let parsed: any = {};
         try {
-            // Oczyszczanie z Markdown, ponieważ bez MimeType model lubi dodać ```json na początku
-            let rawText = result.text ?? "{}";
-            rawText = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
-
-            parsed = JSON.parse(jsonrepair(rawText));
+            parsed = JSON.parse(jsonrepair(structureResult.text ?? "{}"));
         } catch (e) {
-            console.warn("[SCOPE RESEARCHER 🔭] Błąd parsowania JSON, próba odzysku...");
-            parsed = { searchSummary: result.text, typicalScopeForObjectType: [], criticalGaps: [], confidence: 30 };
+            console.warn("[SCOPE RESEARCHER 🔭] Błąd parsowania ostatecznego JSON-a, używam fallbacku.");
+            parsed = { searchSummary: "Błąd parsowania", typicalScopeForObjectType: [], criticalGaps: [], confidence: 10 };
         }
 
-        console.log(`[SCOPE RESEARCHER 🔭] Znaleziono ${parsed.typicalScopeForObjectType?.length || 0} działów, ${parsed.criticalGaps?.length || 0} luk krytycznych`);
+        console.log(`[SCOPE RESEARCHER 🔭] Sukces strukturyzacji: Znaleziono ${parsed.typicalScopeForObjectType?.length || 0} działów, ${parsed.criticalGaps?.length || 0} luk krytycznych.`);
 
         await taskRef.update({
             status: "DONE",
             rawResult: {
                 typicalScopeForObjectType: parsed.typicalScopeForObjectType || [],
                 criticalGaps: parsed.criticalGaps || [],
-                searchSummary: parsed.searchSummary || "",
+                searchSummary: parsed.searchSummary || rawReport.substring(0, 500),
                 sourcesFound: parsed.sourcesFound || [],
                 confidence: parsed.confidence || 50,
                 summary: `Zbadano zakres dla "${objectType}". Znaleziono ${parsed.criticalGaps?.length || 0} krytycznych luk w dokumentacji.`
@@ -174,7 +212,7 @@ Zwróć WYŁĄCZNIE JSON (bez komentarzy, bez markdown) w tej strukturze:
         });
 
     } catch (error: any) {
-        console.error("[SCOPE RESEARCHER 🔭] Błąd:", error);
+        console.error("[SCOPE RESEARCHER 🔭] ❌ Błąd krytyczny:", error);
         if (tenderId && taskId) {
             await adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId).update({
                 status: "ERROR",
