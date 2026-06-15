@@ -7,6 +7,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Podnosimy timeout ze względu na duże PDFy
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -23,7 +24,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const isRateLimit = error.toString().includes("429") || error.toString().includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
             console.warn(`[MATERIAL DETECTIVE 🔍] Limit 429. Czekam ${delay / 1000}s...`);
-            await new Promise(r => setTimeout(r, delay));
+            await new Promise(r => setTimeout(r, delay + Math.random() * 2000));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
@@ -74,11 +75,17 @@ Wyszukaj wszystkie wzmianki o technologiach i klasach materiałów budowlanych.
 === POLECENIE OD TECHNOLOGA ===
 ${taskData.instruction}
 
-Zwróć wyniki w formacie JSON z tablicą "materialFindings":
-- material: "Nazwa materiału (np. beton, pustak)"
-- specification: "Dokładna klasa/parametr (np. C25/30, Ytong 24cm)"
-- context: "Gdzie ma być użyty (np. ściany konstrukcyjne)"
-- confidence: 0-100
+Zwróć wyniki w strukturze JSON zawierającej klucz "materialFindings", który będzie listą zdefiniowaną jak poniżej:
+[
+  {
+    "material": "Nazwa materiału (np. beton, pustak)",
+    "specification": "Dokładna klasa/parametr (np. C25/30, Ytong 24cm)",
+    "context": "Gdzie ma być użyty (np. ściany konstrukcyjne)",
+    "confidence": 90
+  }
+]
+
+UWAGA: Zwróć wyłącznie prawidłowy format JSON (bez bloków markdown np. \`\`\`json).
 `;
 
             const result = await callGeminiWithRetry(() =>
@@ -94,8 +101,8 @@ Zwróć wyniki w formacie JSON z tablicą "materialFindings":
                         }
                     ],
                     config: {
-                        temperature: 0.05,
-                        responseMimeType: "application/json"
+                        temperature: 0.1
+                        // USUNIĘTO: responseMimeType dla stabilności z dużymi plikami PDF
                     }
                 })
             );
@@ -103,12 +110,19 @@ Zwróć wyniki w formacie JSON z tablicą "materialFindings":
             totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
 
             try {
-                const parsed = JSON.parse(jsonrepair(result.text ?? "{}"));
+                let rawText = result.text ?? "{}";
+                rawText = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
+                const parsed = JSON.parse(jsonrepair(rawText));
+
                 const findings = parsed.materialFindings || [];
                 allFindings.push(...findings.map((f: any) => ({ ...f, sourceDoc: docData.fileName })));
+                console.log(`[MATERIAL DETECTIVE 🔍] Pomyślnie zebrano ${findings.length} parametrów z pliku.`);
             } catch (e) {
-                console.warn(`[MATERIAL DETECTIVE 🔍] Błąd parsowania pliku ${docData.fileName}`);
+                console.warn(`[MATERIAL DETECTIVE 🔍] Błąd parsowania wyjścia z pliku ${docData.fileName}`);
             }
+
+            // Pauza między plikami, żeby nie zamęczyć limitu
+            await new Promise(r => setTimeout(r, 2000));
         }
 
         await taskRef.update({
@@ -129,7 +143,7 @@ Zwróć wyniki w formacie JSON z tablicą "materialFindings":
         return NextResponse.json({ success: true, findingsCount: allFindings.length });
 
     } catch (error: any) {
-        console.error("[MATERIAL DETECTIVE 🔍] Błąd:", error);
+        console.error("[MATERIAL DETECTIVE 🔍] ❌ Błąd krytyczny:", error);
         if (tenderId && taskId) {
             await adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId).update({
                 status: "ERROR", rawResult: { error: error.message }, processedByTechnolog: false, updatedAt: new Date()
