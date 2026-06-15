@@ -6,10 +6,10 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
+export const maxDuration = 300; 
 
-// Definiujemy najszybszy i najnowocześniejszy model dla Wizji bezpośrednio z Twojego konta GCP!
-const MODEL_FLASH = "gemini-3.5-flash";
+// Wymuszamy najnowszy, szybki model Flash 2.5
+const MODEL_FLASH = "gemini-2.5-flash";
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -25,7 +25,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
             console.warn(`[VISION 📐] Limit 429. Odczekuję ${delay / 1000}s...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            await new Promise(resolve => setTimeout(resolve, delay + Math.random() * 2000));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
@@ -65,19 +65,27 @@ export async function POST(req: Request) {
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const parts: any[] = [];
 
-        // Generujemy bezpośrednie linki GCS
         for (const docId of inputDocIds) {
             const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
             if (!docSnap.exists) continue;
 
             const docData = docSnap.data()!;
-            const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-            console.log(`[VISION 📐] Referencja GCS dla rysunku: ${fileUri}`);
+            
+            // 🟢 INTELIGENTNY ROUTING PLIKU DLA WIZJI:
+            // Jeśli Faza 0 wycięła z tego dokumentu rysunki do osobnego pliku, Agent Vision
+            // pobiera ten wycięty plik (_drawings.pdf). W przeciwnym wypadku bierze oryginalny PDF.
+            // Nigdy nie próbuje czytać pliku tekstowego .md!
+            const storagePath = docData.hasSeparatedDrawings 
+                ? docData.drawingsStoragePath 
+                : (docData.originalStoragePath || docData.storagePath);
+
+            const fileUri = `gs://${bucketName}/${storagePath}`;
+            console.log(`[VISION 📐] Kieruję analizę wizyjną na plik PDF: ${storagePath}`);
 
             parts.push({
                 fileData: {
                     fileUri: fileUri,
-                    mimeType: docData.mimeType || "application/pdf"
+                    mimeType: "application/pdf" // Zawsze PDF dla silnika wizyjnego
                 }
             });
         }
@@ -95,11 +103,11 @@ Ważne zasady:
 `;
 
         parts.unshift({ text: prompt });
-        console.log(`[VISION 📐] Wysyłam zapytanie referencyjne GCS do Gemini...`);
+        console.log(`[VISION 📐] Wysyłam zapytanie do Gemini...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
-                model: MODEL_FLASH, // Wymuszenie stałej z pliku!
+                model: MODEL_FLASH,
                 contents: parts,
                 config: {
                     temperature: 0.1,
@@ -119,15 +127,13 @@ Ważne zasady:
             updatedAt: new Date()
         });
 
-        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
-        const costUSD = (tokensUsed / 1000) * costPerThousand;
-
+        const costUSD = (tokensUsed / 1000) * 0.000015; // Tani koszt modelu Flash
         await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
         isSuccess = true;
-        console.log("[VISION 📐] Sukces.");
+        console.log("[VISION 📐] Sukces analizy wizyjnej rysunków.");
         return NextResponse.json({ success: true });
 
     } catch (error: any) {

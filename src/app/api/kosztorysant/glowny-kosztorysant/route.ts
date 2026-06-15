@@ -536,13 +536,14 @@ export async function POST(req: Request) {
         }
 
         const documents = docsSnap.docs.map(d => ({
-            id: d.id,
-            fileName: d.data().fileName,
-            tags: d.data().tags || [],
-            summary: d.data().summary || "(brak)",
-            containsDrawings: d.data().containsDrawings || false,
-            pageCount: d.data().pageCount || null
-        }));
+    id: d.id,
+    fileName: d.data().fileName,
+    tags: d.data().tags || [],
+    summary: d.data().summary || "(brak)",
+    containsDrawings: d.data().containsDrawings || false,
+    pageCount: d.data().pageCount || null,
+    hasSeparatedDrawings: d.data().hasSeparatedDrawings || false // 🟢 Dodany odczyt flagi z Fazy 0
+}));
 
         const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
         const currentCognitiveState = currentBrainData?.cognitiveState || {
@@ -666,6 +667,12 @@ ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 
 ▸ Technolog w fazie DONE:
   Wszystkie jego dane są finalne. Działaj na nich w pełni.
+
+▸ Fizycznie wycięte rysunki (hasSeparatedDrawings: true):
+  Jeśli dokument posiada flagę 'hasSeparatedDrawings: true', oznacza to, że rysunki techniczne zostały
+  fizycznie odseparowane do osobnego pliku pomocniczego w celu optymalizacji kosztów. Kiedy będziesz 
+  zlecać zadanie analizy rysunków Agentowi Vision, użyj normalnego ID tego dokumentu — Agent Vision 
+  automatycznie i po cichu przekieruje swoje zapytanie na ten wycięty plik PDF z rysunkami.
 
 === ZASADA DEDUPLIKACJI ZADAŃ (GUARD RAIL) ===
 Przed dodaniem zadania do newTasks, sprawdź sekcję "HISTORIA WSZYSTKICH ZADAŃ" — jeśli istnieje wpis
