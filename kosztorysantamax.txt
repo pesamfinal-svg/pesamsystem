@@ -1907,14 +1907,27 @@ const ai = new GoogleGenAI({
 
 const MODEL_FLASH = "gemini-2.5-flash";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REJESTR AGENTÓW I SCHEMATY (Zadeklarowane na samej górze przed użyciem)
-// ─────────────────────────────────────────────────────────────────────────────
-
 const TECHNOLOG_AGENTS = [
-    { name: "MATERIAL_DETECTIVE", endpoint: "/api/technolog/agent-technolog-materialowy", description: "Skanuje dokumenty w poszukiwaniu parametrów technicznych materiałów budowlanych." },
-    { name: "QUANTITY_ESTIMATOR", endpoint: "/api/technolog/agent-technolog-przedmiarowy", description: "Przelicza wskaźnikowo ilości elementów budowlanych." },
-    { name: "NORM_ADVISOR", endpoint: "/api/technolog/agent-technolog-norm", description: "Dobiera brakujące parametry techniczne z norm WT2021/Eurokodów." }
+    {
+        name: "MATERIAL_DETECTIVE",
+        endpoint: "/api/technolog/agent-technolog-materialowy",
+        description: "Skanuje dokumenty w poszukiwaniu parametrów technicznych materiałów budowlanych (klasy betonu, klasy stali, grubości warstw, U-wartości). Używaj gdy masz rysunki lub opisy techniczne."
+    },
+    {
+        name: "QUANTITY_ESTIMATOR",
+        endpoint: "/api/technolog/agent-technolog-przedmiarowy",
+        description: "Audytor zakresu — porównuje obecny kosztorys z wymaganiami technologicznymi i wskazuje BRAKUJĄCE procesy (np. wywiezienie ziemi, izolacje, rusztowania). Używaj po SCOPE_RESEARCHER gdy masz wstępny kosztorys."
+    },
+    {
+        name: "NORM_ADVISOR",
+        endpoint: "/api/technolog/agent-technolog-norm",
+        description: "Dobiera parametry techniczne z norm WT2021/Eurokodów/PPOŻ i wskaźniki kosztowe z SEKOCENBUD/BCO używając wyszukiwarki Google. Używaj gdy znasz brakujące zakresy i chcesz je wycenić wskaźnikowo."
+    },
+    {
+        name: "SCOPE_RESEARCHER",
+        endpoint: "/api/technolog/agent-scope-researcher",
+        description: "PIERWSZE NARZĘDZIE — wyszukuje w internecie (BIP-y gmin, portale przetargowe, eb2b, bazakosztorysow.pl) typowe kosztorysy/przedmiary dla danego typu inwestycji. Identyfikuje luki w dokumentacji przez porównanie z typowym zakresem. URUCHOM JAKO PIERWSZY gdy wiesz jaki typ obiektu."
+    }
 ];
 
 const TECHNOLOG_SCHEMA = {
@@ -1922,42 +1935,44 @@ const TECHNOLOG_SCHEMA = {
     properties: {
         reasoning: {
             type: Type.STRING,
-            description: "Tok rozumowania technologicznego. Co wiem o technologii tego obiektu? Co mi brakuje? Jakie normy zastosować?"
+            description: "Tok rozumowania technologicznego. Co wiem o technologii tego obiektu? Co mi brakuje? Czy uruchomiłem SCOPE_RESEARCHER? Co zwrócił? Jak porównuję zakres typowy vs dokumentacja projektu?"
         },
         selfCritique: {
             type: Type.STRING,
-            description: "Samokrytyka: Które z moich założeń technologicznych mogą być błędne? Gdzie ryzyko doboru złej technologii?"
+            description: "Samokrytyka: Które z moich założeń mogą być błędne? Czy zakres kosztorysu jest kompletny? Jakie działy mogą brakować? Co pominąłem w poprzedniej iteracji?"
         },
         nextBestAction: {
             type: Type.STRING,
-            description: "Jaka pojedyncza informacja techniczna najbardziej zwiększy jakość opisu technologicznego?"
+            description: "Jaka pojedyncza akcja najbardziej zwiększy kompletność kosztorysu?"
         },
         phase: {
             type: Type.STRING,
-            description: "ANALYZING, WORKING, SYNTHESIZING lub DONE"
+            description: "ANALYZING (zbieram dane), WORKING (agenci pracują), SYNTHESIZING (pakuję findings dla PESAM), DONE (przekazałem wszystko)"
         },
         currentGoal: {
             type: Type.STRING,
-            description: "Aktualny cel technologiczny"
+            description: "Aktualny cel technologiczny — konkretny, mierzalny"
         },
         technologicalState: {
             type: Type.OBJECT,
             properties: {
                 objectProfile: {
                     type: Type.OBJECT,
-                    description: "Profil technologiczny obiektu wynikający z dokumentów",
+                    description: "Profil technologiczny obiektu wyciągnięty z dokumentów",
                     properties: {
-                        objectType: { type: Type.STRING, description: "Typ obiektu np. 'przedszkole', 'hala'" },
-                        constructionSystem: { type: Type.STRING, description: "System konstrukcyjny" },
-                        foundationType: { type: Type.STRING, description: "Typ fundamentów" },
-                        roofType: { type: Type.STRING, description: "Typ dachu" },
-                        insulationType: { type: Type.STRING, description: "Izolacja termiczna" },
-                        finishStandard: { type: Type.STRING, description: "Standard wykończenia WT2021" }
+                        objectType: { type: Type.STRING, description: "Typ obiektu np. 'przedszkole', 'szkoła podstawowa', 'hala magazynowa'" },
+                        constructionSystem: { type: Type.STRING, description: "System konstrukcyjny: murowany/szkieletowy/żelbetowy/stalowy" },
+                        foundationType: { type: Type.STRING, description: "Typ fundamentów: ławy/pale/płyta/stopy" },
+                        roofType: { type: Type.STRING, description: "Typ dachu: płaski/dwuspadowy/wielospadowy/zielony" },
+                        insulationType: { type: Type.STRING, description: "System ocieplenia: ETICS/wdmuchiwana/wełna między krokwiami" },
+                        finishStandard: { type: Type.STRING, description: "Standard wykończenia: podstawowy/podwyższony/luksusowy" },
+                        estimatedFloorArea: { type: Type.NUMBER, description: "Szacowana powierzchnia użytkowa w m2 jeśli wyciągnięta z dokumentów" },
+                        numberOfFloors: { type: Type.NUMBER, description: "Liczba kondygnacji" }
                     }
                 },
                 confirmedMaterials: {
                     type: Type.ARRAY,
-                    description: "Materiały i technologie POTWIERDZONE w dokumentach",
+                    description: "Materiały potwierdzone dokumentami z wysoką pewnością (>70%)",
                     items: {
                         type: Type.OBJECT,
                         properties: {
@@ -1971,7 +1986,7 @@ const TECHNOLOG_SCHEMA = {
                 },
                 derivedParameters: {
                     type: Type.ARRAY,
-                    description: "Parametry DOBRANE przez Technologa z norm gdy brakuje danych",
+                    description: "Parametry normowe wywnioskowane z norm (WT2021, Eurokody) lub szukania",
                     items: {
                         type: Type.OBJECT,
                         properties: {
@@ -1985,7 +2000,7 @@ const TECHNOLOG_SCHEMA = {
                 },
                 quantityIndicators: {
                     type: Type.ARRAY,
-                    description: "Wskaźniki ilościowe przeliczone przez Technologa dla brakujących przedmiarów",
+                    description: "Wskaźnikowe ilości elementów obliczone lub znalezione przez agentów",
                     items: {
                         type: Type.OBJECT,
                         properties: {
@@ -2000,7 +2015,7 @@ const TECHNOLOG_SCHEMA = {
                 },
                 technologicalConflicts: {
                     type: Type.ARRAY,
-                    description: "Sprzeczności technologiczne wykryte między dokumentami",
+                    description: "Sprzeczności między dokumentami lub normami",
                     items: {
                         type: Type.OBJECT,
                         properties: {
@@ -2013,58 +2028,91 @@ const TECHNOLOG_SCHEMA = {
                 },
                 technologicalGaps: {
                     type: Type.ARRAY,
+                    description: "Luki technologiczne — brakujące info blokujące wycenę",
                     items: {
                         type: Type.OBJECT,
                         properties: {
                             element: { type: Type.STRING },
-                            impactScore: { type: Type.NUMBER },
+                            impactScore: { type: Type.NUMBER, description: "0-10, gdzie 10 = bez tego nie da się wycenić" },
                             suggestedAgent: { type: Type.STRING }
                         },
                         required: ["element", "impactScore", "suggestedAgent"]
                     }
+                },
+                scopeResearchDone: {
+                    type: Type.BOOLEAN,
+                    description: "TRUE gdy SCOPE_RESEARCHER zakończył i wyniki są w scopeResearchResults"
+                },
+                identifiedMissingScopes: {
+                    type: Type.ARRAY,
+                    description: "Lista działów kosztorysowych których BRAKUJE w dokumentacji projektu (zidentyfikowanych przez SCOPE_RESEARCHER lub własną analizę)",
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            division: { type: Type.STRING, description: "Nazwa działu np. 'Instalacje elektryczne wewnętrzne'" },
+                            impactScore: { type: Type.NUMBER, description: "0-10 — wpływ na wartość kosztorysu" },
+                            estimatedCostShare: { type: Type.STRING, description: "Szacunkowy % wartości całej inwestycji" },
+                            sentToPESAM: { type: Type.BOOLEAN, description: "TRUE gdy finding z tym zakresem jest już w findingsForPESAM" }
+                        },
+                        required: ["division", "impactScore", "estimatedCostShare", "sentToPESAM"]
+                    }
                 }
             },
-            required: ["objectProfile", "confirmedMaterials", "derivedParameters", "quantityIndicators", "technologicalConflicts", "technologicalGaps"]
+            required: [
+                "objectProfile", "confirmedMaterials", "derivedParameters",
+                "quantityIndicators", "technologicalConflicts", "technologicalGaps",
+                "scopeResearchDone", "identifiedMissingScopes"
+            ]
         },
         newTasks: {
             type: Type.ARRAY,
+            description: "Zadania do zlecenia agentom Technologa. Każde zadanie musi mieć konkretną instrukcję — nie ogólnikową.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    agentType: { type: Type.STRING },
-                    instruction: { type: Type.STRING },
-                    inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    inputFacts: { type: Type.OBJECT }
+                    agentType: { type: Type.STRING, description: "Jeden z: MATERIAL_DETECTIVE, QUANTITY_ESTIMATOR, NORM_ADVISOR, SCOPE_RESEARCHER" },
+                    instruction: { type: Type.STRING, description: "Precyzyjna instrukcja dla agenta — co konkretnie ma zrobić, czego szukać" },
+                    inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING }, description: "IDs dokumentów potrzebnych agentowi. [] jeśli agent korzysta tylko z bazy danych lub wyszukiwarki." },
+                    inputFacts: {
+                        type: Type.OBJECT,
+                        description: "Fakty kontekstowe dla agenta (np. objectType, objectDescription, confirmedScopes)"
+                    }
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
         },
         findingsForPESAM: {
             type: Type.ARRAY,
-            description: "Fakty technologiczne gotowe do przekazania Mózgowi PESAM.",
+            description: "Fakty technologiczne i luki zakresu gotowe do przekazania Mózgowi PESAM. PESAM użyje ich do uzupełnienia kosztorysu. NIE duplikuj — sprawdź existingFindings przed dodaniem.",
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    findingId: { type: Type.STRING },
-                    category: { type: Type.STRING },
-                    facts: { type: Type.OBJECT },
-                    confidence: { type: Type.NUMBER },
-                    normBasis: { type: Type.STRING }
+                    findingId: { type: Type.STRING, description: "Unikalny ID — użyj np. 'missing_elektryka', 'material_beton_c25'" },
+                    category: {
+                        type: Type.STRING,
+                        description: "MISSING_SCOPE (brakujący dział), MATERIAL_SPEC (specyfikacja materiału), QUANTITY_ESTIMATE (ilości wskaźnikowe), NORM_REQUIREMENT (wymóg normatywny), COST_INDICATOR (wskaźnik kosztowy)"
+                    },
+                    facts: {
+                        type: Type.OBJECT,
+                        description: "Konkretne fakty do przekazania. Dla MISSING_SCOPE: {divisionName, typicalItems[], estimatedCostShare, whyMissing}. Dla MATERIAL_SPEC: {element, material, specification, normBasis}. Dla QUANTITY_ESTIMATE: {element, quantity, unit, calculationMethod}. Dla COST_INDICATOR: {scope, unitCost, unit, source}."
+                    },
+                    confidence: { type: Type.NUMBER, description: "0-100 — pewność tego faktu" },
+                    normBasis: { type: Type.STRING, description: "Podstawa normowa lub źródło jeśli dotyczy" }
                 },
                 required: ["findingId", "category", "facts", "confidence"]
             }
         },
         chatReply: {
             type: Type.ARRAY,
+            description: "Komunikaty dla użytkownika — używaj tylko gdy potrzebujesz czegoś od niego lub masz ważne ostrzeżenie.",
             items: { type: Type.STRING }
         }
     },
-    required: ["reasoning", "selfCritique", "nextBestAction", "phase", "currentGoal", "technologicalState", "newTasks", "findingsForPESAM", "chatReply"]
+    required: [
+        "reasoning", "selfCritique", "nextBestAction", "phase",
+        "currentGoal", "technologicalState", "newTasks", "findingsForPESAM", "chatReply"
+    ]
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FUNKCJE POMOCNICZE I POST HANDLER
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
@@ -2073,12 +2121,35 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const errorText = error.toString() || "";
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
-            console.warn(`[TECHNOLOG 🏗️] Limit 429. Czekam ${delay / 1000}s... (Pozostało prób: ${retries})`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            const jitter = Math.random() * 3000;
+            const waitTime = delay + jitter;
+            console.warn(`[TECHNOLOG 🏗️] Limit 429. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
     }
+}
+
+function buildScopeResearchContext(scopeResearchResults: any[]): string {
+    if (!scopeResearchResults || scopeResearchResults.length === 0) {
+        return "(SCOPE_RESEARCHER jeszcze nie był uruchomiony — uruchom go jako PIERWSZE zadanie gdy znasz typ obiektu)";
+    }
+    return scopeResearchResults.map((r: any, i: number) => `
+--- Badanie zakresu #${i + 1} ---
+Podsumowanie szukania: ${r.searchSummary || "brak"}
+Źródła znalezione: ${(r.sourcesFound || []).join(", ") || "brak"}
+Typowe działy dla tego obiektu:
+${(r.typicalScopeForObjectType || []).map((d: any) =>
+        `  • ${d.division} [${d.isMandatory ? "OBOWIĄZKOWY" : "opcjonalny"}]${d.isLikelyMissingInProject ? " ⚠️ BRAKUJE W PROJEKCIE — " + (d.missingReason || "") : ""}`
+    ).join("\n")}
+Krytyczne luki (impactScore > 5):
+${(r.criticalGaps || [])
+            .filter((g: any) => g.impactScore > 5)
+            .map((g: any) => `  🔴 ${g.gapName} [impact: ${g.impactScore}/10, ~${g.estimatedCostShare} wartości inwestycji] — ${g.recommendation}`)
+            .join("\n") || "  (brak krytycznych luk)"}
+Pewność analizy: ${r.confidence || 0}%`
+    ).join("\n\n");
 }
 
 export async function POST(req: Request) {
@@ -2097,6 +2168,7 @@ export async function POST(req: Request) {
             return NextResponse.json({ message: "Przetarg zatrzymany (HALTED)." });
         }
 
+        // Sprawdź aktywne zadania z timeout detection
         const activeTasksSnap = await tasksRef.where("status", "in", ["PENDING", "IN_PROGRESS"]).get();
         const now = Date.now();
         const TIMEOUT_MS = 10 * 60 * 1000;
@@ -2107,7 +2179,13 @@ export async function POST(req: Request) {
             const data = doc.data();
             const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
             if (now - lastActive >= TIMEOUT_MS) {
-                lockBatch.set(doc.ref, { status: "ERROR", rawResult: { error: "TIMEOUT_EXCEEDED" }, processedByTechnolog: false, updatedAt: new Date() }, { merge: true });
+                console.log(`[TECHNOLOG 🏗️] Timeout zadania: ${doc.id}`);
+                lockBatch.set(doc.ref, {
+                    status: "ERROR",
+                    rawResult: { error: "TIMEOUT_EXCEEDED" },
+                    processedByTechnolog: false,
+                    updatedAt: new Date()
+                }, { merge: true });
             } else {
                 trulyActiveCount++;
             }
@@ -2115,17 +2193,28 @@ export async function POST(req: Request) {
 
         if (trulyActiveCount > 0) {
             await lockBatch.commit();
+            console.log(`[TECHNOLOG 🏗️] Agenci pracują (${trulyActiveCount} aktywnych). Czekam...`);
             return NextResponse.json({ message: "Agenci Technologa pracują..." });
         }
         await lockBatch.commit();
 
-        const [docsSnap, techSnap, unprocessedTasksSnap, allTasksSnap, pesamBrainSnap, chatSnap] = await Promise.all([
+        // Pobierz wszystkie dane równolegle
+        const [
+            docsSnap,
+            techSnap,
+            unprocessedTasksSnap,
+            allTasksSnap,
+            pesamBrainSnap,
+            existingFindingsSnap,
+            estimateSectionsSnap
+        ] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             techRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByTechnolog", "==", false).get(),
             tasksRef.get(),
             adminDb.collection(`tenders/${tenderId}/brain`).doc("main").get(),
-            adminDb.collection(`tenders/${tenderId}/chat`).orderBy("timestamp", "asc").limit(10).get()
+            adminDb.collection(`tenders/${tenderId}/technologistFindings`).get(),
+            adminDb.collection(`tenders/${tenderId}/estimate`).get()
         ]);
 
         const documents = docsSnap.docs.map(d => ({
@@ -2135,55 +2224,187 @@ export async function POST(req: Request) {
             summary: d.data().summary || "(brak)",
             detailedElement: d.data().detailedElement || "NIE_DOTYCZY",
             containsDrawings: d.data().containsDrawings || false,
-            containsTablesWithDimensions: d.data().containsTablesWithDimensions || false
+            containsTablesWithDimensions: d.data().containsTablesWithDimensions || false,
+            pageCount: d.data().pageCount || null
         }));
 
         const currentTechData = techSnap.exists ? techSnap.data() : {};
         const currentTechState = currentTechData?.technologicalState || {
-            objectProfile: {}, confirmedMaterials: [], derivedParameters: [], quantityIndicators: [], technologicalConflicts: [], technologicalGaps: []
+            objectProfile: {},
+            confirmedMaterials: [],
+            derivedParameters: [],
+            quantityIndicators: [],
+            technologicalConflicts: [],
+            technologicalGaps: [],
+            scopeResearchDone: false,
+            identifiedMissingScopes: [],
+            scopeResearchResults: []
         };
 
-        const pesamKnownFacts = pesamBrainSnap.exists ? (pesamBrainSnap.data()?.cognitiveState?.knownFacts || {}) : {};
+        const pesamKnownFacts = pesamBrainSnap.exists
+            ? (pesamBrainSnap.data()?.cognitiveState?.knownFacts || {})
+            : {};
+
+        const pesamWorldModel = pesamBrainSnap.exists
+            ? (pesamBrainSnap.data()?.cognitiveState?.worldModel || [])
+            : [];
+
         const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
-            taskId: d.id, agentType: d.data().agentType, status: d.data().status, instruction: d.data().instruction, rawResult: d.data().rawResult
+            taskId: d.id,
+            agentType: d.data().agentType,
+            status: d.data().status,
+            instruction: d.data().instruction,
+            rawResult: d.data().rawResult
         }));
 
         const taskHistory = allTasksSnap.docs.map(d => ({
-            agentType: d.data().agentType, status: d.data().status,
-            resultSummary: d.data().status === "DONE" ? (d.data().rawResult?.summary || "Wykonano") : (d.data().rawResult?.error || "BŁĄD")
+            agentType: d.data().agentType,
+            status: d.data().status,
+            resultSummary: d.data().status === "DONE"
+                ? (d.data().rawResult?.summary || "Wykonano")
+                : (d.data().rawResult?.error || "BŁĄD")
         }));
 
-        const chatHistory = chatSnap.docs.map(c => ({ rola: c.data().role, treść: c.data().content }));
+        const existingFindings = existingFindingsSnap.docs.map(d => ({
+            findingId: d.id,
+            category: d.data().category,
+            confidence: d.data().confidence,
+            facts: d.data().facts
+        }));
 
-        const existingFindingsSnap = await adminDb.collection(`tenders/${tenderId}/technologistFindings`).get();
-        const existingFindings = existingFindingsSnap.docs.map(d => ({ category: d.data().category, confidence: d.data().confidence }));
+        // Aktualny stan kosztorysu — co już wyciągnął Mózg
+        const currentEstimateSummary = estimateSectionsSnap.docs.map(d => ({
+            sekcja: d.data().section,
+            liczba_pozycji: d.data().items?.length || 0
+        }));
 
-        const systemPrompt = `Jesteś Technologiem Budowlanym – autonomicznym ekspertem technicznym w systemie PESAM 3.0.
+        // Zbierz wyniki SCOPE_RESEARCHER z nowych zadań i akumuluj
+        const newScopeResults = newlyFinishedResults
+            .filter(t => t.agentType === "SCOPE_RESEARCHER" && t.status === "DONE")
+            .map(t => t.rawResult);
 
-=== TWOJA ROLA ===
-Pracujesz równolegle do Kosztorysanta. Twoja domena to TECHNOLOGIA (z czego to jest, jak to zbudować, normy WT2021).
-PESAM czeka na Twoje ustalenia (findings) by automatycznie wycenić luki w kosztorysie.
+        const allScopeResearchResults = [
+            ...(currentTechState.scopeResearchResults || []),
+            ...newScopeResults
+        ];
 
-=== TWOJE NARZĘDZIA ===
+        const scopeResearcherRunBefore = taskHistory.some(t => t.agentType === "SCOPE_RESEARCHER");
+        const scopeResearcherDoneSuccessfully = taskHistory.some(
+            t => t.agentType === "SCOPE_RESEARCHER" && t.status === "DONE"
+        );
+
+        const systemPrompt = `Jesteś Technologiem Budowlanym — autonomicznym ekspertem technicznym w systemie PESAM 3.0.
+
+=== TWOJA ROLA I MISJA ===
+Twoja JEDYNA odpowiedzialność: KOMPLETNOŚĆ kosztorysu.
+NIE tylko analizujesz to, co jest w dokumentach.
+AKTYWNIE identyfikujesz CO BRAKUJE w stosunku do typowego, pełnego zakresu dla tego typu inwestycji.
+
+Mózg PESAM (Kosztorysant) czeka na Twoje findings, by uzupełnić luki w kosztorysie.
+Bez Ciebie kosztorys będzie niepełny i wartościowo zaniżony.
+
+=== DOSTĘPNE NARZĘDZIA (agenci Technologa) ===
 ${JSON.stringify(TECHNOLOG_AGENTS.map(a => ({ name: a.name, opis: a.description })), null, 2)}
 
 === DOKUMENTY PROJEKTU ===
 ${JSON.stringify(documents, null, 2)}
 
-=== CO JUŻ WIE KOSZTORYSANT ===
+=== CO JUŻ WIE KOSZTORYSANT (Mózg PESAM — knownFacts) ===
 ${JSON.stringify(pesamKnownFacts, null, 2)}
 
-=== TWÓJ STAN TECHNOLOGICZNY ===
+=== MODEL ŚWIATA PESAM (worldModel) ===
+${JSON.stringify(pesamWorldModel, null, 2)}
+
+=== AKTUALNY STAN KOSZTORYSU (co już wyciągnął Mózg) ===
+${currentEstimateSummary.length > 0
+                ? JSON.stringify(currentEstimateSummary, null, 2)
+                : "⚠️ Kosztorys jeszcze pusty — to wczesna faza."}
+
+=== TWÓJ AKTUALNY STAN TECHNOLOGICZNY ===
 ${JSON.stringify(currentTechState, null, 2)}
 
-=== WYNIKI AGENTÓW ===
-${JSON.stringify(newlyFinishedResults, null, 2)}
+=== WYNIKI BADANIA ZAKRESU (SCOPE_RESEARCHER) ===
+${buildScopeResearchContext(allScopeResearchResults)}
 
-=== FAKTY JUŻ PRZEKAZANE ===
-${JSON.stringify(existingFindings, null, 2)}
+=== NOWE WYNIKI AGENTÓW (do przetworzenia) ===
+${newlyFinishedResults.length > 0
+                ? JSON.stringify(newlyFinishedResults, null, 2)
+                : "(brak nowych wyników)"}
 
-=== CO MASZ TERAZ ZRObić ===
-Zaktualizuj technologicalState. Jeśli masz pewne fakty (>70%), zapisz je do findingsForPESAM. Nie generuj w newTasks standardowych pól, skup się na lukach technologicznych.`;
+=== HISTORIA WSZYSTKICH ZADAŃ ===
+${JSON.stringify(taskHistory, null, 2)}
+
+=== FAKTY JUŻ PRZEKAZANE DO PESAM (nie duplikuj!) ===
+${existingFindings.length > 0
+                ? JSON.stringify(existingFindings, null, 2)
+                : "(brak — nic jeszcze nie przekazano)"}
+
+=== TWOJA STRATEGIA (FOLLOW THIS STRICTLY) ===
+
+**KROK 1 — SCOPE RESEARCH (PRIORYTET ABSOLUTNY)**
+- Czy SCOPE_RESEARCHER był już uruchomiony i zwrócił wyniki? ${scopeResearcherDoneSuccessfully ? "✅ TAK" : "❌ NIE"}
+- Jeśli NIE → Stwórz NATYCHMIAST zadanie dla SCOPE_RESEARCHER.
+  * W inputFacts podaj: objectType (np. "przedszkole publiczne 4-oddziałowe"), objectDescription (z SWZ/dokumentów), confirmedScopes (sekcje które widzisz w kosztorysie lub dokumentach)
+  * Instruction powinna brzmieć: "Wyszukaj w internecie przykładowe kosztorysy inwestorskie dla [typ obiektu]. Porównaj typowy zakres z tym co mamy: [lista tego co jest]. Podaj brakujące działy z impactScore."
+- NIE twórz innych zadań w tej samej iteracji gdy SCOPE_RESEARCHER jeszcze nie zwrócił wyników.
+
+**KROK 2 — ANALIZA LUK (gdy SCOPE_RESEARCHER zwrócił wyniki)**
+- Przejrzyj criticalGaps z wyników powyżej.
+- Dla każdej luki z impactScore > 6 → stwórz finding dla PESAM (category: "MISSING_SCOPE").
+- Finding powinien zawierać: divisionName, typicalItems (przykładowe pozycje kosztorysowe dla tego działu), estimatedCostShare, whyMissing.
+- Sprawdź existingFindings — nie duplikuj tych które już wysłałeś.
+
+**KROK 3 — SPECYFIKACJE MATERIAŁÓW (równolegle po kroku 2)**
+- Jeśli masz dokumenty z rysunkami lub opisem technicznym → MATERIAL_DETECTIVE.
+- Jeśli brakuje parametrów normowych (U-wartości, klasy ognioodporności, klasy betonu) → NORM_ADVISOR z googleSearch.
+
+**KROK 4 — ILOŚCI WSKAŹNIKOWE (po kroku 3)**
+- Gdy masz materiały ale brak przedmiaru → QUANTITY_ESTIMATOR.
+- Agent porówna obecny kosztorys z wymaganiami i wskaże brakujące procesy (izolacje, rusztowania, wywiezienie ziemi).
+
+**KROK 5 — SYNTEZA I PAKOWANIE DLA PESAM**
+- Gdy masz pełny obraz: materiały + parametry + luki zakresu → zapakuj jako findingsForPESAM.
+- Ustaw scopeResearchDone=true gdy SCOPE_RESEARCHER skończył.
+- Zaktualizuj identifiedMissingScopes z sentToPESAM=true dla przekazanych działów.
+- Ustaw phase="DONE" gdy wszystkie luki są przekazane.
+
+=== ZASADA ANTY-DUPLIKACJI ===
+Przed dodaniem nowego finding sprawdź czy findingId już istnieje w "FAKTY JUŻ PRZEKAZANE DO PESAM".
+Jeśli tak — nie dodawaj go ponownie. Zamiast tego zaktualizuj istniejący jeśli masz nowe dane.
+
+=== FORMATY FINDINGS DLA PESAM ===
+
+Dla MISSING_SCOPE:
+{
+  findingId: "missing_[nazwa_dzialu_snake_case]",
+  category: "MISSING_SCOPE",
+  facts: {
+    divisionName: "Instalacje elektryczne wewnętrzne",
+    typicalItems: ["Rozdzielnica główna RG", "Instalacja oświetlenia", "Gniazda wtykowe 230V", "WLZ z rozdzielni"],
+    estimatedCostShare: "8-12% wartości inwestycji",
+    whyMissing: "W dokumentach brak projektu elektrycznego. SCOPE_RESEARCHER znalazł w 3 podobnych przetargach że instalacje elektryczne to obowiązkowy dział."
+  },
+  confidence: 85,
+  normBasis: "Warunki techniczne dla budynków użyteczności publicznej"
+}
+
+Dla MATERIAL_SPEC:
+{
+  findingId: "material_[element]_[parametr]",
+  category: "MATERIAL_SPEC",
+  facts: { element: "Ściany zewnętrzne", material: "Pustak ceramiczny", specification: "Porotherm 25 P+W", normBasis: "WT2021 §321 U≤0.20 W/m²K" },
+  confidence: 90
+}
+
+Dla COST_INDICATOR:
+{
+  findingId: "cost_[zakres]",
+  category: "COST_INDICATOR",
+  facts: { scope: "Instalacja wentylacji mechanicznej", unitCost: "150-200 zł/m2 PU", unit: "m2 powierzchni użytkowej", source: "SEKOCENBUD 2024 Q4" },
+  confidence: 70
+}`;
+
+        console.log(`[TECHNOLOG 🏗️] Wywołuję model. ScopeResearched: ${scopeResearcherDoneSuccessfully}`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
@@ -2197,27 +2418,70 @@ Zaktualizuj technologicalState. Jeśli masz pewne fakty (>70%), zapisz je do fin
             });
         });
 
-        const parsed = JSON.parse(result.text ?? "{}");
+        let parsed: any = {};
+        try {
+            parsed = JSON.parse(result.text ?? "{}");
+        } catch (e) {
+            console.error("[TECHNOLOG 🏗️] Błąd parsowania JSON:", e);
+            throw new Error("Błąd parsowania odpowiedzi modelu");
+        }
+
+        console.log(`[TECHNOLOG 🏗️] Faza: ${parsed.phase} | Next: ${parsed.nextBestAction}`);
+
         const batch = adminDb.batch();
 
-        unprocessedTasksSnap.docs.forEach(doc => batch.set(doc.ref, { processedByTechnolog: true }, { merge: true }));
+        // Oznacz przetworzone zadania
+        unprocessedTasksSnap.docs.forEach(doc =>
+            batch.set(doc.ref, { processedByTechnolog: true }, { merge: true })
+        );
 
+        // Zapisz stan Technologa z akumulacją scopeResearchResults
         batch.set(techRef, {
             phase: parsed.phase,
             currentGoal: parsed.currentGoal,
-            technologicalState: parsed.technologicalState,
+            technologicalState: {
+                ...parsed.technologicalState,
+                scopeResearchResults: allScopeResearchResults // Akumuluj — nie nadpisuj!
+            },
             reasoning: parsed.reasoning,
+            selfCritique: parsed.selfCritique,
+            nextBestAction: parsed.nextBestAction,
             updatedAt: new Date()
         }, { merge: true });
 
+        // Zapisz findings dla PESAM (merge: true żeby nie nadpisywać istniejących)
+        let findingsSentCount = 0;
         if (parsed.findingsForPESAM?.length > 0) {
             parsed.findingsForPESAM.forEach((finding: any) => {
-                const findingRef = adminDb.collection(`tenders/${tenderId}/technologistFindings`).doc(finding.findingId || randomUUID());
-                batch.set(findingRef, { ...finding, createdAt: new Date(), updatedAt: new Date(), source: "TECHNOLOG" }, { merge: true });
+                if (!finding.findingId) {
+                    finding.findingId = `finding_${randomUUID().slice(0, 8)}`;
+                }
+                // Sprawdź czy już istnieje
+                const alreadyExists = existingFindings.some(f => f.findingId === finding.findingId);
+                if (!alreadyExists) {
+                    const findingRef = adminDb
+                        .collection(`tenders/${tenderId}/technologistFindings`)
+                        .doc(finding.findingId);
+                    batch.set(findingRef, {
+                        ...finding,
+                        createdAt: new Date(),
+                        updatedAt: new Date(),
+                        source: "TECHNOLOG"
+                    }, { merge: true });
+                    findingsSentCount++;
+                    console.log(`[TECHNOLOG 🏗️] Finding: [${finding.category}] ${finding.findingId}`);
+                }
             });
-            batch.set(tenderRef, { hasNewTechnologistFindings: true, lastTechnologistUpdate: new Date() }, { merge: true });
+
+            if (findingsSentCount > 0) {
+                batch.set(tenderRef, {
+                    hasNewTechnologistFindings: true,
+                    lastTechnologistUpdate: new Date()
+                }, { merge: true });
+            }
         }
 
+        // Stwórz nowe zadania dla agentów
         const newTasksCreated: any[] = [];
         (parsed.newTasks || []).forEach((task: any) => {
             const taskRef = tasksRef.doc();
@@ -2234,44 +2498,64 @@ Zaktualizuj technologicalState. Jeśli masz pewne fakty (>70%), zapisz je do fin
             };
             batch.set(taskRef, taskData);
             newTasksCreated.push(taskData);
+            console.log(`[TECHNOLOG 🏗️] Nowe zadanie: ${task.agentType} — ${task.instruction.substring(0, 60)}...`);
         });
 
+        // Koszt tokenów
+        const totalTokens = result.usageMetadata?.totalTokenCount || 0;
+        const costUSD = (totalTokens / 1000) * 0.000015;
         batch.set(tenderRef, {
-            "budgetGuard.currentCostUSD": FieldValue.increment(((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.000015),
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD),
             updatedAt: new Date()
         }, { merge: true });
 
         await batch.commit();
+        console.log(`[TECHNOLOG 🏗️] Batch zapisany. Zadań: ${newTasksCreated.length}, Findings: ${findingsSentCount}`);
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
 
-        // Pancerne, asynchroniczne wywoływanie agentów z odstępem 3 sekund dla drugiego Mózgu
-        const triggerTechAgentsWithPacing = async () => {
+        // Uruchom agentów z pacingiem i jitterem — kluczowe dla unikania 429
+        const triggerAgentsWithPacing = async () => {
             for (let i = 0; i < newTasksCreated.length; i++) {
                 const task = newTasksCreated[i];
                 const agentDef = TECHNOLOG_AGENTS.find(a => a.name === task.agentType);
                 if (agentDef?.endpoint) {
-                    if (i > 0) await new Promise(r => setTimeout(r, 3000)); // Bezpieczna pauza
-
+                    if (i > 0) {
+                        const pause = 4000 + Math.random() * 3000; // Jitter 4-7s między agentami
+                        console.log(`[TECHNOLOG 🏗️] Pauza ${Math.round(pause / 1000)}s przed ${task.agentType}...`);
+                        await new Promise(r => setTimeout(r, pause));
+                    }
                     await fetch(`${localOrigin}${agentDef.endpoint}`, {
-                        method: "POST", headers: { "Content-Type": "application/json" },
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ tenderId, taskId: task.taskId })
-                    }).catch(() => { });
+                    }).catch(err => console.error(`[TECHNOLOG 🏗️] Błąd uruchamiania ${task.agentType}:`, err.message));
+                } else {
+                    console.warn(`[TECHNOLOG 🏗️] Agent ${task.agentType} nie ma endpointu w rejestrze!`);
                 }
             }
         };
 
-        // Oczekujemy na wybudzenie wszystkich agentów, aby Cloud Run nie zamroził kontenera przed rozesłaniem żądań!
-        await triggerTechAgentsWithPacing();
+        await triggerAgentsWithPacing();
 
-        if (parsed.findingsForPESAM?.length > 0 && parsed.phase !== "DONE") {
+        // Powiadom Mózg PESAM jeśli są nowe findings
+        if (findingsSentCount > 0) {
+            console.log(`[TECHNOLOG 🏗️] Powiadamiam Mózg PESAM o ${findingsSentCount} nowych findings...`);
             await fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ tenderId, trigger: "TECHNOLOGIST_NEW_FINDINGS" })
-            }).catch(() => { });
+            }).catch(err => console.error("[TECHNOLOG 🏗️] Błąd powiadamiania PESAM:", err.message));
         }
 
-        return NextResponse.json({ success: true, phase: parsed.phase, tasksCreated: newTasksCreated.length });
+        return NextResponse.json({
+            success: true,
+            phase: parsed.phase,
+            tasksCreated: newTasksCreated.length,
+            findingsSent: findingsSentCount,
+            scopeResearchDone: parsed.technologicalState?.scopeResearchDone || false
+        });
+
     } catch (error: any) {
         console.error("[TECHNOLOG 🏗️] Krytyczny błąd:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
@@ -4571,5 +4855,597 @@ ${rawPythonOutput}
 }
 
 --- END OF FILE src/app/api/kosztorysant/agent-python-calc/route.ts ---
+
+
+--- START OF FILE src/app/api/technolog/agent-technolog-materialowy/route.ts ---
+
+import { NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
+
+export const dynamic = "force-dynamic";
+
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 4000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const isRateLimit = error.toString().includes("429") || error.toString().includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[MATERIAL DETECTIVE 🔍] Limit 429. Czekam ${delay / 1000}s...`);
+            await new Promise(r => setTimeout(r, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
+    let isSuccess = false;
+
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
+
+        console.log(`[MATERIAL DETECTIVE 🔍] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
+
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie obsłużone." });
+
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        const inputDocIds: string[] = taskData.inputDocIds || [];
+        const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
+        let totalTokensUsed = 0;
+        const allFindings: any[] = [];
+
+        for (const docId of inputDocIds) {
+            const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
+            if (!docSnap.exists) continue;
+
+            const docData = docSnap.data()!;
+            const fileUri = `gs://${bucketName}/${docData.storagePath}`;
+
+            console.log(`[MATERIAL DETECTIVE 🔍] Skanuję: "${docData.fileName}"`);
+
+            const scanPrompt = `
+Jesteś Detektywem Materiałowym w systemie PESAM 3.0.
+Wyszukaj wszystkie wzmianki o technologiach i klasach materiałów budowlanych.
+
+=== POLECENIE OD TECHNOLOGA ===
+${taskData.instruction}
+
+Zwróć wyniki w formacie JSON z tablicą "materialFindings":
+- material: "Nazwa materiału (np. beton, pustak)"
+- specification: "Dokładna klasa/parametr (np. C25/30, Ytong 24cm)"
+- context: "Gdzie ma być użyty (np. ściany konstrukcyjne)"
+- confidence: 0-100
+`;
+
+            const result = await callGeminiWithRetry(() =>
+                ai.models.generateContent({
+                    model: MODEL_FLASH,
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [
+                                { text: scanPrompt },
+                                { fileData: { fileUri, mimeType: docData.mimeType || "application/pdf" } }
+                            ]
+                        }
+                    ],
+                    config: {
+                        temperature: 0.05,
+                        responseMimeType: "application/json"
+                    }
+                })
+            );
+
+            totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+
+            try {
+                const parsed = JSON.parse(jsonrepair(result.text ?? "{}"));
+                const findings = parsed.materialFindings || [];
+                allFindings.push(...findings.map((f: any) => ({ ...f, sourceDoc: docData.fileName })));
+            } catch (e) {
+                console.warn(`[MATERIAL DETECTIVE 🔍] Błąd parsowania pliku ${docData.fileName}`);
+            }
+        }
+
+        await taskRef.update({
+            status: "DONE",
+            rawResult: {
+                materialFindings: allFindings,
+                summary: `Wyciągnięto ${allFindings.length} cech technologicznych materiałów z dokumentacji.`
+            },
+            processedByTechnolog: false,
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
+        await adminDb.collection("tenders").doc(tenderId).update({ "budgetGuard.currentCostUSD": FieldValue.increment(costUSD) });
+
+        isSuccess = true;
+        return NextResponse.json({ success: true, findingsCount: allFindings.length });
+
+    } catch (error: any) {
+        console.error("[MATERIAL DETECTIVE 🔍] Błąd:", error);
+        if (tenderId && taskId) {
+            await adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId).update({
+                status: "ERROR", rawResult: { error: error.message }, processedByTechnolog: false, updatedAt: new Date()
+            }).catch(() => { });
+        }
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    } finally {
+        if (tenderId && taskId) {
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+            }).catch(() => { });
+        }
+    }
+}
+
+--- END OF FILE src/app/api/technolog/agent-technolog-materialowy/route.ts ---
+
+
+--- START OF FILE src/app/api/technolog/agent-technolog-przedmiarowy/route.ts ---
+
+import { NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
+
+export const dynamic = "force-dynamic";
+
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+const MODEL_FLASH = "gemini-2.5-flash"; // Ultra-tani model
+
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 4000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const isRateLimit = error.toString().includes("429") || error.toString().includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[QUANTITY ESTIMATOR 📐] Limit 429. Czekam ${delay / 1000}s...`);
+            await new Promise(r => setTimeout(r, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
+    let isSuccess = false;
+
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
+
+        console.log(`[QUANTITY ESTIMATOR 📐] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
+
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie obsłużone." });
+
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        // ── KLUCZOWY RECYKLING DANYCH: Pobieramy to, co Kosztorysant już ma w bazie ──
+        const estimateRef = adminDb.collection(`tenders/${tenderId}/estimate`);
+        const estimateSectionsSnap = await estimateRef.get();
+
+        const currentEstimateState: any[] = [];
+
+        for (const secDoc of estimateSectionsSnap.docs) {
+            const itemsSnap = await estimateRef.doc(secDoc.id).collection("items").get();
+            const items = itemsSnap.docs.map(i => ({
+                pozycja: i.data().pozycja,
+                opis: i.data().opis,
+                ilosc: i.data().ilosc,
+                jednostka: i.data().jednostka
+            }));
+            if (items.length > 0) {
+                currentEstimateState.push({
+                    sekcja: secDoc.data().section,
+                    pozycje: items
+                });
+            }
+        }
+
+        console.log(`[QUANTITY ESTIMATOR 📐] Zaimportowano ${currentEstimateState.length} sekcji kosztorysu jako kontekst.`);
+
+        const searchPrompt = `
+Jesteś Inżynierem-Audytorem Zakresu (Scope Auditor) w systemie PESAM 3.0.
+Twoim zadaniem jest przeanalizowanie obecnego kosztorysu pod kątem KOMPLETNOŚCI technologicznej.
+
+=== POLECENIE OD TECHNOLOGA ===
+${taskData.instruction}
+
+=== AKTUALNE POZYCJE W KOSZTORYSIE (Co już wyciągnął Kosztorysant) ===
+${JSON.stringify(currentEstimateState, null, 2)}
+
+=== TWOJE ZADANIE ===
+1. Przeanalizuj obecne pozycje kosztorysowe.
+2. Porównaj je z wiedzą inżynieryjną: co MUSI zawierać budowa obiektu tego typu (np. przedszkole)?
+3. Zidentyfikuj brakujące działy lub procesy poboczne, o których zapomniano w kosztorysie, a które są technologicznie niezbędne (np. wywiezienie ziemi przy wykopach, izolacja pionowa przy fundamentach, warstwy spadkowe na dachu płaskim, rusztowania przy tynkach zewnętrznych).
+4. Jeśli dany proces jest wymagany, ale brak go w kosztorysie – zgłoś to jako lukę (GAP).
+
+Użyj wyszukiwarki Google Search, aby zweryfikować standardowe technologie i kompletność robót (np. checklista robót stanu surowego dla przedszkoli).
+
+Zwróć raport w formacie JSON z tablicą "quantityEstimates" (reprezentującą brakujące działy/luki zakresu):
+- element: "Nazwa brakującego zakresu/procesu (np. Izolacja przeciwwilgociowa ław)"
+- estimatedQuantity: 0 (Ustaw na 0 – nie zgadujemy cyfr, skupiamy się na samym fakcie braku pozycji!)
+- unit: "j.m. właściwa dla elementu"
+- calculationSteps: "Szczegółowe uzasadnienie inżynieryjne dlaczego ten proces jest niezbędny i gdzie Mózg powinien go szukać"
+- indicatorSource: "Podstawa technologiczna / norma / KNR"
+- confidence: Twoja pewność analizy 0-100
+`;
+
+        const result = await callGeminiWithRetry(() =>
+            ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: searchPrompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.1,
+                    responseMimeType: "application/json"
+                }
+            })
+        );
+
+        let totalTokensUsed = result.usageMetadata?.totalTokenCount || 0;
+
+        let quantityEstimates: any[] = [];
+        try {
+            const parsed = JSON.parse(jsonrepair(result.text ?? "{}"));
+            quantityEstimates = parsed.quantityEstimates || parsed.estimates || [];
+        } catch (e) {
+            console.error("[QUANTITY ESTIMATOR 📐] Błąd parsowania wyliczeń.");
+        }
+
+        await taskRef.update({
+            status: "DONE",
+            rawResult: {
+                quantityEstimates,
+                summary: `Wykonano przeliczenia inżynieryjne. Wygenerowano ${quantityEstimates.length} wskaźnikowych propozycji ilościowych dla Mózgu.`,
+                recycledSectionsCount: currentEstimateState.length
+            },
+            processedByTechnolog: false,
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
+        await adminDb.collection("tenders").doc(tenderId).update({ "budgetGuard.currentCostUSD": FieldValue.increment(costUSD) });
+
+        isSuccess = true;
+        return NextResponse.json({ success: true, estimatesCount: quantityEstimates.length });
+
+    } catch (error: any) {
+        console.error("[QUANTITY ESTIMATOR 📐] Błąd:", error);
+        if (tenderId && taskId) {
+            await adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId).update({
+                status: "ERROR", rawResult: { error: error.message }, processedByTechnolog: false, updatedAt: new Date()
+            }).catch(() => { });
+        }
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    } finally {
+        if (tenderId && taskId) {
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+            }).catch(() => { });
+        }
+    }
+}
+
+--- END OF FILE src/app/api/technolog/agent-technolog-przedmiarowy/route.ts ---
+
+
+--- START OF FILE src/app/api/technolog/agent-technolog-norm/route.ts ---
+
+import { NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 120;
+
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 4000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const isRateLimit = error.toString().includes("429") || error.toString().includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            const jitter = Math.random() * 2000;
+            const waitTime = delay + jitter;
+            console.warn(`[NORM ADVISOR 📋] Limit 429. Czekam ${Math.round(waitTime / 1000)}s... (prób: ${retries})`);
+            await new Promise(r => setTimeout(r, waitTime));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
+    let isSuccess = false;
+
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
+
+        console.log(`[NORM ADVISOR 📋] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie obsłużone." });
+
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        // Pobierz pełny kontekst — Mózg + Technolog + wyniki SCOPE_RESEARCHER
+        const [brainSnap, techSnap, estimateSectionsSnap] = await Promise.all([
+            adminDb.collection(`tenders/${tenderId}/brain`).doc("main").get(),
+            adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get(),
+            adminDb.collection(`tenders/${tenderId}/estimate`).get()
+        ]);
+
+        const knownFacts = taskData.inputFacts || {};
+        const brainFacts = brainSnap.exists ? (brainSnap.data()?.cognitiveState?.knownFacts || {}) : {};
+        const techState = techSnap.exists ? techSnap.data()?.technologicalState : {};
+
+        // Wyciągnij brakujące zakresy ze SCOPE_RESEARCHER i Technologa
+        const scopeResearchResults = techState?.scopeResearchResults || [];
+        const identifiedMissingScopes = techState?.identifiedMissingScopes || [];
+
+        const missingDivisions = [
+            // Z SCOPE_RESEARCHER
+            ...scopeResearchResults.flatMap((r: any) =>
+                (r.criticalGaps || [])
+                    .filter((g: any) => g.impactScore > 5)
+                    .map((g: any) => `${g.gapName} (~${g.estimatedCostShare})`)
+            ),
+            // Z identifiedMissingScopes Technologa
+            ...identifiedMissingScopes
+                .filter((s: any) => s.impactScore > 5)
+                .map((s: any) => `${s.division} (~${s.estimatedCostShare})`)
+        ];
+
+        // Deduplikacja
+        const uniqueMissingDivisions = [...new Set(missingDivisions)];
+
+        // Aktualny kosztorys — co już jest
+        const existingEstimateSections = estimateSectionsSnap.docs.map(d => d.data().section || "").filter(Boolean);
+
+        const objectType = knownFacts.objectType || brainFacts.objectType || techState?.objectProfile?.objectType || "obiekt budowlany";
+
+        const normPrompt = `Jesteś ekspertem budowlanym, prawnym i normowym dla inwestycji w Polsce.
+Używasz Google Search by znaleźć aktualne, konkretne dane.
+
+=== OBIEKT ===
+Typ: ${objectType}
+Opis: ${knownFacts.objectDescription || brainFacts.objectDescription || "brak szczegółów"}
+
+=== ZADANIE OD TECHNOLOGA ===
+${taskData.instruction}
+
+=== CO JUŻ JEST W KOSZTORYSIE ===
+${existingEstimateSections.length > 0 ? existingEstimateSections.join(", ") : "(kosztorys pusty)"}
+
+=== BRAKUJĄCE ZAKRESY (zidentyfikowane przez SCOPE_RESEARCHER) ===
+${uniqueMissingDivisions.length > 0 ? uniqueMissingDivisions.join("\n") : "brak — skup się na parametrach normowych dla znanych elementów"}
+
+=== FAKTY Z MÓZGU PESAM ===
+${JSON.stringify(brainFacts, null, 2)}
+
+=== TWOJE ZADANIE ===
+
+Użyj Google Search aby znaleźć i zweryfikować aktualne dane (rok 2024-2025):
+
+**1. PARAMETRY NORMOWE** dla elementów ${objectType}:
+- Współczynniki przenikania ciepła U wg WT2021 (Rozporządzenie Ministra Infrastruktury z 12.04.2002 ze zmianami)
+- Wymagania ognioodporności REI/EI wg Rozporządzenia MSWiA ws. ochrony przeciwpożarowej
+- Parametry akustyczne wg PN-B-02151-3:2015
+- Klasy betonu, stali, kategorie geotechniczne wg Eurokodów (PN-EN 1992, PN-EN 1997)
+Szukaj fraz: "WT2021 współczynnik U ${objectType}", "wymagania pożarowe ${objectType} REI"
+
+**2. WSKAŹNIKI KOSZTOWE** dla brakujących działów:
+${uniqueMissingDivisions.length > 0 ? uniqueMissingDivisions.slice(0, 5).map(d => `- ${d}`).join("\n") : "- Główne roboty budowlane dla " + objectType}
+Szukaj na: SEKOCENBUD (sekocenbud.pl), BCO (bcobcb.pl), przetargi.gov.pl
+Szukaj fraz: "SEKOCENBUD wskaźnik ${objectType} 2024", "koszt instalacji [dział] ${objectType} zł/m2"
+
+**3. WYMAGANIA PRAWNE** specyficzne dla ${objectType}:
+- Ustawa Prawo Budowlane (Dz.U.2020.1333 ze zm.)
+- Rozporządzenie ws. warunków technicznych (WT2021)
+- Rozporządzenia branżowe (np. Ministra Edukacji dla placówek oświatowych, Sanepid dla obiektów żywienia)
+- Decyzje o warunkach zabudowy — typowe wymagania
+Szukaj fraz: "wymagania techniczne ${objectType} przepisy", "rozporządzenie ${objectType} warunki"
+
+Zwróć WYŁĄCZNIE poprawny JSON (bez markdown, bez komentarzy, bez \`\`\`json):
+{
+  "normParameters": [
+    {
+      "parameterName": "Nazwa parametru (np. Współczynnik U ściany zewnętrznej)",
+      "element": "Element budynku (np. ściana zewnętrzna, stropodach, okna)",
+      "derivedValue": "Konkretna wartość (np. U ≤ 0.20 W/m²K od 2021)",
+      "normReference": "Dokładny akt prawny + paragraf (np. Rozp. ws. WT, Dz.U.2002.75.690 §321 ust.1 Tabela 1)",
+      "searchSource": "URL lub tytuł źródła",
+      "confidence": 0,
+      "notes": "Ewentualne uwagi, wyjątki, warunki stosowania"
+    }
+  ],
+  "costIndicators": [
+    {
+      "scope": "Pełna nazwa zakresu robót (np. Instalacja wentylacji mechanicznej z rekuperacją)",
+      "unit": "Jednostka (m2 PU / m2 pow. / mb / kpl / szt)",
+      "estimatedUnitCostMin": 0,
+      "estimatedUnitCostMax": 0,
+      "currency": "PLN",
+      "source": "SEKOCENBUD Q4 2024 / BCO 2024 / Kalkulacja własna",
+      "year": "2024",
+      "applicableTo": "Opis gdy wskaźnik ma zastosowanie (np. dla budynków > 500m2 PU)",
+      "confidence": 0
+    }
+  ],
+  "legalRequirements": [
+    {
+      "requirement": "Treść wymagania (np. Kuchnia w przedszkolu musi posiadać węzeł sanitarny dla personelu)",
+      "legalBasis": "Pełna nazwa aktu prawnego + artykuł/paragraf",
+      "applicableTo": "Konkretny element/pomieszczenie/instalacja",
+      "consequence": "Skutek pominięcia (np. brak odbioru sanitarnego, nakaz rozbiórki)",
+      "estimatedCostImpact": "Szacunkowy koszt dostosowania jeśli brakuje"
+    }
+  ],
+  "summary": "Podsumowanie: ile parametrów znaleziono, jakie kluczowe wymagania, na co PESAM powinien zwrócić uwagę"
+}`;
+
+        console.log(`[NORM ADVISOR 📋] Wywołuję model z googleSearch dla: ${objectType}`);
+
+        const result = await callGeminiWithRetry(() =>
+            ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: normPrompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.1,
+                    responseMimeType: "application/json"
+                }
+            })
+        );
+
+        const totalTokensUsed = result.usageMetadata?.totalTokenCount || 0;
+        console.log(`[NORM ADVISOR 📋] Użyto ${totalTokensUsed} tokenów.`);
+
+        let parsed: any = { normParameters: [], costIndicators: [], legalRequirements: [], summary: "" };
+        try {
+            const rawText = result.text ?? "{}";
+            parsed = JSON.parse(jsonrepair(rawText));
+        } catch (e) {
+            console.warn("[NORM ADVISOR 📋] Błąd parsowania JSON — surowy tekst jako fallback.");
+            parsed.summary = `Błąd parsowania. Surowy tekst: ${result.text?.substring(0, 300) || "brak"}`;
+        }
+
+        const normCount = parsed.normParameters?.length || 0;
+        const costCount = parsed.costIndicators?.length || 0;
+        const legalCount = parsed.legalRequirements?.length || 0;
+
+        console.log(`[NORM ADVISOR 📋] Wyniki: ${normCount} parametrów normowych, ${costCount} wskaźników kosztowych, ${legalCount} wymagań prawnych`);
+
+        await taskRef.update({
+            status: "DONE",
+            rawResult: {
+                normParameters: parsed.normParameters || [],
+                costIndicators: parsed.costIndicators || [],
+                legalRequirements: parsed.legalRequirements || [],
+                missingDivisionsResearched: uniqueMissingDivisions,
+                summary: parsed.summary || `Znaleziono: ${normCount} parametrów normowych, ${costCount} wskaźników kosztowych, ${legalCount} wymagań prawnych dla ${objectType}.`
+            },
+            processedByTechnolog: false,
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
+        await adminDb.collection("tenders").doc(tenderId).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        });
+
+        isSuccess = true;
+        return NextResponse.json({
+            success: true,
+            normParametersCount: normCount,
+            costIndicatorsCount: costCount,
+            legalRequirementsCount: legalCount
+        });
+
+    } catch (error: any) {
+        console.error("[NORM ADVISOR 📋] Błąd:", error);
+        if (tenderId && taskId) {
+            await adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByTechnolog: false,
+                updatedAt: new Date()
+            }).catch(() => { });
+        }
+        return NextResponse.json({ error: error.message }, { status: 500 });
+
+    } finally {
+        if (tenderId && taskId) {
+            // Jitter przed callbackiem — rozłożenie żądań w czasie
+            const jitter = 1000 + Math.random() * 3000;
+            await new Promise(r => setTimeout(r, jitter));
+
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch(err => console.error("[NORM ADVISOR 📋] Błąd powiadamiania Technologa:", err.message));
+        }
+    }
+}
+
+--- END OF FILE src/app/api/technolog/agent-technolog-norm/route.ts ---
 
 

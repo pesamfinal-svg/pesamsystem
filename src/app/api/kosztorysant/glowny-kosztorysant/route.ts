@@ -8,7 +8,7 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
+export const maxDuration = 300;
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -25,8 +25,10 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const errorText = error.toString() || "";
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
-            console.warn(`[MÓZG 🧠] Limit API 429. Czekam ${delay / 1000}s... (Pozostało prób: ${retries})`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            const jitter = Math.random() * 3000;
+            const waitTime = delay + jitter;
+            console.warn(`[MÓZG 🧠] Limit API 429. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
@@ -34,7 +36,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
 }
 
 // ─────────────────────────────────────────────────────────────────
-// BRAIN SCHEMA — dynamiczny extractionProfile w newTasks
+// BRAIN SCHEMA — struktura własnego myślenia Mózgu
 // ─────────────────────────────────────────────────────────────────
 
 const BRAIN_SCHEMA = {
@@ -42,15 +44,15 @@ const BRAIN_SCHEMA = {
     properties: {
         reasoning: {
             type: Type.STRING,
-            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które z założeń są najbardziej ryzykowne i co musisz zrobić, by zmniejszyć niepewność kosztorysu.`
+            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które założenia są najbardziej ryzykowne i co musisz zrobić by zmniejszyć niepewność kosztorysu. UWZGLĘDNIJ: co dostarczył Technolog, które luki to pokrywa, co jeszcze brakuje.`
         },
         selfCritique: {
             type: Type.STRING,
-            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które z moich założeń mogłyby wywrócić budżet o ponad 10% jeśli są mylne?`
+            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które założenia mogłyby wywrócić budżet o ponad 10% jeśli są mylne? Czy w pełni wykorzystałem dane od Technologa?`
         },
         nextBestAction: {
             type: Type.STRING,
-            description: `Jaka pojedyncza informacja/akcja najbardziej zwiększy w tym momencie jakość kosztorysu? Zdefiniuj JEDEN najważniejszy cel na teraz.`
+            description: `Jaka pojedyncza informacja/akcja najbardziej zwiększy w tym momencie jakość kosztorysu?`
         },
         assumptionMode: {
             type: Type.BOOLEAN,
@@ -58,7 +60,7 @@ const BRAIN_SCHEMA = {
         },
         assumptionDisclaimer: {
             type: Type.STRING,
-            description: `Wyraźne, profesjonalne ostrzeżenie dla Kosztorysanta – z jakich źródeł i norm korzystasz oraz jakie ryzyko niesie ten tryb.`
+            description: `Wyraźne ostrzeżenie dla Kosztorysanta — z jakich źródeł i norm korzystasz oraz jakie ryzyko niesie ten tryb.`
         },
         cognitiveState: {
             type: Type.OBJECT,
@@ -130,7 +132,7 @@ const BRAIN_SCHEMA = {
         chatReply: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: `Komunikacja z użytkownikiem. Używaj TYLKO w ostateczności.`
+            description: `Komunikacja z użytkownikiem. Używaj TYLKO w ostateczności lub gdy phase=WAITING_INPUT.`
         },
         newEstimateItems: {
             type: Type.ARRAY,
@@ -142,7 +144,8 @@ const BRAIN_SCHEMA = {
                     opis: { type: Type.STRING },
                     ilosc: { type: Type.NUMBER },
                     jednostka: { type: Type.STRING },
-                    KNR_ref: { type: Type.STRING }
+                    KNR_ref: { type: Type.STRING },
+                    cenaJed: { type: Type.NUMBER, description: "Wpisz tylko gdy masz pewny wskaźnik kosztowy od Technologa (COST_INDICATOR). Domyślnie 0." }
                 },
                 required: ["sectionName", "pozycja", "opis", "ilosc", "jednostka"]
             }
@@ -154,7 +157,7 @@ const BRAIN_SCHEMA = {
         currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
-            description: `Zadania dla narzędzi. KLUCZOWE: dla BOQ_PARSER i VISION zawsze dołącz pole extractionProfile z niestandardowymi polami dopasowanymi do luki w wiedzy.`,
+            description: `Zadania dla narzędzi. Dla BOQ_PARSER i VISION zawsze dołącz extractionProfile. Workery działają bez sztywnego schematu — daj im precyzyjne instrukcje tekstowe.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
@@ -162,29 +165,20 @@ const BRAIN_SCHEMA = {
                     instruction: { type: Type.STRING },
                     inputDocIds: { type: Type.ARRAY, items: { type: Type.STRING } },
                     inputFactsKeys: { type: Type.ARRAY, items: { type: Type.STRING } },
-
-                    // ── DYNAMICZNY PROFIL EKSTRAKCJI (Zaprojektowany przez Mózg) ──
                     extractionProfile: {
                         type: Type.OBJECT,
-                        description: `WYMAGANE dla BOQ_PARSER i VISION. Określa dynamiczny kontrakt pól, które agent ma wyciągnąć z dokumentu.`,
+                        description: `WYMAGANE dla BOQ_PARSER i VISION.`,
                         properties: {
-                            contextLabel: {
-                                type: Type.STRING,
-                                description: "Nazwa kontekstu branżowego pisana dużymi literami z podkreśleniami, np. 'ZBROJENIE_SLUPOW', 'INSTALACJA_PV', 'NAWIERZCHNIA_ASPO'"
-                            },
-                            modelHint: {
-                                type: Type.STRING,
-                                description: "Rekomendacja modelu: 'PRO' dla rysunków/planów graficznych, 'FLASH' dla czystych tabel i tekstów."
-                            },
+                            contextLabel: { type: Type.STRING },
+                            modelHint: { type: Type.STRING },
                             customFields: {
                                 type: Type.ARRAY,
-                                description: "Dynamicznie zaprojektowane przez Ciebie zmienne, które chcesz wyciągnąć z pliku w tym zadaniu.",
                                 items: {
                                     type: Type.OBJECT,
                                     properties: {
-                                        name: { type: Type.STRING, description: "Unikalna nazwa zmiennej w camelCase, np. mocInstalacjiKwp, klasaStali, gruboscPodbudowyCm" },
-                                        type: { type: Type.STRING, description: "STRING, NUMBER lub BOOLEAN" },
-                                        description: { type: Type.STRING, description: "Precyzyjna instrukcja dla agenta, czego konkretnie ma szukać w pliku na potrzeby tego pola" }
+                                        name: { type: Type.STRING },
+                                        type: { type: Type.STRING },
+                                        description: { type: Type.STRING }
                                     },
                                     required: ["name", "type", "description"]
                                 }
@@ -192,7 +186,6 @@ const BRAIN_SCHEMA = {
                         },
                         required: ["contextLabel", "modelHint", "customFields"]
                     }
-                    // ─────────────────────────────────────────────────────────
                 },
                 required: ["agentType", "instruction", "inputDocIds"]
             }
@@ -201,38 +194,117 @@ const BRAIN_SCHEMA = {
     required: ["reasoning", "selfCritique", "nextBestAction", "assumptionMode", "assumptionDisclaimer", "cognitiveState", "chatReply", "newEstimateItems", "phase", "currentGoal", "newTasks"]
 };
 
-// Przewodnik projektowania pól na podstawie niepewności
 const EXTRACTION_PROFILES_GUIDE = `
 === DYNAMICZNE PROFILE EKSTRAKCJI (extractionProfile) ===
 
-Kiedy zlecasz zadanie do BOQ_PARSER lub VISION, ZAWSZE dynamicznie projektuj strukturę bazy danych przez 'extractionProfile'. Ty decydujesz, jakie pola są kluczowe dla załatania luk (knowledgeGaps).
+Dla BOQ_PARSER i VISION zawsze dynamicznie projektuj extractionProfile.
 
-ZASADY TWORZENIA PÓL (customFields):
-1. Dopasuj pola do specyfiki elementu w worldModel.
-2. Zmienne nazywaj w camelCase, określaj typ (STRING/NUMBER/BOOLEAN) i daj precyzyjny opis instrukcji.
+ZASADY:
+1. Pola 'pozycja', 'opis', 'ilosc', 'jednostka', 'KNR_ref' są ZAWSZE automatyczne — NIE twórz dla nich customFields.
+2. customFields to wyłącznie DODATKOWE parametry techniczne (np. mocFalownika, gruboscAsfaltu, klasaBetonu).
+3. modelHint: 'PRO' dla rysunków/grafik, 'FLASH' dla tabel i tekstów.
 
-ŻELAZNA ZASADA BEZPRAWNEGO DUBLOWANIA:
-Pola: 'pozycja', 'opis', 'ilosc', 'jednostka', 'KNR_ref' są ZAWSZE automatycznie obecne w bazie każdego zadania.
-NIGDY nie twórz dla nich zamienników jako customFields (np. nie twórz 'numerPozycji', 'opisRoboty', 'jednostkaMiary' czy 'ilosc'). To marnuje pamięć wyjściową modelu! 
-Jako customFields projektuj wyłącznie DODATKOWE parametry techniczne (np. mocFalownika, gruboscAsfaltu, klasaBetonu), których nie ma w standardowym kosztorysie, a są kluczowe do wyceny.
-
-Przykład dla Instalacji Fotowoltaicznej:
-  contextLabel: "INSTALACJA_PV",
-  modelHint: "PRO",
-  customFields: [
-    { name: "mocModuluWp", type: "NUMBER", description: "Moc pojedynczego panelu w Wp" },
-    { name: "liczbaModulow", type: "NUMBER", description: "Łączna ilość modułów" },
-    { name: "typInwertera", type: "STRING", description: "Dokładny model/moc falownika" }
-  ]
-
-Przykład dla Robót Drogowych:
-  contextLabel: "ROBOTY_DROGOWE",
-  modelHint: "FLASH",
-  customFields: [
-    { name: "szerokoscJezdniM", type: "NUMBER", description: "Szerokość projektowanej jezdni w metrach" },
-    { name: "gruboscAsfaltuCm", type: "NUMBER", description: "Grubość warstwy ścieralnej w centymetrach" }
-  ]
+Przykład dla Instalacji PV:
+  contextLabel: "INSTALACJA_PV", modelHint: "PRO"
+  customFields: [{ name: "mocModuluWp", type: "NUMBER", description: "Moc panelu w Wp" }]
 `;
+
+// ─────────────────────────────────────────────────────────────────
+// Formatowanie findings od Technologa dla Mózgu
+// ─────────────────────────────────────────────────────────────────
+
+function buildTechnologistContext(findings: any[], techPhase: string): string {
+    if (!findings || findings.length === 0) {
+        return "Technolog jeszcze nie przekazał danych. Możesz go wybudzić triggerem TECHNOLOGIST_NEW_FINDINGS.";
+    }
+
+    const byCategory = findings.reduce((acc: any, f: any) => {
+        const cat = f.category || "OTHER";
+        if (!acc[cat]) acc[cat] = [];
+        acc[cat].push(f);
+        return acc;
+    }, {});
+
+    const sections: string[] = [];
+    sections.push(`Status Technologa: ${techPhase || "UNKNOWN"}`);
+    sections.push(`Łącznie findings: ${findings.length}`);
+    sections.push("");
+
+    // MISSING_SCOPE — najważniejsze
+    if (byCategory["MISSING_SCOPE"]?.length > 0) {
+        sections.push("=== 🔴 BRAKUJĄCE DZIAŁY KOSZTORYSU (MISSING_SCOPE) ===");
+        sections.push("ZASADA: Dla każdego brakującego działu MUSISZ podjąć akcję — patrz instrukcje poniżej.");
+        sections.push("");
+        byCategory["MISSING_SCOPE"].forEach((f: any) => {
+            const facts = f.facts || {};
+            sections.push(`▶ BRAKUJE: ${facts.divisionName || f.findingId}`);
+            sections.push(`  Pewność: ${f.confidence}%`);
+            sections.push(`  Szacowany udział w kosztorysie: ${facts.estimatedCostShare || "nieznany"}`);
+            sections.push(`  Dlaczego brakuje: ${facts.whyMissing || "brak info"}`);
+            if (facts.typicalItems?.length > 0) {
+                sections.push(`  Typowe pozycje kosztorysowe (użyj ich!):`);
+                facts.typicalItems.forEach((item: string) => sections.push(`    - ${item}`));
+            }
+            if (f.normBasis) sections.push(`  Podstawa: ${f.normBasis}`);
+            sections.push("");
+        });
+    }
+
+    // COST_INDICATOR — wskaźniki gotowe do użycia
+    if (byCategory["COST_INDICATOR"]?.length > 0) {
+        sections.push("=== 💰 WSKAŹNIKI KOSZTOWE OD TECHNOLOGA (COST_INDICATOR) ===");
+        sections.push("ZASADA: Jeśli znasz powierzchnię/ilość — przelicz i wpisz cenaJed do pozycji kosztorysowej.");
+        sections.push("");
+        byCategory["COST_INDICATOR"].forEach((f: any) => {
+            const facts = f.facts || {};
+            sections.push(`▶ ${facts.scope || f.findingId}`);
+            sections.push(`  Wskaźnik: ${facts.estimatedUnitCostMin || facts.unitCost || "?"} - ${facts.estimatedUnitCostMax || "?"} PLN/${facts.unit || "j.m."}`);
+            sections.push(`  Źródło: ${facts.source || "brak"} (${facts.year || "?"})`);
+            sections.push(`  Pewność: ${f.confidence}%`);
+            sections.push("");
+        });
+    }
+
+    // MATERIAL_SPEC
+    if (byCategory["MATERIAL_SPEC"]?.length > 0) {
+        sections.push("=== 🧱 SPECYFIKACJE MATERIAŁÓW (MATERIAL_SPEC) ===");
+        sections.push("ZASADA: Wpisz te parametry do knownFacts i użyj w opisach pozycji kosztorysowych.");
+        sections.push("");
+        byCategory["MATERIAL_SPEC"].forEach((f: any) => {
+            const facts = f.facts || {};
+            sections.push(`▶ ${facts.element || f.findingId}: ${facts.material || ""} ${facts.specification || ""}`);
+            sections.push(`  Podstawa: ${facts.normBasis || f.normBasis || "brak"} | Pewność: ${f.confidence}%`);
+        });
+        sections.push("");
+    }
+
+    // QUANTITY_ESTIMATE
+    if (byCategory["QUANTITY_ESTIMATE"]?.length > 0) {
+        sections.push("=== 📐 ILOŚCI WSKAŹNIKOWE (QUANTITY_ESTIMATE) ===");
+        sections.push("ZASADA: Użyj tych ilości bezpośrednio w newEstimateItems (ilosc + jednostka gotowe).");
+        sections.push("");
+        byCategory["QUANTITY_ESTIMATE"].forEach((f: any) => {
+            const facts = f.facts || {};
+            sections.push(`▶ ${facts.element || f.findingId}: ${facts.quantity || "?"} ${facts.unit || "j.m."}`);
+            sections.push(`  Metoda: ${facts.calculationMethod || "wskaźnikowa"} | Pewność: ${f.confidence}%`);
+        });
+        sections.push("");
+    }
+
+    // NORM_REQUIREMENT
+    if (byCategory["NORM_REQUIREMENT"]?.length > 0) {
+        sections.push("=== 📋 WYMAGANIA NORMOWE (NORM_REQUIREMENT) ===");
+        byCategory["NORM_REQUIREMENT"].forEach((f: any) => {
+            const facts = f.facts || {};
+            sections.push(`▶ ${facts.requirement || f.findingId}`);
+            sections.push(`  Podstawa: ${facts.legalBasis || f.normBasis || "brak"}`);
+            if (facts.consequence) sections.push(`  Skutek pominięcia: ${facts.consequence}`);
+        });
+        sections.push("");
+    }
+
+    return sections.join("\n");
+}
 
 export async function POST(req: Request) {
     try {
@@ -245,33 +317,33 @@ export async function POST(req: Request) {
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
-        // Seeding agentów (wzbogacone o PDF_SPLITTER i zaktualizowanego sędziego REVISOR_JUDGE)
+        // Seeding agentów
         let agentRegistrySnap = await adminDb.collection("agentRegistry").get();
         if (agentRegistrySnap.empty) {
             console.log("[MÓZG 🧠] Seeding bazy agentów...");
             const defaultAgents = [
                 { name: "VISION", endpoint: "/api/kosztorysant/agent-wbs-architekt", capabilities: ["vision", "pdf_parsing"], description: "Narzędzie (Skaner). Czyta wymiary, przekroje i legendy z PDF z rysunkami. WYMAGA extractionProfile." },
                 { name: "LEGAL_EXPERT", endpoint: "/api/kosztorysant/czytacz-dokumentow", capabilities: ["text_analysis"], description: "Narzędzie (Skaner tekstu). Szuka słów kluczowych o umowach, karach i SWZ." },
-                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Odpal by przemnożyć setki liczb wyciągniętych przez inne narzędzia." },
-                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wezwij by wrzucił ceny R/M/S do gotowych pozycji." },
-                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Poproś go, by wrzucił technologię domyślną z norm dla obiektu, gdy masz lukę." },
+                { name: "PYTHON_CALC", endpoint: "/api/kosztorysant/agent-python-calc", capabilities: ["codeExecution"], description: "Narzędzie (Kalkulator). Przemnóż setki liczb wyciągniętych przez inne narzędzia." },
+                { name: "BROKER", endpoint: "/api/kosztorysant/broker-cenowy", capabilities: ["googleSearch"], description: "Narzędzie (Pobieracz stawek). Wrzuca ceny R/M/S do gotowych pozycji." },
+                { name: "BUDOWLANIEC", endpoint: "/api/kosztorysant/agent-budowlaniec", capabilities: ["engineering", "googleSearch"], description: "Narzędzie (Wyszukiwarka Norm). Wrzuca technologię domyślną z norm gdy masz lukę. Idealny do obsługi MISSING_SCOPE od Technologa — daj mu nazwę działu i typicalItems, on rozpisze pełny przedmiar." },
                 { name: "SILENT_AUDITOR", endpoint: "/api/kosztorysant/agent-cichy-rewident", capabilities: ["audit", "googleSearch"], description: "Narzędzie (Audytor Prawny). Waliduje gotowe pozycje z WT2021 i PPOŻ." },
-                { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo to, co ma 'economicImpactScore' wysoki a brakuje rysunków." },
+                { name: "GAP_FILLER", endpoint: "/api/kosztorysant/agent-gap-filler", capabilities: ["estimation", "googleSearch"], description: "Narzędzie (Szacowarka). Wycenia wskaźnikowo zakresy bez dokumentów. Użyj gdy Technolog dał MISSING_SCOPE z COST_INDICATOR — GAP_FILLER może od razu wycenić." },
                 { name: "BOQ_PARSER", endpoint: "/api/kosztorysant/agent-ilosciowiec", capabilities: ["table_parsing"], description: "Narzędzie (Ekstraktor Excel/PDF). Ściąga czyste dane tabelaryczne z przedmiarów. WYMAGA extractionProfile." },
-                { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta dziwne i wąskie opisy technologii." },
+                { name: "KAMELEON", endpoint: "/api/kosztorysant/agent-kameleon", capabilities: ["specialist_analysis"], description: "Narzędzie (Skaner specjalistyczny). Czyta wąskie opisy technologii." },
                 {
                     name: "REVISOR_JUDGE",
                     endpoint: "/api/kosztorysant/agent-rewident",
                     capabilities: ["legal_reasoning", "googleSearch", "conflict_resolution"],
-                    description: "Narzędzie (Sędzia Roju). Skanuje kolekcję 'conflicts', rozstrzyga spory technologiczne i prawne w oparciu o PZP, WT 2021 i hierarchię dokumentów SWZ. Zapisuje werdykt (decision, justification) do konfliktu i zmienia status na RESOLVED lub ESCALATED_TO_USER. Wywołuj gdy conflicts.status == OPEN lub INVESTIGATING."
+                    description: "Narzędzie (Sędzia Roju). Skanuje kolekcję 'conflicts', rozstrzyga spory technologiczne i prawne w oparciu o PZP, WT 2021 i hierarchię dokumentów SWZ. Wywołuj gdy conflicts.status == OPEN lub INVESTIGATING."
                 },
                 {
                     name: "PDF_SPLITTER",
                     endpoint: "/api/kosztorysant/agent-pdf-splitter",
                     capabilities: ["pdf_parsing", "semantic_chunking"],
-                    description: "Narzędzie (Semantyczny Skaner Struktury). Używaj jako PIERWSZY KROK przed wysłaniem dużego PDF do VISION lub BOQ_PARSER. Mapuje logiczne granice dokumentu (strony X-Y = nierozrywalna jednostka) używając Flash-Lite. Zwraca gotową mapę segmentów z rekomendowanym agentem i zakresem stron dla każdego. Zapobiega rozrywaniu rysunków technicznych. ZAWSZE wywołuj dla dokumentów > 5 stron."
+                    description: "Narzędzie (Semantyczny Skaner Struktury). ZAWSZE wywołaj przed wysłaniem dużego PDF (>5 stron) do VISION lub BOQ_PARSER. Mapuje logiczne granice dokumentu i zwraca gotową mapę segmentów."
                 },
-                { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki pdf w wymiar 3D." }
+                { name: "MAPPING_DETECTIVE", endpoint: "/api/kosztorysant/agent-detektyw", capabilities: ["pdf_parsing", "correlations"], description: "Narzędzie (Korelator PDF). Łączy 2 pliki PDF w wymiar 3D." }
             ];
             const seedBatch = adminDb.batch();
             for (const agent of defaultAgents)
@@ -292,8 +364,13 @@ export async function POST(req: Request) {
             const data = doc.data();
             const lastActive = data.updatedAt?.toMillis?.() || data.createdAt?.toMillis?.() || now;
             if (now - lastActive >= TIMEOUT_MS) {
-                console.log(`[MÓZG 🧠] Oznaczam zawieszone zadanie ${doc.id} jako ERROR.`);
-                lockBatch.update(doc.ref, { status: "ERROR", rawResult: { error: "TIMEOUT_EXCEEDED" }, processedByBrain: false, updatedAt: new Date() });
+                console.log(`[MÓZG 🧠] Timeout zadania ${doc.id} — oznaczam jako ERROR.`);
+                lockBatch.update(doc.ref, {
+                    status: "ERROR",
+                    rawResult: { error: "TIMEOUT_EXCEEDED" },
+                    processedByBrain: false,
+                    updatedAt: new Date()
+                });
             } else {
                 trulyActiveCount++;
             }
@@ -306,14 +383,24 @@ export async function POST(req: Request) {
         }
         await lockBatch.commit();
 
-        // Obsługa reakcji na wybudzenie przez Technologa
+        // Obsługa triggera od Technologa
         if (trigger === "TECHNOLOGIST_NEW_FINDINGS") {
             await tenderRef.update({ hasNewTechnologistFindings: false });
-            console.log("[MÓZG 🧠] Wybudzony przez Technologa – nowe fakty technologiczne są już dostępne.");
+            console.log("[MÓZG 🧠] Wybudzony przez Technologa — nowe findings są dostępne.");
         }
 
-        // Pobieranie danych wejściowych i stanu Roju
-        const [docsSnap, brainSnap, unprocessedTasksSnap, tenderDoc, chatHistSnap, estimateSnap, allTasksHistorySnap, technologistFindingsSnap] = await Promise.all([
+        // Pobieranie wszystkich danych równolegle
+        const [
+            docsSnap,
+            brainSnap,
+            unprocessedTasksSnap,
+            tenderDoc,
+            chatHistSnap,
+            estimateSnap,
+            allTasksHistorySnap,
+            technologistFindingsSnap,
+            technologSnap
+        ] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
             tasksRef.where("status", "in", ["DONE", "ERROR"]).where("processedByBrain", "==", false).get(),
@@ -321,26 +408,21 @@ export async function POST(req: Request) {
             adminDb.collection(`tenders/${tenderId}/chat`).orderBy("timestamp", "asc").limit(20).get(),
             adminDb.collection(`tenders/${tenderId}/estimate`).get(),
             tasksRef.get(),
-            adminDb.collection(`tenders/${tenderId}/technologistFindings`).get() // NOWE: Odczyt ustaleń Technologa
+            adminDb.collection(`tenders/${tenderId}/technologistFindings`).get(),
+            adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get()
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
             return NextResponse.json({ message: "Przetarg zatrzymany (HALTED)." });
         }
 
-        // Mapowanie rad technologicznych od drugiego Mózgu
-        const technologistFindings = technologistFindingsSnap.docs.map(d => ({
-            category: d.data().category,
-            facts: d.data().facts,
-            confidence: d.data().confidence,
-            normBasis: d.data().normBasis || null
-        }));
-
         const documents = docsSnap.docs.map(d => ({
             id: d.id,
             fileName: d.data().fileName,
             tags: d.data().tags || [],
-            summary: d.data().summary || "(brak)"
+            summary: d.data().summary || "(brak)",
+            containsDrawings: d.data().containsDrawings || false,
+            pageCount: d.data().pageCount || null
         }));
 
         const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
@@ -349,39 +431,104 @@ export async function POST(req: Request) {
         };
 
         const chatHistory = chatHistSnap.docs.map(c => ({ rola: c.data().role, treść: c.data().content }));
+
         const newlyFinishedResults = unprocessedTasksSnap.docs.map(d => ({
-            taskId: d.id, agentType: d.data().agentType, status: d.data().status,
-            instruction: d.data().instruction, rawResult: d.data().rawResult,
+            taskId: d.id,
+            agentType: d.data().agentType,
+            status: d.data().status,
+            instruction: d.data().instruction,
+            rawResult: d.data().rawResult,
             extractionProfile: d.data().extractionProfile || null
         }));
+
         const taskHistory = allTasksHistorySnap.docs.map(d => ({
-            agentType: d.data().agentType, status: d.data().status,
+            agentType: d.data().agentType,
+            status: d.data().status,
             resultSummary: d.data().status === "DONE"
                 ? (d.data().rawResult?.summary || "Wykonano")
                 : (d.data().rawResult?.error || "BŁĄD"),
             extractionProfile: d.data().extractionProfile || null
         }));
 
-        const estimateState = estimateSnap.docs.map(d => ({ sekcja: d.data().section, liczba_pozycji: d.data().items?.length || 0, wartosc_zl: d.data().totalValue || 0 }));
+        const estimateState = estimateSnap.docs.map(d => ({
+            sekcja: d.data().section,
+            liczba_pozycji: d.data().items?.length || 0,
+            wartosc_zl: d.data().totalValue || 0
+        }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
 
-        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem), jedynym Inżynierem i Architektem systemu PESAM 3.0. 
+        // Dane od Technologa
+        const technologistFindings = technologistFindingsSnap.docs.map(d => ({
+            findingId: d.id,
+            category: d.data().category,
+            facts: d.data().facts,
+            confidence: d.data().confidence,
+            normBasis: d.data().normBasis || null
+        }));
+        const techPhase = technologSnap.exists ? (technologSnap.data()?.phase || "UNKNOWN") : "NOT_STARTED";
+        const techGoal = technologSnap.exists ? (technologSnap.data()?.currentGoal || "") : "";
+        const techIdentifiedMissingScopes = technologSnap.exists
+            ? (technologSnap.data()?.technologicalState?.identifiedMissingScopes || [])
+            : [];
+
+        // Buduj opis stanu Technologa
+        const technologistContext = buildTechnologistContext(technologistFindings, techPhase);
+
+        // Znajdź brakujące zakresy które Technolog ma w kolejce (żeby nie duplikować)
+        const technologGapsInProgress = technologSnap.exists
+            ? (technologSnap.data()?.technologicalState?.technologicalGaps || []).map((g: any) => g.element)
+            : [];
+
+        const systemPrompt = `Jesteś Mózgiem (Orkiestratorem) — jedynym Inżynierem i Architektem systemu PESAM 3.0.
 
 === ZASADA DZIAŁANIA (COGNITIVE ARCHITECTURE) ===
-Nie jesteś tu by ślepo delegować zadania do ekspertów. TO TY JESTEŚ JEDYNYM EKSPERTEM.
-Twój proces myślowy to: 
-1. Budowa hipotezy czym jest inwestycja (Cognitive State -> worldModel).
-2. BELIEF REVISION (Rewizja Przekonań): Konfrontuj nowe dane od narzędzi ze starymi hipotezami. Obniżaj lub podnoś pewność, żądaj dowodów (evidence).
-3. Wykrywanie luk w Twojej wiedzy. Oblicz ich Wpływ Ekonomiczny (Economic Impact Score 1-100).
-4. Wysyłanie "Głupich Narzędzi" TYLKO by zweryfikować luki o najwyższym ryzyku finansowym.
-5. Generowanie pozycji do kosztorysu WYŁĄCZNIE, gdy masz pewność (confidence) danego faktu/założenia na poziomie MINIMUM 75%.
+Nie deleguj ślepo — TY JESTEŚ JEDYNYM EKSPERTEM.
+Twój proces: 
+1. Budowa hipotezy czym jest inwestycja (worldModel).
+2. BELIEF REVISION: Konfrontuj nowe dane ze starymi hipotezami. Obniżaj/podnoś pewność.
+3. Wykrywanie luk. Oblicz Wpływ Ekonomiczny (Economic Impact Score 1-100).
+4. Wysyłanie narzędzi TYLKO by zweryfikować luki o najwyższym ryzyku finansowym.
+5. Generowanie pozycji WYŁĄCZNIE gdy pewność (confidence) ≥ 75%.
+
+=== ZASADA WSPÓŁPRACY Z TECHNOLOGIEM ===
+Masz drugiego eksperta — Technologa Budowlanego. On pracuje równolegle i dostarcza Ci:
+- Listę BRAKUJĄCYCH działów kosztorysowych (MISSING_SCOPE)
+- Wskaźniki kosztowe (COST_INDICATOR) 
+- Specyfikacje materiałów (MATERIAL_SPEC)
+- Ilości wskaźnikowe (QUANTITY_ESTIMATE)
+- Wymagania normowe (NORM_REQUIREMENT)
+
+ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
+▸ MISSING_SCOPE z confidence ≥ 70%:
+  Musisz ZAREAGOWAĆ. Masz dwie opcje:
+  a) Jeśli typicalItems są konkretne → generuj pozycje SAMODZIELNIE do newEstimateItems (assumptionMode: true, oznacz [ZAKRES TECHNOLOGA])
+  b) Jeśli typicalItems są ogólne → zlecaj BUDOWLANIEC z instrukcją: "Rozpisz pełny przedmiar dla działu [nazwa], typowe pozycje: [lista]. Obiekt: [typ]"
+  NIE ignoruj MISSING_SCOPE. Brak reakcji = dziura w kosztorysie.
+
+▸ COST_INDICATOR z confidence ≥ 65%:
+  Przelicz: unitCostMin × ilość = wartość. Wpisz do opisu pozycji [WSKAŹNIK: X PLN/j.m. × Y j.m. = Z PLN].
+  Jeśli masz MISSING_SCOPE + COST_INDICATOR dla tego samego zakresu → zlecaj GAP_FILLER z oboma danymi.
+  GAP_FILLER dostanie wskaźnik i wygeneruje pozycje z cenami.
+
+▸ MATERIAL_SPEC z confidence ≥ 70%:
+  Zapisz do knownFacts. Użyj w opisach pozycji (np. "Beton C25/30 wg PN-EN 206").
+
+▸ QUANTITY_ESTIMATE z confidence ≥ 70%:
+  Użyj bezpośrednio jako ilosc w newEstimateItems — nie szacuj własnych ilości gdy Technolog już podał.
+
+▸ Technolog w fazie WORKING lub ANALYZING:
+  Dla zakresów które MA W KOLEJCE (technologGapsInProgress) — POCZEKAJ zanim zaczniesz zgadywać.
+  Nie twórz duplikatów. Sprawdź co Technolog już bada.
+
+▸ Technolog w fazie DONE:
+  Wszystkie jego dane są finalne. Działaj na nich w pełni.
 
 === TRYB ZAŁOŻEŃ RYNKOWYCH (ASSUMPTION_MODE) ===
-Jeśli brakuje krytycznej dokumentacji (np. Załącznik nr 5, rysunki, szczegółowe przedmiary):
-- Możesz rozważyć włączenie assumptionMode: true.
-- W takim przypadku przygotuj klarowny 'assumptionDisclaimer'.
-- Używaj agresywnie BUDOWLANIEC + GAP_FILLER.
-- Każdą pozycję wygenerowaną w tym trybie oznacz w opisie jako **[ZAŁOŻENIE RYNKOWE]**.
+Jeśli brakuje dokumentacji technicznej LUB reagujesz na MISSING_SCOPE bez rysunków:
+- Włącz assumptionMode: true
+- Przygotuj assumptionDisclaimer
+- Każdą pozycję oznacz w opisie jako [ZAŁOŻENIE RYNKOWE] lub [ZAKRES TECHNOLOGA]
+- Używaj agresywnie BUDOWLANIEC + GAP_FILLER
 
 === TWOJE NARZĘDZIA ===
 ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, mozliwosci: a.capabilities })), null, 2)}
@@ -389,63 +536,59 @@ ${JSON.stringify(availableAgents.map(a => ({ name: a.name, opis: a.description, 
 ${EXTRACTION_PROFILES_GUIDE}
 
 === ZASADY UŻYWANIA PDF_SPLITTER ===
-- Gdy dokument ma > 5 stron i containsDrawings === true → ZAWSZE najpierw wywołaj PDF_SPLITTER.
-- Wyniki PDF_SPLITTER znajdziesz w rawResult.segments agenta. Każdy segment ma:
-  - segmentId, label, pageFrom, pageTo, recommendedAgent, agentInstruction
-- Tworząc zadania dla VISION/BOQ_PARSER po splitterze, użyj agentInstruction z segmentu jako instruction.
-- Nie mieszaj segmentów różnych typów w jednym zadaniu.
+Dokumenty > 5 stron z containsDrawings === true → ZAWSZE najpierw PDF_SPLITTER.
+Użyj agentInstruction z każdego segmentu jako instruction dla VISION/BOQ_PARSER.
 
 === ZASADY UŻYWANIA REVISOR_JUDGE ===
-- Wywołuj gdy w kolekcji conflicts istnieje dokument ze status == "OPEN" lub "INVESTIGATING".
-- Nie podawaj inputDocIds – agent sam pobierze konflikty z Firestore.
-- W instruction opisz kontekst sporu i co jest finansowo najważniejsze.
-- Po wykonaniu sprawdź czy status konfliktów zmienił się na RESOLVED lub ESCALATED_TO_USER.
-- Jeśli ESCALATED_TO_USER – poinformuj użytkownika przez chatReply i ustaw phase = "WAITING_INPUT".
+Wywołuj gdy w kolekcji conflicts istnieje status == "OPEN" lub "INVESTIGATING".
+Nie podawaj inputDocIds. Po wykonaniu sprawdź czy zmienił na RESOLVED lub ESCALATED_TO_USER.
 
-=== DOKUMENTY (Wejście sensoryczne) ===
+=== DOKUMENTY PROJEKTU ===
 ${JSON.stringify(documents, null, 2)}
 
-=== TWÓJ AKTUALNY STAN POZNAWCZY (Z poprzedniej tury) ===
+=== TWÓJ AKTUALNY STAN POZNAWCZY ===
 ${JSON.stringify(currentCognitiveState, null, 2)}
 
-=== ODPOWIEDZI OD NARZĘDZI (Świeże dane do strawienia) ===
-${JSON.stringify(newlyFinishedResults, null, 2)}
+=== NOWE WYNIKI OD NARZĘDZI (świeże dane) ===
+${newlyFinishedResults.length > 0 ? JSON.stringify(newlyFinishedResults, null, 2) : "(brak nowych wyników)"}
 
 === HISTORIA URUCHOMIONYCH NARZĘDZI ===
 ${JSON.stringify(taskHistory, null, 2)}
 
 === AKTUALNY STAN KOSZTORYSU ===
-${isEstimateEmpty ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów." : JSON.stringify(estimateState, null, 2)}
+${isEstimateEmpty
+                ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów."
+                : JSON.stringify(estimateState, null, 2)}
+
+=== DANE OD TECHNOLOGA BUDOWLANEGO ===
+${technologistContext}
+
+=== STATUS TECHNOLOGA ===
+Faza: ${techPhase}
+Aktualny cel: ${techGoal || "brak"}
+Zakresy które Technolog aktualnie bada (NIE duplikuj): ${technologGapsInProgress.length > 0 ? technologGapsInProgress.join(", ") : "brak"}
+Brakujące zakresy zidentyfikowane przez Technologa: ${techIdentifiedMissingScopes.length > 0
+                ? techIdentifiedMissingScopes.map((s: any) => `${s.division} [impact: ${s.impactScore}/10]`).join(", ")
+                : "brak"}
 
 === ŚLEDZENIE OBLICZEŃ (CALCULATION TRAIL) ===
-Każda nowa pozycja w "newEstimateItems" musi być w pełni audytowalna.
-Gdy generujesz pole "opis" dla pozycji, DODAJ na jego końcu wyraźny dowód matematyczny i źródłowy w nawiasie kwadratowym.
+Każda pozycja w newEstimateItems musi mieć w polu "opis" dowód matematyczny i źródłowy w nawiasie kwadratowym.
+Przykład: "Beton C25/30 fundamenty [250 m3 × 450 zł/m3 = 112 500 PLN | źródło: MATERIAL_SPEC Technologa]"
 
-UWAGA KRYTYCZNA: Pozycje wyciągnięte przez narzędzie BOQ_PARSER zapisują się do bazy AUTOMATYCZNIE. 
-Jeśli w historii zadań widzisz, że BOQ_PARSER zwrócił pozycje w rawResult.items, ABSOLUTNIE NIE PRZEPISUJ ICH do "newEstimateItems". Uznaj je za załatwione i skup się na innych zadaniach. "newEstimateItems" używaj tylko do dodawania własnych, dedykowanych pozycji z innych przemyśleń (np. luk).
+UWAGA KRYTYCZNA: Pozycje BOQ_PARSER zapisują się AUTOMATYCZNIE.
+Jeśli widzisz w historii że BOQ_PARSER zwrócił rawResult.items — NIE przepisuj ich do newEstimateItems.
 
-=== HISTORIA CZATU Z KOSZTORYSANTEM ===
+=== HISTORIA CZATU ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
 
-=== FAKTY I REKOMENDACJE OD TECHNOLOGA BUDOWLANEGO ===
-Równoległy Mózg Technologa przeanalizował dokumentację i dostarczył twarde fakty technologiczne oraz normowe:
-${technologistFindings.length > 0
-                ? JSON.stringify(technologistFindings, null, 2)
-                : "Technolog jeszcze nie przekazał danych. Możesz go wybudzić triggerem TECHNOLOGIST_NEW_FINDINGS."}
-
-ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
-- Jeśli pewność (confidence) danych od Technologa > 70%, traktuj je jako twarde fakty i zapisuj w knownFacts.
-- Wykorzystaj wyliczone przez niego ilości wskaźnikowe (np. powierzchnie ścian, kubatury betonu) do tworzenia brakujących głównych pozycji w kosztorysie (newEstimateItems).
-- Używaj dołączonych norm (np. WT2021) jako uzasadnienia dla wyceny wskaźnikowej (GAP_FILLER).
-- Nie duplikuj pracy – jeśli Technolog podał kompletną technologię przegród, skup się wyłącznie na ich kosztorysowaniu.
-
 === CO MASZ ZROBIĆ ===
-Zaktualizuj swój CognitiveState. Przerób nowe wyniki w fakty, zweryfikuj stare hipotezy (Belief Revision).
-Przeprowadź Samokrytykę. Ustal 'nextBestAction'. 
-Pamiętaj o 'failedStrategies' by nie kręcić się w kółko!
-Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektuj i wypełnij 'extractionProfile'.`;
+1. Zaktualizuj CognitiveState. Przerób wyniki narzędzi i findings Technologa w fakty. Belief Revision.
+2. Przeprowadź Samokrytykę. Sprawdź failedStrategies.
+3. REAGUJ na każde MISSING_SCOPE od Technologa — to Twój priorytet gdy kosztorys jest niepełny.
+4. Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze wypełnij extractionProfile.
+5. Pamiętaj: workery (BUDOWLANIEC, GAP_FILLER, SILENT_AUDITOR itp.) działają BEZ sztywnego schematu — daj im precyzyjne instrukcje tekstowe w polu instruction.`;
 
-        console.log(`[MÓZG 🧠] Prompt Poznawczy wygenerowany. Trawienie danych...`);
+        console.log(`[MÓZG 🧠] Prompt gotowy. Findings od Technologa: ${technologistFindings.length}. Wywołuję model...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
@@ -465,15 +608,17 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
         } catch (e) {
             console.error("[MÓZG 🧠] Krytyczny błąd parsowania JSON:", e);
         }
+
+        console.log(`[MÓZG 🧠] Phase: ${parsedResult.phase}`);
         console.log(`[MÓZG 🧠] Next Best Action: ${parsedResult.nextBestAction}`);
-        console.log(`[MÓZG 🧠] Self-Critique: ${parsedResult.selfCritique?.substring(0, 80)}...`);
+        console.log(`[MÓZG 🧠] Self-Critique: ${parsedResult.selfCritique?.substring(0, 100)}...`);
 
         const batch = adminDb.batch();
 
+        // Oznacz przetworzone zadania + AUTO-COMMITTER dla BOQ_PARSER
         unprocessedTasksSnap.docs.forEach(doc => {
             batch.update(doc.ref, { processedByBrain: true });
 
-            // AUTO-COMMITTER: Bezpośredni zapis tysięcy pozycji z przedmiarów z ominięciem limitu tokenów Mózgu
             const taskData = doc.data();
             if (taskData.agentType === "BOQ_PARSER" && taskData.status === "DONE" && taskData.rawResult?.items?.length > 0) {
                 const items = taskData.rawResult.items;
@@ -481,7 +626,12 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
                 const sectionId = `sec_${sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30)}`;
                 const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
 
-                batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", totalValue: 0, updatedAt: new Date() }, { merge: true });
+                batch.set(sectionRef, {
+                    section: sectionName,
+                    status: "QUANTITY_READY",
+                    totalValue: 0,
+                    updatedAt: new Date()
+                }, { merge: true });
 
                 items.forEach((item: any) => {
                     const id = randomUUID();
@@ -494,31 +644,43 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
                         cenaJed: 0,
                         KNR_ref: item.KNR_ref || "",
                         confidence: "HIGH",
-                        sourceTrack: `Wydobyte natywnie przez BOQ_PARSER (${sectionName})`
+                        sourceTrack: `BOQ_PARSER auto-commit (${sectionName})`
                     });
                 });
-                console.log(`[MÓZG 🧠 LOG] Auto-Commit: Bezpośrednio zapisano ${items.length} pozycji do sekcji "${sectionName}".`);
+                console.log(`[MÓZG 🧠] AUTO-COMMIT: ${items.length} pozycji → sekcja "${sectionName}"`);
             }
         });
 
+        // Wiadomości do czatu
         if (parsedResult.chatReply?.length > 0) {
             parsedResult.chatReply.forEach((msg: string) => {
                 const ref = adminDb.collection(`tenders/${tenderId}/chat`).doc();
-                batch.set(ref, { role: "brain", content: msg, timestamp: FieldValue.serverTimestamp(), intent: "BRAIN_MESSAGE" });
+                batch.set(ref, {
+                    role: "brain",
+                    content: msg,
+                    timestamp: FieldValue.serverTimestamp(),
+                    intent: "BRAIN_MESSAGE"
+                });
             });
         }
 
+        // Zapisz stan Mózgu
         batch.update(brainRef, {
             phase: parsedResult.phase,
             currentGoal: parsedResult.currentGoal,
             cognitiveState: parsedResult.cognitiveState,
             assumptionMode: parsedResult.assumptionMode || false,
             assumptionDisclaimer: parsedResult.assumptionDisclaimer || null,
-            reasoningLog: FieldValue.arrayUnion(`Reasoning: ${parsedResult.reasoning || ""} | Next Action: ${parsedResult.nextBestAction || ""}`)
+            reasoningLog: FieldValue.arrayUnion(
+                `[${new Date().toISOString()}] Reasoning: ${(parsedResult.reasoning || "").substring(0, 200)} | Next: ${parsedResult.nextBestAction || ""}`
+            ),
+            updatedAt: new Date()
         });
 
+        // Zapisz nowe pozycje kosztorysowe
         if (parsedResult.newEstimateItems?.length > 0) {
-            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} pozycji (>75% pewności lub tryb założeń).`);
+            console.log(`[MÓZG 🧠] Zapisuję ${parsedResult.newEstimateItems.length} pozycji (≥75% pewności lub tryb założeń).`);
+
             const sectionsMap = new Map<string, any[]>();
             parsedResult.newEstimateItems.forEach((item: any) => {
                 const sec = item.sectionName || "Ogólne";
@@ -529,24 +691,35 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
             for (const [sectionName, items] of sectionsMap.entries()) {
                 const sectionId = `sec_${sectionName.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30)}`;
                 const sectionRef = adminDb.collection(`tenders/${tenderId}/estimate`).doc(sectionId);
+
                 const formattedItems = items.map((item: any) => ({
                     id: randomUUID(),
                     pozycja: item.pozycja || "",
                     opis: item.opis || "",
                     ilosc: Number(item.ilosc) || 0,
                     jednostka: item.jednostka || "szt",
-                    cenaJed: 0,
+                    cenaJed: Number(item.cenaJed) || 0,
                     KNR_ref: item.KNR_ref || "",
                     confidence: parsedResult.assumptionMode ? "ASSUMPTION_MODE" : "AI_COGNITIVE_MODEL",
-                    sourceTrack: parsedResult.assumptionMode ? "Konceptualizacja Mózgu" : "Model Poznawczy Mózgu"
+                    sourceTrack: parsedResult.assumptionMode
+                        ? "Konceptualizacja Mózgu / Dane Technologa"
+                        : "Model Poznawczy Mózgu"
                 }));
-                batch.set(sectionRef, { section: sectionName, status: "QUANTITY_READY", items: formattedItems, totalValue: 0, updatedAt: new Date() }, { merge: true });
+
+                batch.set(sectionRef, {
+                    section: sectionName,
+                    status: "QUANTITY_READY",
+                    totalValue: 0,
+                    updatedAt: new Date()
+                }, { merge: true });
+
                 formattedItems.forEach(fItem => {
                     batch.set(sectionRef.collection("items").doc(fItem.id), fItem);
                 });
             }
         }
 
+        // Tworzenie nowych zadań dla workerów
         const newTasksCreated: any[] = [];
         (parsedResult.newTasks || []).forEach((task: any) => {
             const taskRef = tasksRef.doc();
@@ -558,11 +731,9 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
             });
 
             if (task.extractionProfile) {
-                console.log(`[MÓZG 🧠 LOG] Tworzę zadanie z DYNAMICZNYM PROFILEM EKSTRAKCJI:`);
-                console.log(`[MÓZG 🧠 LOG]   - Agent: ${task.agentType}`);
-                console.log(`[MÓZG 🧠 LOG]   - Kontekst: ${task.extractionProfile.contextLabel}`);
-                console.log(`[MÓZG 🧠 LOG]   - Rekomendowany model: ${task.extractionProfile.modelHint}`);
-                console.log(`[MÓZG 🧠 LOG]   - Zaprojektowane pola: ${task.extractionProfile.customFields?.map((f: any) => `${f.name} (${f.type})`).join(", ") || "brak"}`);
+                console.log(`[MÓZG 🧠] Zadanie z extractionProfile: ${task.agentType} | ${task.extractionProfile.contextLabel} | pola: ${task.extractionProfile.customFields?.map((f: any) => f.name).join(", ")}`);
+            } else {
+                console.log(`[MÓZG 🧠] Zadanie: ${task.agentType} | ${task.instruction?.substring(0, 60)}...`);
             }
 
             const taskData = {
@@ -581,29 +752,34 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
             newTasksCreated.push(taskData);
         });
 
+        // Status przetargu
         const newTenderStatus = parsedResult.phase === "DONE" ? "DONE"
             : parsedResult.phase === "WAITING_INPUT" ? "WAITING_INPUT"
                 : "ORCHESTRATING";
 
         batch.update(tenderRef, {
-            "budgetGuard.currentCostUSD": FieldValue.increment(((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.002),
+            "budgetGuard.currentCostUSD": FieldValue.increment(
+                ((result.usageMetadata?.totalTokenCount || 0) / 1000) * 0.002
+            ),
             status: newTenderStatus,
             updatedAt: new Date()
         });
 
         await batch.commit();
-        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Narzędzi: ${newTasksCreated.length}.`);
+        console.log(`[MÓZG 🧠] Batch zapisany. Status: ${newTenderStatus}. Narzędzi zleconych: ${newTasksCreated.length}.`);
 
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
 
-        // Pancerne, asynchroniczne wywoływanie agentów z odstępem 3 sekund, aby nie przeciążyć CPU i gniazd chmury
+        // Uruchamianie agentów z pacingiem i jitterem
         const triggerAgentsWithPacing = async () => {
             for (let i = 0; i < newTasksCreated.length; i++) {
                 const task = newTasksCreated[i];
                 const agentDef = availableAgents.find(a => a.name === task.agentType);
                 if (agentDef?.endpoint) {
-                    if (i > 0) await new Promise(r => setTimeout(r, 3000)); // Bezpieczna pauza
-
+                    if (i > 0) {
+                        const pause = 3000 + Math.random() * 2000;
+                        await new Promise(r => setTimeout(r, pause));
+                    }
                     await fetch(`${localOrigin}${agentDef.endpoint}`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
@@ -611,20 +787,23 @@ Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze dynamicznie zaprojektu
                     }).catch(err => console.error(`[MÓZG 🧠] Błąd uruchamiania ${task.agentType}:`, err.message));
                 } else {
                     await adminDb.collection(`tenders/${tenderId}/tasks`).doc(task.taskId).update({
-                        status: "ERROR", rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` }, processedByBrain: false, updatedAt: new Date()
+                        status: "ERROR",
+                        rawResult: { error: `Narzędzie "${task.agentType}" nie istnieje w rejestrze.` },
+                        processedByBrain: false,
+                        updatedAt: new Date()
                     }).catch(() => { });
                 }
             }
         };
 
-        // Oczekujemy na wybudzenie wszystkich agentów, aby Cloud Run nie zamroził kontenera przed wysłaniem żądań!
         await triggerAgentsWithPacing();
 
         return NextResponse.json({
             success: true,
             phase: parsedResult.phase,
             tasksCreated: newTasksCreated.length,
-            estimateItemsAdded: parsedResult.newEstimateItems?.length || 0
+            estimateItemsAdded: parsedResult.newEstimateItems?.length || 0,
+            technologistFindingsProcessed: technologistFindings.length
         });
 
     } catch (error: any) {
