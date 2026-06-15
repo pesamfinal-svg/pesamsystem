@@ -124,9 +124,11 @@ Zakresy potwierdzone: ${JSON.stringify(existingScopes)}
 Fakty z Mózgu PESAM: ${JSON.stringify(brainFacts)}
 
 === ZADANIE WYSZUKIWANIA ===
-1. Wyszukaj w internecie (Google Search) przykładowe kosztorysy inwestorskie lub przedmiary robót dla: "${objectType}" w Polsce. Szukaj na BIP gmin, eb2b, itp.
-2. Na podstawie wyników, sporządź szczegółowy RAPORT TEKSTOWY.
-3. W raporcie wymień: jakie działy kosztorysowe są wymagane w takim obiekcie, czego brakuje w obecnych dokumentach (wyłap luki), oraz jakie źródła (linki) znalazłeś.
+1. Wyszukaj w internecie (Google Search) przykładowe kosztorysy inwestorskie dla: "${objectType}" w Polsce. Szukaj na BIP gmin, eb2b, itp.
+2. Na podstawie wyników, sporządź szczegółowy RAPORT TEKSTOWY z typowych branż i robót.
+3. W raporcie wymień: jakie FIZYCZNE BRANŻE BUDOWLANE i INSTALACYJNE (np. roboty ziemne, fundamenty, dach, instalacja elektryczna, teletechniczna, odgromowa, wentylacja) są zawsze obecne w takim obiekcie, a czego z nich PODEJRZEWASZ, że brakuje w naszym projekcie.
+
+UWAGA KRYTYCZNA: NIE analizuj poprawności formalnej samego dokumentu! Kompletnie nie interesuje nas "strona tytułowa", "kalkulacja", "tabela elementów scalonych" czy "załączniki". Skup się WYŁĄCZNIE na "cegłach, rurach i kablach" – szukamy fizycznych braków w wycenie budynku!
 
 Napisz raport jako zwykły tekst, kategorycznie BEZ struktury JSON.
 `;
@@ -152,8 +154,10 @@ Napisz raport jako zwykły tekst, kategorycznie BEZ struktury JSON.
         // ==========================================
         console.log("[SCOPE RESEARCHER 🔭] KROK 2: Strukturyzacja raportu do JSON...");
         const structurePrompt = `
-Poniżej znajduje się surowy raport z poszukiwań typowych zakresów robót w internecie.
+Poniżej znajduje się surowy raport z poszukiwań typowych fizycznych zakresów robót w internecie.
 Zmień te informacje w ustrukturyzowany format JSON, ściśle według zadanego schematu.
+
+PAMIĘTAJ KRYTYCZNĄ ZASADĘ: Pola "gapName" i "division" MUSZĄ dotyczyć wyłącznie FIZYCZNYCH elementów budowy (np. "Instalacje elektryczne wewnętrzne", "Konstrukcja dachu", "Biały montaż", "Izolacje fundamentów"). Absolutnie nie wpisuj tu żadnych formalnych części dokumentu (zakaz wpisywania "Strona tytułowa", "Kosztorys", "Opis techniczny"). Jeśli raport mówi o brakach dokumentacyjnych, zignoruj je.
 
 RAPORT BADACZA:
 ${rawReport}
