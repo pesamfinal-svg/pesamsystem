@@ -4,7 +4,7 @@ const path = require('path');
 // Ścieżka do pliku wyjściowego
 const outputFilePath = path.join(__dirname, 'kosztorysantamax.txt');
 
-// Ścisła lista wszystkich plików dwumózgowego Roju PESAM 3.0 + Technologa
+// Ścisła lista wszystkich plików dwumózgowego Roju PESAM 3.0 + Głównego Technologa
 const filesToConsolidate = [
     // --- 🖥️ WIDOK I INTERFEJS ---
     'src/app/(dashboard)/dashboard/estimator/page.tsx',                 // Główny panel kosztorysu z czatem, checklistami i podglądem PDF
@@ -35,11 +35,14 @@ const filesToConsolidate = [
     'src/app/api/kosztorysant/agent-rewident/route.ts',                  // Agent: REVISOR_JUDGE (Rozjemca konfliktów technologicznych)
     'src/app/api/kosztorysant/agent-kameleon/route.ts',                  // Agent: KAMELEON (Skaner niszowych technologii branżowych)
     'src/app/api/kosztorysant/agent-python-calc/route.ts',               // Agent: PYTHON_CALC (Ekspert matematyczny w piaskownicy)
+    'src/app/api/kosztorysant/agent-pdf-splitter/route.ts',              // Agent: PDF_SPLITTER (Fizyczny spliter PDF)
+    'src/app/api/kosztorysant/agent-detektyw/route.ts',                  // Agent: MAPPING_DETECTIVE (Korelator 3D PDF)
 
     // --- 🧬 AGENCI SPECJALIŚCI TECHNOLOGA ---
     'src/app/api/technolog/agent-technolog-materialowy/route.ts',         // Agent: MATERIAL_DETECTIVE (Skaner parametrów materiałów)
     'src/app/api/technolog/agent-technolog-przedmiarowy/route.ts',        // Agent: QUANTITY_ESTIMATOR (Audytor kompletności zakresu)
-    'src/app/api/technolog/agent-technolog-norm/route.ts'                // Agent: NORM_ADVISOR (Dobieracz norm budowlanych WT2021)
+    'src/app/api/technolog/agent-technolog-norm/route.ts',                // Agent: NORM_ADVISOR (Dobieracz norm budowlanych WT2021)
+    'src/app/api/technolog/agent-scope-researcher/route.ts'               // Agent: SCOPE_RESEARCHER (Badacz zakresu rynkowego z wyszukiwarką)
 ];
 
 let consolidatedContent = '';
@@ -47,7 +50,7 @@ let foundCount = 0;
 let missingCount = 0;
 
 console.log('==================================================');
-console.log('[PESAM Backup] Rozpoczynam konsolidację kodu NOWEGO kosztorysanta PESAM 3.0 + Technologa...');
+console.log('[PESAM Backup] Rozpoczynam konsolidację kodu NOWEGO kosztorysanta PESAM 3.0 + Głównego Technologa...');
 console.log('==================================================\n');
 
 filesToConsolidate.forEach(file => {

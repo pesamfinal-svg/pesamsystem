@@ -3,6 +3,7 @@ import { adminDb } from "@/lib/firebase/admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
 import { randomUUID } from "crypto";
+import { jsonrepair } from "jsonrepair"; // <--- TEGO BRAKOWAŁO!
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
@@ -45,11 +46,11 @@ const TECHNOLOG_SCHEMA = {
     properties: {
         reasoning: {
             type: Type.STRING,
-            description: "Tok rozumowania technologicznego. Co wiem o technologii tego obiektu? Co mi brakuje? Czy uruchomiłem SCOPE_RESEARCHER? Co zwrócił? Jak porównuję zakres typowy vs dokumentacja projektu?"
+            description: "Tok rozumowania technologicznego. Co wiem o technologii tego obiektu? Co mi brakuje? Czy uruchomiłem SCOPE_RESEARCHER? Jak porównuję zakres typowy vs Spis Działów z dokumentów?"
         },
         selfCritique: {
             type: Type.STRING,
-            description: "Samokrytyka: Które z moich założeń mogą być błędne? Czy zakres kosztorysu jest kompletny? Jakie działy mogą brakować? Co pominąłem w poprzedniej iteracji?"
+            description: "Samokrytyka: Które z moich założeń mogą być błędne? Czy upewniłem się, że 'brakujący' dział naprawdę nie widnieje w 'constructionDivisions' wgranych plików?"
         },
         nextBestAction: {
             type: Type.STRING,
@@ -228,12 +229,17 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
     try {
         return await fn();
     } catch (error: any) {
-        const errorText = error.toString() || "";
-        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
-        if (isRateLimit && retries > 0) {
+        const errorText = error?.toString?.() || "";
+        const causeText = error?.cause?.toString?.() || "";
+        const fullText = `${errorText} ${causeText}`;
+
+        const isRateLimit = fullText.includes("429") || fullText.includes("RESOURCE_EXHAUSTED");
+        const isSocketError = fullText.includes("UND_ERR_SOCKET") || fullText.includes("fetch failed") || fullText.includes("ECONNRESET") || fullText.includes("ETIMEDOUT") || fullText.includes("SocketError");
+
+        if ((isRateLimit || isSocketError) && retries > 0) {
             const jitter = Math.random() * 3000;
             const waitTime = delay + jitter;
-            console.warn(`[TECHNOLOG 🏗️] Limit 429. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
+            console.warn(`[TECHNOLOG 🏗️] Błąd sieci/limitu. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -327,6 +333,7 @@ export async function POST(req: Request) {
             adminDb.collection(`tenders/${tenderId}/estimate`).get()
         ]);
 
+        // 🟢 UWZGLĘDNIENIE SPISÓW DZIAŁÓW Z DOKUMENTÓW (constructionDivisions)
         const documents = docsSnap.docs.map(d => ({
             id: d.id,
             fileName: d.data().fileName,
@@ -335,7 +342,8 @@ export async function POST(req: Request) {
             detailedElement: d.data().detailedElement || "NIE_DOTYCZY",
             containsDrawings: d.data().containsDrawings || false,
             containsTablesWithDimensions: d.data().containsTablesWithDimensions || false,
-            pageCount: d.data().pageCount || null
+            pageCount: d.data().pageCount || null,
+            constructionDivisions: d.data().constructionDivisions || [] // 🟢 Pobrane wprost z bazy
         }));
 
         const currentTechData = techSnap.exists ? techSnap.data() : {};
@@ -398,7 +406,6 @@ export async function POST(req: Request) {
             ...newScopeResults
         ];
 
-        const scopeResearcherRunBefore = taskHistory.some(t => t.agentType === "SCOPE_RESEARCHER");
         const scopeResearcherDoneSuccessfully = taskHistory.some(
             t => t.agentType === "SCOPE_RESEARCHER" && t.status === "DONE"
         );
@@ -416,8 +423,8 @@ Bez Ciebie kosztorys będzie niepełny i wartościowo zaniżony.
 === DOSTĘPNE NARZĘDZIA (agenci Technologa) ===
 ${JSON.stringify(TECHNOLOG_AGENTS.map(a => ({ name: a.name, opis: a.description })), null, 2)}
 
-=== DOKUMENTY PROJEKTU ===
-${JSON.stringify(documents, null, 2)}
+=== DOKUMENTY PROJEKTU (ZAWIERAJĄ SPIS DZIAŁÓW Z PDF) ===
+${JSON.stringify(documents.map(d => ({ fileName: d.fileName, constructionDivisions: d.constructionDivisions })), null, 2)}
 
 === CO JUŻ WIE KOSZTORYSANT (Mózg PESAM — knownFacts) ===
 ${JSON.stringify(pesamKnownFacts, null, 2)}
@@ -458,10 +465,10 @@ ${existingFindings.length > 0
   * Instruction powinna brzmieć: "Wyszukaj w internecie przykładowe kosztorysy inwestorskie dla [typ obiektu]. Porównaj typowy zakres z tym co mamy: [lista tego co jest]. Podaj brakujące działy z impactScore."
 - NIE twórz innych zadań w tej samej iteracji gdy SCOPE_RESEARCHER jeszcze nie zwrócił wyników.
 
-**KROK 2 — ANALIZA LUK (gdy SCOPE_RESEARCHER zwrócił wyniki)**
-- Przejrzyj criticalGaps z wyników powyżej.
-- Dla każdej luki z impactScore > 6 → stwórz finding dla PESAM (category: "MISSING_SCOPE").
-- Finding powinien zawierać: divisionName, typicalItems (przykładowe pozycje kosztorysowe dla tego działu), estimatedCostShare, whyMissing.
+**KROK 2 — ANALIZA LUK (ELIMINACJA FAŁSZYWYCH ALARMÓW)**
+- Przejrzyj criticalGaps od SCOPE_RESEARCHER.
+- 🛑 ZASADA KRYTYCZNA: Zanim uznasz jakikolwiek dział (np. instalacje sanitarne, wentylację) za brakujący, sprawdź absolutnie sekcję "DOKUMENTY PROJEKTU". Jeśli nazwa tego lub podobnego działu znajduje się w "constructionDivisions" któregokolwiek dokumentu (np. w spisie przedmiaru), OZNACZA TO, ŻE ZAKRES TEN ISTNIEJE w dokumentacji projektowej i Kosztorysant go wkrótce wczyta. W takim wypadku ABSOLUTNIE NIE ZGŁASZAJ GO jako MISSING_SCOPE.
+- Zgłoś jako MISSING_SCOPE WYŁĄCZNIE te działy, których nie ma ani w obecnym Kosztorysie, ani w spisach "constructionDivisions" w plikach PDF. Dla każdej potwierdzonej luki z impactScore > 6 stwórz finding (category: "MISSING_SCOPE").
 - Sprawdź existingFindings — nie duplikuj tych które już wysłałeś.
 
 **KROK 3 — SPECYFIKACJE MATERIAŁÓW (równolegle po kroku 2)**
@@ -492,7 +499,7 @@ Dla MISSING_SCOPE:
     divisionName: "Instalacje elektryczne wewnętrzne",
     typicalItems: ["Rozdzielnica główna RG", "Instalacja oświetlenia", "Gniazda wtykowe 230V", "WLZ z rozdzielni"],
     estimatedCostShare: "8-12% wartości inwestycji",
-    whyMissing: "W dokumentach brak projektu elektrycznego. SCOPE_RESEARCHER znalazł w 3 podobnych przetargach że instalacje elektryczne to obowiązkowy dział."
+    whyMissing: "W dokumentach brak projektu elektrycznego, nie ma go również w spisie treści przedmiaru. SCOPE_RESEARCHER znalazł w 3 podobnych przetargach że instalacje elektryczne to obowiązkowy dział."
   },
   confidence: 85,
   normBasis: "Warunki techniczne dla budynków użyteczności publicznej"
@@ -530,7 +537,7 @@ Dla COST_INDICATOR:
 
         let parsed: any = {};
         try {
-            parsed = JSON.parse(result.text ?? "{}");
+            parsed = JSON.parse(jsonrepair(result.text ?? "{}"));
         } catch (e) {
             console.error("[TECHNOLOG 🏗️] Błąd parsowania JSON:", e);
             throw new Error("Błąd parsowania odpowiedzi modelu");

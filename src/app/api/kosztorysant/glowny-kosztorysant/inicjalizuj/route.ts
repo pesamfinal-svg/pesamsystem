@@ -36,12 +36,24 @@ const CLASSIFIER_SCHEMA = {
         summary: { type: Type.STRING },
         detailedElement: { type: Type.STRING },
         containsTablesWithDimensions: { type: Type.BOOLEAN },
-        drawingPages: { 
-            type: Type.ARRAY, 
+        drawingPages: {
+            type: Type.ARRAY,
             items: { type: Type.NUMBER },
             description: "Numery stron (liczone od 1), na których są rysunki techniczne, mapy, schematy ORAZ strony zawierające bezpośrednio powiązane z nimi opisy/legendy. Zwróć pustą tablicę, jeśli brak rysunków."
         },
-        pageCount: { type: Type.NUMBER }
+        pageCount: { type: Type.NUMBER },
+        constructionDivisions: {
+            type: Type.ARRAY,
+            description: "Hierarchiczny spis działów robót budowlanych/instalacyjnych znalezionych w dokumencie.",
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    id: { type: Type.STRING, description: "Numer działu np. '1.2', 'E.1', 'S.2'" },
+                    name: { type: Type.STRING, description: "Nazwa działu np. 'Instalacje elektryczne', 'Strop nad przelotnią'" },
+                    pageStart: { type: Type.NUMBER, description: "Strona, na której zaczyna się dział" }
+                }
+            }
+        }
     },
     required: ["tags", "summary", "detailedElement", "containsTablesWithDimensions", "drawingPages", "pageCount"]
 };
@@ -80,7 +92,7 @@ async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: n
     return results;
 }
 
-// 🛠️ Funkcja pomocnicza: Grupuje ciągi liczb (np. [13, 14, 15, 50] -> {start: 13, end: 15}, {start: 50, end: 50})
+// 🛠️ Funkcja pomocnicza do rysunków
 function groupConsecutivePages(pages: number[]): { start: number, end: number }[] {
     if (pages.length === 0) return [];
     const sorted = [...pages].sort((a, b) => a - b);
@@ -102,42 +114,41 @@ function groupConsecutivePages(pages: number[]): { start: number, end: number }[
 }
 
 /**
- * 🚀 METODA DZIEL I ŁĄCZ 4.1: (Z Systemowymi Kotwicami)
+ * 🚀 METODA DZIEL I ŁĄCZ 4.1: (Z Systemowymi Kotwicami i Spisem Działów)
  */
 async function convertPdfToMarkdownInShadow(
     docSnap: FirebaseFirestore.QueryDocumentSnapshot,
     bucketName: string,
     originalPdf: PDFDocument,
-    textPages: number[], 
-    drawingPages: number[], 
+    textPages: number[],
+    drawingPages: number[],
     containsTables: boolean,
-    drawingsFilename: string 
+    drawingsFilename: string,
+    constructionDivisions: any[]
 ): Promise<number> {
     const docData = docSnap.data();
     const originalPath = docData.storagePath as string;
     const mdPath = `${originalPath}.md`;
 
-    // Routing inteligentny
-    const CHUNK_SIZE = containsTables ? 10 : 30; 
+    const CHUNK_SIZE = containsTables ? 10 : 30;
     let totalTokensUsed = 0;
 
-    console.log(`[FAZA 0.5 🏗️] Konwersja MD dla ${docData.fileName} (Stron tekstu: ${textPages.length}, Stron rysunków: ${drawingPages.length})`);
+    console.log(`[FAZA 0.5 🏗️] Konwersja MD dla ${docData.fileName} (Stron tekstu: ${textPages.length})`);
 
-    // Dzielimy strony tekstowe na mniejsze paczki dla modelu LLM
     const chunks: { pages: number[] }[] = [];
     for (let i = 0; i < textPages.length; i += CHUNK_SIZE) {
         chunks.push({ pages: textPages.slice(i, i + CHUNK_SIZE) });
     }
 
-    const tasks = chunks.map((chunk, index) => async () => {
+    const tasks = chunks.map((chunk) => async () => {
         const pagesToExtract = chunk.pages;
         console.log(`[FAZA 0.5 ✂️] Wycianam i procesuję paczkę tekstu: [${pagesToExtract.join(", ")}]...`);
-        
+
         const newPdf = await PDFDocument.create();
         const pageIndices = pagesToExtract.map(p => p - 1);
         const copiedPages = await newPdf.copyPages(originalPdf, pageIndices);
         copiedPages.forEach(page => newPdf.addPage(page));
-        
+
         const newPdfBytes = await newPdf.save();
         const base64Data = Buffer.from(newPdfBytes).toString("base64");
 
@@ -145,9 +156,9 @@ async function convertPdfToMarkdownInShadow(
 Jesteś precyzyjnym konwerterem dokumentów budowlanych.
 Zignoruj to, że to wycinek z większej całości. Przeanalizuj i przepisz załączony fragment na format Markdown.
 Zasady:
-${containsTables 
-    ? "- ZACHOWAJ TABELE jako czyste tabele Markdown (| kolumna | kolumna |) i zachowaj wszystkie liczby, jednostki oraz przedmiary." 
-    : "- Przepisz tekst z zachowaniem oryginalnej struktury nagłówków (#, ##, ###)."}
+${containsTables
+                ? "- ZACHOWAJ TABELE jako czyste tabele Markdown (| kolumna | kolumna |) i zachowaj wszystkie liczby, jednostki oraz przedmiary."
+                : "- Przepisz tekst z zachowaniem oryginalnej struktury nagłówków (#, ##, ###)."}
 - Odpowiedz TYLKO i WYŁĄCZNIE treścią Markdown.
 `;
 
@@ -169,35 +180,39 @@ ${containsTables
         let chunkText = result.text ?? "";
         chunkText = chunkText.replace(/```markdown/gi, "").replace(/```/g, "").trim();
 
-        // 🟢 Zwracamy obiekt z wygenerowanym Markdownem
         return { start: pagesToExtract[0], text: `<!-- Wyciąg ze stron: ${pagesToExtract.join(", ")} -->\n${chunkText}`, tokens };
     });
 
-    const MAX_CONCURRENCY = 3; 
+    const MAX_CONCURRENCY = 3;
     const results = await runWithConcurrency(tasks, MAX_CONCURRENCY);
     totalTokensUsed = results.reduce((acc, curr) => acc + curr.tokens, 0);
 
-    // ⚓ TWORZYMY SYSTEMOWE KOTWICE DLA USUNIĘTYCH RYSUNKÓW (Darmowe, bez użycia API!)
     const drawingGroups = groupConsecutivePages(drawingPages);
     for (const group of drawingGroups) {
         const pageRange = group.start === group.end ? `strony ${group.start}` : `stron ${group.start} - ${group.end}`;
-        
         const anchorText = `
 > ⚠️ **[SYSTEM PESAM - KOTWICA WIZUALNA]** 
-> Z tego miejsca (${pageRange}) wyodrębniono rysunki techniczne, schematy lub mapy. 
-> Zostały one fizycznie przeniesione do pliku: \`${drawingsFilename}\`.
-> *Jeżeli do wykonania wyceny lub sprawdzenia obmiarów potrzebujesz danych z tych rysunków, zleć zadanie analizy Agentowi Vision (wskazując ten plik).*
+> Z tego miejsca (${pageRange}) wyodrębniono rysunki techniczne/mapy do pliku: \`${drawingsFilename}\`.
 `;
-        
-        // Dodajemy Kotwicę do puli wyników (udaje normalną paczkę, co pozwala zachować chronologię)
         results.push({ start: group.start, text: anchorText.trim(), tokens: 0 });
     }
 
-    // 🔄 SORTUJEMY WSZYSTKO W JEDNĄ SPÓJNĄ CAŁOŚĆ (Teksty + Kotwice według oryginalnych numerów stron)
     results.sort((a, b) => a.start - b.start);
-    
-    // Kleimy finalny plik Markdown
-    const compiledMarkdown = results.map(r => r.text).join("\n\n---\n\n");
+
+    // WSTRZYKIWANIE SPISU DZIAŁÓW (TOC)
+    let tocHeader = "";
+    if (constructionDivisions && constructionDivisions.length > 0) {
+        tocHeader = `# 🏗️ SPIS DZIAŁÓW ROBÓT BUDOWLANYCH (Wykryty automatycznie)\n\n`;
+        tocHeader += `> *Globalna mapa zakresu opracowana przez Klasyfikator PESAM*\n\n`;
+        constructionDivisions.forEach(div => {
+            const indent = div.id ? (div.id.split('.').length - 1) : 0;
+            const prefix = "  ".repeat(Math.max(0, indent));
+            tocHeader += `${prefix}- **${div.id || '-'}** — ${div.name || 'Brak nazwy'} *(str. ${div.pageStart || '?'})*\n`;
+        });
+        tocHeader += "\n---\n\n";
+    }
+
+    const compiledMarkdown = tocHeader + results.map(r => r.text).join("\n\n---\n\n");
 
     if (compiledMarkdown.length >= 50) {
         const bucket = adminStorage.bucket(bucketName);
@@ -211,10 +226,9 @@ ${containsTables
             mimeType: "text/markdown",
             isMarkdownCache: true,
             originalStoragePath: originalPath,
+            constructionDivisions: constructionDivisions
         });
-        console.log(`[FAZA 0.5 🏗️] ✅ Zapisano posklejany Markdown z kotwicami: ${mdPath}`);
-    } else {
-        console.warn(`[FAZA 0.5 ⚠️] Wynik MD dla ${docData.fileName} był zbyt krótki.`);
+        console.log(`[FAZA 0.5 🏗️] ✅ Zapisano posklejany Markdown ze Spisem Działów (TOC)`);
     }
 
     return totalTokensUsed;
@@ -239,20 +253,23 @@ export async function POST(req: Request) {
         for (let j = 0; j < snapshot.docs.length; j++) {
             const docSnap = snapshot.docs[j];
             const docData = docSnap.data();
-            
+
             try {
                 const isPdf = (docData.mimeType || "").includes("pdf") || (docData.storagePath || "").toLowerCase().endsWith(".pdf");
                 const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-                
-                // 🧠 KLASYFIKATOR SENSORYCZNY (Skanowanie całego dokumentu)
+
+                // 🟢 ZMODYFIKOWANY PROMPT KLASYFIKATORA: Pełny skan i wielobranżowy spis treści z nagłówków!
                 const prompt = `
 Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
 Otrzymujesz CAŁY dokument budowlany do przeskanowania (od deski do deski).
 TWOJE ZADANIE:
-1. Przeskanuj go i zwróć JSON z odpowiednimi tagami, streszczeniem oraz łączną liczbą stron.
-2. Zaznacz 'containsTablesWithDimensions': true, jeśli dokument ma tabele z przedmiarami.
-3. BARDZO WAŻNE: Wypełnij tablicę 'drawingPages' numerami stron (od 1), na których znajdują się mapy, rzuty lub rysunki. 
-4. LOGICZNY KONTEKST: Jeśli rysunek ma powiązany ze sobą opis, legendę lub uwagi na stronach bezpośrednio przed nim lub po nim (np. mapa jest na str. 150, a na str. 148-149 jest do niej opis tekstowy), DOŁĄCZ numery tych stron opisowych do tablicy 'drawingPages'. Chcemy wyciąć rysunek razem z jego kontekstem.
+1. Zwróć JSON z tagami, streszczeniem i łączną liczbą stron.
+2. Zaznacz 'containsTablesWithDimensions': true dla tabel przedmiarowych.
+3. Wypełnij 'drawingPages' numerami stron z rysunkami/mapami.
+4. BARDZO WAŻNE: Znajdź "Spis treści" lub wylistowane nagłówki działów w tabelach przedmiarowych.
+   Wyodrębnij WSZYSTKIE działy robót do 'constructionDivisions', łącznie z działami instalacyjnymi
+   (np. elektryka, sanitarna, wentylacja). Zachowaj oryginalną numerację (np. "d.1.3", "E.1", "S.2").
+   Dla dokumentów bez spisu treści — wyodrębnij działy z pogrubionych nagłówków tabel (zazwyczaj to wiersze bez ilości i ceny).
 `;
                 const result = await callGeminiWithRetry(async () => {
                     return await aiGlobal.models.generateContent({
@@ -277,6 +294,7 @@ TWOJE ZADANIE:
 
                 let drawingPages: number[] = parsedResult.drawingPages || [];
                 const pageCount = parsedResult.pageCount || 1;
+                const constructionDivisions = parsedResult.constructionDivisions || [];
 
                 await docSnap.ref.update({
                     tags: parsedResult.tags || [],
@@ -285,64 +303,59 @@ TWOJE ZADANIE:
                     containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
                     containsDrawings: drawingPages.length > 0,
                     pageCount: pageCount,
+                    constructionDivisions: constructionDivisions,
                     status: "CLASSIFIED",
                     classifyModel: MODEL_LITE,
                     updatedAt: new Date()
                 });
 
-                console.log(`[FAZA 0 🚀] Sklasyfikowano: ${docData.fileName} (Strony z rysunkami/mapami: [${drawingPages.join(", ")}])`);
+                console.log(`[FAZA 0 🚀] Sklasyfikowano: ${docData.fileName}. Wykryto ${constructionDivisions.length} działów głównych.`);
 
-                // --- KROK 2: SMART EXTRACTION ---
                 if (isPdf) {
                     const [fileBuffer] = await bucket.file(docData.storagePath).download();
                     const originalPdf = await PDFDocument.load(fileBuffer);
                     const actualPageCount = originalPdf.getPageCount();
 
-                    // Czyszczenie danych od AI (duplikaty i strony spoza zakresu)
-                    drawingPages = [...new Set(drawingPages)].filter(p => p >= 1 && p <= actualPageCount).sort((a,b) => a-b);
-                    
+                    drawingPages = [...new Set(drawingPages)].filter(p => p >= 1 && p <= actualPageCount).sort((a, b) => a - b);
+
                     const textPages: number[] = [];
                     for (let p = 1; p <= actualPageCount; p++) {
                         if (!drawingPages.includes(p)) textPages.push(p);
                     }
 
                     const originalFileName = docData.fileName || "dokument.pdf";
-                    const drawingsFilename = drawingPages.length > 0 
-                        ? originalFileName.replace(/\.pdf$/i, '_drawings.pdf') 
+                    const drawingsFilename = drawingPages.length > 0
+                        ? originalFileName.replace(/\.pdf$/i, '_drawings.pdf')
                         : "Brak";
-                    
-                    // A) Zapisz osobny PDF z rysunkami dla Agenta Vision
+
                     if (drawingPages.length > 0) {
                         const drawingsPdf = await PDFDocument.create();
                         const copiedDrawings = await drawingsPdf.copyPages(originalPdf, drawingPages.map(p => p - 1));
                         copiedDrawings.forEach(page => drawingsPdf.addPage(page));
-                        
+
                         const drawingsStoragePath = (docData.storagePath as string).replace(/\.pdf$/i, '_drawings.pdf');
                         const drawingsPdfBytes = await drawingsPdf.save();
                         await bucket.file(drawingsStoragePath).save(drawingsPdfBytes, { contentType: "application/pdf" });
-                        
+
                         await docSnap.ref.update({ drawingsStoragePath, hasSeparatedDrawings: true });
-                        console.log(`[FAZA 0.5 ✂️] Utworzono plik bazowy dla Agenta Vision: ${drawingsStoragePath}`);
                     }
 
-                    // B) Przerób pozostałe strony na Markdown wstrzykując Kotwice
                     if (textPages.length > 0) {
                         try {
                             const mdTokens = await convertPdfToMarkdownInShadow(
-                                docSnap, 
-                                bucketName, 
-                                originalPdf, 
-                                textPages, 
-                                drawingPages, 
+                                docSnap,
+                                bucketName,
+                                originalPdf,
+                                textPages,
+                                drawingPages,
                                 parsedResult.containsTablesWithDimensions,
-                                drawingsFilename
+                                drawingsFilename,
+                                constructionDivisions
                             );
                             totalTokensUsed += mdTokens;
                         } catch (convErr: any) {
                             console.warn(`[FAZA 0.5 📄] Błąd MD dla ${docData.fileName}:`, convErr);
                         }
-                    } else {
-                        console.log(`[FAZA 0.5 📄] Plik to 100% rysunki. Skrypt pomija konwersję na tekst.`);
                     }
                 }
 
@@ -350,10 +363,9 @@ TWOJE ZADANIE:
                 console.error(`[FAZA 0 🚀] Błąd dla dokumentu ${docData.fileName}:`, docError);
                 await docSnap.ref.update({ status: "ERROR_CLASSIFYING", updatedAt: new Date() }).catch(() => { });
             }
-            await new Promise(r => setTimeout(r, 1000)); // Pacing między dokumentami
+            await new Promise(r => setTimeout(r, 1000));
         }
 
-        // Estymacja kosztu i aktualizacja "Budżetu Ochronnego" w Przetargu
         const estimatedCostUSD = (totalTokensUsed / 1000) * 0.0003;
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
@@ -369,7 +381,6 @@ TWOJE ZADANIE:
             }
         });
 
-        // 🧠 Inicjalizacja Głównego Mózgu Przetargu
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         await brainRef.set({
             phase: "PLANNING",
@@ -382,7 +393,6 @@ TWOJE ZADANIE:
             totalCostUSD: estimatedCostUSD
         }, { merge: true });
 
-        // Wybudzenie Agentów Nadrzędnych
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
             method: "POST", headers: { "Content-Type": "application/json" },

@@ -162,7 +162,7 @@ const BRAIN_SCHEMA = {
                     ilosc: { type: Type.NUMBER },
                     jednostka: { type: Type.STRING },
                     KNR_ref: { type: Type.STRING },
-                    cenaJed: { type: Type.NUMBER, description: "Wpisz tylko gdy masz pewny wskaźnik kosztowy od Technologa (COST_INDICATOR). Domyślnie 0." }
+                    cenaJed: { type: Type.NUMBER, description: "Wpisz SAMĄ stawkę jednostkową (np. 150), tylko gdy masz pewny wskaźnik kosztowy od Technologa (COST_INDICATOR). Domyślnie 0." }
                 },
                 required: ["sectionName", "pozycja", "opis", "ilosc", "jednostka"]
             }
@@ -327,19 +327,21 @@ function buildTechnologistContext(findings: any[], techPhase: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Sygnatura zadania — do deduplikacji (agentType + zbiór inputDocIds)
+// Sygnatura zadania — do deduplikacji (agentType + zbiór inputDocIds + instrukcja)
 // ─────────────────────────────────────────────────────────────────
 
-function taskSignature(agentType: string, inputDocIds: string[] | undefined): string {
+function taskSignature(agentType: string, inputDocIds: string[] | undefined, instruction: string): string {
     const sortedIds = [...(inputDocIds || [])].sort();
-    return `${agentType}::${sortedIds.join(",")}`;
+    // Normalizujemy instrukcję (małe litery, brak spacji i znaków specjalnych),
+    // aby drobne różnice w spacjach nie oszukały systemu, ale inne polecenia będą się różnić.
+    const normalizedInstruction = (instruction || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+    return `${agentType}::${sortedIds.join(",")}::${normalizedInstruction}`;
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Heurystyczne dopasowanie MISSING_SCOPE (z findings Technologa) do
-// sekcji już istniejących w kosztorysie — żeby Mózg "widział" pokrycie
-// luki, nawet jeśli pozycje wpisał tam BOQ_PARSER zlecony przez Technologa
-// (a nie przez samego Mózga).
+// Heurystyczne dopasowanie MISSING_SCOPE do sekcji kosztorysu
 // ─────────────────────────────────────────────────────────────────
 
 function normalizeForMatch(s: string): string {
@@ -399,12 +401,6 @@ function buildScopeCoverageContext(
 
     return lines.join("\n");
 }
-
-// ─────────────────────────────────────────────────────────────────
-// Wspólna historia zadań — Mózg (tasksRef) + Technolog (technologTasksRef)
-// Mózg musi widzieć, co zlecił Technolog swoim narzędziom (np. Obmiarowcowi),
-// żeby nie zlecać tego ponownie i żeby wiedzieć, że dane pochodzą "z innej ręki".
-// ─────────────────────────────────────────────────────────────────
 
 function summarizeTaskDoc(d: any, origin: "MOZG" | "TECHNOLOG"): any {
     const data = d.data();
@@ -528,22 +524,24 @@ export async function POST(req: Request) {
             tasksRef.get(),
             adminDb.collection(`tenders/${tenderId}/technologistFindings`).get(),
             adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get(),
-            technologTasksRef.get().catch(() => ({ docs: [] } as any)) // kolekcja może nie istnieć jeszcze
+            technologTasksRef.get().catch(() => ({ docs: [] } as any))
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
             return NextResponse.json({ message: "Przetarg zatrzymany (HALTED)." });
         }
 
+        // 🟢 UWZGLĘDNIONE constructionDivisions ORAZ hasSeparatedDrawings
         const documents = docsSnap.docs.map(d => ({
-    id: d.id,
-    fileName: d.data().fileName,
-    tags: d.data().tags || [],
-    summary: d.data().summary || "(brak)",
-    containsDrawings: d.data().containsDrawings || false,
-    pageCount: d.data().pageCount || null,
-    hasSeparatedDrawings: d.data().hasSeparatedDrawings || false // 🟢 Dodany odczyt flagi z Fazy 0
-}));
+            id: d.id,
+            fileName: d.data().fileName,
+            tags: d.data().tags || [],
+            summary: d.data().summary || "(brak)",
+            containsDrawings: d.data().containsDrawings || false,
+            pageCount: d.data().pageCount || null,
+            hasSeparatedDrawings: d.data().hasSeparatedDrawings || false,
+            constructionDivisions: d.data().constructionDivisions || []
+        }));
 
         const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
         const currentCognitiveState = currentBrainData?.cognitiveState || {
@@ -561,7 +559,7 @@ export async function POST(req: Request) {
             extractionProfile: d.data().extractionProfile || null
         }));
 
-        // ── POPRAWKA #2: rzeczywisty stan kosztorysu — odpytujemy subkolekcję items ──
+        // Rzeczywisty stan kosztorysu (subkolekcje)
         const estimateState = await Promise.all(estimateSnap.docs.map(async (d) => {
             const itemsSnap = await d.ref.collection("items").get();
             return {
@@ -572,19 +570,17 @@ export async function POST(req: Request) {
         }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
 
-        // ── HISTORIA ZADAŃ: Mózg + Technolog połączone, do deduplikacji i świadomości ──
         const brainTaskSummaries = allTasksHistorySnap.docs.map(d => summarizeTaskDoc(d, "MOZG"));
         const technologTaskSummaries = (technologTasksSnap.docs || []).map((d: any) => summarizeTaskDoc(d, "TECHNOLOG"));
         const combinedTaskHistory = [...brainTaskSummaries, ...technologTaskSummaries];
 
-        // Sygnatury zadań aktywnych/zakończonych — z OBU stron — do guard rail
+        // Semantyczne sygnatury do guard rail
         const existingTaskSignatures = new Set<string>(
             combinedTaskHistory
                 .filter((t: any) => ["PENDING", "IN_PROGRESS", "DONE"].includes(t.status))
-                .map((t: any) => taskSignature(t.agentType, t.inputDocIds))
+                .map((t: any) => taskSignature(t.agentType, t.inputDocIds, t.instruction))
         );
 
-        // Dane od Technologa
         const technologistFindings = technologistFindingsSnap.docs.map(d => ({
             findingId: d.id,
             category: d.data().category,
@@ -598,13 +594,9 @@ export async function POST(req: Request) {
             ? (technologSnap.data()?.technologicalState?.identifiedMissingScopes || [])
             : [];
 
-        // Buduj opis stanu Technologa
         const technologistContext = buildTechnologistContext(technologistFindings, techPhase);
-
-        // ── POPRAWKA #3: korelacja MISSING_SCOPE ↔ realny stan kosztorysu ──
         const scopeCoverageContext = buildScopeCoverageContext(technologistFindings, estimateState);
 
-        // Znajdź brakujące zakresy które Technolog ma w kolejce (żeby nie duplikować)
         const technologGapsInProgress = technologSnap.exists
             ? (technologSnap.data()?.technologicalState?.technologicalGaps || []).map((g: any) => g.element)
             : [];
@@ -637,6 +629,12 @@ dotyczyć tylko WYCINKA jednego działu (np. jednej branży instalacyjnej) — n
 CAŁY dział jest pokryty tylko bo Technolog coś zlecił. Zweryfikuj zakres (inputDocIds, instruction,
 resultSummary) i porównaj z liczbą pozycji w odpowiadającej sekcji kosztorysu.
 
+▸ Fizycznie wycięte rysunki (hasSeparatedDrawings: true):
+  Jeśli dokument posiada flagę 'hasSeparatedDrawings: true', oznacza to, że rysunki techniczne zostały
+  fizycznie odseparowane do osobnego pliku pomocniczego w celu optymalizacji kosztów. Kiedy będziesz 
+  zlecać zadanie analizy rysunków Agentowi Vision, użyj normalnego ID tego dokumentu — Agent Vision 
+  automatycznie i po cichu przekieruje swoje zapytanie na ten wycięty plik PDF z rysunkami.
+
 ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 ▸ MISSING_SCOPE z confidence ≥ 70%:
   Sprawdź najpierw sekcję "POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS" poniżej — mówi ona, czy dany dział ma już
@@ -668,12 +666,6 @@ ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 ▸ Technolog w fazie DONE:
   Wszystkie jego dane są finalne. Działaj na nich w pełni.
 
-▸ Fizycznie wycięte rysunki (hasSeparatedDrawings: true):
-  Jeśli dokument posiada flagę 'hasSeparatedDrawings: true', oznacza to, że rysunki techniczne zostały
-  fizycznie odseparowane do osobnego pliku pomocniczego w celu optymalizacji kosztów. Kiedy będziesz 
-  zlecać zadanie analizy rysunków Agentowi Vision, użyj normalnego ID tego dokumentu — Agent Vision 
-  automatycznie i po cichu przekieruje swoje zapytanie na ten wycięty plik PDF z rysunkami.
-
 === ZASADA DEDUPLIKACJI ZADAŃ (GUARD RAIL) ===
 Przed dodaniem zadania do newTasks, sprawdź sekcję "HISTORIA WSZYSTKICH ZADAŃ" — jeśli istnieje wpis
 (z Twojej historii LUB Technologa) z tym samym agentType i tym samym (lub podzbiorem/nadzbiorem) zestawem
@@ -702,8 +694,14 @@ Użyj agentInstruction z każdego segmentu jako instruction dla VISION/BOQ_PARSE
 Wywołuj gdy w kolekcji conflicts istnieje status == "OPEN" lub "INVESTIGATING".
 Nie podawaj inputDocIds. Po wykonaniu sprawdź czy zmienił na RESOLVED lub ESCALATED_TO_USER.
 
-=== DOKUMENTY PROJEKTU ===
-${JSON.stringify(documents, null, 2)}
+=== DOKUMENTY PROJEKTU (ZAWIERAJĄ SPIS DZIAŁÓW) ===
+${JSON.stringify(documents.map(d => ({
+            id: d.id,
+            fileName: d.fileName,
+            summary: d.summary,
+            hasSeparatedDrawings: d.hasSeparatedDrawings,
+            constructionDivisions: d.constructionDivisions // Mózg od razu widzi, co jest w pliku
+        })), null, 2)}
 
 === TWÓJ AKTUALNY STAN POZNAWCZY ===
 ${JSON.stringify(currentCognitiveState, null, 2)}
@@ -891,13 +889,12 @@ ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomo
         // ── POPRAWKA #3: deduplikacja newTasks (guard rail po stronie kodu) ──
         const newTasksCreated: any[] = [];
         (parsedResult.newTasks || []).forEach((task: any) => {
-            const sig = taskSignature(task.agentType, task.inputDocIds);
+            const sig = taskSignature(task.agentType, task.inputDocIds, task.instruction);
 
             if (existingTaskSignatures.has(sig)) {
                 console.log(`[MÓZG 🧠] DEDUPLIKACJA: Zadanie ${task.agentType} dla [${(task.inputDocIds || []).join(", ")}] już istnieje (PENDING/IN_PROGRESS/DONE — Mózg lub Technolog) — odrzucono.`);
                 return;
             }
-            // chroni też przed duplikatami WEWNĄTRZ tej samej odpowiedzi modelu
             existingTaskSignatures.add(sig);
 
             const taskRef = tasksRef.doc();

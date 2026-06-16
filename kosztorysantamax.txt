@@ -824,8 +824,16 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
     try {
-        const { storagePath } = await req.json();
+        let { storagePath } = await req.json();
         if (!storagePath) return NextResponse.json({ error: "Brak ścieżki" }, { status: 400 });
+
+        // --- PRZEZROCZYSTA PODMIANA PODGLĄDU ---
+        // Jeśli system pod spodem zoptymalizował plik i wskazał w bazie na .md,
+        // my na potrzeby wyświetlenia podglądu PDF na frontendzie zmieniamy ścieżkę na oryginalny .pdf
+        if (storagePath.endsWith(".pdf.md")) {
+            storagePath = storagePath.replace(".pdf.md", ".pdf");
+            console.log(`[PODGLĄD API 👁️] Po cichu przełączono ścieżkę podglądu z Markdown na oryginalny PDF: ${storagePath}`);
+        }
 
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const file = adminStorage.bucket(bucketName).file(storagePath);
@@ -839,6 +847,7 @@ export async function POST(req: Request) {
 
         return NextResponse.json({ url });
     } catch (e: any) {
+        console.error("[PODGLĄD API 👁️] Błąd generowania url:", e);
         return NextResponse.json({ error: e.message }, { status: 500 });
     }
 }
@@ -868,16 +877,33 @@ const ai = new GoogleGenAI({
 
 const MODEL_PRO = "gemini-2.5-pro";
 
+// ─────────────────────────────────────────────────────────────────
+// RETRY: 429 (rate limit) + błędy sieciowe/socketowe (UND_ERR_SOCKET,
+// "fetch failed", "other side closed", ECONNRESET, ETIMEDOUT)
+// ─────────────────────────────────────────────────────────────────
+
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
-        const errorText = error.toString() || "";
-        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
-        if (isRateLimit && retries > 0) {
+        const errorText = error?.toString?.() || "";
+        const causeText = error?.cause?.toString?.() || "";
+        const fullText = `${errorText} ${causeText}`;
+
+        const isRateLimit = fullText.includes("429") || fullText.includes("RESOURCE_EXHAUSTED");
+        const isSocketError =
+            fullText.includes("UND_ERR_SOCKET") ||
+            fullText.includes("fetch failed") ||
+            fullText.includes("other side closed") ||
+            fullText.includes("ECONNRESET") ||
+            fullText.includes("ETIMEDOUT") ||
+            fullText.includes("SocketError");
+
+        if ((isRateLimit || isSocketError) && retries > 0) {
             const jitter = Math.random() * 3000;
             const waitTime = delay + jitter;
-            console.warn(`[MÓZG 🧠] Limit API 429. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
+            const reason = isRateLimit ? "Limit API 429" : "Błąd sieci/socketu (zerwane połączenie)";
+            console.warn(`[MÓZG 🧠] ${reason}. Czekam ${Math.round(waitTime / 1000)}s... (Pozostało prób: ${retries})`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
@@ -894,11 +920,11 @@ const BRAIN_SCHEMA = {
     properties: {
         reasoning: {
             type: Type.STRING,
-            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które założenia są najbardziej ryzykowne i co musisz zrobić by zmniejszyć niepewność kosztorysu. UWZGLĘDNIJ: co dostarczył Technolog, które luki to pokrywa, co jeszcze brakuje.`
+            description: `Twój tok rozumowania. Przeanalizuj swój 'World Model', oceń które założenia są najbardziej ryzykowne i co musisz zrobić by zmniejszyć niepewność kosztorysu. UWZGLĘDNIJ: co dostarczył Technolog, które luki to pokrywa, co jeszcze brakuje, oraz co wynika z RZECZYWISTEGO stanu kosztorysu (sekcje + liczba pozycji) i z HISTORII ZADAŃ obu mózgów (Twojego i Technologa).`
         },
         selfCritique: {
             type: Type.STRING,
-            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które założenia mogłyby wywrócić budżet o ponad 10% jeśli są mylne? Czy w pełni wykorzystałem dane od Technologa?`
+            description: `Samokrytyka: Dlaczego mój kosztorys na tym etapie może być drastycznie błędny? Które założenia mogłyby wywrócić budżet o ponad 10% jeśli są mylne? Czy w pełni wykorzystałem dane od Technologa? Czy nie zlecam ponownie czegoś, co już zostało zrobione (przez mój zespół LUB przez zespół Technologa)?`
         },
         nextBestAction: {
             type: Type.STRING,
@@ -1007,7 +1033,7 @@ const BRAIN_SCHEMA = {
         currentGoal: { type: Type.STRING },
         newTasks: {
             type: Type.ARRAY,
-            description: `Zadania dla narzędzi. Dla BOQ_PARSER i VISION zawsze dołącz extractionProfile. Workery działają bez sztywnego schematu — daj im precyzyjne instrukcje tekstowe.`,
+            description: `Zadania dla narzędzi. Dla BOQ_PARSER i VISION zawsze dołącz extractionProfile. Workery działają bez sztywnego schematu — daj im precyzyjne instrukcje tekstowe. UWAGA: Przed zleceniem zadania sprawdź sekcję "HISTORIA WSZYSTKICH ZADAŃ" (Twoich i Technologa) — jeśli identyczne zadanie (ten sam agentType + te same inputDocIds) już istnieje w statusie PENDING/IN_PROGRESS/DONE, NIE twórz go ponownie. System i tak je odrzuci, ale unikaj tego na poziomie rozumowania.`,
             items: {
                 type: Type.OBJECT,
                 properties: {
@@ -1084,6 +1110,9 @@ function buildTechnologistContext(findings: any[], techPhase: string): string {
     if (byCategory["MISSING_SCOPE"]?.length > 0) {
         sections.push("=== 🔴 BRAKUJĄCE DZIAŁY KOSZTORYSU (MISSING_SCOPE) ===");
         sections.push("ZASADA: Dla każdego brakującego działu MUSISZ podjąć akcję — patrz instrukcje poniżej.");
+        sections.push("UWAGA: Sprawdź sekcję 'AKTUALNY STAN KOSZTORYSU' i 'POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS' —");
+        sections.push("jeśli dany dział JUŻ MA pozycje w kosztorysie (np. dzięki BOQ_PARSER zleconemu przez Technologa");
+        sections.push("Obmiarowcowi), NIE generuj duplikatów — luka może być już częściowo lub w pełni pokryta.");
         sections.push("");
         byCategory["MISSING_SCOPE"].forEach((f: any) => {
             const facts = f.facts || {};
@@ -1156,6 +1185,107 @@ function buildTechnologistContext(findings: any[], techPhase: string): string {
     return sections.join("\n");
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Sygnatura zadania — do deduplikacji (agentType + zbiór inputDocIds)
+// ─────────────────────────────────────────────────────────────────
+
+function taskSignature(agentType: string, inputDocIds: string[] | undefined, instruction: string): string {
+    const sortedIds = [...(inputDocIds || [])].sort();
+    // Normalizujemy instrukcję (małe litery, brak spacji i znaków specjalnych),
+    // aby drobne różnice w spacjach nie oszukały systemu, ale inne numery stron będą się różnić.
+    const normalizedInstruction = (instruction || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+    return `${agentType}::${sortedIds.join(",")}::${normalizedInstruction}`;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Heurystyczne dopasowanie MISSING_SCOPE (z findings Technologa) do
+// sekcji już istniejących w kosztorysie — żeby Mózg "widział" pokrycie
+// luki, nawet jeśli pozycje wpisał tam BOQ_PARSER zlecony przez Technologa
+// (a nie przez samego Mózga).
+// ─────────────────────────────────────────────────────────────────
+
+function normalizeForMatch(s: string): string {
+    return (s || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // usuń diakrytyki
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+}
+
+function buildScopeCoverageContext(
+    technologistFindings: any[],
+    estimateState: { sekcja: string; liczba_pozycji: number; wartosc_zl: number }[]
+): string {
+    const missingScopeFindings = technologistFindings.filter((f: any) => f.category === "MISSING_SCOPE");
+    if (missingScopeFindings.length === 0) {
+        return "Technolog nie zgłosił żadnych MISSING_SCOPE — brak do skorelowania.";
+    }
+    if (estimateState.length === 0) {
+        return "Kosztorys jest całkowicie pusty — wszystkie zgłoszone MISSING_SCOPE są nadal NIEPOKRYTE.";
+    }
+
+    const normalizedSections = estimateState.map(s => ({
+        original: s.sekcja,
+        normalized: normalizeForMatch(s.sekcja),
+        liczba_pozycji: s.liczba_pozycji
+    }));
+
+    const lines: string[] = [];
+    lines.push("Korelacja MISSING_SCOPE od Technologa ze stanem kosztorysu (dopasowanie nazw — przybliżone, zweryfikuj sam):");
+    lines.push("");
+
+    missingScopeFindings.forEach((f: any) => {
+        const facts = f.facts || {};
+        const divisionName = facts.divisionName || f.findingId || "";
+        const normDivision = normalizeForMatch(divisionName);
+
+        const matches = normalizedSections.filter(s =>
+            s.normalized.includes(normDivision) ||
+            normDivision.includes(s.normalized) ||
+            (normDivision.length > 4 && s.normalized.includes(normDivision.slice(0, Math.min(8, normDivision.length))))
+        );
+
+        if (matches.length > 0) {
+            const totalItems = matches.reduce((sum, m) => sum + m.liczba_pozycji, 0);
+            if (totalItems > 0) {
+                lines.push(`▶ "${divisionName}" → ⚠️ MOŻLIWE POKRYCIE: znaleziono w kosztorysie sekcję/e [${matches.map(m => `"${m.original}" (${m.liczba_pozycji} poz.)`).join(", ")}].`);
+                lines.push(`  NIE generuj ponownie tych pozycji i NIE zlecaj ponownie BOQ_PARSER/BUDOWLANIEC dla tego zakresu bez weryfikacji — sprawdź najpierw, czy te pozycje rzeczywiście odpowiadają temu zakresowi (np. mogły zostać dodane przez Obmiarowca na zlecenie Technologa).`);
+            } else {
+                lines.push(`▶ "${divisionName}" → sekcja o podobnej nazwie istnieje [${matches.map(m => `"${m.original}"`).join(", ")}], ale ma 0 pozycji. Wciąż NIEPOKRYTE — działaj.`);
+            }
+        } else {
+            lines.push(`▶ "${divisionName}" → 🔴 NIEPOKRYTE. Brak odpowiadającej sekcji w kosztorysie. Wymaga akcji.`);
+        }
+    });
+
+    return lines.join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Wspólna historia zadań — Mózg (tasksRef) + Technolog (technologTasksRef)
+// Mózg musi widzieć, co zlecił Technolog swoim narzędziom (np. Obmiarowcowi),
+// żeby nie zlecać tego ponownie i żeby wiedzieć, że dane pochodzą "z innej ręki".
+// ─────────────────────────────────────────────────────────────────
+
+function summarizeTaskDoc(d: any, origin: "MOZG" | "TECHNOLOG"): any {
+    const data = d.data();
+    return {
+        origin,
+        taskId: d.id,
+        agentType: data.agentType,
+        status: data.status,
+        inputDocIds: data.inputDocIds || [],
+        instruction: (data.instruction || "").substring(0, 160),
+        resultSummary: data.status === "DONE"
+            ? (data.rawResult?.summary || (data.rawResult?.items ? `Zwrócono ${data.rawResult.items.length} pozycji` : "Wykonano"))
+            : (data.rawResult?.error || (data.status === "PENDING" || data.status === "IN_PROGRESS" ? "W toku" : "BŁĄD")),
+        extractionProfile: data.extractionProfile || null
+    };
+}
+
 export async function POST(req: Request) {
     try {
         const { tenderId, trigger } = await req.json();
@@ -1164,6 +1294,7 @@ export async function POST(req: Request) {
         console.log(`[MÓZG 🧠] Cognitive Wake-up. tenderID: ${tenderId} | Trigger: ${trigger}`);
 
         const tasksRef = adminDb.collection(`tenders/${tenderId}/tasks`);
+        const technologTasksRef = adminDb.collection(`tenders/${tenderId}/technologTasks`);
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
@@ -1249,7 +1380,8 @@ export async function POST(req: Request) {
             estimateSnap,
             allTasksHistorySnap,
             technologistFindingsSnap,
-            technologSnap
+            technologSnap,
+            technologTasksSnap
         ] = await Promise.all([
             adminDb.collection(`tenders/${tenderId}/documents`).get(),
             brainRef.get(),
@@ -1259,7 +1391,8 @@ export async function POST(req: Request) {
             adminDb.collection(`tenders/${tenderId}/estimate`).get(),
             tasksRef.get(),
             adminDb.collection(`tenders/${tenderId}/technologistFindings`).get(),
-            adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get()
+            adminDb.collection(`tenders/${tenderId}/technolog`).doc("main").get(),
+            technologTasksRef.get().catch(() => ({ docs: [] } as any)) // kolekcja może nie istnieć jeszcze
         ]);
 
         if (tenderDoc.exists && tenderDoc.data()?.status === "HALTED") {
@@ -1272,7 +1405,8 @@ export async function POST(req: Request) {
             tags: d.data().tags || [],
             summary: d.data().summary || "(brak)",
             containsDrawings: d.data().containsDrawings || false,
-            pageCount: d.data().pageCount || null
+            pageCount: d.data().pageCount || null,
+            hasSeparatedDrawings: d.data().hasSeparatedDrawings || false // 🟢 Dodany odczyt flagi z Fazy 0
         }));
 
         const currentBrainData = brainSnap.exists ? brainSnap.data() : {};
@@ -1291,21 +1425,28 @@ export async function POST(req: Request) {
             extractionProfile: d.data().extractionProfile || null
         }));
 
-        const taskHistory = allTasksHistorySnap.docs.map(d => ({
-            agentType: d.data().agentType,
-            status: d.data().status,
-            resultSummary: d.data().status === "DONE"
-                ? (d.data().rawResult?.summary || "Wykonano")
-                : (d.data().rawResult?.error || "BŁĄD"),
-            extractionProfile: d.data().extractionProfile || null
-        }));
-
-        const estimateState = estimateSnap.docs.map(d => ({
-            sekcja: d.data().section,
-            liczba_pozycji: d.data().items?.length || 0,
-            wartosc_zl: d.data().totalValue || 0
+        // ── POPRAWKA #2: rzeczywisty stan kosztorysu — odpytujemy subkolekcję items ──
+        const estimateState = await Promise.all(estimateSnap.docs.map(async (d) => {
+            const itemsSnap = await d.ref.collection("items").get();
+            return {
+                sekcja: d.data().section,
+                liczba_pozycji: itemsSnap.size,
+                wartosc_zl: d.data().totalValue || 0
+            };
         }));
         const isEstimateEmpty = estimateState.length === 0 || estimateState.every(s => s.liczba_pozycji === 0);
+
+        // ── HISTORIA ZADAŃ: Mózg + Technolog połączone, do deduplikacji i świadomości ──
+        const brainTaskSummaries = allTasksHistorySnap.docs.map(d => summarizeTaskDoc(d, "MOZG"));
+        const technologTaskSummaries = (technologTasksSnap.docs || []).map((d: any) => summarizeTaskDoc(d, "TECHNOLOG"));
+        const combinedTaskHistory = [...brainTaskSummaries, ...technologTaskSummaries];
+
+        // Sygnatury zadań aktywnych/zakończonych — z OBU stron — do guard rail
+        const existingTaskSignatures = new Set<string>(
+            combinedTaskHistory
+                .filter((t: any) => ["PENDING", "IN_PROGRESS", "DONE"].includes(t.status))
+                .map((t: any) => taskSignature(t.agentType, t.inputDocIds, t.instruction)) // 🟢 Dodano t.instruction
+        );
 
         // Dane od Technologa
         const technologistFindings = technologistFindingsSnap.docs.map(d => ({
@@ -1324,6 +1465,9 @@ export async function POST(req: Request) {
         // Buduj opis stanu Technologa
         const technologistContext = buildTechnologistContext(technologistFindings, techPhase);
 
+        // ── POPRAWKA #3: korelacja MISSING_SCOPE ↔ realny stan kosztorysu ──
+        const scopeCoverageContext = buildScopeCoverageContext(technologistFindings, estimateState);
+
         // Znajdź brakujące zakresy które Technolog ma w kolejce (żeby nie duplikować)
         const technologGapsInProgress = technologSnap.exists
             ? (technologSnap.data()?.technologicalState?.technologicalGaps || []).map((g: any) => g.element)
@@ -1333,7 +1477,7 @@ export async function POST(req: Request) {
 
 === ZASADA DZIAŁANIA (COGNITIVE ARCHITECTURE) ===
 Nie deleguj ślepo — TY JESTEŚ JEDYNYM EKSPERTEM.
-Twój proces: 
+Twój proces:
 1. Budowa hipotezy czym jest inwestycja (worldModel).
 2. BELIEF REVISION: Konfrontuj nowe dane ze starymi hipotezami. Obniżaj/podnoś pewność.
 3. Wykrywanie luk. Oblicz Wpływ Ekonomiczny (Economic Impact Score 1-100).
@@ -1341,23 +1485,37 @@ Twój proces:
 5. Generowanie pozycji WYŁĄCZNIE gdy pewność (confidence) ≥ 75%.
 
 === ZASADA WSPÓŁPRACY Z TECHNOLOGIEM ===
-Masz drugiego eksperta — Technologa Budowlanego. On pracuje równolegle i dostarcza Ci:
+Masz drugiego eksperta — Technologa Budowlanego. On pracuje równolegle, ma WŁASNYCH workerów (np. może
+samodzielnie zlecić Obmiarowcowi/BOQ_PARSER ekstrakcję konkretnego przedmiaru) i dostarcza Ci dodatkowo:
 - Listę BRAKUJĄCYCH działów kosztorysowych (MISSING_SCOPE)
-- Wskaźniki kosztowe (COST_INDICATOR) 
+- Wskaźniki kosztowe (COST_INDICATOR)
 - Specyfikacje materiałów (MATERIAL_SPEC)
 - Ilości wskaźnikowe (QUANTITY_ESTIMATE)
 - Wymagania normowe (NORM_REQUIREMENT)
 
+KLUCZOWE: Sekcja "HISTORIA WSZYSTKICH ZADAŃ" zawiera zadania zlecone PRZEZ CIEBIE (origin: MOZG) ORAZ zadania
+zlecone PRZEZ TECHNOLOGA jego workerom (origin: TECHNOLOG). Jeśli widzisz tam np. że Technolog zlecił
+BOQ_PARSER dla konkretnego pliku/zakresu i ma status DONE — te dane PRAWDOPODOBNIE trafiły już do kosztorysu
+(sekcja "AKTUALNY STAN KOSZTORYSU"). NIE zlecaj tego ponownie. Pamiętaj jednak, że zadanie Technologa może
+dotyczyć tylko WYCINKA jednego działu (np. jednej branży instalacyjnej) — nie zakładaj automatycznie, że
+CAŁY dział jest pokryty tylko bo Technolog coś zlecił. Zweryfikuj zakres (inputDocIds, instruction,
+resultSummary) i porównaj z liczbą pozycji w odpowiadającej sekcji kosztorysu.
+
 ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 ▸ MISSING_SCOPE z confidence ≥ 70%:
-  Musisz ZAREAGOWAĆ. Masz dwie opcje:
-  a) Jeśli typicalItems są konkretne → generuj pozycje SAMODZIELNIE do newEstimateItems (assumptionMode: true, oznacz [ZAKRES TECHNOLOGA])
-  b) Jeśli typicalItems są ogólne → zlecaj BUDOWLANIEC z instrukcją: "Rozpisz pełny przedmiar dla działu [nazwa], typowe pozycje: [lista]. Obiekt: [typ]"
-  NIE ignoruj MISSING_SCOPE. Brak reakcji = dziura w kosztorysie.
+  Sprawdź najpierw sekcję "POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS" poniżej — mówi ona, czy dany dział ma już
+  pozycje w kosztorysie (niezależnie od tego, kto je tam wstawił — Ty, BOQ_PARSER czy worker Technologa).
+  - Jeśli dział jest oznaczony jako NIEPOKRYTE → MUSISZ ZAREAGOWAĆ:
+    a) Jeśli typicalItems są konkretne → generuj pozycje SAMODZIELNIE do newEstimateItems (assumptionMode: true, oznacz [ZAKRES TECHNOLOGA])
+    b) Jeśli typicalItems są ogólne → zlecaj BUDOWLANIEC z instrukcją: "Rozpisz pełny przedmiar dla działu [nazwa], typowe pozycje: [lista]. Obiekt: [typ]"
+  - Jeśli dział jest oznaczony jako MOŻLIWE POKRYCIE → NIE generuj duplikatów. Możesz jednak zlecić
+    SILENT_AUDITOR lub PYTHON_CALC weryfikację kompletności/wartości istniejących pozycji, jeśli uznasz to
+    za istotne, ale nie twórz nowych pozycji dla tego zakresu bez wyraźnego powodu.
+  NIE ignoruj MISSING_SCOPE oznaczonego jako NIEPOKRYTE. Brak reakcji = dziura w kosztorysie.
 
 ▸ COST_INDICATOR z confidence ≥ 65%:
   Przelicz: unitCostMin × ilość = wartość. Wpisz do opisu pozycji [WSKAŹNIK: X PLN/j.m. × Y j.m. = Z PLN].
-  Jeśli masz MISSING_SCOPE + COST_INDICATOR dla tego samego zakresu → zlecaj GAP_FILLER z oboma danymi.
+  Jeśli masz MISSING_SCOPE (NIEPOKRYTE) + COST_INDICATOR dla tego samego zakresu → zlecaj GAP_FILLER z oboma danymi.
   GAP_FILLER dostanie wskaźnik i wygeneruje pozycje z cenami.
 
 ▸ MATERIAL_SPEC z confidence ≥ 70%:
@@ -1368,13 +1526,28 @@ ZASADY KORZYSTANIA Z DANYCH TECHNOLOGA:
 
 ▸ Technolog w fazie WORKING lub ANALYZING:
   Dla zakresów które MA W KOLEJCE (technologGapsInProgress) — POCZEKAJ zanim zaczniesz zgadywać.
-  Nie twórz duplikatów. Sprawdź co Technolog już bada.
+  Nie twórz duplikatów. Sprawdź co Technolog już bada (sekcja HISTORIA WSZYSTKICH ZADAŃ, origin: TECHNOLOG,
+  status PENDING/IN_PROGRESS).
 
 ▸ Technolog w fazie DONE:
   Wszystkie jego dane są finalne. Działaj na nich w pełni.
 
+▸ Fizycznie wycięte rysunki (hasSeparatedDrawings: true):
+  Jeśli dokument posiada flagę 'hasSeparatedDrawings: true', oznacza to, że rysunki techniczne zostały
+  fizycznie odseparowane do osobnego pliku pomocniczego w celu optymalizacji kosztów. Kiedy będziesz 
+  zlecać zadanie analizy rysunków Agentowi Vision, użyj normalnego ID tego dokumentu — Agent Vision 
+  automatycznie i po cichu przekieruje swoje zapytanie na ten wycięty plik PDF z rysunkami.
+
+=== ZASADA DEDUPLIKACJI ZADAŃ (GUARD RAIL) ===
+Przed dodaniem zadania do newTasks, sprawdź sekcję "HISTORIA WSZYSTKICH ZADAŃ" — jeśli istnieje wpis
+(z Twojej historii LUB Technologa) z tym samym agentType i tym samym (lub podzbiorem/nadzbiorem) zestawem
+inputDocIds, w statusie PENDING, IN_PROGRESS lub DONE — NIE twórz duplikatu. System odrzuci identyczne
+sygnatury automatycznie, ale Twoim zadaniem jest nie próbować ich tworzyć w ogóle (oszczędza to cykl
+rozumowania). Jeśli potrzebujesz INNEJ części tego samego dokumentu lub innego extractionProfile —
+to NIE jest duplikat, możesz zlecić.
+
 === TRYB ZAŁOŻEŃ RYNKOWYCH (ASSUMPTION_MODE) ===
-Jeśli brakuje dokumentacji technicznej LUB reagujesz na MISSING_SCOPE bez rysunków:
+Jeśli brakuje dokumentacji technicznej LUB reagujesz na MISSING_SCOPE (NIEPOKRYTE) bez rysunków:
 - Włącz assumptionMode: true
 - Przygotuj assumptionDisclaimer
 - Każdą pozycję oznacz w opisie jako [ZAŁOŻENIE RYNKOWE] lub [ZAKRES TECHNOLOGA]
@@ -1402,13 +1575,16 @@ ${JSON.stringify(currentCognitiveState, null, 2)}
 === NOWE WYNIKI OD NARZĘDZI (świeże dane) ===
 ${newlyFinishedResults.length > 0 ? JSON.stringify(newlyFinishedResults, null, 2) : "(brak nowych wyników)"}
 
-=== HISTORIA URUCHOMIONYCH NARZĘDZI ===
-${JSON.stringify(taskHistory, null, 2)}
+=== HISTORIA WSZYSTKICH ZADAŃ (Twoje + Technologa, origin = MOZG | TECHNOLOG) ===
+${JSON.stringify(combinedTaskHistory, null, 2)}
 
-=== AKTUALNY STAN KOSZTORYSU ===
+=== AKTUALNY STAN KOSZTORYSU (sekcje + RZECZYWISTA liczba pozycji z subkolekcji items) ===
 ${isEstimateEmpty
                 ? "⚠️ KOSZTORYS JEST PUSTY. Szukaj luk kosztotwórczych (80-100 pkt) i twardych faktów."
                 : JSON.stringify(estimateState, null, 2)}
+
+=== POKRYCIE MISSING_SCOPE PRZEZ KOSZTORYS (korelacja automatyczna — zweryfikuj) ===
+${scopeCoverageContext}
 
 === DANE OD TECHNOLOGA BUDOWLANEGO ===
 ${technologistContext}
@@ -1425,20 +1601,27 @@ Brakujące zakresy zidentyfikowane przez Technologa: ${techIdentifiedMissingScop
 Każda pozycja w newEstimateItems musi mieć w polu "opis" dowód matematyczny i źródłowy w nawiasie kwadratowym.
 Przykład: "Beton C25/30 fundamenty [250 m3 × 450 zł/m3 = 112 500 PLN | źródło: MATERIAL_SPEC Technologa]"
 
-UWAGA KRYTYCZNA: Pozycje BOQ_PARSER zapisują się AUTOMATYCZNIE.
-Jeśli widzisz w historii że BOQ_PARSER zwrócił rawResult.items — NIE przepisuj ich do newEstimateItems.
+UWAGA KRYTYCZNA: Pozycje BOQ_PARSER (zarówno Twoje, jak i Technologa) zapisują się AUTOMATYCZNIE do kosztorysu.
+Jeśli widzisz w HISTORII WSZYSTKICH ZADAŃ, że BOQ_PARSER (origin: MOZG lub TECHNOLOG) zwrócił pozycje
+(resultSummary "Zwrócono N pozycji") — te pozycje SĄ JUŻ w "AKTUALNY STAN KOSZTORYSU". NIE przepisuj ich
+do newEstimateItems.
 
 === HISTORIA CZATU ===
 ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomości)"}
 
 === CO MASZ ZROBIĆ ===
 1. Zaktualizuj CognitiveState. Przerób wyniki narzędzi i findings Technologa w fakty. Belief Revision.
-2. Przeprowadź Samokrytykę. Sprawdź failedStrategies.
-3. REAGUJ na każde MISSING_SCOPE od Technologa — to Twój priorytet gdy kosztorys jest niepełny.
+   Uwzględnij RZECZYWISTY stan kosztorysu (estimateState) — jeśli pokazuje pozycje, których wcześniej nie
+   widziałeś (bo zlecił je Technolog), zaktualizuj worldModel/knownFacts o tym fakcie.
+2. Przeprowadź Samokrytykę. Sprawdź failedStrategies. Sprawdź, czy nie powtarzasz zadania, które już
+   wykonał Technolog (HISTORIA WSZYSTKICH ZADAŃ, origin: TECHNOLOG).
+3. REAGUJ na każde MISSING_SCOPE od Technologa oznaczone jako NIEPOKRYTE — to Twój priorytet gdy kosztorys
+   jest niepełny. Dla MOŻLIWE POKRYCIE — zweryfikuj, nie duplikuj.
 4. Gdy tworzysz zadanie dla BOQ_PARSER lub VISION — zawsze wypełnij extractionProfile.
-5. Pamiętaj: workery (BUDOWLANIEC, GAP_FILLER, SILENT_AUDITOR itp.) działają BEZ sztywnego schematu — daj im precyzyjne instrukcje tekstowe w polu instruction.`;
+5. Pamiętaj: workery (BUDOWLANIEC, GAP_FILLER, SILENT_AUDITOR itp.) działają BEZ sztywnego schematu — daj im precyzyjne instrukcje tekstowe w polu instruction.
+6. Przed dodaniem zadania do newTasks sprawdź deduplikację (patrz ZASADA DEDUPLIKACJI ZADAŃ).`;
 
-        console.log(`[MÓZG 🧠] Prompt gotowy. Findings od Technologa: ${technologistFindings.length}. Wywołuję model...`);
+        console.log(`[MÓZG 🧠] Prompt gotowy. Findings od Technologa: ${technologistFindings.length}. Zadania Technologa w historii: ${technologTaskSummaries.length}. Wywołuję model...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
@@ -1569,9 +1752,18 @@ ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomo
             }
         }
 
-        // Tworzenie nowych zadań dla workerów
+        // ── POPRAWKA #3: deduplikacja newTasks (guard rail po stronie kodu) ──
         const newTasksCreated: any[] = [];
         (parsedResult.newTasks || []).forEach((task: any) => {
+            const sig = taskSignature(task.agentType, task.inputDocIds);
+
+            if (existingTaskSignatures.has(sig)) {
+                console.log(`[MÓZG 🧠] DEDUPLIKACJA: Zadanie ${task.agentType} dla [${(task.inputDocIds || []).join(", ")}] już istnieje (PENDING/IN_PROGRESS/DONE — Mózg lub Technolog) — odrzucono.`);
+                return;
+            }
+            // chroni też przed duplikatami WEWNĄTRZ tej samej odpowiedzi modelu
+            existingTaskSignatures.add(sig);
+
             const taskRef = tasksRef.doc();
             const inputFacts: Record<string, any> = {};
             (task.inputFactsKeys || []).forEach((key: string) => {
@@ -1668,72 +1860,231 @@ ${chatHistory.length > 0 ? JSON.stringify(chatHistory, null, 2) : "(brak wiadomo
 --- START OF FILE src/app/api/kosztorysant/glowny-kosztorysant/inicjalizuj/route.ts ---
 
 import { NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase/admin";
+import { adminDb, adminStorage } from "@/lib/firebase/admin";
 import { GoogleGenAI, Type } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
+import { PDFDocument } from "pdf-lib";
 import dns from "dns";
+
+// Optymalizacja zapytań DNS w środowisku Node
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300; // 5 minut - max na Cloud Run
 
-// Używamy nowego, szybkiego i ultra-taniego modelu Flash-Lite dla klasyfikacji sensorycznej
 const MODEL_LITE = "gemini-2.5-flash-lite";
+const MODEL_CONVERTER = "gemini-2.5-flash";
 
-const ai = new GoogleGenAI({
+// 🌍 Klient GLOBALNY (dla zadań lekkich: klasyfikacji)
+const aiGlobal = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
     location: "global"
 });
 
+// 🇪🇺 Klient REGIONALNY (dla ciężkich zadań: konwersji Markdown)
+const aiRegional = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "europe-west4"
+});
+
+// Schemat zwracany przez klasyfikatora (Mózg Sensoryczny)
 const CLASSIFIER_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        tags: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Tagi dokumentu, np. [SWZ], [UMOWA], [SPECYFIKACJA], [OPIS_TECHNICZNY]"
+        tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+        summary: { type: Type.STRING },
+        detailedElement: { type: Type.STRING },
+        containsTablesWithDimensions: { type: Type.BOOLEAN },
+        drawingPages: { 
+            type: Type.ARRAY, 
+            items: { type: Type.NUMBER },
+            description: "Numery stron (liczone od 1), na których są rysunki techniczne, mapy, schematy ORAZ strony zawierające bezpośrednio powiązane z nimi opisy/legendy. Zwróć pustą tablicę, jeśli brak rysunków."
         },
-        summary: {
-            type: Type.STRING,
-            description: "Maksymalnie 2-zdaniowe streszczenie zawartości pliku."
-        },
-        detailedElement: {
-            type: Type.STRING,
-            description: "Konkretny, szczegółowy element budowlany, którego dotyczy rysunek/dokument wyciągnięty z tabelki rysunkowej (np. 'płyta fundamentowa', 'strop nad parterem', 'zbrojenie słupów', 'elewacja południowa', 'szczegół dachu', 'winda'). Wpisz 'NIE_DOTYCZY' jeśli to ogólny dokument tekstowy jak SWZ."
-        },
-        containsTablesWithDimensions: {
-            type: Type.BOOLEAN,
-            description: "Czy dokument zawiera tabele z przedmiarami, obmiarami lub wymiarami fizycznymi obiektu."
-        },
-        containsDrawings: {
-            type: Type.BOOLEAN,
-            description: "Czy dokument zawiera rysunki techniczne, rzuty, przekroje, schematy lub inną dokumentację graficzną."
-        }
+        pageCount: { type: Type.NUMBER }
     },
-    required: ["tags", "summary", "detailedElement", "containsTablesWithDimensions", "containsDrawings"]
+    required: ["tags", "summary", "detailedElement", "containsTablesWithDimensions", "drawingPages", "pageCount"]
 };
 
+// 🛡️ Pancerny Retry API
 async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
     try {
         return await fn();
     } catch (error: any) {
-        const errorText = error.toString() || "";
-        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
-        if (isRateLimit && retries > 0) {
-            console.warn(`[FAZA 0 🚀] Limit 429. Odczekuję ${delay / 1000}s...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+        const fullText = `${error?.toString?.() || ""} ${error?.cause?.toString?.() || ""}`;
+        const isRateLimit = fullText.includes("429") || fullText.includes("RESOURCE_EXHAUSTED");
+        const isSocketError = fullText.includes("UND_ERR_SOCKET") || fullText.includes("fetch failed") || fullText.includes("ECONNRESET") || fullText.includes("ETIMEDOUT");
+
+        if ((isRateLimit || isSocketError) && retries > 0) {
+            const jitter = Math.random() * 3000;
+            const waitTime = delay + jitter;
+            console.warn(`[FAZA 0/0.5 ⚠️] API Limit/Sieć. Czekam ${Math.round(waitTime / 1000)}s...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
     }
 }
 
+// 🚄 Współbieżność zabezpieczająca limity pamięci i CPU
+async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    const executing = new Set<Promise<void>>();
+    for (const task of tasks) {
+        const p = task().then(res => { results.push(res); });
+        executing.add(p);
+        p.finally(() => executing.delete(p));
+        if (executing.size >= concurrency) await Promise.race(executing);
+    }
+    await Promise.all(executing);
+    return results;
+}
+
+// 🛠️ Funkcja pomocnicza: Grupuje ciągi liczb (np. [13, 14, 15, 50] -> {start: 13, end: 15}, {start: 50, end: 50})
+function groupConsecutivePages(pages: number[]): { start: number, end: number }[] {
+    if (pages.length === 0) return [];
+    const sorted = [...pages].sort((a, b) => a - b);
+    const groups = [];
+    let start = sorted[0];
+    let prev = sorted[0];
+
+    for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i] === prev + 1) {
+            prev = sorted[i];
+        } else {
+            groups.push({ start, end: prev });
+            start = sorted[i];
+            prev = sorted[i];
+        }
+    }
+    groups.push({ start, end: prev });
+    return groups;
+}
+
+/**
+ * 🚀 METODA DZIEL I ŁĄCZ 4.1: (Z Systemowymi Kotwicami)
+ */
+async function convertPdfToMarkdownInShadow(
+    docSnap: FirebaseFirestore.QueryDocumentSnapshot,
+    bucketName: string,
+    originalPdf: PDFDocument,
+    textPages: number[], 
+    drawingPages: number[], 
+    containsTables: boolean,
+    drawingsFilename: string 
+): Promise<number> {
+    const docData = docSnap.data();
+    const originalPath = docData.storagePath as string;
+    const mdPath = `${originalPath}.md`;
+
+    // Routing inteligentny
+    const CHUNK_SIZE = containsTables ? 10 : 30; 
+    let totalTokensUsed = 0;
+
+    console.log(`[FAZA 0.5 🏗️] Konwersja MD dla ${docData.fileName} (Stron tekstu: ${textPages.length}, Stron rysunków: ${drawingPages.length})`);
+
+    // Dzielimy strony tekstowe na mniejsze paczki dla modelu LLM
+    const chunks: { pages: number[] }[] = [];
+    for (let i = 0; i < textPages.length; i += CHUNK_SIZE) {
+        chunks.push({ pages: textPages.slice(i, i + CHUNK_SIZE) });
+    }
+
+    const tasks = chunks.map((chunk, index) => async () => {
+        const pagesToExtract = chunk.pages;
+        console.log(`[FAZA 0.5 ✂️] Wycianam i procesuję paczkę tekstu: [${pagesToExtract.join(", ")}]...`);
+        
+        const newPdf = await PDFDocument.create();
+        const pageIndices = pagesToExtract.map(p => p - 1);
+        const copiedPages = await newPdf.copyPages(originalPdf, pageIndices);
+        copiedPages.forEach(page => newPdf.addPage(page));
+        
+        const newPdfBytes = await newPdf.save();
+        const base64Data = Buffer.from(newPdfBytes).toString("base64");
+
+        const converterPrompt = `
+Jesteś precyzyjnym konwerterem dokumentów budowlanych.
+Zignoruj to, że to wycinek z większej całości. Przeanalizuj i przepisz załączony fragment na format Markdown.
+Zasady:
+${containsTables 
+    ? "- ZACHOWAJ TABELE jako czyste tabele Markdown (| kolumna | kolumna |) i zachowaj wszystkie liczby, jednostki oraz przedmiary." 
+    : "- Przepisz tekst z zachowaniem oryginalnej struktury nagłówków (#, ##, ###)."}
+- Odpowiedz TYLKO i WYŁĄCZNIE treścią Markdown.
+`;
+
+        const result = await callGeminiWithRetry(async () => {
+            return await aiRegional.models.generateContent({
+                model: MODEL_CONVERTER,
+                contents: [{
+                    role: "user",
+                    parts: [
+                        { text: converterPrompt },
+                        { inlineData: { data: base64Data, mimeType: "application/pdf" } }
+                    ]
+                }],
+                config: { temperature: 0.1 }
+            });
+        });
+
+        const tokens = result.usageMetadata?.totalTokenCount || 0;
+        let chunkText = result.text ?? "";
+        chunkText = chunkText.replace(/```markdown/gi, "").replace(/```/g, "").trim();
+
+        // 🟢 Zwracamy obiekt z wygenerowanym Markdownem
+        return { start: pagesToExtract[0], text: `<!-- Wyciąg ze stron: ${pagesToExtract.join(", ")} -->\n${chunkText}`, tokens };
+    });
+
+    const MAX_CONCURRENCY = 3; 
+    const results = await runWithConcurrency(tasks, MAX_CONCURRENCY);
+    totalTokensUsed = results.reduce((acc, curr) => acc + curr.tokens, 0);
+
+    // ⚓ TWORZYMY SYSTEMOWE KOTWICE DLA USUNIĘTYCH RYSUNKÓW (Darmowe, bez użycia API!)
+    const drawingGroups = groupConsecutivePages(drawingPages);
+    for (const group of drawingGroups) {
+        const pageRange = group.start === group.end ? `strony ${group.start}` : `stron ${group.start} - ${group.end}`;
+        
+        const anchorText = `
+> ⚠️ **[SYSTEM PESAM - KOTWICA WIZUALNA]** 
+> Z tego miejsca (${pageRange}) wyodrębniono rysunki techniczne, schematy lub mapy. 
+> Zostały one fizycznie przeniesione do pliku: \`${drawingsFilename}\`.
+> *Jeżeli do wykonania wyceny lub sprawdzenia obmiarów potrzebujesz danych z tych rysunków, zleć zadanie analizy Agentowi Vision (wskazując ten plik).*
+`;
+        
+        // Dodajemy Kotwicę do puli wyników (udaje normalną paczkę, co pozwala zachować chronologię)
+        results.push({ start: group.start, text: anchorText.trim(), tokens: 0 });
+    }
+
+    // 🔄 SORTUJEMY WSZYSTKO W JEDNĄ SPÓJNĄ CAŁOŚĆ (Teksty + Kotwice według oryginalnych numerów stron)
+    results.sort((a, b) => a.start - b.start);
+    
+    // Kleimy finalny plik Markdown
+    const compiledMarkdown = results.map(r => r.text).join("\n\n---\n\n");
+
+    if (compiledMarkdown.length >= 50) {
+        const bucket = adminStorage.bucket(bucketName);
+        await bucket.file(mdPath).save(compiledMarkdown, {
+            contentType: "text/markdown; charset=utf-8",
+            metadata: { cacheControl: "no-cache" }
+        });
+
+        await docSnap.ref.update({
+            storagePath: mdPath,
+            mimeType: "text/markdown",
+            isMarkdownCache: true,
+            originalStoragePath: originalPath,
+        });
+        console.log(`[FAZA 0.5 🏗️] ✅ Zapisano posklejany Markdown z kotwicami: ${mdPath}`);
+    } else {
+        console.warn(`[FAZA 0.5 ⚠️] Wynik MD dla ${docData.fileName} był zbyt krótki.`);
+    }
+
+    return totalTokensUsed;
+}
+
 export async function POST(req: Request) {
     try {
         const body = await req.json();
         const { tenderId } = body;
-
-        console.log(`[FAZA 0 🚀] Start inicjalizacji sensorycznej dla: ${tenderId}`);
 
         if (!tenderId) return NextResponse.json({ error: "Brak tenderId" }, { status: 400 });
 
@@ -1742,88 +2093,135 @@ export async function POST(req: Request) {
 
         if (snapshot.empty) return NextResponse.json({ message: "Brak dokumentów do klasyfikacji." });
 
-        console.log(`[FAZA 0 🚀] Skanuję ${snapshot.size} dokumentów przy użyciu ${MODEL_LITE}...`);
         let totalTokensUsed = 0;
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
+        const bucket = adminStorage.bucket(bucketName);
 
-        const BATCH_SIZE = 6;
-        for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
-            const batch = snapshot.docs.slice(i, i + BATCH_SIZE);
-            console.log(`[FAZA 0 🚀] Skanuję paczkę plików ${i + 1} do ${Math.min(i + BATCH_SIZE, snapshot.docs.length)}...`);
-
-            await Promise.all(batch.map(async (docSnap) => {
-                const docData = docSnap.data();
-                console.log(`[FAZA 0 🚀] Analizuję strukturę: ${docData.fileName}`);
-
-                try {
-                    const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-                    const prompt = `
+        for (let j = 0; j < snapshot.docs.length; j++) {
+            const docSnap = snapshot.docs[j];
+            const docData = docSnap.data();
+            
+            try {
+                const isPdf = (docData.mimeType || "").includes("pdf") || (docData.storagePath || "").toLowerCase().endsWith(".pdf");
+                const fileUri = `gs://${bucketName}/${docData.storagePath}`;
+                
+                // 🧠 KLASYFIKATOR SENSORYCZNY (Skanowanie całego dokumentu)
+                const prompt = `
 Jesteś Klasyfikatorem Sensorycznym systemu kosztorysowego PESAM 3.0. 
-Przeanalizuj pierwszą stronę lub spis treści tego dokumentu budowlanego. 
-Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy dokument zawiera tabele wymiarowe lub rysunki techniczne.
+Otrzymujesz CAŁY dokument budowlany do przeskanowania (od deski do deski).
+TWOJE ZADANIE:
+1. Przeskanuj go i zwróć JSON z odpowiednimi tagami, streszczeniem oraz łączną liczbą stron.
+2. Zaznacz 'containsTablesWithDimensions': true, jeśli dokument ma tabele z przedmiarami.
+3. BARDZO WAŻNE: Wypełnij tablicę 'drawingPages' numerami stron (od 1), na których znajdują się mapy, rzuty lub rysunki. 
+4. LOGICZNY KONTEKST: Jeśli rysunek ma powiązany ze sobą opis, legendę lub uwagi na stronach bezpośrednio przed nim lub po nim (np. mapa jest na str. 150, a na str. 148-149 jest do niej opis tekstowy), DOŁĄCZ numery tych stron opisowych do tablicy 'drawingPages'. Chcemy wyciąć rysunek razem z jego kontekstem.
 `;
-
-                    const result = await callGeminiWithRetry(async () => {
-                        return await ai.models.generateContent({
-                            model: MODEL_LITE,
-                            contents: [{
-                                role: "user",
-                                parts: [
-                                    { text: prompt },
-                                    { fileData: { fileUri: fileUri, mimeType: docData.mimeType || "application/pdf" } }
-                                ]
-                            }],
-                            config: {
-                                temperature: 0.1,
-                                responseMimeType: "application/json",
-                                responseSchema: CLASSIFIER_SCHEMA as any
-                            }
-                        });
+                const result = await callGeminiWithRetry(async () => {
+                    return await aiGlobal.models.generateContent({
+                        model: MODEL_LITE,
+                        contents: [{
+                            role: "user",
+                            parts: [
+                                { text: prompt },
+                                { fileData: { fileUri: fileUri, mimeType: docData.mimeType || "application/pdf" } }
+                            ]
+                        }],
+                        config: {
+                            temperature: 0.1,
+                            responseMimeType: "application/json",
+                            responseSchema: CLASSIFIER_SCHEMA as any
+                        }
                     });
+                });
 
-                    let parsedResult: any = {};
-                    try {
-                        parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
-                    } catch (e) {
-                        console.error(`[FAZA 0 🚀] Błąd parsowania JSON dla ${docData.fileName}`);
+                const parsedResult = JSON.parse(jsonrepair(result.text ?? "{}"));
+                totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+
+                let drawingPages: number[] = parsedResult.drawingPages || [];
+                const pageCount = parsedResult.pageCount || 1;
+
+                await docSnap.ref.update({
+                    tags: parsedResult.tags || [],
+                    summary: parsedResult.summary || "(brak)",
+                    detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
+                    containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
+                    containsDrawings: drawingPages.length > 0,
+                    pageCount: pageCount,
+                    status: "CLASSIFIED",
+                    classifyModel: MODEL_LITE,
+                    updatedAt: new Date()
+                });
+
+                console.log(`[FAZA 0 🚀] Sklasyfikowano: ${docData.fileName} (Strony z rysunkami/mapami: [${drawingPages.join(", ")}])`);
+
+                // --- KROK 2: SMART EXTRACTION ---
+                if (isPdf) {
+                    const [fileBuffer] = await bucket.file(docData.storagePath).download();
+                    const originalPdf = await PDFDocument.load(fileBuffer);
+                    const actualPageCount = originalPdf.getPageCount();
+
+                    // Czyszczenie danych od AI (duplikaty i strony spoza zakresu)
+                    drawingPages = [...new Set(drawingPages)].filter(p => p >= 1 && p <= actualPageCount).sort((a,b) => a-b);
+                    
+                    const textPages: number[] = [];
+                    for (let p = 1; p <= actualPageCount; p++) {
+                        if (!drawingPages.includes(p)) textPages.push(p);
                     }
 
-                    const tokensUsed = result.usageMetadata?.totalTokenCount || 0;
-                    totalTokensUsed += tokensUsed;
+                    const originalFileName = docData.fileName || "dokument.pdf";
+                    const drawingsFilename = drawingPages.length > 0 
+                        ? originalFileName.replace(/\.pdf$/i, '_drawings.pdf') 
+                        : "Brak";
+                    
+                    // A) Zapisz osobny PDF z rysunkami dla Agenta Vision
+                    if (drawingPages.length > 0) {
+                        const drawingsPdf = await PDFDocument.create();
+                        const copiedDrawings = await drawingsPdf.copyPages(originalPdf, drawingPages.map(p => p - 1));
+                        copiedDrawings.forEach(page => drawingsPdf.addPage(page));
+                        
+                        const drawingsStoragePath = (docData.storagePath as string).replace(/\.pdf$/i, '_drawings.pdf');
+                        const drawingsPdfBytes = await drawingsPdf.save();
+                        await bucket.file(drawingsStoragePath).save(drawingsPdfBytes, { contentType: "application/pdf" });
+                        
+                        await docSnap.ref.update({ drawingsStoragePath, hasSeparatedDrawings: true });
+                        console.log(`[FAZA 0.5 ✂️] Utworzono plik bazowy dla Agenta Vision: ${drawingsStoragePath}`);
+                    }
 
-                    await docSnap.ref.update({
-                        tags: parsedResult.tags || [],
-                        summary: parsedResult.summary || "(brak)",
-                        detailedElement: parsedResult.detailedElement || "NIE_DOTYCZY",
-                        containsTablesWithDimensions: parsedResult.containsTablesWithDimensions || false,
-                        containsDrawings: parsedResult.containsDrawings || false,
-                        status: "CLASSIFIED",
-                        classifyModel: MODEL_LITE,
-                        updatedAt: new Date()
-                    });
-
-                    console.log(`[FAZA 0 🚀] Sukces dla ${docData.fileName}. Tabele: ${parsedResult.containsTablesWithDimensions}, Rysunki: ${parsedResult.containsDrawings}`);
-
-                } catch (docError: any) {
-                    console.error(`[FAZA 0 🚀] Błąd klasyfikacji dla ${docData.fileName}:`, docError);
-                    await docSnap.ref.update({ status: "ERROR_CLASSIFYING", errorDetails: docError.message, updatedAt: new Date() }).catch(() => { });
+                    // B) Przerób pozostałe strony na Markdown wstrzykując Kotwice
+                    if (textPages.length > 0) {
+                        try {
+                            const mdTokens = await convertPdfToMarkdownInShadow(
+                                docSnap, 
+                                bucketName, 
+                                originalPdf, 
+                                textPages, 
+                                drawingPages, 
+                                parsedResult.containsTablesWithDimensions,
+                                drawingsFilename
+                            );
+                            totalTokensUsed += mdTokens;
+                        } catch (convErr: any) {
+                            console.warn(`[FAZA 0.5 📄] Błąd MD dla ${docData.fileName}:`, convErr);
+                        }
+                    } else {
+                        console.log(`[FAZA 0.5 📄] Plik to 100% rysunki. Skrypt pomija konwersję na tekst.`);
+                    }
                 }
-            }));
 
-            // Przerwa tylko między paczkami, a nie pojedynczymi plikami
-            if (i + BATCH_SIZE < snapshot.docs.length) {
-                await new Promise(r => setTimeout(r, 2000));
+            } catch (docError: any) {
+                console.error(`[FAZA 0 🚀] Błąd dla dokumentu ${docData.fileName}:`, docError);
+                await docSnap.ref.update({ status: "ERROR_CLASSIFYING", updatedAt: new Date() }).catch(() => { });
             }
+            await new Promise(r => setTimeout(r, 1000)); // Pacing między dokumentami
         }
 
-        // Koszt tokenów dla Flash-Lite jest drastycznie niższy (około $0.000075 za 1k input tokenów)
-        const estimatedCostUSD = (totalTokensUsed / 1000) * 0.000075;
+        // Estymacja kosztu i aktualizacja "Budżetu Ochronnego" w Przetargu
+        const estimatedCostUSD = (totalTokensUsed / 1000) * 0.0003;
         const tenderRef = adminDb.collection("tenders").doc(tenderId);
 
         await adminDb.runTransaction(async (t) => {
             const tenderDoc = await t.get(tenderRef);
             if (tenderDoc.exists) {
-                const currentBudget = tenderDoc.data()?.budgetGuard || { currentCostUSD: 0, maxBudgetUSD: 5.0, limitReached: false, iterationCount: 0, maxIterations: 50 };
+                const currentBudget = tenderDoc.data()?.budgetGuard || { currentCostUSD: 0 };
                 t.update(tenderRef, {
                     status: "ORCHESTRATING",
                     "budgetGuard.currentCostUSD": currentBudget.currentCostUSD + estimatedCostUSD,
@@ -1832,6 +2230,7 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy 
             }
         });
 
+        // 🧠 Inicjalizacja Głównego Mózgu Przetargu
         const brainRef = adminDb.collection(`tenders/${tenderId}/brain`).doc("main");
         await brainRef.set({
             phase: "PLANNING",
@@ -1840,30 +2239,25 @@ Zwróć JSON z odpowiednimi tagami, streszczeniem oraz precyzyjnie określ, czy 
             missingData: [],
             activeTaskIds: [],
             pendingDecisions: [],
-            reasoningLog: ["Inicjalizacja sensoryczna zakończona pomyślnie."],
+            reasoningLog: ["Zakończono Fazę 0: System wykonał ekstrakcję dokumentów tekstowych oraz oddzielił rysunki techniczne do analizy wizualnej."],
             totalCostUSD: estimatedCostUSD
         }, { merge: true });
 
+        // Wybudzenie Agentów Nadrzędnych
         const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
-
-        // Wybudzenie Głównego Kosztorysanta (PESAM)
         fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
         }).catch(() => { });
-
-        // NOWE: Jednoczesne wybudzenie Głównego Technologa Budowlanego
         fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tenderId, trigger: "CLASSIFICATION_COMPLETE" })
         }).catch(() => { });
 
-        return NextResponse.json({ success: true, tokensUsed: totalTokensUsed, modelUsed: MODEL_LITE });
+        return NextResponse.json({ success: true, tokensUsed: totalTokensUsed });
 
     } catch (error: any) {
-        console.error("[FAZA 0 🚀] Błąd krytyczny inicjalizacji:", error);
+        console.error("[FAZA 0 🚀] Błąd krytyczny API:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
@@ -3867,10 +4261,10 @@ import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300; // Zwiększenie czasu wykonania w chmurze Google do 5 minut
+export const maxDuration = 300; 
 
-// Definiujemy najszybszy i najnowocześniejszy model dla Wizji bezpośrednio z Twojego konta GCP!
-const MODEL_FLASH = "gemini-3.5-flash";
+// Wymuszamy najnowszy, szybki model Flash 2.5
+const MODEL_FLASH = "gemini-2.5-flash";
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -3886,7 +4280,7 @@ async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 
         const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
         if (isRateLimit && retries > 0) {
             console.warn(`[VISION 📐] Limit 429. Odczekuję ${delay / 1000}s...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            await new Promise(resolve => setTimeout(resolve, delay + Math.random() * 2000));
             return callGeminiWithRetry(fn, retries - 1, delay * 2);
         }
         throw error;
@@ -3926,19 +4320,27 @@ export async function POST(req: Request) {
         const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
         const parts: any[] = [];
 
-        // Generujemy bezpośrednie linki GCS
         for (const docId of inputDocIds) {
             const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
             if (!docSnap.exists) continue;
 
             const docData = docSnap.data()!;
-            const fileUri = `gs://${bucketName}/${docData.storagePath}`;
-            console.log(`[VISION 📐] Referencja GCS dla rysunku: ${fileUri}`);
+            
+            // 🟢 INTELIGENTNY ROUTING PLIKU DLA WIZJI:
+            // Jeśli Faza 0 wycięła z tego dokumentu rysunki do osobnego pliku, Agent Vision
+            // pobiera ten wycięty plik (_drawings.pdf). W przeciwnym wypadku bierze oryginalny PDF.
+            // Nigdy nie próbuje czytać pliku tekstowego .md!
+            const storagePath = docData.hasSeparatedDrawings 
+                ? docData.drawingsStoragePath 
+                : (docData.originalStoragePath || docData.storagePath);
+
+            const fileUri = `gs://${bucketName}/${storagePath}`;
+            console.log(`[VISION 📐] Kieruję analizę wizyjną na plik PDF: ${storagePath}`);
 
             parts.push({
                 fileData: {
                     fileUri: fileUri,
-                    mimeType: docData.mimeType || "application/pdf"
+                    mimeType: "application/pdf" // Zawsze PDF dla silnika wizyjnego
                 }
             });
         }
@@ -3956,11 +4358,11 @@ Ważne zasady:
 `;
 
         parts.unshift({ text: prompt });
-        console.log(`[VISION 📐] Wysyłam zapytanie referencyjne GCS do Gemini...`);
+        console.log(`[VISION 📐] Wysyłam zapytanie do Gemini...`);
 
         const result = await callGeminiWithRetry(async () => {
             return await ai.models.generateContent({
-                model: MODEL_FLASH, // Wymuszenie stałej z pliku!
+                model: MODEL_FLASH,
                 contents: parts,
                 config: {
                     temperature: 0.1,
@@ -3980,15 +4382,13 @@ Ważne zasady:
             updatedAt: new Date()
         });
 
-        const costPerThousand = (taskData.modelOverride === "gemini-2.5-pro") ? 0.002 : 0.000015;
-        const costUSD = (tokensUsed / 1000) * costPerThousand;
-
+        const costUSD = (tokensUsed / 1000) * 0.000015; // Tani koszt modelu Flash
         await adminDb.collection("tenders").doc(tenderId).update({
             "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
         });
 
         isSuccess = true;
-        console.log("[VISION 📐] Sukces.");
+        console.log("[VISION 📐] Sukces analizy wizyjnej rysunków.");
         return NextResponse.json({ success: true });
 
     } catch (error: any) {
@@ -5082,6 +5482,454 @@ ${rawPythonOutput}
 --- END OF FILE src/app/api/kosztorysant/agent-python-calc/route.ts ---
 
 
+--- START OF FILE src/app/api/kosztorysant/agent-pdf-splitter/route.ts ---
+
+import { NextResponse } from "next/server";
+import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
+
+export const dynamic = "force-dynamic";
+
+// Używamy modelu Flash-Lite: jest niesamowicie tani, szybki i doskonale radzi sobie z mapowaniem struktury dokumentów
+const MODEL_LITE = "gemini-2.5-flash-lite";
+
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 4000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[PDF SPLITTER ✂️] Limit 429. Czekam ${delay / 1000}s... (Pozostało prób: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
+    let isSuccess = false;
+
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
+
+        console.log(`[PDF SPLITTER ✂️] Rozpoczynam mapowanie logiczne dokumentów. Przetarg: ${tenderId} | Zadanie: ${taskId}`);
+
+        if (!tenderId || !taskId) {
+            return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+        }
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+        if (taskData.status !== "PENDING") {
+            return NextResponse.json({ message: "Zadanie zostało już obsłużone." });
+        }
+
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        const inputDocIds: string[] = taskData.inputDocIds || [];
+        if (inputDocIds.length === 0) {
+            await taskRef.update({
+                status: "DONE",
+                rawResult: { message: "Brak dokumentów wskazanych do podziału.", segments: [] },
+                processedByBrain: false,
+                updatedAt: new Date()
+            });
+            isSuccess = true;
+            return NextResponse.json({ message: "Brak dokumentów." });
+        }
+
+        const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
+        let totalTokensUsed = 0;
+        const allSegments: any[] = [];
+
+        // Przetwarzamy każdy przypisany dokument
+        for (const docId of inputDocIds) {
+            const docSnap = await adminDb
+                .collection(`tenders/${tenderId}/documents`)
+                .doc(docId)
+                .get();
+
+            if (!docSnap.exists) {
+                console.warn(`[PDF SPLITTER ✂️] Dokument o ID ${docId} nie istnieje w bazie. Pomijam.`);
+                continue;
+            }
+
+            const docData = docSnap.data()!;
+            console.log(`[PDF SPLITTER ✂️] ── Skanuję strukturę logiczną: "${docData.fileName}"`);
+
+            // Ścieżka bezpośrednia do Google Cloud Storage
+            const fileUri = `gs://${bucketName}/${docData.storagePath}`;
+
+            const scanPrompt = `
+Jesteś Kognitywnym Skanerem Struktury Dokumentów Budowlanych (PESAM 3.0, Faza 0.5).
+Twoim jedynym zadaniem jest zmapowanie LOGICZNYCH GRANIC tego dokumentu PDF.
+
+=== INSTRUKCJA OD MÓZGU ===
+${taskData.instruction}
+
+=== KONTEKST ===
+Plik: ${docData.fileName}
+Znane fakty projektu: ${JSON.stringify(taskData.inputFacts || {}).substring(0, 1000)}
+
+=== TWOJE ZADANIE ===
+Przejrzyj spis treści, nagłówki rysunków, tabelki rysunkowe i ogólną strukturę tego dokumentu.
+Zidentyfikuj wszystkie LOGICZNE SEKCJE – czyli grupy stron, które absolutnie NIE MOGĄ być rozerwane
+(np. rysunek zbrojenia płyty fundamentowej + jego legenda + zestawienie stali to jedna nierozrywalna jednostka).
+
+Zwróć WYŁĄCZNIE czysty obiekt JSON (bez znaczników markdown) z tablicą segmentów.
+Każdy segment to obiekt o strukturze:
+- "segmentId": STRING – unikalny identyfikator, np. "seg_01"
+- "label": STRING – krótka, czytelna nazwa sekcji, np. "Zbrojenie płyty fundamentowej"
+- "pageFrom": NUMBER – pierwsza strona tej sekcji (indeksowana od 1)
+- "pageTo": NUMBER – ostatnia strona tej sekcji (indeksowana od 1, włącznie)
+- "elementType": STRING – typ elementu: "RYSUNEK_ZBROJENIA" | "ZESTAWIENIE_STALI" | "OPIS_TECHNICZNY" | "PRZEDMIAR" | "SWZ" | "UMOWA" | "INNY"
+- "recommendedAgent": STRING – sugerowane narzędzie do obróbki: "VISION" | "BOQ_PARSER" | "LEGAL_EXPERT" | "KAMELEON"
+- "priority": NUMBER – priorytet ekonomiczny 1-100 (100 = największy wpływ na kosztorys, np. zbrojenie płyty, fundamenty; 5 = mało ważny detal)
+- "canSplitFurther": BOOLEAN – czy tę sekcję można bezpiecznie podzielić na mniejsze kawałki
+- "notes": STRING – ważne uwagi i instrukcje dla agenta, który otrzyma ten segment
+
+Zasady krytyczne:
+- Rysunek techniczny + jego legenda + powiązana tabela stali = JEDEN wspólny segment
+- Nigdy nie rozdzielaj tabeli przedmiarowej, która przechodzi płynnie między stronami
+- Spis treści i strona tytułowa = osobny segment o niskim priorytecie
+- Jeśli nie potrafisz wyznaczyć precyzyjnych granic – zwróć jeden segment obejmujący cały dokument
+`;
+
+            const scanResult = await callGeminiWithRetry(() =>
+                ai.models.generateContent({
+                    model: MODEL_LITE,
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [
+                                { text: scanPrompt },
+                                {
+                                    fileData: {
+                                        fileUri,
+                                        mimeType: docData.mimeType || "application/pdf"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    config: {
+                        temperature: 0.05,
+                        responseMimeType: "application/json"
+                    }
+                })
+            );
+
+            totalTokensUsed += scanResult.usageMetadata?.totalTokenCount || 0;
+
+            let segments: any[] = [];
+            try {
+                const parsed = JSON.parse(jsonrepair(scanResult.text ?? "{}"));
+                segments = Array.isArray(parsed)
+                    ? parsed
+                    : (parsed.segments || parsed.items || [parsed]);
+            } catch (parseErr) {
+                console.error(`[PDF SPLITTER ✂️] Błąd parsowania mapy logicznej dla "${docData.fileName}". Tworzę awaryjny segment dla całego pliku.`);
+                segments = [{
+                    segmentId: `seg_fallback_${docId}`,
+                    label: docData.fileName,
+                    pageFrom: 1,
+                    pageTo: 9999,
+                    elementType: "INNY",
+                    recommendedAgent: docData.containsDrawings ? "VISION" : "BOQ_PARSER",
+                    priority: 50,
+                    canSplitFurther: false,
+                    notes: "Błąd parsowania mapy – wycofano do pełnego dokumentu."
+                }];
+            }
+
+            console.log(`[PDF SPLITTER ✂️] Zmapowano ${segments.length} logicznych sekcji w "${docData.fileName}".`);
+
+            // Wzbogacenie każdego segmentu o ścieżki i instrukcje dla Mózgu
+            const enrichedSegments = segments.map((seg: any) => ({
+                ...seg,
+                sourceDocId: docId,
+                sourceFileName: docData.fileName,
+                storagePath: docData.storagePath,
+                mimeType: docData.mimeType || "application/pdf",
+                fileUri: `gs://${bucketName}/${docData.storagePath}`,
+                agentInstruction: `Przetwórz WYŁĄCZNIE strony ${seg.pageFrom}-${seg.pageTo} dokumentu "${docData.fileName}". 
+Zakres sekcji: "${seg.label}". 
+${seg.notes ? `Uwagi: ${seg.notes}` : ""}
+Oryginalna wytyczna: ${taskData.instruction}`
+            }));
+
+            allSegments.push(...enrichedSegments);
+
+            // Zapisanie wyliczonej mapy segmentów bezpośrednio do metadanych dokumentu w Firestore
+            await docSnap.ref.update({
+                logicalSegments: enrichedSegments,
+                segmentsMappedAt: new Date(),
+                segmentsCount: enrichedSegments.length
+            });
+        }
+
+        // Sortowanie segmentów po priorytecie ekonomicznym (od najważniejszych do wyceny)
+        allSegments.sort((a, b) => (b.priority || 0) - (a.priority || 0));
+
+        console.log(`[PDF SPLITTER ✂️] Proces orzekania zakończony. Łączna liczba wygenerowanych segmentów: ${allSegments.length}.`);
+        allSegments.forEach((s, i) =>
+            console.log(`[PDF SPLITTER ✂️]   [${i + 1}] "${s.label}" (str. ${s.pageFrom}-${s.pageTo}) → Agent: ${s.recommendedAgent} | Priorytet: ${s.priority}`)
+        );
+
+        // Zapis wyniku zadania w Firestore dla Mózgu
+        await taskRef.update({
+            status: "DONE",
+            rawResult: {
+                segments: allSegments,
+                summary: `Zmapowano pomyślnie ${allSegments.length} logicznych segmentów. Mózg może teraz precyzyjnie delegować zadania na określone przedziały stron.`,
+                byAgent: {
+                    VISION: allSegments.filter(s => s.recommendedAgent === "VISION").map(s => s.segmentId),
+                    BOQ_PARSER: allSegments.filter(s => s.recommendedAgent === "BOQ_PARSER").map(s => s.segmentId),
+                    LEGAL_EXPERT: allSegments.filter(s => s.recommendedAgent === "LEGAL_EXPERT").map(s => s.segmentId),
+                    KAMELEON: allSegments.filter(s => s.recommendedAgent === "KAMELEON").map(s => s.segmentId)
+                }
+            },
+            processedByBrain: false,
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        // Flash-Lite jest bardzo tani (koszt: 0.0000375 $ za 1k input tokenów)
+        const costUSD = (totalTokensUsed / 1000) * 0.0000375;
+        await adminDb.collection("tenders").doc(tenderId).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        });
+
+        isSuccess = true;
+        return NextResponse.json({
+            success: true,
+            segmentsCount: allSegments.length,
+            documentsProcessed: inputDocIds.length
+        });
+
+    } catch (error: any) {
+        console.error("[PDF SPLITTER ✂️] ❌ Krytyczny błąd podczas pracy splittera:", error);
+        if (tenderId && taskId) {
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByBrain: false,
+                updatedAt: new Date()
+            }).catch(() => { });
+        }
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    } finally {
+        if (tenderId && taskId) {
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch(() => { });
+        }
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-pdf-splitter/route.ts ---
+
+
+--- START OF FILE src/app/api/kosztorysant/agent-detektyw/route.ts ---
+
+import { NextResponse } from "next/server";
+import { adminDb, adminStorage } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI, Type } from "@google/genai";
+
+export const dynamic = "force-dynamic";
+
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+const MODEL_PRO = "gemini-2.5-pro"; // Operacja sklejania logiki i rozległych danych wymaga inteligencji na PRO! 
+
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 3, delay = 3000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const errorText = error.toString() || "";
+        const isRateLimit = errorText.includes("429") || errorText.includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[DETEKTYW 🕵️‍♂️] Chmura Google dusi sie plikami. Zrzucamy temperature:  ${delay / 1000}s na wystudzenia Optyki modeli!...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
+// Rewolucyjny Schemat Zalezności
+const MAPPING_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        documentRelations: {
+            type: Type.ARRAY,
+            description: "Sieć połączonych arkuszy, zmapowane i gotowe by zalać wymiarami m3 kubatury obiekt. ",
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    baseDocId: { type: Type.STRING, description: "Główne Zródło Osi i Powierzni : Id PDFa z Rzutem/Planem" },
+                    relatedDocIds: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Inne powiazanie i pokroję docIDs ktore dopieszczają bazę o oś (np Przekroje os Z  H. Opisy z warstwówkowi tynki na tym parterze, normy stali ramiki od zbroja rzuty) ." },
+                    relationshipType: { type: Type.STRING, description: "Slang relacyjny, np: PLAN_I_PRZEKROJ_XY_Z , ALBO   MAPOWANIA_RZUT_Z_WARSTWAMI." },
+                    explanation: { type: Type.STRING, description: "Daj notkę: Z pierwszego wciagniesz powierzchnie os XY , a w polaczenia DocY znajdzie Mózg przekrój na cm posadzki... " }
+                },
+                required: ["baseDocId", "relatedDocIds", "relationshipType", "explanation"]
+            }
+        },
+        missingDimensionWarning: { type: Type.BOOLEAN, description: "Ustaw Twarde TRUE – jesli z braku przesłanych tu Przekroi na chmurce/ brakuje głęboksci, i rzuty plaskich Rzedncy Y x X u wizjera m3 nic bez biedy ludzia w WAITTING Chat NIE Wniosą...  " },
+        summary: { type: Type.STRING, description: "Jak gruby był stos i jak złączono paczke klatką 1 pdf połączoną dla Mózguf, i Pythona Calculator!" }
+    },
+    required: ["documentRelations", "missingDimensionWarning", "summary"]
+};
+
+
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
+    let isSuccess = false;
+
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
+
+        console.log(`[DETEKTYW 🕵️‍♂️] Agent Korelacyjny pobudzony. Uderza Rysunki . tenderId: ${tenderId}, taskId: ${taskId}`);
+
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak Danych Startów " }, { status: 400 });
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+        if (!taskDoc.exists) throw new Error("Detektywne powolanie urwane u Mrozu! Task Pusty ");
+
+        const taskData = taskDoc.data()!;
+        if (taskData.status !== "PENDING") { return NextResponse.json({ message: "Task odbity predzej..." }); }
+
+        console.log("[DETEKTYW 🕵️‍♂️] Start MAPPING. Tusz po slade... ");
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        const inputDocIds: string[] = taskData.inputDocIds || [];
+        if (inputDocIds.length < 2) { // By coś skorelować i szukac przekroj u pliku X na Y potrzebujemy >1 .. 
+            console.warn(`[DETEKTYW 🕵️‍♂️] Odbieramy Pliko_Szrota Pojedynce. Zrywamy spięcie do biedy JSON:   Odrzuto Omijacz (Brak > 2).  Zakańzcam z Brakiem Potrz. Relacyjnego... `);
+            await taskRef.update({ status: "DONE", rawResult: { summary: "Do powiązania Pliku potrzebowala conajmn. min2 na biurku.. a na talerzku pchnieto PUSTKO ", missingDimensionWarning: false, documentRelations: [] }, processedByBrain: false, updatedAt: new Date() });
+            isSuccess = true;
+            return NextResponse.json({ message: "Za Mała Probna plików Zlącznikowych - Skip!  ." });
+        }
+
+        const bucketName = process.env.STORAGE_BUCKET || "pesam-system-81165.firebasestorage.app";
+        const bucket = adminStorage.bucket(bucketName);
+        const parts: any[] = [];
+        let totalTokensUsed = 0;
+
+        const basePrompt = `
+Jesteś Ekspertem Architektonicznym (Korelacyjny Detektyw Relacji Rzut <-> Przekrój <-> Warstwy budowli z norm - MAPPING_DETECTIVE ).
+Twoim jedynym celem jest przeglądnięcie sterty i sparowanie i ustalenie ze plik na plasko musi byc mierzony w chmurze ze Skryptem Pliku drugiego z wysokości. !
+
+Mózgu Dał u Instrukcji - >: ${taskData.instruction}
+
+Nie powołuj danych ,nie tnij na centymerry robót tu - Po prostu Powiedz że do wyceny w Agent "Python i Vission!" musi on skleiće na warsztatu DocID XYZ po wymiar OSi od x - x  oraz dociag z ID Pliku PDF przekrojem. ! Wyciąg szkielet Powiąż siecia id  wedlu schemata JOSn:  \n\n\ OTO STRUKTUAR POWIĄZU DANY Z URZĘDO W ZAŁCZAŃIKACH API (Doksy pod numer):`;
+
+        parts.push({ text: basePrompt });
+
+        // 5.. Pobranie PDF ow (Pchanie RZEDNE DO Base. ) : 
+        for (const docId of inputDocIds) {
+            const docSnap = await adminDb.collection(`tenders/${tenderId}/documents`).doc(docId).get();
+            if (!docSnap.exists) continue;
+
+            const docData = docSnap.data()!;
+
+            parts.push({ text: `[START DOKUMENTU, ID: ${docId}, TYP PRAWNY PLIKU (NZAWA LĄZCN): ${docData.fileName}]  --> WIZJA WNETRZ PONIŻEJ U OBIEK:  ` });
+
+            try {
+                const fileRef = bucket.file(docData.storagePath);
+                const [downloadedBuffer] = await fileRef.download();
+                console.log(`[DETEKTYW 🕵️‍♂️] Doczyta do analizki Złocznych plik Mappy -   : ${docData.fileName}`);
+
+                const safeBuffer = Buffer.from(new Uint8Array(downloadedBuffer).buffer);
+                const base64Data = safeBuffer.toString("base64");
+                parts.push({ inlineData: { data: base64Data, mimeType: docData.mimeType || "application/pdf" } });
+            } catch (err: any) {
+                console.error(`[DETEKTYW 🕵️‍♂️] Brak wygenerowanych usterku dla Mappe rzut , plik padny Storage ${docData.fileName}:`, err);
+            }
+        }
+
+        const result = await callGeminiWithRetry(async () => {
+            return await ai.models.generateContent({
+                model: taskData.modelOverride || MODEL_PRO, // MAPPING u wymaga potęzniejszych odcieci szumiency RZEDÓW a liter . Wieć tluczesz Modele najwyrzych prog - > w modelu GeminipPRO w korelacja os i ram   !   
+                contents: parts, // BEZPOSREDZNIO U Twarde Parts[] na Obejkct Tabliy u wpychau JSONowego bez zająkn . Znow Bez Bledu Typescriopw ts  "
+                config: { temperature: 0.1, responseMimeType: "application/json", responseSchema: MAPPING_SCHEMA as any }
+            });
+        });
+
+        console.log("[DETEKTYW 🕵️‍♂️] Spiete kółki mappy , i relacji ... Wycinek  Rozwikło Json  !");
+        const parsedMapResult = JSON.parse(result.text ?? "{}");
+        totalTokensUsed += result.usageMetadata?.totalTokenCount || 0;
+
+        await taskRef.update({
+            status: "DONE",
+            rawResult: parsedMapResult,
+            processedByBrain: false,
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        const costUSD = (totalTokensUsed / 1000) * 0.002;
+        await adminDb.collection("tenders").doc(tenderId).update({ "budgetGuard.currentCostUSD": FieldValue.increment(costUSD) });
+
+        isSuccess = true;
+        console.log(`[DETEKTYW 🕵️‍♂️] Misja MApping zlapany Pliki Połączano W System Relacii . Konczę - Orzuca Wywoły . Rownam Zyske u Odszczędzon RAM Visi !.`)
+
+        return NextResponse.json({ success: true });
+    } catch (errmap: any) {
+        console.error("[DETEKTYW 🕵️‍♂️] ❌  Detkewy Poddal sprawe Usterkaw Rowni", errmap);
+        if (tenderId && taskId) {
+            await adminDb.collection(`tenders/${tenderId}/tasks`).doc(taskId).update({
+                status: "ERROR", rawResult: { error: errmap.message }, processedByBrain: false, updatedAt: new Date()
+            }).catch(() => { });
+        }
+        return NextResponse.json({ error: errmap.message }, { status: 500 });
+    } finally {
+        if (tenderId && taskId) {
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            fetch(`${localOrigin}/api/kosztorysant/glowny-kosztorysant`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenderId, trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}` })
+            }).catch(() => { });
+        }
+    }
+}
+
+--- END OF FILE src/app/api/kosztorysant/agent-detektyw/route.ts ---
+
+
 --- START OF FILE src/app/api/technolog/agent-technolog-materialowy/route.ts ---
 
 import { NextResponse } from "next/server";
@@ -5686,5 +6534,253 @@ Zwróć WYŁĄCZNIE poprawny JSON (bez markdown, bez komentarzy, bez \`\`\`json)
 }
 
 --- END OF FILE src/app/api/technolog/agent-technolog-norm/route.ts ---
+
+
+--- START OF FILE src/app/api/technolog/agent-scope-researcher/route.ts ---
+
+import { NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase/admin";
+import { FieldValue } from "firebase-admin/firestore";
+import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 300; // Podniesiony czas, bo robimy 2 kroki
+
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GCP_PROJECT_ID || "pesam-system-81165",
+    location: "global"
+});
+
+const MODEL_FLASH = "gemini-2.5-flash";
+
+async function callGeminiWithRetry(fn: () => Promise<any>, retries = 5, delay = 4000): Promise<any> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const isRateLimit = error.toString().includes("429") || error.toString().includes("RESOURCE_EXHAUSTED");
+        if (isRateLimit && retries > 0) {
+            console.warn(`[SCOPE RESEARCHER 🔭] Limit 429. Czekam ${delay / 1000}s... (prób: ${retries})`);
+            await new Promise(r => setTimeout(r, delay + Math.random() * 2000)); // jitter
+            return callGeminiWithRetry(fn, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
+
+// Schemat wyjściowy dla kroku 2 (Strukturyzacja)
+const SCOPE_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        searchSummary: { type: Type.STRING },
+        typicalScopeForObjectType: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    division: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    isMandatory: { type: Type.BOOLEAN },
+                    legalBasis: { type: Type.STRING },
+                    isLikelyMissingInProject: { type: Type.BOOLEAN },
+                    missingReason: { type: Type.STRING }
+                },
+                required: ["division", "isMandatory", "isLikelyMissingInProject"]
+            }
+        },
+        criticalGaps: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    gapName: { type: Type.STRING },
+                    impactScore: { type: Type.NUMBER },
+                    estimatedCostShare: { type: Type.STRING },
+                    recommendation: { type: Type.STRING }
+                },
+                required: ["gapName", "impactScore", "recommendation"]
+            }
+        },
+        sourcesFound: { type: Type.ARRAY, items: { type: Type.STRING } },
+        confidence: { type: Type.NUMBER }
+    },
+    required: ["searchSummary", "typicalScopeForObjectType", "criticalGaps", "confidence"]
+};
+
+export async function POST(req: Request) {
+    let tenderId: string | undefined;
+    let taskId: string | undefined;
+    let isSuccess = false;
+
+    try {
+        const body = await req.json();
+        tenderId = body.tenderId;
+        taskId = body.taskId;
+
+        console.log(`[SCOPE RESEARCHER 🔭] Start. tenderId: ${tenderId}, taskId: ${taskId}`);
+        if (!tenderId || !taskId) return NextResponse.json({ error: "Brak parametrów" }, { status: 400 });
+
+        const taskRef = adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId);
+        const taskDoc = await taskRef.get();
+        if (!taskDoc.exists) throw new Error("Zadanie nie istnieje.");
+
+        const taskData = taskDoc.data()!;
+        if (taskData.status !== "PENDING") return NextResponse.json({ message: "Zadanie obsłużone." });
+
+        await taskRef.update({ status: "IN_PROGRESS", updatedAt: new Date() });
+
+        // Pobierz kontekst z Mózgu i dokumentów
+        const [brainSnap, docsSnap] = await Promise.all([
+            adminDb.collection(`tenders/${tenderId}/brain`).doc("main").get(),
+            adminDb.collection(`tenders/${tenderId}/documents`).get()
+        ]);
+
+        const knownFacts = taskData.inputFacts || {};
+        const objectType = knownFacts.objectType || "budynek użyteczności publicznej";
+        const objectDescription = knownFacts.objectDescription || "";
+        const brainFacts = brainSnap.exists ? (brainSnap.data()?.cognitiveState?.knownFacts || {}) : {};
+
+        const existingDocs = docsSnap.docs.map(d => d.data().fileName || "").join(", ");
+        const existingScopes = knownFacts.confirmedScopes || [];
+        let totalTokensUsed = 0;
+
+        // ==========================================
+        // KROK 1: BADANIE SIECI (Google Search) - Zwraca czysty tekst!
+        // ==========================================
+        console.log("[SCOPE RESEARCHER 🔭] KROK 1: Szukanie informacji w sieci...");
+        const searchPrompt = `
+Jesteś ekspertem kosztorysowym budownictwa w Polsce. 
+
+=== TYP INWESTYCJI ===
+${objectType}
+${objectDescription}
+
+=== CO JUŻ WIEMY Z DOKUMENTÓW ===
+Dokumenty w projekcie: ${existingDocs}
+Zakresy potwierdzone: ${JSON.stringify(existingScopes)}
+Fakty z Mózgu PESAM: ${JSON.stringify(brainFacts)}
+
+=== ZADANIE WYSZUKIWANIA ===
+1. Wyszukaj w internecie (Google Search) przykładowe kosztorysy inwestorskie dla: "${objectType}" w Polsce. Szukaj na BIP gmin, eb2b, itp.
+2. Na podstawie wyników, sporządź szczegółowy RAPORT TEKSTOWY z typowych branż i robót.
+3. W raporcie wymień: jakie FIZYCZNE BRANŻE BUDOWLANE i INSTALACYJNE (np. roboty ziemne, fundamenty, dach, instalacja elektryczna, teletechniczna, odgromowa, wentylacja) są zawsze obecne w takim obiekcie, a czego z nich PODEJRZEWASZ, że brakuje w naszym projekcie.
+
+UWAGA KRYTYCZNA: NIE analizuj poprawności formalnej samego dokumentu! Kompletnie nie interesuje nas "strona tytułowa", "kalkulacja", "tabela elementów scalonych" czy "załączniki". Skup się WYŁĄCZNIE na "cegłach, rurach i kablach" – szukamy fizycznych braków w wycenie budynku!
+
+Napisz raport jako zwykły tekst, kategorycznie BEZ struktury JSON.
+`;
+
+        const searchResult = await callGeminiWithRetry(() =>
+            ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: searchPrompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0.2
+                    // NIE MA responseMimeType !
+                }
+            })
+        );
+
+        totalTokensUsed += searchResult.usageMetadata?.totalTokenCount || 0;
+        const rawReport = searchResult.text || "Nie udało się znaleźć precyzyjnych danych.";
+        console.log("[SCOPE RESEARCHER 🔭] KROK 1: Pomyślnie zebrano raport tekstowy.");
+
+        // ==========================================
+        // KROK 2: STRUKTURYZACJA WYNIKÓW (Bez Google Search, narzucony JSON)
+        // ==========================================
+        console.log("[SCOPE RESEARCHER 🔭] KROK 2: Strukturyzacja raportu do JSON...");
+        const structurePrompt = `
+Poniżej znajduje się surowy raport z poszukiwań typowych fizycznych zakresów robót w internecie.
+Zmień te informacje w ustrukturyzowany format JSON, ściśle według zadanego schematu.
+
+PAMIĘTAJ KRYTYCZNĄ ZASADĘ: Pola "gapName" i "division" MUSZĄ dotyczyć wyłącznie FIZYCZNYCH elementów budowy (np. "Instalacje elektryczne wewnętrzne", "Konstrukcja dachu", "Biały montaż", "Izolacje fundamentów"). Absolutnie nie wpisuj tu żadnych formalnych części dokumentu (zakaz wpisywania "Strona tytułowa", "Kosztorys", "Opis techniczny"). Jeśli raport mówi o brakach dokumentacyjnych, zignoruj je.
+
+RAPORT BADACZA:
+${rawReport}
+`;
+
+        const structureResult = await callGeminiWithRetry(() =>
+            ai.models.generateContent({
+                model: MODEL_FLASH,
+                contents: structurePrompt,
+                config: {
+                    // BEZ narzedzia Google Search!
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                    responseSchema: SCOPE_SCHEMA as any
+                }
+            })
+        );
+
+        totalTokensUsed += structureResult.usageMetadata?.totalTokenCount || 0;
+
+        let parsed: any = {};
+        try {
+            parsed = JSON.parse(jsonrepair(structureResult.text ?? "{}"));
+        } catch (e) {
+            console.warn("[SCOPE RESEARCHER 🔭] Błąd parsowania ostatecznego JSON-a, używam fallbacku.");
+            parsed = { searchSummary: "Błąd parsowania", typicalScopeForObjectType: [], criticalGaps: [], confidence: 10 };
+        }
+
+        console.log(`[SCOPE RESEARCHER 🔭] Sukces strukturyzacji: Znaleziono ${parsed.typicalScopeForObjectType?.length || 0} działów, ${parsed.criticalGaps?.length || 0} luk krytycznych.`);
+
+        await taskRef.update({
+            status: "DONE",
+            rawResult: {
+                typicalScopeForObjectType: parsed.typicalScopeForObjectType || [],
+                criticalGaps: parsed.criticalGaps || [],
+                searchSummary: parsed.searchSummary || rawReport.substring(0, 500),
+                sourcesFound: parsed.sourcesFound || [],
+                confidence: parsed.confidence || 50,
+                summary: `Zbadano zakres dla "${objectType}". Znaleziono ${parsed.criticalGaps?.length || 0} krytycznych luk w dokumentacji.`
+            },
+            processedByTechnolog: false,
+            costTokens: totalTokensUsed,
+            updatedAt: new Date()
+        });
+
+        const costUSD = (totalTokensUsed / 1000) * 0.000015;
+        await adminDb.collection("tenders").doc(tenderId!).update({
+            "budgetGuard.currentCostUSD": FieldValue.increment(costUSD)
+        });
+
+        isSuccess = true;
+        return NextResponse.json({
+            success: true,
+            divisionsFound: parsed.typicalScopeForObjectType?.length || 0,
+            criticalGaps: parsed.criticalGaps?.length || 0
+        });
+
+    } catch (error: any) {
+        console.error("[SCOPE RESEARCHER 🔭] ❌ Błąd krytyczny:", error);
+        if (tenderId && taskId) {
+            await adminDb.collection(`tenders/${tenderId}/technolog_tasks`).doc(taskId).update({
+                status: "ERROR",
+                rawResult: { error: error.message },
+                processedByTechnolog: false,
+                updatedAt: new Date()
+            }).catch(() => { });
+        }
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    } finally {
+        if (tenderId && taskId) {
+            const localOrigin = `http://localhost:${process.env.PORT || "3000"}`;
+            fetch(`${localOrigin}/api/technolog/glowny-technolog`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenderId,
+                    trigger: isSuccess ? `TASK_COMPLETED_${taskId}` : `TASK_FAILED_${taskId}`
+                })
+            }).catch(() => { });
+        }
+    }
+}
+
+--- END OF FILE src/app/api/technolog/agent-scope-researcher/route.ts ---
 
 
