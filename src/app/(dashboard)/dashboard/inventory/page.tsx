@@ -672,32 +672,119 @@ export default function InventoryPage() {
 
     // 1. Renderowanie rusztowań (Systemów i elementów systemowych)
     const renderBulkGroups = () => {
-        const mainCats = sortedFilteredItems.filter(i => i.subType === "MAIN_CAT");
-        const subs = items.filter(i => i.subType === "SUB_ITEM");
+        const allMainCats = items.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
+        const allSubItems = items.filter(i => i.type === "BULK" && i.subType !== "MAIN_CAT" && i.subType !== "MANUAL" && i.category !== "Zaległości osprzętu");
+
+        const matchesFilter = (item: InventoryItem) => {
+            const matchesSearch = !searchTerm.trim() ||
+                item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (item.inventoryNumber || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (item.category && item.category.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                (item.subcategory && item.subcategory.toLowerCase().includes(searchTerm.toLowerCase()));
+            const matchesLoc = locFilter === "ALL" || item.currentLocation === locFilter;
+            const matchesStatus = statusFilter === "ALL" || item.status === statusFilter;
+            return matchesSearch && matchesLoc && matchesStatus;
+        };
+
+        // Pokazujemy te systemy (MAIN_CAT), które same pasują LUB których pod-elementy pasują do szukania/filtrów
+        const visibleMainCats = allMainCats.filter(main => {
+            const mainMatches = matchesFilter(main);
+            const hasMatchingSub = allSubItems.some(sub => sub.mainCategoryId === main.id && matchesFilter(sub));
+            return mainMatches || hasMatchingSub;
+        });
+
+        // Znajdź podkategorie bez przypisanego systemu (lub o nieistniejącym systemie)
+        const orphanSubItems = allSubItems.filter(sub =>
+            matchesFilter(sub) && (!sub.mainCategoryId || !allMainCats.some(m => m.id === sub.mainCategoryId))
+        );
+
+        if (visibleMainCats.length === 0 && orphanSubItems.length === 0) {
+            return (
+                <div className="p-12 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
+                    <p className="text-lg font-bold">Brak elementów rusztowań spełniających kryteria wyszukiwania.</p>
+                    <p className="text-xs text-slate-400 mt-1">Spróbuj zmienić szukaną frazę ({searchTerm}) lub wyczyścić filtry.</p>
+                </div>
+            );
+        }
 
         return (
             <div className="space-y-6 animate-fade-in">
-                {mainCats.map(main => (
-                    <div key={main.id} className="border rounded-2xl overflow-hidden shadow-sm bg-white border-slate-200">
-                        <div className="bg-slate-800 text-white p-4 flex items-center justify-between">
-                            <div className="flex items-center gap-4">
-                                <img src={main.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-lg border border-slate-600" alt="kat" />
-                                <div>
-                                    <h2 className="text-lg font-black uppercase tracking-tight">{main.name}</h2>
-                                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">System / Kod: {main.inventoryNumber}</p>
+                {visibleMainCats.map(main => {
+                    const mainMatches = matchesFilter(main);
+                    const matchingSubs = allSubItems.filter(sub => {
+                        if (sub.mainCategoryId !== main.id) return false;
+                        if (!searchTerm.trim() && locFilter === "ALL" && statusFilter === "ALL") return true;
+                        return matchesFilter(sub) || mainMatches;
+                    });
+
+                    return (
+                        <div key={main.id} className="border rounded-2xl overflow-hidden shadow-sm bg-white border-slate-200">
+                            <div className="bg-slate-800 text-white p-4 flex items-center justify-between">
+                                <div className="flex items-center gap-4">
+                                    <img src={main.imageUrl || 'https://via.placeholder.com/50'} className="w-12 h-12 object-cover rounded-lg border border-slate-600" alt="kat" />
+                                    <div>
+                                        <h2 className="text-lg font-black uppercase tracking-tight">{main.name}</h2>
+                                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">System / Kod: {main.inventoryNumber}</p>
+                                    </div>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button onClick={() => { setEditingItem(main); setFormData({ ...main }); setIsFormOpen(true); }} className="text-xs bg-slate-700 text-white px-3 py-1 rounded hover:bg-slate-600 transition font-bold">Edytuj System</button>
+                                    <button onClick={() => handleDelete(main)} className="text-xs bg-red-900 text-red-100 px-3 py-1 rounded hover:bg-red-800 transition font-bold">Usuń System</button>
                                 </div>
                             </div>
-                            <div className="flex gap-2">
-                                <button onClick={() => { setEditingItem(main); setFormData({ ...main }); setIsFormOpen(true); }} className="text-xs bg-slate-700 text-white px-3 py-1 rounded hover:bg-slate-600 transition font-bold">Edytuj System</button>
-                                <button onClick={() => handleDelete(main)} className="text-xs bg-red-900 text-red-100 px-3 py-1 rounded hover:bg-red-800 transition font-bold">Usuń System</button>
-                            </div>
+                            <table className="w-full text-left">
+                                <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
+                                    <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Element / Podkategoria</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
+                                </thead>
+                                <tbody className="text-sm">
+                                    {matchingSubs.length > 0 ? (
+                                        matchingSubs.map(sub => (
+                                            <tr key={sub.id} className="border-b last:border-0 hover:bg-slate-50 transition">
+                                                <td className="p-3"><img src={sub.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                                <td className="p-4 cursor-pointer" onClick={() => openItemCard(sub)}>
+                                                    <p className="font-bold text-slate-700">{sub.name}</p>
+                                                    <p className="text-[10px] text-slate-400">{sub.category} / {sub.subcategory}</p>
+                                                </td>
+                                                <td className="p-4 text-center font-mono text-xs text-blue-600 font-bold">{sub.inventoryNumber}</td>
+                                                <td className="p-4 text-center font-black">{sub.availableQuantity} / {sub.totalQuantity}</td>
+                                                <td className="p-4 text-right space-x-3 whitespace-nowrap">
+                                                    <button
+                                                        onClick={() => { setAdjustItem(sub); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
+                                                        className="text-orange-600 hover:underline font-bold text-xs"
+                                                    >
+                                                        ⚙️ Korekta Stanu
+                                                    </button>
+                                                    <span className="text-slate-300">|</span>
+                                                    <button onClick={() => { setEditingItem(sub); setFormData({ ...sub }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                                    <span className="text-slate-300">|</span>
+                                                    <button onClick={() => handleDelete(sub)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                                </td>
+                                            </tr>
+                                        ))
+                                    ) : (
+                                        <tr>
+                                            <td colSpan={5} className="p-4 text-center text-xs text-slate-400">Brak elementów w tym systemie pasujących do wyszukiwania</td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    );
+                })}
+
+                {/* Sekcja dla elementów nieprzypisanych do żadnego głównego systemu */}
+                {orphanSubItems.length > 0 && (
+                    <div className="border rounded-2xl overflow-hidden shadow-sm bg-white border-slate-200">
+                        <div className="bg-slate-700 text-white p-4">
+                            <h2 className="text-lg font-black uppercase tracking-tight">Inne / Nieprzypisane elementy rusztowań</h2>
+                            <p className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">Elementy bez zdefiniowanego systemu nadrzędnego</p>
                         </div>
                         <table className="w-full text-left">
                             <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
                                 <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Element / Podkategoria</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
                             </thead>
                             <tbody className="text-sm">
-                                {subs.filter(s => s.mainCategoryId === main.id).map(sub => (
+                                {orphanSubItems.map(sub => (
                                     <tr key={sub.id} className="border-b last:border-0 hover:bg-slate-50 transition">
                                         <td className="p-3"><img src={sub.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
                                         <td className="p-4 cursor-pointer" onClick={() => openItemCard(sub)}>
@@ -723,7 +810,7 @@ export default function InventoryPage() {
                             </tbody>
                         </table>
                     </div>
-                ))}
+                )}
             </div>
         );
     };
