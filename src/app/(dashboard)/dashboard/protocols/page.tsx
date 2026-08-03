@@ -1058,8 +1058,12 @@ export default function ProtocolsHub() {
     }).map(item => {
         const siteQty = item.allocations?.[paperReturnSiteId] || 0;
         const lockedQty = lockedInPending[item.id] || 0;
-        // Zabezpieczenie wizualne (żeby nie pisało, że max do zwrotu to -5 sztuk)
-        return { ...item, availableToReturn: Math.max(999999, siteQty - lockedQty) };
+        const realSiteQty = siteQty - lockedQty;
+        return {
+            ...item,
+            siteQtyOnSelectedSite: siteQty,
+            availableToReturn: Math.max(0, realSiteQty)
+        };
     });
 
     const addToPaperReturnCart = async (item: InventoryItem & { availableToReturn: number }) => {
@@ -3309,7 +3313,17 @@ export default function ProtocolsHub() {
                                                             {item.name}
                                                             {item.inventoryNumber && <span className="text-orange-600 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
                                                         </p>
-                                                        {!isFormallyOnSite && <p className="text-[10px] text-red-600 font-bold uppercase mt-1">⚠️ Wg systemu na: {item.currentLocation}</p>}
+                                                        {paperReturnSiteId && item.type === "BULK" && (
+                                                            <p className="text-[11px] font-semibold text-slate-600 mt-0.5">
+                                                                Na budowie: <b className="text-orange-700 font-bold text-xs">{(item.allocations?.[paperReturnSiteId] || 0)} {item.unit || "szt."}</b>
+                                                                {lockedInPending[item.id] > 0 && <span className="text-slate-400 font-normal"> (w tym {lockedInPending[item.id]} w toku)</span>}
+                                                            </p>
+                                                        )}
+                                                        {paperReturnSiteId && item.type === "UNIQUE" && (
+                                                            <p className="text-[11px] font-semibold text-slate-600 mt-0.5">
+                                                                Wg systemu na: <b className={item.currentLocation === sites.find(s => s.id === paperReturnSiteId)?.name ? "text-green-700 font-bold" : "text-red-600 font-bold"}>{item.currentLocation || "MAGAZYN"}</b>
+                                                            </p>
+                                                        )}
                                                     </div>
                                                     <button onClick={() => addToPaperReturnCart({ ...item, availableToReturn: isFormallyOnSite ? item.availableToReturn : 1 })} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${isFormallyOnSite ? 'bg-orange-100 hover:bg-orange-500 text-orange-700 hover:text-white' : 'bg-red-500 text-white hover:bg-red-600 shadow'}`}>
                                                         {isFormallyOnSite ? "Dodaj do zwrotu" : "Wymuś Zwrot"}
