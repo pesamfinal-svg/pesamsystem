@@ -164,6 +164,7 @@ export default function ProtocolsHub() {
     const [issueDocDate, setIssueDocDate] = useState(() => new Date().toISOString().split('T')[0]);
     const [isIssueArchival, setIsIssueArchival] = useState(false);
     const [paperDocDate, setPaperDocDate] = useState(() => new Date().toISOString().split('T')[0]);
+    const [returnDocDate, setReturnDocDate] = useState(() => new Date().toISOString().split('T')[0]);
     const [paperSearchName, setPaperSearchName] = useState("");
     const [paperSearchInvNumber, setPaperSearchInvNumber] = useState("");
 
@@ -986,6 +987,7 @@ export default function ProtocolsHub() {
             await setDoc(protocolRef, {
                 protocolId, type: "ZWROT", documentSource: "APP_ELECTRONIC", sourceId: returnSiteId, sourceName: siteName, destinationId: "MAGAZYN",
                 createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "OCZEKUJACY", createdAt: new Date().toISOString(),
+                documentDate: returnDocDate || new Date().toISOString().split("T")[0],
                 items: finalReturnItems
             });
             alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
@@ -1812,6 +1814,7 @@ export default function ProtocolsHub() {
                     acceptedBy: user?.uid,
                     acceptedByName: `${user?.firstName} ${user?.lastName}`,
                     acceptedAt: new Date().toISOString(),
+                    documentDate: acceptReturnDocDate,
                     items: updatedItemsForProtocol,
                     ...(photoURLs.length > 0 && { photos: photoURLs })
                 });
