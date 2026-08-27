@@ -32,10 +32,7 @@ export default function AddToSitePage() {
     const [purchaseDate, setPurchaseDate] = useState("");
     const [notes, setNotes] = useState("");
 
-    const canAddToSite = user ? (
-        hasPermission("wzCreateDelivery", user.rolePermissions, user.permissionOverrides) ||
-        hasPermission("workersAddToSite", user.rolePermissions, user.permissionOverrides)
-    ) : false;
+    const canAddToSite = user ? hasPermission("wzCreateDelivery", user.rolePermissions, user.permissionOverrides) : false;
 
     useEffect(() => {
         if (user && !canAddToSite) {

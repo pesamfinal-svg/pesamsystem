@@ -68,13 +68,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             name: "Wprowadź WZ / Fakturę (Biuro)",
             path: "/dashboard/admin/workers/add-to-site",
             icon: "📝",
-            requiredPermission: ["workersAddToSite", "wzCreateDelivery"]
+            requiredPermission: "wzCreateDelivery"
         },
         {
             name: "Dodaj do stanu budowy z WZ",
             path: "/dashboard/wz-approvals",
             icon: "📥",
-            requiredPermission: ["wzApproveDelivery", "workersAddToSite", "acceptReturns"]
+            requiredPermission: "wzApproveDelivery"
         },
         { name: "Ustawienia Systemu", path: "/dashboard/admin/settings", icon: "⚙️", requiredPermission: "manageSettings" },
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },

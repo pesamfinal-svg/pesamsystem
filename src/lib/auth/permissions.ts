@@ -35,8 +35,7 @@ export const ALL_PERMISSIONS = {
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",
     workersIssueWarehouse: "Pracownicy fizyczni: Wydawanie z Magazynu Głównego",
     workersIssueSite: "Pracownicy fizyczni: Wydawanie ze swoich budów",
-    workersAddToSite: "Wprowadź surową pozycję WZ (Księgowość)",
-    wzCreateDelivery: "Księgowość: Wprowadzanie pozycji z WZ / Faktur do kolejki",
+    wzCreateDelivery: "Biuro / Księgowość: Wprowadzanie pozycji z WZ / Faktur do kolejki",
     wzApproveDelivery: "Magazynier: Dodaj do stanu budowy z WZ (Dopasowanie i Akceptacja)",
 
     // --- NOWE UPRAWNIENIA AI W SKLEPIE ---
@@ -51,10 +50,17 @@ export const ALL_PERMISSIONS = {
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;
 
 export function hasPermission(
-    permissionKey: PermissionKey,
+    permissionKey: PermissionKey | string,
     rolePermissions: Record<string, boolean> = {},
     permissionOverrides: Record<string, boolean> = {}
 ): boolean {
+    // Wsparcie wsteczne dla starego klucza 'workersAddToSite'
+    if (permissionKey === "wzCreateDelivery") {
+        if (permissionOverrides["wzCreateDelivery"] !== undefined) return permissionOverrides["wzCreateDelivery"];
+        if (permissionOverrides["workersAddToSite"] !== undefined) return permissionOverrides["workersAddToSite"];
+        return !!(rolePermissions["wzCreateDelivery"] || rolePermissions["workersAddToSite"]);
+    }
+
     if (permissionKey in permissionOverrides) {
         return permissionOverrides[permissionKey];
     }

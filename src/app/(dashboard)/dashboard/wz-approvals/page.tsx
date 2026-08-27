@@ -61,11 +61,7 @@ export default function WzApprovalsPage() {
     const [customNewName, setCustomNewName] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    const canApproveWz = user ? (
-        hasPermission("wzApproveDelivery", user.rolePermissions, user.permissionOverrides) ||
-        hasPermission("workersAddToSite", user.rolePermissions, user.permissionOverrides) ||
-        hasPermission("acceptReturns", user.rolePermissions, user.permissionOverrides)
-    ) : false;
+    const canApproveWz = user ? hasPermission("wzApproveDelivery", user.rolePermissions, user.permissionOverrides) : false;
 
     useEffect(() => {
         if (user && !canApproveWz) {
