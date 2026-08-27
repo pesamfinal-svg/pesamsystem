@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, query, where, orderBy, runTransaction } from "firebase/firestore";
+import { collection, getDocs, doc, query, where, orderBy, runTransaction, deleteDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -302,6 +302,24 @@ export default function WzApprovalsPage() {
         }
     };
 
+    const handleDeleteWzItem = async (item: PendingWzItem) => {
+        const isApproved = item.status === "ZATWIERDZONY";
+        const message = isApproved
+            ? `Czy na pewno chcesz usunąć ten wpis z WZ („${item.rawItemName}”) z historii?`
+            : `Czy na pewno chcesz anulować i całkowicie usunąć ten wpis z WZ („${item.rawItemName}”) z kolejki?`;
+
+        if (!window.confirm(message)) return;
+
+        try {
+            await deleteDoc(doc(db, "pending_wz_items", item.id));
+            alert("✅ Pomyślnie usunięto wpis z WZ!");
+            fetchData();
+        } catch (error: any) {
+            console.error("Błąd podczas usuwania wpisu z WZ:", error);
+            alert("Nie udało się usunąć wpisu: " + error.message);
+        }
+    };
+
     if (!canApproveWz) return null;
     if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie kolejki WZ i budów...</div>;
 
@@ -417,16 +435,34 @@ export default function WzApprovalsPage() {
                             </div>
 
                             {activeTab === "PENDING" ? (
-                                <button
-                                    onClick={() => handleOpenAssignModal(item)}
-                                    className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider rounded-xl shadow transition"
-                                >
-                                    ⚡ Przypisz do stanu budowy ➡️
-                                </button>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => handleOpenAssignModal(item)}
+                                        className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider rounded-xl shadow transition"
+                                    >
+                                        ⚡ Przypisz do stanu budowy ➡️
+                                    </button>
+                                    <button
+                                        onClick={() => handleDeleteWzItem(item)}
+                                        title="Anuluj / Usuń wpis z WZ"
+                                        className="px-3.5 py-3 bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 font-bold text-xs rounded-xl transition flex items-center justify-center shadow-sm"
+                                    >
+                                        🗑️
+                                    </button>
+                                </div>
                             ) : (
-                                <div className="pt-2 border-t text-[11px] text-slate-500 space-y-1">
-                                    <div>✓ Przypisano do: <b className="text-slate-800">{item.assignedToItemName}</b></div>
-                                    <div>Zatwierdził: <b>{item.acceptedByName}</b> ({new Date(item.acceptedAt || '').toLocaleDateString('pl-PL')})</div>
+                                <div className="pt-2 border-t text-[11px] text-slate-500 flex justify-between items-center gap-2">
+                                    <div className="space-y-0.5">
+                                        <div>✓ Przypisano do: <b className="text-slate-800">{item.assignedToItemName}</b></div>
+                                        <div>Zatwierdził: <b>{item.acceptedByName}</b> ({new Date(item.acceptedAt || '').toLocaleDateString('pl-PL')})</div>
+                                    </div>
+                                    <button
+                                        onClick={() => handleDeleteWzItem(item)}
+                                        title="Usuń z historii WZ"
+                                        className="p-2 bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 rounded-lg text-xs transition shrink-0"
+                                    >
+                                        🗑️
+                                    </button>
                                 </div>
                             )}
                         </div>
