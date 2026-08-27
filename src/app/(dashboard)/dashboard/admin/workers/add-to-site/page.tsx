@@ -88,15 +88,10 @@ export default function AddToSitePage() {
         if (user && canAddToSite) fetchData();
     }, [user, canAddToSite]);
 
-    // Po wyborze budowy - automatyczne zaznaczenie kierowników tej budowy
+    // Czyszczenie wyboru kierowników przy zmianie budowy (księgowa sama wybierze właściwych)
     useEffect(() => {
-        if (selectedSiteId && managers.length > 0) {
-            const autoSelected = managers
-                .filter(m => m.assignedSites?.includes(selectedSiteId) || m.assignedSites?.includes("ALL"))
-                .map(m => m.uid);
-            setSelectedManagerUids(autoSelected);
-        }
-    }, [selectedSiteId, managers]);
+        setSelectedManagerUids([]);
+    }, [selectedSiteId]);
 
     const toggleManager = (uid: string) => {
         setSelectedManagerUids(prev =>
@@ -299,7 +294,7 @@ export default function AddToSitePage() {
                                 </div>
 
                                 <p className="text-[11px] text-slate-500">
-                                    System automatycznie zaznaczył kierowników przypisanych do tej budowy. Możesz zmodyfikować tę listę.
+                                    Zaznacz kierownika lub kierowników, do których ma zostać wysłane powiadomienie e-mail o dostawie WZ.
                                 </p>
 
                                 <div className="flex flex-wrap gap-2 pt-1">
