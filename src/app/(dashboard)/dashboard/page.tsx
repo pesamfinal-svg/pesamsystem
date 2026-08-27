@@ -103,6 +103,8 @@ export default function DashboardPage() {
     const isAccountant = user ? hasPermission("workersAddToSite", user.rolePermissions, user.permissionOverrides) : false;
     const isManager = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
     const canManageCloseouts = user ? hasPermission("manageProjectCloseouts", user.rolePermissions, user.permissionOverrides) : false;
+    const canApproveWz = user ? hasPermission("wzApproveDelivery", user.rolePermissions, user.permissionOverrides) : false;
+    const canCreateWz = user ? hasPermission("wzCreateDelivery", user.rolePermissions, user.permissionOverrides) : false;
 
     // Sprawdzamy czy użytkownik ma dostęp do przeglądania katalogu sprzętu
     const canViewCatalog = user ? hasPermission("viewInventory", user.rolePermissions, user.permissionOverrides) : false;
@@ -224,6 +226,30 @@ export default function DashboardPage() {
             {/* ========================================================================= */}
             {user && hasAnyOperationalPermission ? (
                 <div className="space-y-8">
+                    {/* BANER ALERTO-NOTYFIKACJA DLA MAGAZYNIERA O OCZEKUJĄCYCH WZ */}
+                    {pendingWzCount > 0 && canApproveWz && (
+                        <div className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white p-6 rounded-3xl shadow-lg flex flex-col md:flex-row justify-between items-center gap-4 animate-fade-in">
+                            <div className="flex items-center gap-4">
+                                <div className="bg-white/20 p-3.5 rounded-2xl text-3xl">📦</div>
+                                <div>
+                                    <h4 className="font-extrabold text-base uppercase tracking-wider flex items-center gap-2">
+                                        <span>Nowe pozycje z WZ do zatwierdzenia</span>
+                                        <span className="bg-white text-blue-700 text-xs px-2.5 py-0.5 rounded-full font-black animate-pulse">{pendingWzCount}</span>
+                                    </h4>
+                                    <p className="text-xs text-blue-100 mt-1 leading-relaxed">
+                                        Księgowość wprowadziła nowe zakupy z dokumentów WZ/Faktur na budowę. Wymagają one Twojej weryfikacji i dopasowania do kartotek budowlanych.
+                                    </p>
+                                </div>
+                            </div>
+                            <Link
+                                href="/dashboard/wz-approvals"
+                                className="bg-white text-blue-700 hover:bg-blue-50 px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition whitespace-nowrap"
+                            >
+                                Zatwierdź pozycje WZ ➡️
+                            </Link>
+                        </div>
+                    )}
+
                     {/* 1. PANEL MAGAZYNU GŁÓWNEGO */}
                     {isWarehouse && (
                         <div className="space-y-4">

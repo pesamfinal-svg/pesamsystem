@@ -24,6 +24,8 @@ interface PendingWzItem {
     status: "OCZEKUJE_NA_PRZYPISANIE" | "ZATWIERDZONY";
     createdBy: string;
     createdByName: string;
+    managerNames?: string;
+    assignedManagers?: string[];
     createdAt: string;
     assignedToItemId?: string;
     assignedToItemName?: string;
@@ -399,6 +401,12 @@ export default function WzApprovalsPage() {
                                         <span className="text-slate-400 font-bold">Wprowadził(a):</span>
                                         <span className="font-bold text-slate-700">{item.createdByName}</span>
                                     </div>
+                                    {item.managerNames && (
+                                        <div className="flex justify-between border-t border-slate-200/60 pt-1.5 mt-1.5">
+                                            <span className="text-slate-400 font-bold">Kierownicy:</span>
+                                            <span className="font-bold text-blue-900 text-right">{item.managerNames}</span>
+                                        </div>
+                                    )}
                                 </div>
 
                                 {item.notes && (

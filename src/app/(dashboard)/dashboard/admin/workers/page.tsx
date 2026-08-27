@@ -299,6 +299,7 @@ export default function WorkersPage() {
     const [selectedWorker, setSelectedWorker] = useState<Worker | null>(null);
     const [workerHistory, setWorkerHistory] = useState<WorkerIssueHistory[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
+    const [activeDrawerTab, setActiveDrawerTab] = useState<"ACTIVE" | "HISTORY">("ACTIVE");
 
     const [isIssueToWorkerOpen, setIsIssueToWorkerOpen] = useState(false);
     const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -342,6 +343,7 @@ export default function WorkersPage() {
 
     const openWorkerCard = async (worker: Worker) => {
         setSelectedWorker(worker);
+        setActiveDrawerTab("ACTIVE");
         setHistoryLoading(true);
         try {
             const issuesSnap = await getDocs(
@@ -618,68 +620,200 @@ export default function WorkersPage() {
                             {selectedWorker.notes || "Brak notatek w profilu."}
                         </p>
 
-                        <div className="flex justify-between items-center mt-10 mb-4 border-b pb-4">
-                            <h3 className="font-black uppercase text-sm text-slate-800 tracking-wider">Historia pobranego sprzętu</h3>
+                        {/* PASKI ZAKŁADEK DLA KARTY PRACOWNIKA */}
+                        {(() => {
+                            // Obliczenie aktualnie posiadanego sprzętu (netto na stanie)
+                            const activeMap: Record<string, {
+                                itemId: string;
+                                itemName: string;
+                                qtyHeld: number;
+                                source: string;
+                                sourceSiteId?: string;
+                                sourceSiteName?: string;
+                                latestHistoryItem: WorkerIssueHistory;
+                            }> = {};
 
-                            {canIssueAny && (
-                                <button
-                                    onClick={() => setIsIssueToWorkerOpen(true)}
-                                    disabled={inventoryLoading}
-                                    className="bg-green-600 text-white px-5 py-2 rounded-xl font-black text-xs shadow-md hover:bg-green-700 transition disabled:opacity-50"
-                                >
-                                    ➕ Wydaj sprzęt
-                                </button>
-                            )}
-                        </div>
+                            for (const h of workerHistory) {
+                                const key = `${h.itemId}_${h.source}_${h.sourceSiteId || 'NONE'}`;
+                                if (!activeMap[key]) {
+                                    activeMap[key] = {
+                                        itemId: h.itemId,
+                                        itemName: h.itemName,
+                                        qtyHeld: 0,
+                                        source: h.source,
+                                        sourceSiteId: h.sourceSiteId,
+                                        sourceSiteName: h.sourceSiteName,
+                                        latestHistoryItem: h
+                                    };
+                                }
+                                if (h.type === "ISSUE") {
+                                    activeMap[key].qtyHeld += h.qty;
+                                    activeMap[key].latestHistoryItem = h;
+                                } else if (h.type === "RETURN") {
+                                    activeMap[key].qtyHeld -= h.qty;
+                                }
+                            }
 
-                        {historyLoading ? (
-                            <div className="animate-pulse text-xs text-slate-400 text-center py-10">Pobieranie historii z bazy...</div>
-                        ) : workerHistory.length === 0 ? (
-                            <div className="text-center text-slate-400 p-10 text-sm border-2 border-dashed rounded-xl bg-slate-50">Brak historii pobrań na koncie tego pracownika.</div>
-                        ) : (
-                            <table className="w-full text-sm">
-                                <thead className="text-[10px] text-slate-400 bg-slate-50 uppercase tracking-widest font-black">
-                                    <tr className="border-b">
-                                        <th className="p-3 text-left">Przedmiot</th>
-                                        <th className="p-3 text-center">Ilość</th>
-                                        <th className="p-3 text-left">Źródło</th>
-                                        <th className="p-3 text-left">Data</th>
-                                        <th className="p-3 text-right">Akcje</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {workerHistory.map((h) => (
-                                        <tr key={h.id} className={`border-b border-slate-100 last:border-0 hover:bg-slate-50 transition ${h.type === "RETURN" ? "bg-slate-50/50 opacity-70" : ""}`}>
-                                            <td className={`p-3 font-bold text-slate-800 ${h.type === "RETURN" ? "line-through text-slate-500" : ""}`}>
-                                                {h.itemName}
-                                                {h.notes && <p className="text-[10px] text-slate-400 font-normal no-underline mt-0.5">{h.notes}</p>}
-                                            </td>
-                                            <td className={`p-3 text-center font-black ${h.type === "RETURN" ? "text-orange-600" : "text-green-600"}`}>
-                                                {h.type === "RETURN" ? `+${h.qty} (zwrot)` : `${h.qty} szt.`}
-                                            </td>
-                                            <td className="p-3">
-                                                <span className={`px-2 py-1 rounded-md text-[9px] font-black uppercase ${h.source === "MAGAZYN" ? "bg-blue-100 text-blue-800 border border-blue-200" : "bg-green-100 text-green-800 border border-green-200"}`}>
-                                                    {h.source === "MAGAZYN" ? "MAGAZYN" : `BUDOWA: ${h.sourceSiteName || "Nieznana"}`}
+                            const activeWorkerItems = Object.values(activeMap).filter(i => i.qtyHeld > 0);
+
+                            return (
+                                <>
+                                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mt-8 mb-4 border-b pb-4">
+                                        <div className="flex bg-slate-100 p-1 rounded-xl border">
+                                            <button
+                                                type="button"
+                                                onClick={() => setActiveDrawerTab("ACTIVE")}
+                                                className={`px-4 py-2 rounded-lg text-xs font-black transition flex items-center gap-2 ${
+                                                    activeDrawerTab === "ACTIVE" ? "bg-white text-green-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                                                }`}
+                                            >
+                                                <span>🎒 AKTUALNIE NA STANIE</span>
+                                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                                                    activeDrawerTab === "ACTIVE" ? "bg-green-100 text-green-800" : "bg-slate-200 text-slate-600"
+                                                }`}>
+                                                    {activeWorkerItems.length}
                                                 </span>
-                                            </td>
-                                            <td className="p-3 text-xs text-slate-500 font-mono">
-                                                {new Date(h.date).toLocaleDateString("pl-PL")}
-                                            </td>
-                                            <td className="p-3 text-right">
-                                                {h.type !== "RETURN" && (h.source === "MAGAZYN" ? canIssueWarehouse : canIssueSite) && (
-                                                    <button
-                                                        onClick={() => handleReturnItem(h)}
-                                                        className="text-orange-600 hover:text-white hover:bg-orange-500 px-3 py-1 rounded-lg border border-orange-200 text-[10px] uppercase font-black tracking-wider transition-colors shadow-sm"
-                                                    >
-                                                        Zwróć
-                                                    </button>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        )}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setActiveDrawerTab("HISTORY")}
+                                                className={`px-4 py-2 rounded-lg text-xs font-black transition flex items-center gap-2 ${
+                                                    activeDrawerTab === "HISTORY" ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                                                }`}
+                                            >
+                                                <span>📜 PEŁNA HISTORIA</span>
+                                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                                                    activeDrawerTab === "HISTORY" ? "bg-blue-100 text-blue-800" : "bg-slate-200 text-slate-600"
+                                                }`}>
+                                                    {workerHistory.length}
+                                                </span>
+                                            </button>
+                                        </div>
+
+                                        {canIssueAny && (
+                                            <button
+                                                onClick={() => setIsIssueToWorkerOpen(true)}
+                                                disabled={inventoryLoading}
+                                                className="bg-green-600 text-white px-5 py-2 rounded-xl font-black text-xs shadow-md hover:bg-green-700 transition disabled:opacity-50"
+                                            >
+                                                ➕ Wydaj sprzęt
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {historyLoading ? (
+                                        <div className="animate-pulse text-xs text-slate-400 text-center py-10">Pobieranie historii z bazy...</div>
+                                    ) : activeDrawerTab === "ACTIVE" ? (
+                                        /* ZAKŁADKA 1: AKTUALNIE NA STANIE */
+                                        activeWorkerItems.length === 0 ? (
+                                            <div className="text-center text-slate-400 p-10 text-sm border-2 border-dashed rounded-2xl bg-slate-50">
+                                                <span className="text-3xl block mb-2">🎉</span>
+                                                Pracownik nie posiada obecnie żadnego pobranego sprzętu. Wszystkie wydane przedmioty zostały zwrócone.
+                                            </div>
+                                        ) : (
+                                            <table className="w-full text-sm">
+                                                <thead className="text-[10px] text-slate-400 bg-slate-50 uppercase tracking-widest font-black">
+                                                    <tr className="border-b">
+                                                        <th className="p-3 text-left">Sprzęt / Narzędzie</th>
+                                                        <th className="p-3 text-center">Na stanie</th>
+                                                        <th className="p-3 text-left">Źródło pobrania</th>
+                                                        <th className="p-3 text-right">Akcje</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {activeWorkerItems.map((item) => {
+                                                        const returnTarget: WorkerIssueHistory = {
+                                                            ...item.latestHistoryItem,
+                                                            qty: item.qtyHeld
+                                                        };
+                                                        const canReturnThis = item.source === "MAGAZYN" ? canIssueWarehouse : canIssueSite;
+
+                                                        return (
+                                                            <tr key={`${item.itemId}_${item.source}_${item.sourceSiteId}`} className="border-b border-slate-100 last:border-0 hover:bg-slate-50 transition">
+                                                                <td className="p-3 font-bold text-slate-800">
+                                                                    {item.itemName}
+                                                                    {item.latestHistoryItem.notes && (
+                                                                        <p className="text-[10px] text-slate-400 font-normal mt-0.5">{item.latestHistoryItem.notes}</p>
+                                                                    )}
+                                                                </td>
+                                                                <td className="p-3 text-center">
+                                                                    <span className="bg-green-100 text-green-800 font-black text-xs px-2.5 py-1 rounded-md">
+                                                                        {item.qtyHeld} szt.
+                                                                    </span>
+                                                                </td>
+                                                                <td className="p-3">
+                                                                    <span className={`px-2 py-1 rounded-md text-[9px] font-black uppercase ${item.source === "MAGAZYN" ? "bg-blue-100 text-blue-800 border border-blue-200" : "bg-green-100 text-green-800 border border-green-200"}`}>
+                                                                        {item.source === "MAGAZYN" ? "MAGAZYN" : `BUDOWA: ${item.sourceSiteName || "Nieznana"}`}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="p-3 text-right">
+                                                                    {canReturnThis && (
+                                                                        <button
+                                                                            onClick={() => handleReturnItem(returnTarget)}
+                                                                            className="text-orange-600 hover:text-white hover:bg-orange-500 px-3.5 py-1.5 rounded-lg border border-orange-200 text-[10px] uppercase font-black tracking-wider transition-colors shadow-sm"
+                                                                        >
+                                                                            Zwróć
+                                                                        </button>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        )
+                                    ) : (
+                                        /* ZAKŁADKA 2: PEŁNA HISTORIA OPERACJI */
+                                        workerHistory.length === 0 ? (
+                                            <div className="text-center text-slate-400 p-10 text-sm border-2 border-dashed rounded-xl bg-slate-50">Brak historii pobrań na koncie tego pracownika.</div>
+                                        ) : (
+                                            <table className="w-full text-sm">
+                                                <thead className="text-[10px] text-slate-400 bg-slate-50 uppercase tracking-widest font-black">
+                                                    <tr className="border-b">
+                                                        <th className="p-3 text-left">Przedmiot</th>
+                                                        <th className="p-3 text-center">Ilość</th>
+                                                        <th className="p-3 text-left">Źródło</th>
+                                                        <th className="p-3 text-left">Data</th>
+                                                        <th className="p-3 text-right">Akcje</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {workerHistory.map((h) => (
+                                                        <tr key={h.id} className={`border-b border-slate-100 last:border-0 hover:bg-slate-50 transition ${h.type === "RETURN" ? "bg-slate-50/50 opacity-70" : ""}`}>
+                                                            <td className={`p-3 font-bold text-slate-800 ${h.type === "RETURN" ? "line-through text-slate-500" : ""}`}>
+                                                                {h.itemName}
+                                                                {h.notes && <p className="text-[10px] text-slate-400 font-normal no-underline mt-0.5">{h.notes}</p>}
+                                                            </td>
+                                                            <td className={`p-3 text-center font-black ${h.type === "RETURN" ? "text-orange-600" : "text-green-600"}`}>
+                                                                {h.type === "RETURN" ? `+${h.qty} (zwrot)` : `${h.qty} szt.`}
+                                                            </td>
+                                                            <td className="p-3">
+                                                                <span className={`px-2 py-1 rounded-md text-[9px] font-black uppercase ${h.source === "MAGAZYN" ? "bg-blue-100 text-blue-800 border border-blue-200" : "bg-green-100 text-green-800 border border-green-200"}`}>
+                                                                    {h.source === "MAGAZYN" ? "MAGAZYN" : `BUDOWA: ${h.sourceSiteName || "Nieznana"}`}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-3 text-xs text-slate-500 font-mono">
+                                                                {new Date(h.date).toLocaleDateString("pl-PL")}
+                                                            </td>
+                                                            <td className="p-3 text-right">
+                                                                {h.type !== "RETURN" && (h.source === "MAGAZYN" ? canIssueWarehouse : canIssueSite) && (
+                                                                    <button
+                                                                        onClick={() => handleReturnItem(h)}
+                                                                        className="text-orange-600 hover:text-white hover:bg-orange-500 px-3 py-1 rounded-lg border border-orange-200 text-[10px] uppercase font-black tracking-wider transition-colors shadow-sm"
+                                                                    >
+                                                                        Zwróć
+                                                                    </button>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        )
+                                    )}
+                                </>
+                            );
+                        })()}
                     </div>
                 </div>
             )}

@@ -9,12 +9,23 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 interface Site { id: string; name: string; status: string; }
+interface ManagerUser {
+    uid: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    roleId: string;
+    assignedSites: string[];
+}
 
 export default function AddToSitePage() {
     const { user } = useAuth();
     const router = useRouter();
 
     const [sites, setSites] = useState<Site[]>([]);
+    const [managers, setManagers] = useState<ManagerUser[]>([]);
+    const [selectedManagerUids, setSelectedManagerUids] = useState<string[]>([]);
+
     const [loading, setLoading] = useState(true);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -46,8 +57,20 @@ export default function AddToSitePage() {
         try {
             const sitesSnap = await getDocs(query(collection(db, "sites"), orderBy("name", "asc")));
             setSites(sitesSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Site[]);
+
+            const usersSnap = await getDocs(collection(db, "users"));
+            const allUsers = usersSnap.docs.map(d => ({ uid: d.id, ...d.data() })) as ManagerUser[];
+
+            // Filtrujemy użytkowników o roli Kierownik lub mających dostęp do budów
+            const managerList = allUsers.filter(u =>
+                u.roleId === "kierownik" ||
+                u.roleId === "manager" ||
+                u.roleId === "admin" ||
+                (u.assignedSites && u.assignedSites.length > 0)
+            );
+            setManagers(managerList);
         } catch (error) {
-            console.error("Błąd pobierania budów:", error);
+            console.error("Błąd pobierania danych:", error);
         } finally {
             setLoading(false);
         }
@@ -57,6 +80,22 @@ export default function AddToSitePage() {
         if (user && canAddToSite) fetchData();
     }, [user, canAddToSite]);
 
+    // Po wyborze budowy - automatyczne zaznaczenie kierowników tej budowy
+    useEffect(() => {
+        if (selectedSiteId && managers.length > 0) {
+            const autoSelected = managers
+                .filter(m => m.assignedSites?.includes(selectedSiteId) || m.assignedSites?.includes("ALL"))
+                .map(m => m.uid);
+            setSelectedManagerUids(autoSelected);
+        }
+    }, [selectedSiteId, managers]);
+
+    const toggleManager = (uid: string) => {
+        setSelectedManagerUids(prev =>
+            prev.includes(uid) ? prev.filter(id => id !== uid) : [...prev, uid]
+        );
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setSuccessMsg(null);
@@ -65,14 +104,23 @@ export default function AddToSitePage() {
             return alert("Uzupełnij wymagane pola (Budowa, Nazwa z WZ, Ilość)!");
         }
 
+        if (selectedManagerUids.length === 0) {
+            const confirmNoManager = window.confirm("Nie wybrano żadnego kierownika budowy. Czy na pewno chcesz opublikować WZ bez powiadomienia kierownika?");
+            if (!confirmNoManager) return;
+        }
+
         setIsSubmitting(true);
         try {
             const siteName = sites.find(s => s.id === selectedSiteId)?.name || "Budowa";
+            const selectedManagerObjects = managers.filter(m => selectedManagerUids.includes(m.uid));
+            const managerNamesStr = selectedManagerObjects.map(m => `${m.firstName} ${m.lastName}`.trim()).join(", ");
 
             // Tworzenie wpisu w nowej kolejce WZ: 'pending_wz_items'
             await addDoc(collection(db, "pending_wz_items"), {
                 siteId: selectedSiteId,
                 siteName: siteName,
+                assignedManagers: selectedManagerUids,
+                managerNames: managerNamesStr || "Brak",
                 rawItemName: itemName.trim(),
                 type: itemType,
                 quantity: Number(quantity),
@@ -87,7 +135,30 @@ export default function AddToSitePage() {
                 createdAt: new Date().toISOString()
             });
 
-            setSuccessMsg(`Zapisano pozycję z WZ („${itemName.trim()}”) w kolejce dla budowy: ${siteName}. Magazynier otrzymał pozycję do zweryfikowania i przypisania na stan budowy.`);
+            // Wysyłka e-mail powiadomienia do kierowników i magazynu
+            try {
+                await fetch("/api/wz-delivery-email", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        siteName: siteName,
+                        rawItemName: itemName.trim(),
+                        type: itemType,
+                        quantity: Number(quantity),
+                        unit: unit || "szt.",
+                        purchasePrice: purchasePrice !== "" ? Number(purchasePrice) : undefined,
+                        invoiceNumber: invoiceNumber.trim() || undefined,
+                        purchaseDate: purchaseDate || undefined,
+                        notes: notes.trim() || undefined,
+                        createdByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || "Księgowość",
+                        assignedManagerUids: selectedManagerUids
+                    })
+                });
+            } catch (emailErr) {
+                console.error("Błąd wysyłki e-mail WZ:", emailErr);
+            }
+
+            setSuccessMsg(`Zapisano pozycję z WZ („${itemName.trim()}”) w kolejce dla budowy: ${siteName}. Wysyłano powiadomienie e-mail do kierowników i magazynu.`);
 
             // Resettowanie formularza
             setItemName("");
@@ -105,7 +176,7 @@ export default function AddToSitePage() {
     };
 
     if (!canAddToSite) return null;
-    if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie budów...</div>;
+    if (loading) return <div className="p-10 text-center animate-pulse">Ładowanie formularza WZ...</div>;
 
     return (
         <div className="p-6 md:p-10 max-w-3xl mx-auto space-y-6">
@@ -148,6 +219,52 @@ export default function AddToSitePage() {
                             {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
                     </div>
+
+                    {/* SEKCJA WYBORU KIEROWNIKA / KIEROWNIKÓW BUDOWY */}
+                    {selectedSiteId && (
+                        <div className="bg-slate-50 p-5 rounded-2xl border-2 border-slate-200 space-y-3 animate-fade-in">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-[11px] font-black text-slate-600 uppercase tracking-widest">
+                                    👤 Wybierz Kierownika / Kierowników Budowy (Powiadomieni e-mailem) *
+                                </label>
+                                <span className="text-xs font-bold text-blue-600 bg-blue-100 px-2.5 py-0.5 rounded-full">
+                                    Zaznaczono: {selectedManagerUids.length}
+                                </span>
+                            </div>
+
+                            <p className="text-[11px] text-slate-500">
+                                System automatycznie podpowiada kierowników tej budowy. Możesz zaznaczyć lub odznaczyć dowolnych kierowników.
+                            </p>
+
+                            <div className="flex flex-wrap gap-2 pt-1">
+                                {managers.length === 0 ? (
+                                    <p className="text-xs text-slate-400 italic">Brak zdefiniowanych kierowników w systemie.</p>
+                                ) : (
+                                    managers.map(m => {
+                                        const isSelected = selectedManagerUids.includes(m.uid);
+                                        return (
+                                            <button
+                                                type="button"
+                                                key={m.uid}
+                                                onClick={() => toggleManager(m.uid)}
+                                                className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 border ${
+                                                    isSelected
+                                                        ? 'bg-blue-600 text-white border-blue-700 shadow-md scale-[1.02]'
+                                                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                                                }`}
+                                            >
+                                                <span>{isSelected ? '✓' : '+'}</span>
+                                                <span>{m.firstName} {m.lastName}</span>
+                                                {m.assignedSites?.includes(selectedSiteId) && (
+                                                    <span className="text-[9px] opacity-75 bg-black/10 px-1.5 py-0.5 rounded font-mono">Dedykowany</span>
+                                                )}
+                                            </button>
+                                        );
+                                    })
+                                )}
+                            </div>
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t">
                         {/* 2. TYP PRZEDMIOTU */}
@@ -205,7 +322,7 @@ export default function AddToSitePage() {
                             <input
                                 required
                                 type="text"
-                                placeholder="Wpisz dokłądną nazwę z dokumentu WZ... (np. Nożyce dekarskie 250mm)"
+                                placeholder="Wpisz dokładną nazwę z dokumentu WZ... (np. Nożyce dekarskie 250mm)"
                                 value={itemName}
                                 onChange={e => setItemName(e.target.value)}
                                 className="w-full p-3.5 border-2 rounded-xl outline-none focus:border-blue-500 font-bold bg-white"
@@ -308,7 +425,7 @@ export default function AddToSitePage() {
                             disabled={isSubmitting}
                             className="w-2/3 py-4 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl shadow-lg transition disabled:opacity-50"
                         >
-                            {isSubmitting ? "ZAPISYWANIE W KOLEJCE WZ..." : "ZAPISZ POZYCJĘ Z WZ DLA MAGAZYNIERA"}
+                            {isSubmitting ? "ZAPISYWANIE I WYSYŁANIE E-MAILA..." : "ZAPISZ POZYCJĘ I POWIADOM KIEROWNIKA"}
                         </button>
                     </div>
                 </form>
