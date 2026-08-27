@@ -122,13 +122,22 @@ export default function UsersManagementPage() {
     // Zarządzanie wyjątkami uprawnień
     const selectedRole = roles.find(r => r.id === formData.roleId);
 
+    const getRoleDefault = (permKey: string): boolean => {
+        if (!selectedRole) return false;
+        if (selectedRole.permissions[permKey] !== undefined) return !!selectedRole.permissions[permKey];
+        // Wsparcie dla starych ról i kluczy
+        if (permKey === "wzCreateDelivery") return !!selectedRole.permissions.workersAddToSite;
+        if (permKey === "wzApproveDelivery") return !!(selectedRole.permissions.acceptReturns || selectedRole.permissions.workersAddToSite);
+        return false;
+    };
+
     const handlePermissionToggle = (permKey: string) => {
         if (!selectedRole) {
             alert("Najpierw wybierz rolę użytkownika!");
             return;
         }
 
-        const roleDefault = !!selectedRole.permissions[permKey];
+        const roleDefault = getRoleDefault(permKey);
         const currentVal = formData.permissionOverrides[permKey] !== undefined
             ? formData.permissionOverrides[permKey]
             : roleDefault;
@@ -445,7 +454,7 @@ export default function UsersManagementPage() {
                                     ) : (
                                         <div className="space-y-2 max-h-[550px] overflow-y-auto pr-2">
                                             {Object.entries(ALL_PERMISSIONS).map(([key, label]) => {
-                                                const isDefault = selectedRole.permissions[key] || false;
+                                                const isDefault = getRoleDefault(key);
                                                 const hasOverride = formData.permissionOverrides[key] !== undefined;
                                                 const currentActive = hasOverride ? formData.permissionOverrides[key] : isDefault;
 

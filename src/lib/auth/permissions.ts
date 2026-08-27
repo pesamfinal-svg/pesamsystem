@@ -54,13 +54,6 @@ export function hasPermission(
     rolePermissions: Record<string, boolean> = {},
     permissionOverrides: Record<string, boolean> = {}
 ): boolean {
-    // Wsparcie wsteczne dla starego klucza 'workersAddToSite'
-    if (permissionKey === "wzCreateDelivery") {
-        if (permissionOverrides["wzCreateDelivery"] !== undefined) return permissionOverrides["wzCreateDelivery"];
-        if (permissionOverrides["workersAddToSite"] !== undefined) return permissionOverrides["workersAddToSite"];
-        return !!(rolePermissions["wzCreateDelivery"] || rolePermissions["workersAddToSite"]);
-    }
-
     if (permissionKey in permissionOverrides) {
         return permissionOverrides[permissionKey];
     }

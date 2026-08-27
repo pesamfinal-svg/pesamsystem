@@ -64,7 +64,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                             const roleDoc = await getDoc(doc(db, "roles", userData.roleId));
                             if (roleDoc.exists()) {
                                 fetchedRoleName = roleDoc.data().name || "Bez nazwy";
-                                fetchedRolePermissions = roleDoc.data().permissions || {};
+                                const rawPerms = roleDoc.data().permissions || {};
+                                // Auto-migracja kluczy WZ dla ról posiadających stare uprawnienia
+                                if (rawPerms.workersAddToSite && rawPerms.wzCreateDelivery === undefined) {
+                                    rawPerms.wzCreateDelivery = true;
+                                }
+                                if ((rawPerms.workersAddToSite || rawPerms.acceptReturns) && rawPerms.wzApproveDelivery === undefined) {
+                                    rawPerms.wzApproveDelivery = true;
+                                }
+                                fetchedRolePermissions = rawPerms;
                             }
                         }
 
