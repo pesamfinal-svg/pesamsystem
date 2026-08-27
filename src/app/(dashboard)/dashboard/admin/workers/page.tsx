@@ -774,7 +774,7 @@ export default function WorkersPage() {
                                                         <th className="p-3 text-center">Ilość</th>
                                                         <th className="p-3 text-left">Źródło</th>
                                                         <th className="p-3 text-left">Data</th>
-                                                        <th className="p-3 text-right">Akcje</th>
+                                                        <th className="p-3 text-right">Typ operacji</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -796,13 +796,14 @@ export default function WorkersPage() {
                                                                 {new Date(h.date).toLocaleDateString("pl-PL")}
                                                             </td>
                                                             <td className="p-3 text-right">
-                                                                {h.type !== "RETURN" && (h.source === "MAGAZYN" ? canIssueWarehouse : canIssueSite) && (
-                                                                    <button
-                                                                        onClick={() => handleReturnItem(h)}
-                                                                        className="text-orange-600 hover:text-white hover:bg-orange-500 px-3 py-1 rounded-lg border border-orange-200 text-[10px] uppercase font-black tracking-wider transition-colors shadow-sm"
-                                                                    >
-                                                                        Zwróć
-                                                                    </button>
+                                                                {h.type === "RETURN" ? (
+                                                                    <span className="px-2.5 py-1 rounded-md text-[10px] font-black uppercase bg-orange-100 text-orange-800 border border-orange-200">
+                                                                        ↩️ Zwrot
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="px-2.5 py-1 rounded-md text-[10px] font-black uppercase bg-green-100 text-green-800 border border-green-200">
+                                                                        📤 Wydanie
+                                                                    </span>
                                                                 )}
                                                             </td>
                                                         </tr>
