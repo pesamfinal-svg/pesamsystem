@@ -32,6 +32,7 @@ export default function DashboardPage() {
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [sites, setSites] = useState<Site[]>([]);
     const [pendingProtocolsCount, setPendingProtocolsCount] = useState(0);
+    const [pendingWzCount, setPendingWzCount] = useState(0);
     const [loading, setLoading] = useState(true);
 
     // NOWE STANY SPECJALNE DLA KIEROWNIKA BUDOWY (OBSŁUGA WIELU BUDÓW)
@@ -67,6 +68,11 @@ export default function DashboardPage() {
                 const q = query(collection(db, "protocols"), where("status", "==", "OCZEKUJACY"), where("type", "==", "ZWROT"));
                 const protoSnap = await getDocs(q);
                 setPendingProtocolsCount(protoSnap.size);
+
+                // Pobierz liczbę oczekujących wpisów WZ
+                const wzQ = query(collection(db, "pending_wz_items"), where("status", "==", "OCZEKUJACY_NA_PRZYPISANIE"));
+                const wzSnap = await getDocs(wzQ);
+                setPendingWzCount(wzSnap.size);
 
                 // --- POPRAWIONE: GLOBALNY SĄD (Szukamy spraw, w których Kierownik jest OSKARŻONY/PRZYPISANY) ---
                 const claimsQ = query(collection(db, "claims"), where("assignedManagers", "array-contains", user.uid));
@@ -247,11 +253,20 @@ export default function DashboardPage() {
                                     <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Trwające budowy</p>
                                 </div>
 
+                                <Link href="/dashboard/wz-approvals" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
+                                    <div>
+                                        <p className="text-slate-400 text-xs font-bold uppercase">Pozycje z WZ do przypisania</p>
+                                        <p className="text-4xl font-black text-blue-600 mt-2">{pendingWzCount}</p>
+                                        <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Weryfikacja i stan budowy</p>
+                                    </div>
+                                    <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>
+                                </Link>
+
                                 {canManageCloseouts && (
                                     <Link href="/dashboard/closeouts" className="bg-white hover:bg-slate-50 border p-6 rounded-2xl shadow-sm transition-all flex items-center justify-between group">
                                         <div>
                                             <p className="text-slate-400 text-xs font-bold uppercase">Rozliczanie Budów</p>
-                                            <p className="text-4xl font-black text-blue-600 mt-2">🏁</p>
+                                            <p className="text-4xl font-black text-slate-700 mt-2">🏁</p>
                                             <p className="text-[10px] text-slate-400 font-bold mt-2 uppercase">Audyt i zamknięcie</p>
                                         </div>
                                         <span className="text-2xl opacity-50 group-hover:translate-x-2 transition-transform">➡️</span>

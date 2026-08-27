@@ -65,10 +65,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             requiredPermission: ["workersManage", "workersIssueWarehouse", "workersIssueSite"]
         },
         {
-            name: "Wprowadź produkty na stan budowy",
+            name: "Wprowadź WZ / Fakturę (Biuro)",
             path: "/dashboard/admin/workers/add-to-site",
+            icon: "📝",
+            requiredPermission: ["workersAddToSite", "wzCreateDelivery"]
+        },
+        {
+            name: "Dodaj do stanu budowy z WZ",
+            path: "/dashboard/wz-approvals",
             icon: "📥",
-            requiredPermission: "workersAddToSite"
+            requiredPermission: ["wzApproveDelivery", "workersAddToSite", "acceptReturns"]
         },
         { name: "Ustawienia Systemu", path: "/dashboard/admin/settings", icon: "⚙️", requiredPermission: "manageSettings" },
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },

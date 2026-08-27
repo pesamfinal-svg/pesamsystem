@@ -31,11 +31,13 @@ export const ALL_PERMISSIONS = {
     viewVehicles: "Flota: Podgląd bazy pojazdów i historii napraw",
     manageVehicles: "Flota: Zarządzanie (dodawanie/edycja pojazdów i napraw)",
 
-    // --- UPRAWNIENIA PRACOWNIKÓW FIZYCZNYCH ---
+    // --- UPRAWNIENIA PRACOWNIKÓW FIZYCZNYCH I DOSTAW WZ ---
     workersManage: "Pracownicy fizyczni: Zarządzanie kartoteką (Dodaj/Edytuj)",
     workersIssueWarehouse: "Pracownicy fizyczni: Wydawanie z Magazynu Głównego",
     workersIssueSite: "Pracownicy fizyczni: Wydawanie ze swoich budów",
-    workersAddToSite: "Wprowadź na stan budowy",
+    workersAddToSite: "Wprowadź surową pozycję WZ (Księgowość)",
+    wzCreateDelivery: "Księgowość: Wprowadzanie pozycji z WZ / Faktur do kolejki",
+    wzApproveDelivery: "Magazynier: Dodaj do stanu budowy z WZ (Dopasowanie i Akceptacja)",
 
     // --- NOWE UPRAWNIENIA AI W SKLEPIE ---
     useAiCartInspector: "Sklep AI: Inspektor (Weryfikacja koszyka i podpowiedzi)",
