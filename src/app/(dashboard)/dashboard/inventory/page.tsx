@@ -38,6 +38,10 @@ interface InventoryItem {
     createdAt: string;
     lastOperationDate?: string;
     isUsingTemplateImage?: boolean; // Pole określające czy kopiujemy grafikę z bazy
+    requiresInspection?: boolean;
+    lastInspectionDate?: string;
+    inspectionIntervalMonths?: number;
+    nextInspectionDate?: string;
 }
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
@@ -56,14 +60,18 @@ const INITIAL_FORM_STATE: Partial<InventoryItem> = {
     invoiceNumber: "",
     imageUrl: "",
     additionalInfo: "",
-    isUsingTemplateImage: true
+    isUsingTemplateImage: true,
+    requiresInspection: false,
+    lastInspectionDate: "",
+    inspectionIntervalMonths: 12,
+    nextInspectionDate: ""
 };
 
 export default function InventoryPage() {
     const { user } = useAuth();
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(true);
-    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE"); // Trzy aktywne zakładki
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE"); // Aktywne zakładki (w tym BHP)
 
     // FILTRY
     const [searchTerm, setSearchTerm] = useState("");
@@ -119,6 +127,97 @@ export default function InventoryPage() {
     const [historyLoading, setItemHistoryLoading] = useState(false);
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
     const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
+
+    // STANY PRZEGLĄDÓW BHP
+    const [isInspectionModalOpen, setIsInspectionModalOpen] = useState(false);
+    const [inspectionDate, setInspectionDate] = useState(new Date().toISOString().split("T")[0]);
+    const [inspectionNotes, setInspectionNotes] = useState("");
+    const [isInspectionSubmitting, setIsInspectionSubmitting] = useState(false);
+
+    // HELPERY PRZEGLĄDOWE
+    const calculateNextInspectionDate = (lastDateStr: string, intervalMonths: number = 12): string => {
+        if (!lastDateStr) return "";
+        const date = new Date(lastDateStr);
+        if (isNaN(date.getTime())) return "";
+        date.setMonth(date.getMonth() + Number(intervalMonths));
+        return date.toISOString().split("T")[0];
+    };
+
+    const getInspectionStatusBadge = (nextDateStr?: string) => {
+        if (!nextDateStr) return <span className="bg-slate-100 text-slate-500 text-[10px] font-bold px-2 py-0.5 rounded">Brak daty</span>;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const nextDate = new Date(nextDateStr);
+        nextDate.setHours(0, 0, 0, 0);
+
+        const diffDays = Math.ceil((nextDate.getTime() - today.getTime()) / (1000 * 3600 * 24));
+
+        if (diffDays < 0) {
+            return (
+                <span className="bg-red-600 text-white font-black text-[10px] px-2.5 py-1 rounded-full uppercase animate-pulse">
+                    🔴 PRZETERMINOWANY ({Math.abs(diffDays)} dni temu)
+                </span>
+            );
+        } else if (diffDays <= 30) {
+            return (
+                <span className="bg-amber-100 text-amber-900 font-bold text-[10px] px-2.5 py-1 rounded-full uppercase border border-amber-300">
+                    ⚠️ Przegląd za {diffDays} dni
+                </span>
+            );
+        } else {
+            return (
+                <span className="bg-green-100 text-green-800 font-bold text-[10px] px-2.5 py-1 rounded-full uppercase">
+                    🟢 OK (za {diffDays} dni)
+                </span>
+            );
+        }
+    };
+
+    const handleRegisterInspection = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedItem || !inspectionDate) return;
+        setIsInspectionSubmitting(true);
+        try {
+            const nextDate = calculateNextInspectionDate(inspectionDate, selectedItem.inspectionIntervalMonths || 12);
+            await runTransaction(db, async (transaction) => {
+                const itemRef = doc(db, "inventory", selectedItem.id);
+                const historyRef = doc(collection(db, `inventory/${selectedItem.id}/history`));
+
+                transaction.update(itemRef, {
+                    lastInspectionDate: inspectionDate,
+                    nextInspectionDate: nextDate,
+                    status: "sprawne"
+                });
+
+                const desc = `Zarejestrowano przegląd techniczny/BHP. Data wykonania: ${inspectionDate}. Następny przegląd: ${nextDate}.${inspectionNotes.trim() ? ' Uwagi: ' + inspectionNotes.trim() : ''}`;
+
+                transaction.set(historyRef, {
+                    date: new Date().toISOString(),
+                    documentDate: inspectionDate,
+                    type: "PRZEGLĄD",
+                    description: desc,
+                    status: "sprawne",
+                    user: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || "Magazynier"
+                });
+            });
+
+            alert("✅ Przegląd techniczny/BHP został pomyślnie zarejestrowany!");
+            const updatedItem = {
+                ...selectedItem,
+                lastInspectionDate: inspectionDate,
+                nextInspectionDate: nextDate,
+                status: "sprawne"
+            };
+            setSelectedItem(updatedItem);
+            setIsInspectionModalOpen(false);
+            setInspectionNotes("");
+            fetchItems();
+        } catch (error: any) {
+            alert("Błąd rejestracji przeglądu: " + (error.message || error));
+        } finally {
+            setIsInspectionSubmitting(false);
+        }
+    };
 
     // Stany dla asystenta wklejania linków z sieci (bez API)
     const [showGallerySelector, setShowGallerySelector] = useState(false);
@@ -283,10 +382,23 @@ export default function InventoryPage() {
 
             const qty = formData.type === "UNIQUE" ? 1 : (formData.subType === "MAIN_CAT" ? 0 : Number(formData.totalQuantity));
 
+            let calculatedNextDate = formData.nextInspectionDate || "";
+            if (formData.requiresInspection && formData.lastInspectionDate) {
+                calculatedNextDate = calculateNextInspectionDate(formData.lastInspectionDate, formData.inspectionIntervalMonths || 12);
+            }
+
+            const itemDataToSave = {
+                ...formData,
+                requiresInspection: !!formData.requiresInspection,
+                lastInspectionDate: formData.lastInspectionDate || "",
+                inspectionIntervalMonths: Number(formData.inspectionIntervalMonths) || 12,
+                nextInspectionDate: calculatedNextDate
+            };
+
             if (editingItem) {
                 const { availableQuantity, allocations, createdAt } = editingItem;
                 await updateDoc(doc(db, "inventory", editingItem.id), {
-                    ...formData,
+                    ...itemDataToSave,
                     inventoryNumber: finalInvNumber || editingItem.inventoryNumber,
                     category: finalCategory,
                     subcategory: finalSubcategory,
@@ -299,7 +411,7 @@ export default function InventoryPage() {
                 });
             } else {
                 const newDocData = {
-                    ...formData,
+                    ...itemDataToSave,
                     inventoryNumber: finalInvNumber,
                     category: finalCategory,
                     subcategory: finalSubcategory,
@@ -620,9 +732,9 @@ export default function InventoryPage() {
     };
 
     const filteredItems = items.filter(item => {
-        // Filtrowanie pod kątem 3 oddzielnych zakładek:
+        // Filtrowanie pod kątem 4 oddzielnych zakładek:
         if (activeTab === "UNIQUE") {
-            if (item.type !== "UNIQUE") return false;
+            if (item.type !== "UNIQUE" || item.requiresInspection) return false;
         } else if (activeTab === "BULK") {
             // Zakładka Rusztowania: Tylko BULK, które nie są manualnymi ubytkami ani zaległym osprzętem
             if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu") return false;
@@ -630,6 +742,9 @@ export default function InventoryPage() {
             // Zakładka Drobnica: Wszystkie BULK będące wpisami ręcznymi lub zaległym osprzętem
             const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT";
             if (item.type !== "BULK" || !isLoose) return false;
+        } else if (activeTab === "BHP") {
+            const isBhpCategory = (item.category || "").toUpperCase().includes("BHP") || (item.category || "").toUpperCase().includes("OCHRONA OSOBISTA") || (item.category || "").toUpperCase().includes("SZELKI");
+            if (!item.requiresInspection && !isBhpCategory) return false;
         }
 
         const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || item.inventoryNumber.toLowerCase().includes(searchTerm.toLowerCase());
@@ -862,6 +977,78 @@ export default function InventoryPage() {
         );
     };
 
+    // 3. NOWOŚĆ: Renderowanie Sprzętu BHP / Ochrony Osobowej z przeglądami (Czwarta zakładka)
+    const renderBhpItemsGroup = () => {
+        return (
+            <div className="border rounded-2xl overflow-hidden shadow-sm bg-white border-purple-200 animate-fade-in">
+                <div className="bg-purple-900 text-white p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                        <span className="text-2xl">🦺</span>
+                        <div>
+                            <h2 className="text-lg font-black uppercase tracking-tight">Sprzęt Ochrony Osobowej (BHP) i Przeglądy</h2>
+                            <p className="text-[10px] text-purple-200 font-bold uppercase tracking-widest">Szelki, linki asekuracyjne, amortyzatory i urządzenia wymagające przeglądów rocznych</p>
+                        </div>
+                    </div>
+                </div>
+                <table className="w-full text-left">
+                    <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
+                        <tr>
+                            <th className="p-4 w-16">Zdjęcie</th>
+                            <th className="p-4">Nazwa Sprzętu / Kod / Nr Seryjny</th>
+                            <th className="p-4 text-center">Ostatni Przegląd</th>
+                            <th className="p-4 text-center">Następny Przegląd</th>
+                            <th className="p-4 text-center">Status Przeglądu</th>
+                            <th className="p-4">Lokalizacja</th>
+                            <th className="p-4 text-right">Akcje</th>
+                        </tr>
+                    </thead>
+                    <tbody className="text-sm">
+                        {sortedFilteredItems.length === 0 ? (
+                            <tr>
+                                <td colSpan={7} className="p-10 text-center text-slate-400 text-sm font-bold">
+                                    Brak sprzętu BHP spełniającego kryteria wyszukiwania.
+                                </td>
+                            </tr>
+                        ) : (
+                            sortedFilteredItems.map(item => (
+                                <tr key={item.id} className="border-b last:border-0 hover:bg-slate-50 transition">
+                                    <td className="p-3"><img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                    <td className="p-4 cursor-pointer" onClick={() => openItemCard(item)}>
+                                        <p className="font-bold text-slate-800">{item.name}</p>
+                                        <p className="text-xs font-mono font-bold text-purple-700">Nr Mag/Seria: {item.inventoryNumber || "BRAK"}</p>
+                                        <p className="text-[10px] text-slate-400 font-bold uppercase">{item.category} / {item.subcategory}</p>
+                                    </td>
+                                    <td className="p-4 text-center font-mono text-xs text-slate-600 font-bold">
+                                        {item.lastInspectionDate || "Brak wpisu"}
+                                    </td>
+                                    <td className="p-4 text-center font-mono text-xs font-bold text-slate-800">
+                                        {item.nextInspectionDate || "Brak daty"}
+                                    </td>
+                                    <td className="p-4 text-center">
+                                        {getInspectionStatusBadge(item.nextInspectionDate)}
+                                    </td>
+                                    <td className="p-4 text-slate-600 text-xs font-bold">{item.currentLocation || "MAGAZYN PESAM"}</td>
+                                    <td className="p-4 text-right space-x-2 whitespace-nowrap">
+                                        <button
+                                            onClick={() => { setSelectedItem(item); setInspectionDate(new Date().toISOString().split("T")[0]); setIsInspectionModalOpen(true); }}
+                                            className="text-purple-700 hover:bg-purple-50 border border-purple-200 px-2.5 py-1 rounded-lg font-black text-xs transition"
+                                        >
+                                            📋 Przegląd
+                                        </button>
+                                        <span className="text-slate-300">|</span>
+                                        <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                        <span className="text-slate-300">|</span>
+                                        <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        );
+    };
+
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto">
             <div className="flex justify-between items-center mb-8">
@@ -871,11 +1058,12 @@ export default function InventoryPage() {
                 </button>
             </div>
 
-            {/* TRZY FILTRY ZAKŁADEK */}
-            <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-2xl w-fit border shadow-inner">
-                <button onClick={() => setActiveTab("UNIQUE")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>NARZĘDZIA</button>
-                <button onClick={() => setActiveTab("BULK")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>RUSZTOWANIA</button>
-                <button onClick={() => setActiveTab("OTHER")} className={`px-10 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>DROBNICA / OSPRZĘT</button>
+            {/* CZTERY FILTRY ZAKŁADEK */}
+            <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-2xl w-fit border shadow-inner flex-wrap">
+                <button onClick={() => setActiveTab("UNIQUE")} className={`px-6 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>NARZĘDZIA</button>
+                <button onClick={() => setActiveTab("BULK")} className={`px-6 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>RUSZTOWANIA</button>
+                <button onClick={() => setActiveTab("OTHER")} className={`px-6 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>DROBNICA / OSPRZĘT</button>
+                <button onClick={() => setActiveTab("BHP")} className={`px-6 py-3 rounded-xl text-xs font-black transition-all ${activeTab === 'BHP' ? 'bg-white text-purple-700 shadow-xl scale-105' : 'text-slate-500 hover:text-slate-700'}`}>🦺 OCHRONA OSOBISTA (BHP)</button>
             </div>
 
             <div className="bg-white p-4 rounded-xl mb-6 shadow-sm border border-slate-200 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1036,6 +1224,34 @@ export default function InventoryPage() {
                                 <p className="text-sm text-blue-900 whitespace-pre-wrap">{selectedItem.additionalInfo || "Brak informacji."}</p>
                             </div>
                         )}
+                        {/* WIDŻET PRZEGLĄDÓW DLA KARTEK Z WYMAGANIEM PRZEGLĄDU */}
+                        {(selectedItem.requiresInspection || selectedItem.lastInspectionDate) && (
+                            <div className="bg-purple-50 border-2 border-purple-200 p-5 rounded-2xl mb-8 animate-fade-in shadow-sm">
+                                <div className="flex justify-between items-center mb-3 border-b border-purple-200 pb-2">
+                                    <h4 className="text-xs font-black text-purple-900 uppercase tracking-wider flex items-center gap-2">
+                                        <span>🦺 Okresowy Przegląd Techniczny / BHP</span>
+                                    </h4>
+                                    <div>{getInspectionStatusBadge(selectedItem.nextInspectionDate)}</div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4 text-xs mb-4">
+                                    <div>
+                                        <p className="text-[10px] font-bold text-purple-600 uppercase">Ostatni przegląd</p>
+                                        <p className="font-bold text-slate-800 font-mono text-sm">{selectedItem.lastInspectionDate || "Brak rejestracji"}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-[10px] font-bold text-purple-600 uppercase">Termin następnego</p>
+                                        <p className="font-bold text-purple-900 font-mono text-sm">{selectedItem.nextInspectionDate || "Brak ustalonej daty"}</p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => { setInspectionDate(new Date().toISOString().split("T")[0]); setIsInspectionModalOpen(true); }}
+                                    className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-black text-xs rounded-xl shadow transition flex items-center justify-center gap-2"
+                                >
+                                    📋 Zarejestruj Wykonanie Przeglądu
+                                </button>
+                            </div>
+                        )}
+
                         <div className="grid grid-cols-2 gap-4 mb-10 bg-slate-50 p-6 rounded-2xl border text-sm">
                             <div><p className="text-[10px] font-bold text-slate-400 uppercase">Nr Magazynowy</p><p className="font-mono font-bold text-lg">{selectedItem.inventoryNumber}</p></div>
                             <div>
@@ -1396,12 +1612,145 @@ export default function InventoryPage() {
                                     <div><label className="text-[10px] font-bold text-slate-400 uppercase">Cena netto</label><input type="number" step="0.01" value={formData.purchasePrice} onChange={e => setFormData({ ...formData, purchasePrice: Number(e.target.value) })} className="w-full p-2 border rounded-xl" /></div>
                                     <div><label className="text-[10px] font-bold text-slate-400 uppercase">Numer Faktury</label><input value={formData.invoiceNumber} onChange={e => setFormData({ ...formData, invoiceNumber: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
                                     <div className="md:col-span-2"><label className="text-[10px] font-bold text-slate-400 uppercase">Data zakupu</label><input type="date" value={formData.purchaseDate} onChange={e => setFormData({ ...formData, purchaseDate: e.target.value })} className="w-full p-2 border rounded-xl" /></div>
+
+                                    {/* SEKCJA PRZEGLĄDÓW OKRESOOWYCH / BHP */}
+                                    <div className="md:col-span-2 mt-4 border-t pt-4 bg-purple-50 p-4 rounded-2xl border border-purple-200">
+                                        <div className="flex items-center gap-3 mb-3">
+                                            <input
+                                                type="checkbox"
+                                                id="requiresInspectionCheck"
+                                                checked={!!formData.requiresInspection}
+                                                onChange={e => setFormData({ ...formData, requiresInspection: e.target.checked })}
+                                                className="w-5 h-5 text-purple-600 rounded cursor-pointer"
+                                            />
+                                            <label htmlFor="requiresInspectionCheck" className="text-xs font-black text-purple-900 cursor-pointer uppercase">
+                                                🦺 Sprzęt BHP / Wymaga obowiązkowych przeglądów okresowych
+                                            </label>
+                                        </div>
+
+                                        {formData.requiresInspection && (
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 animate-fade-in">
+                                                <div>
+                                                    <label className="text-[10px] font-bold text-purple-700 uppercase">Data Ostatniego Przeglądu</label>
+                                                    <input
+                                                        type="date"
+                                                        value={formData.lastInspectionDate || ""}
+                                                        onChange={e => {
+                                                            const newLast = e.target.value;
+                                                            const calculatedNext = calculateNextInspectionDate(newLast, formData.inspectionIntervalMonths || 12);
+                                                            setFormData({
+                                                                ...formData,
+                                                                lastInspectionDate: newLast,
+                                                                nextInspectionDate: calculatedNext
+                                                            });
+                                                        }}
+                                                        className="w-full p-2 border rounded-xl bg-white text-xs"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="text-[10px] font-bold text-purple-700 uppercase">Częstotliwość przeglądu</label>
+                                                    <select
+                                                        value={formData.inspectionIntervalMonths || 12}
+                                                        onChange={e => {
+                                                            const newInterval = Number(e.target.value);
+                                                            const calculatedNext = calculateNextInspectionDate(formData.lastInspectionDate || "", newInterval);
+                                                            setFormData({
+                                                                ...formData,
+                                                                inspectionIntervalMonths: newInterval,
+                                                                nextInspectionDate: calculatedNext
+                                                            });
+                                                        }}
+                                                        className="w-full p-2 border rounded-xl bg-white text-xs font-bold"
+                                                    >
+                                                        <option value={6}>Co pół roku (6 miesięcy)</option>
+                                                        <option value={12}>Co rok (12 miesięcy)</option>
+                                                        <option value={24}>Co 2 lata (24 miesiące)</option>
+                                                    </select>
+                                                </div>
+                                                {formData.lastInspectionDate && (
+                                                    <div className="md:col-span-2 bg-white p-2.5 rounded-xl border border-purple-200 text-xs flex justify-between items-center">
+                                                        <span className="text-slate-500 font-bold">Obliczona data następnego przeglądu:</span>
+                                                        <span className="font-mono font-black text-purple-800 bg-purple-100 px-2 py-0.5 rounded">
+                                                            {formData.nextInspectionDate || calculateNextInspectionDate(formData.lastInspectionDate, formData.inspectionIntervalMonths || 12)}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
                                 </>
                             )}
 
                             <div className="md:col-span-2 flex gap-3 pt-6 border-t mt-2">
                                 <button type="button" onClick={() => setIsFormOpen(false)} className="flex-1 py-3 text-slate-500 border rounded-2xl font-bold">Anuluj</button>
                                 <button type="submit" disabled={isUploading} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700">{isUploading ? "WGRYWANIE..." : "ZAPISZ"}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL PRZEGLĄDU TECHNICZNEGO / BHP */}
+            {isInspectionModalOpen && selectedItem && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in border-2 border-purple-200">
+                        <div className="flex justify-between items-center mb-4 border-b pb-3">
+                            <div className="flex items-center gap-2">
+                                <span className="text-2xl">📋</span>
+                                <h2 className="text-lg font-black text-purple-900 uppercase">Rejestracja Przeglądu BHP</h2>
+                            </div>
+                            <button onClick={() => setIsInspectionModalOpen(false)} className="text-2xl text-slate-400 hover:text-slate-800 font-bold">&times;</button>
+                        </div>
+
+                        <form onSubmit={handleRegisterInspection} className="space-y-4">
+                            <div className="bg-purple-50 p-4 rounded-xl border border-purple-100">
+                                <p className="text-[10px] uppercase font-bold text-purple-600">Urządzenie / Sprzęt:</p>
+                                <p className="font-black text-slate-800 text-base">{selectedItem.name}</p>
+                                <p className="text-xs font-mono font-bold text-purple-800">Nr Mag/Seria: {selectedItem.inventoryNumber}</p>
+                            </div>
+
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Data Wykonania Przeglądu</label>
+                                <input
+                                    type="date"
+                                    required
+                                    value={inspectionDate}
+                                    onChange={e => setInspectionDate(e.target.value)}
+                                    className="w-full p-3 border rounded-xl font-bold text-sm outline-none focus:ring-2 focus:ring-purple-600"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Interwał przeglądów</label>
+                                <p className="text-xs font-bold text-slate-700 p-2 bg-slate-100 rounded-xl border">
+                                    {selectedItem.inspectionIntervalMonths === 6 ? "Co pół roku (6 miesięcy)" : selectedItem.inspectionIntervalMonths === 24 ? "Co 2 lata (24 miesiące)" : "Co rok (12 miesięcy)"}
+                                </p>
+                            </div>
+
+                            {inspectionDate && (
+                                <div className="bg-green-50 p-3 rounded-xl border border-green-200 text-xs flex justify-between items-center">
+                                    <span className="text-green-800 font-bold">Przeliczony nowy termin:</span>
+                                    <span className="font-mono font-black text-green-900 bg-green-200 px-2 py-0.5 rounded text-sm">
+                                        {calculateNextInspectionDate(inspectionDate, selectedItem.inspectionIntervalMonths || 12)}
+                                    </span>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Uwagi / Wynik Przeglądu (Opcjonalnie)</label>
+                                <textarea
+                                    value={inspectionNotes}
+                                    onChange={e => setInspectionNotes(e.target.value)}
+                                    placeholder="np. Pozytywny, wymieniono linkę pomocniczą..."
+                                    className="w-full p-3 border rounded-xl text-xs h-20 outline-none focus:ring-2 focus:ring-purple-600"
+                                />
+                            </div>
+
+                            <div className="flex gap-3 pt-2">
+                                <button type="button" onClick={() => setIsInspectionModalOpen(false)} className="flex-1 py-3 text-slate-500 border rounded-xl font-bold text-xs">Anuluj</button>
+                                <button type="submit" disabled={isInspectionSubmitting} className="flex-1 py-3 bg-purple-700 text-white font-black rounded-xl shadow-lg hover:bg-purple-800 text-xs">
+                                    {isInspectionSubmitting ? "ZAPISYWANIE..." : "ZATWIERDŹ PRZEGLĄD"}
+                                </button>
                             </div>
                         </form>
                     </div>

@@ -66,13 +66,14 @@ interface IssueToWorkerModalProps {
     canIssueWarehouse: boolean;
     canIssueSite: boolean;
     onClose: () => void;
-    onSave: (itemId: string, qty: number, notes: string, source: "MAGAZYN" | "BUDOWA", sourceSiteId: string) => Promise<void>;
+    onSave: (itemId: string, qty: number, notes: string, source: "MAGAZYN" | "BUDOWA", sourceSiteId: string, issueDate?: string) => Promise<void>;
 }
 
 function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse, canIssueSite, onClose, onSave }: IssueToWorkerModalProps) {
     const [itemId, setItemId] = useState("");
     const [qty, setQty] = useState(1);
     const [notes, setNotes] = useState("");
+    const [issueDate, setIssueDate] = useState(new Date().toISOString().split("T")[0]);
     const [saving, setSaving] = useState(false);
 
     const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
@@ -117,8 +118,8 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
         if (issueSource === "BUDOWA" && !selectedSiteId) return alert("Wybierz budowę źródłową!");
 
         setSaving(true);
-        // Przekazujemy selectedSiteId, żeby główna funkcja wiedziała skąd zdjąć
-        await onSave(itemId, qty, notes, issueSource, selectedSiteId);
+        // Przekazujemy selectedSiteId oraz issueDate, żeby główna funkcja wiedziała skąd zdjąć i z jaką datą
+        await onSave(itemId, qty, notes, issueSource, selectedSiteId, issueDate);
         setSaving(false);
     };
 
@@ -229,13 +230,31 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
                                         Wybierz przedmiot z listy obok, aby kontynuować.
                                     </div>
                                 ) : (
-                                    <div className="bg-green-50 border border-green-200 rounded-xl p-4 animate-fade-in flex flex-col h-full">
-                                        <p className="text-[10px] font-black text-green-800 uppercase mb-1">Wybrano do wydania:</p>
-                                        <p className="font-bold text-slate-800 mb-1">{selectedItem.name}</p>
-                                        <p className="text-xs font-mono text-slate-500 mb-6">Nr Mag: {selectedItem.inventoryNumber || "BRAK"}</p>
+                                    <div className="bg-green-50 border border-green-200 rounded-xl p-4 animate-fade-in flex flex-col h-full overflow-y-auto space-y-4">
+                                        <div>
+                                            <p className="text-[10px] font-black text-green-800 uppercase mb-1">Wybrano do wydania:</p>
+                                            <p className="font-bold text-slate-800 mb-1">{selectedItem.name}</p>
+                                            <p className="text-xs font-mono text-slate-500">Nr Mag: {selectedItem.inventoryNumber || "BRAK"}</p>
+                                            {(selectedItem as any).nextInspectionDate && (
+                                                <div className="mt-2 bg-purple-100 border border-purple-300 p-2 rounded-lg text-xs font-bold text-purple-900 flex items-center gap-2">
+                                                    <span>🦺 Data przeglądu BHP:</span>
+                                                    <span className="font-mono">{(selectedItem as any).nextInspectionDate}</span>
+                                                </div>
+                                            )}
+                                        </div>
 
-                                        <div className="mb-6">
-                                            <label className="text-xs font-bold text-slate-600 block mb-2">Ilość do wydania</label>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-600 block mb-1">Data wydania fizycznego / papierowego</label>
+                                            <input
+                                                type="date"
+                                                value={issueDate}
+                                                onChange={e => setIssueDate(e.target.value)}
+                                                className="w-full p-2.5 border-2 rounded-xl text-sm font-bold bg-white outline-none focus:border-green-500"
+                                            />
+                                        </div>
+
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-600 block mb-1">Ilość do wydania</label>
                                             <div className="flex items-center gap-3">
                                                 <input
                                                     required
@@ -244,7 +263,7 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
                                                     max={availableQty || 9999}
                                                     value={qty}
                                                     onChange={e => setQty(Number(e.target.value))}
-                                                    className="w-24 p-3 border-2 rounded-xl text-center font-bold text-lg outline-none focus:border-green-500"
+                                                    className="w-24 p-3 border-2 rounded-xl text-center font-bold text-lg outline-none focus:border-green-500 bg-white"
                                                 />
                                                 <span className="text-xs font-bold text-slate-500">z {availableQty} dostępnych</span>
                                             </div>
@@ -254,11 +273,11 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
                                         </div>
 
                                         <div className="mt-auto">
-                                            <label className="text-xs font-bold text-slate-600 block mb-2">Notatki (opcjonalnie)</label>
+                                            <label className="text-xs font-bold text-slate-600 block mb-1">Notatki (opcjonalnie)</label>
                                             <textarea
                                                 value={notes}
                                                 onChange={e => setNotes(e.target.value)}
-                                                className="w-full p-3 border-2 rounded-xl text-sm h-20 resize-none outline-none focus:border-green-500"
+                                                className="w-full p-3 border-2 rounded-xl text-sm h-16 resize-none outline-none focus:border-green-500 bg-white"
                                                 placeholder="np. wymiana za zużyty, nowa osoba..."
                                             />
                                         </div>
@@ -385,7 +404,7 @@ export default function WorkersPage() {
     // -----------------------------------------------------------------------
     // FUNKCJA: WYDANIE PRACOWNIKOWI
     // -----------------------------------------------------------------------
-    const handleIssueToWorker = async (itemId: string, qty: number, notes: string, source: "MAGAZYN" | "BUDOWA", sourceSiteId: string) => {
+    const handleIssueToWorker = async (itemId: string, qty: number, notes: string, source: "MAGAZYN" | "BUDOWA", sourceSiteId: string, issueDate?: string) => {
         if (!selectedWorker) return;
 
         try {
@@ -407,13 +426,14 @@ export default function WorkersPage() {
 
                 // Szukamy nazwy budowy do zapisania w historii
                 const siteName = source === "BUDOWA" ? (sites.find(s => s.id === sourceSiteId)?.name || "Budowa") : "Magazyn";
+                const recordDate = issueDate ? new Date(issueDate).toISOString() : new Date().toISOString();
 
                 const issueRef = doc(collection(db, `workers/${selectedWorker.id}/issues`));
                 transaction.set(issueRef, {
                     itemId,
                     itemName: itemData.name,
                     qty,
-                    date: new Date().toISOString(),
+                    date: recordDate,
                     issuedBy: `${user?.firstName} ${user?.lastName}`,
                     notes,
                     source,

@@ -117,7 +117,7 @@ export default function ProtocolsHub() {
     const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
     const [returnSiteId, setReturnSiteId] = useState("");
     const [returnCart, setReturnCart] = useState<ReturnCartItem[]>([]);
-    const [returnActiveTab, setReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE");
+    const [returnActiveTab, setReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE");
     const [isReturnManualModalOpen, setIsReturnManualModalOpen] = useState(false);
 
     // Stany dla AKCEPTACJI ZWROTÓW
@@ -148,7 +148,7 @@ export default function ProtocolsHub() {
     const [paperDocReference, setPaperDocReference] = useState("");
     const [paperDocSource, setPaperDocSource] = useState<PaperDocSource>("KIEROWNIK");
     const [paperReturnCart, setPaperReturnCart] = useState<PaperReturnCartItem[]>([]);
-    const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER">("UNIQUE");
+    const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE");
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
     const [paperBulkPickModal, setPaperBulkPickModal] = useState<{ item: InventoryItem & { availableToReturn: number }; qty: number } | null>(null);
     const [investigationData, setInvestigationData] = useState<{
@@ -953,6 +953,40 @@ export default function ProtocolsHub() {
         }
     };
 
+    // --- NOWOŚĆ: Funkcja czyszcząca kartoteki wydanego sprzętu BHP u pracowników przy zwrocie ---
+    const clearReturnedWorkerPpe = async (items: any[]) => {
+        try {
+            const workersSnap = await getDocs(collection(db, "workers"));
+            for (const workerDoc of workersSnap.docs) {
+                const workerId = workerDoc.id;
+                const issuesSnap = await getDocs(collection(db, `workers/${workerId}/issues`));
+                const activeIssues = issuesSnap.docs.map(d => ({ issueId: d.id, ...d.data() as any }));
+
+                for (const item of items) {
+                    const itemId = item.inventoryId || item.dbId;
+                    if (!itemId) continue;
+
+                    const issueRecord = activeIssues.find(i => i.itemId === itemId && i.type === "ISSUE");
+                    if (issueRecord) {
+                        const returnLogRef = doc(collection(db, `workers/${workerId}/issues`));
+                        await setDoc(returnLogRef, {
+                            itemId: itemId,
+                            itemName: item.name || issueRecord.itemName,
+                            qty: item.receivedQty || item.declaredQty || issueRecord.qty,
+                            date: new Date().toISOString(),
+                            issuedBy: "Magazyn (Zwrot z budowy)",
+                            notes: `Automatyczne rozliczenie po zwrocie z budowy protokołem`,
+                            source: "MAGAZYN",
+                            type: "RETURN"
+                        });
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Błąd czyszczenia kartoteki BHP pracowników:", err);
+        }
+    };
+
     const handleReturnSubmit = async () => {
         if (!returnSiteId || returnCart.length === 0) return alert("Wybierz budowę i przedmioty do zwrotu!");
 
@@ -1010,11 +1044,13 @@ export default function ProtocolsHub() {
         });
 
     const filteredReturnInventory = inventoryOnSelectedSite.filter(item => {
-        if (returnActiveTab === "UNIQUE") return item.type === "UNIQUE";
-        if (returnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL" && item.category !== "Zaległości osprzętu";
+        const isBhp = (item as any).requiresInspection || item.category === "BHP" || (item.name || "").toLowerCase().includes("szelki") || (item.name || "").toLowerCase().includes("linka");
+        if (returnActiveTab === "BHP") return isBhp;
+        if (returnActiveTab === "UNIQUE") return item.type === "UNIQUE" && !isBhp;
+        if (returnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL" && item.category !== "Zaległości osprzętu" && !isBhp;
         if (returnActiveTab === "OTHER") {
             const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (!item.subType && item.type === "BULK");
-            return item.type === "BULK" && isLoose;
+            return item.type === "BULK" && isLoose && !isBhp;
         }
         return true;
     });
@@ -1030,13 +1066,16 @@ export default function ProtocolsHub() {
     };
 
     const filteredPaperInventory = inventory.filter(item => {
-        if (paperReturnActiveTab === "UNIQUE") {
-            if (item.type !== "UNIQUE") return false;
+        const isBhp = (item as any).requiresInspection || item.category === "BHP" || (item.name || "").toLowerCase().includes("szelki") || (item.name || "").toLowerCase().includes("linka");
+        if (paperReturnActiveTab === "BHP") {
+            if (!isBhp) return false;
+        } else if (paperReturnActiveTab === "UNIQUE") {
+            if (item.type !== "UNIQUE" || isBhp) return false;
         } else if (paperReturnActiveTab === "BULK") {
-            if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu") return false;
+            if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || isBhp) return false;
         } else if (paperReturnActiveTab === "OTHER") {
             const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (!item.subType && item.type === "BULK");
-            if (item.type !== "BULK" || !isLoose) return false;
+            if (item.type !== "BULK" || !isLoose || isBhp) return false;
         }
 
         const isSearching = paperSearchName.trim() !== "" || paperSearchInvNumber.trim() !== "";
@@ -1440,11 +1479,12 @@ export default function ProtocolsHub() {
                 });
             });
 
-            // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił osprzęt z listy Kierownika
+            // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił osprzęt z listy Kierownika oraz wyczyścił kartotekę pracownika z BHP
             const ghostItems = processedCart.filter(i => i.isGhostItem);
             if (ghostItems.length > 0) {
                 await clearReturnedAccessoriesFromIssue(paperReturnSiteId, ghostItems);
             }
+            await clearReturnedWorkerPpe(processedCart);
 
             alert("Papierowy protokół zwrotu został wprowadzony i zaakceptowany!");
             closeModal();
@@ -1824,11 +1864,12 @@ export default function ProtocolsHub() {
                 });
             });
 
-            // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił zaakceptowany osprzęt z listy Kierownika
+            // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił zaakceptowany osprzęt z listy Kierownika oraz wyczyścił kartotekę pracownika z BHP
             const ghostItems = selectedProtocol.items.filter((i: any) => i.isGhostItem);
             if (ghostItems.length > 0) {
                 await clearReturnedAccessoriesFromIssue(selectedProtocol.sourceId, ghostItems);
             }
+            await clearReturnedWorkerPpe(selectedProtocol.items);
 
             alert("Zwrot został pomyślnie przyjęty!");
             setSelectedProtocol(null);
@@ -3090,6 +3131,7 @@ export default function ProtocolsHub() {
                                         <button onClick={() => setReturnActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
                                         <button onClick={() => setReturnActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
                                         <button onClick={() => setReturnActiveTab("OTHER")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>DROBNICA / OSPRZĘT</button>
+                                        <button onClick={() => setReturnActiveTab("BHP")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${returnActiveTab === 'BHP' ? 'bg-purple-600 text-white shadow-sm' : 'text-purple-700 hover:bg-purple-100'}`}>🦺 SPRZĘT BHP</button>
                                     </div>
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-slate-50">
@@ -3288,6 +3330,7 @@ export default function ProtocolsHub() {
                                         <button onClick={() => setPaperReturnActiveTab("UNIQUE")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'UNIQUE' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>NARZĘDZIA</button>
                                         <button onClick={() => setPaperReturnActiveTab("BULK")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500'}`}>RUSZTOWANIA</button>
                                         <button onClick={() => setPaperReturnActiveTab("OTHER")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'OTHER' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>DROBNICA / OSPRZĘT</button>
+                                        <button onClick={() => setPaperReturnActiveTab("BHP")} className={`px-4 py-2 rounded-lg text-xs font-black transition-all ${paperReturnActiveTab === 'BHP' ? 'bg-purple-600 text-white shadow-sm' : 'text-purple-700 hover:bg-purple-100'}`}>🦺 SPRZĘT BHP</button>
                                     </div>
 
                                     {/* WYSZUKIWARKA RATUNKOWA */}

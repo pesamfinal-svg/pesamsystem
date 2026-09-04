@@ -19,6 +19,7 @@ interface InventoryItem {
     inventoryNumber: string; category: string; subcategory: string; status: string;
     imageUrl: string; currentLocation: string; totalQuantity: number; availableQuantity: number;
     purchasePrice: number; allocations: Record<string, number>;
+    requiresInspection?: boolean; lastInspectionDate?: string; nextInspectionDate?: string;
 }
 
 interface Site {
@@ -195,6 +196,24 @@ export default function DashboardPage() {
         p.createdAt >= sevenDaysAgoISO
     );
 
+    // Obliczanie zaległych i nadchodzących przeglądów BHP
+    const todayStr = new Date().toISOString().split("T")[0];
+    const todayDate = new Date();
+    todayDate.setHours(0, 0, 0, 0);
+
+    const overdueBhpItems = items.filter(i => {
+        if (!i.requiresInspection || !i.nextInspectionDate) return false;
+        return i.nextInspectionDate < todayStr;
+    });
+
+    const upcomingBhpItems = items.filter(i => {
+        if (!i.requiresInspection || !i.nextInspectionDate) return false;
+        const nextDate = new Date(i.nextInspectionDate);
+        nextDate.setHours(0, 0, 0, 0);
+        const diffDays = Math.ceil((nextDate.getTime() - todayDate.getTime()) / (1000 * 3600 * 24));
+        return diffDays >= 0 && diffDays <= 30;
+    });
+
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-fade-in">
             {/* Witaj pracowniku (Zawsze widoczne na górze) */}
@@ -226,6 +245,39 @@ export default function DashboardPage() {
             {/* ========================================================================= */}
             {user && hasAnyOperationalPermission ? (
                 <div className="space-y-8">
+                    {/* BANER ALERTO-NOTYFIKACJA O PRZEGLĄDACH BHP */}
+                    {(overdueBhpItems.length > 0 || upcomingBhpItems.length > 0) && (
+                        <div className="bg-gradient-to-r from-purple-900 to-indigo-900 text-white p-6 rounded-3xl shadow-xl flex flex-col md:flex-row justify-between items-center gap-4 animate-fade-in border-2 border-purple-400">
+                            <div className="flex items-center gap-4">
+                                <div className="bg-purple-800/80 p-3.5 rounded-2xl text-3xl border border-purple-400">🦺</div>
+                                <div>
+                                    <h4 className="font-extrabold text-base uppercase tracking-wider flex items-center gap-2 flex-wrap">
+                                        <span>Alerty Przeglądów Technicznych & BHP</span>
+                                        {overdueBhpItems.length > 0 && (
+                                            <span className="bg-red-600 text-white text-xs px-3 py-0.5 rounded-full font-black animate-pulse">
+                                                🔴 Przeterminowane: {overdueBhpItems.length}
+                                            </span>
+                                        )}
+                                        {upcomingBhpItems.length > 0 && (
+                                            <span className="bg-amber-400 text-amber-950 text-xs px-3 py-0.5 rounded-full font-black">
+                                                ⚠️ Do 30 dni: {upcomingBhpItems.length}
+                                            </span>
+                                        )}
+                                    </h4>
+                                    <p className="text-xs text-purple-200 mt-1 leading-relaxed">
+                                        Wykryto sprzęt ochrony osobistej (szelki, liny, osprzęt), którego okresowy przegląd minął lub upływa w ciągu najbliższych 30 dni.
+                                    </p>
+                                </div>
+                            </div>
+                            <Link
+                                href="/dashboard/inventory"
+                                className="bg-purple-400 hover:bg-purple-300 text-purple-950 px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition whitespace-nowrap"
+                            >
+                                Przejdź do BHP ➡️
+                            </Link>
+                        </div>
+                    )}
+
                     {/* BANER ALERTO-NOTYFIKACJA DLA MAGAZYNIERA O OCZEKUJĄCYCH WZ */}
                     {pendingWzCount > 0 && canApproveWz && (
                         <div className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white p-6 rounded-3xl shadow-lg flex flex-col md:flex-row justify-between items-center gap-4 animate-fade-in">
