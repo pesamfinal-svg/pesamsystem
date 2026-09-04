@@ -42,6 +42,8 @@ interface InventoryItem {
     lastInspectionDate?: string;
     inspectionIntervalMonths?: number;
     nextInspectionDate?: string;
+    assignedWorkerId?: string;
+    assignedWorkerName?: string;
 }
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
@@ -743,8 +745,8 @@ export default function InventoryPage() {
             const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT";
             if (item.type !== "BULK" || !isLoose) return false;
         } else if (activeTab === "BHP") {
-            const isBhpCategory = (item.category || "").toUpperCase().includes("BHP") || (item.category || "").toUpperCase().includes("OCHRONA OSOBISTA") || (item.category || "").toUpperCase().includes("SZELKI");
-            if (!item.requiresInspection && !isBhpCategory) return false;
+            const isBhpPersonal = item.requiresInspection || (item.category || "").toUpperCase().includes("OCHRONA OSOBISTA") || (item.category || "").toUpperCase().includes("BHP OSOBISTE");
+            if (!isBhpPersonal) return false;
         }
 
         const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || item.inventoryNumber.toLowerCase().includes(searchTerm.toLowerCase());
@@ -1027,7 +1029,21 @@ export default function InventoryPage() {
                                     <td className="p-4 text-center">
                                         {getInspectionStatusBadge(item.nextInspectionDate)}
                                     </td>
-                                    <td className="p-4 text-slate-600 text-xs font-bold">{item.currentLocation || "MAGAZYN PESAM"}</td>
+                                    <td className="p-4">
+                                        {item.assignedWorkerName ? (
+                                            <span className="bg-blue-100 text-blue-900 border border-blue-300 font-bold text-xs px-2.5 py-1.5 rounded-xl flex items-center gap-1 w-fit shadow-sm">
+                                                👤 Wydano: {item.assignedWorkerName}
+                                            </span>
+                                        ) : item.availableQuantity > 0 ? (
+                                            <span className="bg-emerald-100 text-emerald-900 border border-emerald-300 font-bold text-xs px-2.5 py-1.5 rounded-xl flex items-center gap-1 w-fit shadow-sm">
+                                                🏠 Na magazynie (PESAM)
+                                            </span>
+                                        ) : (
+                                            <span className="bg-amber-100 text-amber-900 border border-amber-300 font-bold text-xs px-2.5 py-1.5 rounded-xl flex items-center gap-1 w-fit shadow-sm">
+                                                🏢 {item.currentLocation || "Na budowie"}
+                                            </span>
+                                        )}
+                                    </td>
                                     <td className="p-4 text-right space-x-2 whitespace-nowrap">
                                         <button
                                             onClick={() => { setSelectedItem(item); setInspectionDate(new Date().toISOString().split("T")[0]); setIsInspectionModalOpen(true); }}
@@ -1303,9 +1319,37 @@ export default function InventoryPage() {
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-8 max-h-[90vh] overflow-y-auto animate-fade-in">
                         <h2 className="text-2xl font-bold mb-6 text-slate-800">{editingItem ? "Edytuj dane" : "Dodaj sprzęt"}</h2>
                         <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                            <div className="md:col-span-2 flex bg-slate-100 p-1 rounded-xl mb-2">
-                                <button type="button" disabled={!!editingItem} onClick={() => setFormData({ ...formData, type: "UNIQUE" })} className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${formData.type === 'UNIQUE' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>NARZĘDZIE (UNIQUE)</button>
-                                <button type="button" disabled={!!editingItem} onClick={() => setFormData({ ...formData, type: "BULK", subType: "SUB_ITEM" })} className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${formData.type === 'BULK' ? 'bg-white shadow text-blue-600' : 'text-slate-400'}`}>RUSZTOWANIE (BULK)</button>
+                            <div className="md:col-span-2 flex bg-slate-100 p-1 rounded-xl mb-2 gap-1">
+                                <button
+                                    type="button"
+                                    disabled={!!editingItem}
+                                    onClick={() => setFormData({ ...formData, type: "UNIQUE", requiresInspection: false })}
+                                    className={`flex-1 py-2.5 rounded-lg font-black text-xs transition ${formData.type === 'UNIQUE' && !formData.requiresInspection ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}
+                                >
+                                    🔨 NARZĘDZIE (UNIQUE)
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={!!editingItem}
+                                    onClick={() => setFormData({ ...formData, type: "BULK", subType: "SUB_ITEM", requiresInspection: false })}
+                                    className={`flex-1 py-2.5 rounded-lg font-black text-xs transition ${formData.type === 'BULK' ? 'bg-white shadow text-orange-600' : 'text-slate-500'}`}
+                                >
+                                    🏗️ RUSZTOWANIE (BULK)
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={!!editingItem}
+                                    onClick={() => setFormData({
+                                        ...formData,
+                                        type: "UNIQUE",
+                                        category: "OCHRONA OSOBISTA",
+                                        requiresInspection: true,
+                                        inspectionIntervalMonths: 12
+                                    })}
+                                    className={`flex-1 py-2.5 rounded-lg font-black text-xs transition ${formData.type === 'UNIQUE' && formData.requiresInspection ? 'bg-purple-700 shadow text-white' : 'text-purple-800 bg-purple-100 hover:bg-purple-200'}`}
+                                >
+                                    🦺 BHP OSOBISTE (SZELKI/LINKI)
+                                </button>
                             </div>
 
                             {formData.type === "BULK" && (

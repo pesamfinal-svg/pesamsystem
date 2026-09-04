@@ -30,6 +30,11 @@ interface InventoryItem {
     totalQuantity: number;
     allocations: Record<string, number>;
     unit?: string;
+    requiresInspection?: boolean;
+    nextInspectionDate?: string;
+    assignedWorkerId?: string;
+    assignedWorkerName?: string;
+    currentLocation?: string;
 }
 
 interface Site {
@@ -415,13 +420,26 @@ export default function WorkersPage() {
 
                 const itemData = itemDoc.data() as InventoryItem;
 
+                const workerFullName = `${selectedWorker.firstName} ${selectedWorker.lastName}`;
                 if (source === "MAGAZYN") {
                     if (itemData.availableQuantity < qty) throw new Error("Brak wystarczającej ilości w magazynie!");
-                    transaction.update(itemRef, { availableQuantity: itemData.availableQuantity - qty });
+                    const updateObj: any = { availableQuantity: itemData.availableQuantity - qty };
+                    if (itemData.type === "UNIQUE" || itemData.requiresInspection) {
+                        updateObj.assignedWorkerId = selectedWorker.id;
+                        updateObj.assignedWorkerName = workerFullName;
+                        updateObj.currentLocation = `Wydano: ${workerFullName}`;
+                    }
+                    transaction.update(itemRef, updateObj);
                 } else {
                     const siteQty = itemData.allocations?.[sourceSiteId] || 0;
                     if (siteQty < qty) throw new Error("Nie masz wystarczającej ilości na wybranej budowie!");
-                    transaction.update(itemRef, { [`allocations.${sourceSiteId}`]: siteQty - qty });
+                    const updateObj: any = { [`allocations.${sourceSiteId}`]: siteQty - qty };
+                    if (itemData.type === "UNIQUE" || itemData.requiresInspection) {
+                        updateObj.assignedWorkerId = selectedWorker.id;
+                        updateObj.assignedWorkerName = workerFullName;
+                        updateObj.currentLocation = `Wydano: ${workerFullName}`;
+                    }
+                    transaction.update(itemRef, updateObj);
                 }
 
                 // Szukamy nazwy budowy do zapisania w historii
