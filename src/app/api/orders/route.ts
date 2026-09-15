@@ -46,9 +46,11 @@ async function generateOrderPdf(payload: OrderPayload): Promise<Uint8Array> {
     const { orderId, siteName, user, sections, notes } = payload;
     const now = new Date();
     const dateStr = now.toLocaleDateString('pl-PL', {
+        timeZone: 'Europe/Warsaw',
         year: 'numeric', month: 'long', day: 'numeric',
     });
     const timeStr = now.toLocaleTimeString('pl-PL', {
+        timeZone: 'Europe/Warsaw',
         hour: '2-digit', minute: '2-digit',
     });
 
@@ -403,8 +405,8 @@ export async function POST(req: Request) {
                 </table>
             </div>
             <div style="background:#f8fafc;padding:16px 36px;border-radius:0 0 12px 12px;text-align:center">
-                <p style="margin:0;font-size:11px;color:#94a3b8">Wiadomość wygenerowana automatycznie przez system PESAM · ${new Date().toLocaleString('pl-PL')}</p>
-            </div>
+    <p style="margin:0;font-size:11px;color:#94a3b8">Wiadomość wygenerowana automatycznie przez system PESAM · ${new Date().toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' })}</p>
+</div>
         </div>`;
 
         // 6. Wysyłka do MAGAZYNU i BIURA (Dynamiczna lista odbiorców z bazy)
