@@ -2,7 +2,7 @@
 import { NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/admin';
 import nodemailer from 'nodemailer';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 
 // ─── TYPY ────────────────────────────────────────────────────────────────────
@@ -171,21 +171,52 @@ async function generateOrderPdf(payload: OrderPayload): Promise<Uint8Array> {
         y -= HEADER_H;
     };
 
-    const drawTableRow = (lp: number, item: OrderItem, shade: boolean) => {
-        if (shade) {
-            page.drawRectangle({ x: TABLE_LEFT, y: y - ROW_H, width: TABLE_WIDTH, height: ROW_H, color: rgb(0.972, 0.976, 0.984) });
+    const wrapText = (text: string, font: any, fontSize: number, maxWidth: number): string[] => {
+        if (!text || !text.trim()) return ['—'];
+        const words = text.trim().split(/\s+/);
+        const lines: string[] = [];
+        let currentLine = '';
+        for (const word of words) {
+            const testLine = currentLine ? `${currentLine} ${word}` : word;
+            let textWidth = 0;
+            try { textWidth = font.widthOfTextAtSize(testLine, fontSize); } catch (_) { textWidth = font.widthOfTextAtSize(toAscii(testLine), fontSize); }
+            if (textWidth > maxWidth && currentLine !== '') {
+                lines.push(currentLine);
+                currentLine = word;
+            } else {
+                currentLine = testLine;
+            }
         }
-        page.drawLine({ start: { x: TABLE_LEFT, y: y - ROW_H }, end: { x: TABLE_LEFT + TABLE_WIDTH, y: y - ROW_H }, thickness: 0.5, color: rgb(0.88, 0.90, 0.92) });
+        if (currentLine) lines.push(currentLine);
+        return lines.length > 0 ? lines : ['—'];
+    };
 
-        const nameMaxChars = 52;
-        const rawName = item.name.length > nameMaxChars ? item.name.slice(0, nameMaxChars) + '...' : item.name;
+    const drawTableRow = (lp: number, item: OrderItem, shade: boolean) => {
+        const nameLines = wrapText(item.name, fontRegular, 8, COL_NAME - 12);
+        const lineH = 11;
+        const dynamicRowH = Math.max(20, nameLines.length * lineH + 8);
 
+        if (shade) {
+            page.drawRectangle({ x: TABLE_LEFT, y: y - dynamicRowH, width: TABLE_WIDTH, height: dynamicRowH, color: rgb(0.972, 0.976, 0.984) });
+        }
+        page.drawRectangle({ x: TABLE_LEFT, y: y - dynamicRowH, width: TABLE_WIDTH, height: dynamicRowH, borderColor: rgb(0.88, 0.90, 0.92), borderWidth: 0.5 });
+
+        // Lp.
         page.drawText(`${lp}.`, { x: TABLE_LEFT + 6, y: y - 14, size: 8, font: fontRegular, color: colorSlate });
-        page.drawText(toAscii(rawName), { x: TABLE_LEFT + COL_LP + 6, y: y - 14, size: 8, font: fontRegular, color: colorDark });
+
+        // Nazwa przedmiotu (wielowierszowa, BEZ przycinania)
+        nameLines.forEach((lineText, idx) => {
+            let safeText = lineText;
+            try { fontRegular.widthOfTextAtSize(safeText, 8); } catch (_) { safeText = toAscii(safeText); }
+            page.drawText(safeText, { x: TABLE_LEFT + COL_LP + 6, y: y - 14 - (idx * lineH), size: 8, font: fontRegular, color: colorDark });
+        });
+
+        // Nr Mag.
         page.drawText(item.inventoryNumber || '—', { x: TABLE_LEFT + COL_LP + COL_NAME + 6, y: y - 14, size: 8, font: fontRegular, color: colorSlate });
+        // Ilość
         page.drawText(`${item.quantity} szt.`, { x: TABLE_LEFT + COL_LP + COL_NAME + COL_INV + 4, y: y - 14, size: 8, font: fontBold, color: colorDark });
 
-        y -= ROW_H;
+        y -= dynamicRowH;
     };
 
     const drawColumnLines = (startY: number, endY: number) => {
@@ -348,7 +379,7 @@ export async function POST(req: Request) {
         const allItemsHtml = cart.map((item, i) => `
             <tr style="background:${i % 2 === 0 ? '#fff' : '#f8fafc'}">
                 <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:12px">${i + 1}</td>
-                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-weight:600;font-size:12px">${item.name}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-weight:600;font-size:12px;white-space:pre-wrap;word-break:break-word">${item.name}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#3b82f6;font-family:monospace;font-size:11px">${item.inventoryNumber || '—'}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-weight:700;font-size:12px">${item.quantity}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:10px;color:#94a3b8">${item.section}</td>
