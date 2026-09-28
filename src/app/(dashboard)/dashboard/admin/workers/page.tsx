@@ -48,6 +48,7 @@ interface WorkerIssueHistory {
     id: string;
     itemId: string;
     itemName: string;
+    itemInventoryNumber?: string;
     qty: number;
     date: string;
     issuedBy: string;
@@ -81,7 +82,7 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
     const [issueDate, setIssueDate] = useState(new Date().toISOString().split("T")[0]);
     const [saving, setSaving] = useState(false);
 
-    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
+    const [activeTab, setActiveTab] = useState<"ALL" | "BHP" | "UNIQUE" | "BULK">("ALL");
     const [searchTerm, setSearchTerm] = useState("");
 
     const [issueSource, setIssueSource] = useState<"MAGAZYN" | "BUDOWA">(canIssueWarehouse ? "MAGAZYN" : "BUDOWA");
@@ -107,13 +108,19 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
         const dostepne = issueSource === "MAGAZYN" ? i.availableQuantity : (i.allocations?.[selectedSiteId] || 0);
         if (dostepne <= 0) return false;
 
-        if (i.type !== activeTab) return false;
+        if (activeTab === "UNIQUE" && i.type !== "UNIQUE") return false;
+        if (activeTab === "BULK" && i.type !== "BULK") return false;
+        if (activeTab === "BHP") {
+            const isBhp = i.requiresInspection || ((i as any).category || "").toUpperCase().includes("OCHRONA OSOBISTA") || ((i as any).category || "").toUpperCase().includes("BHP");
+            if (!isBhp) return false;
+        }
         if (i.subType === "MAIN_CAT") return false;
 
         const term = searchTerm.toLowerCase();
         const matchName = i.name.toLowerCase().includes(term);
         const matchInv = (i.inventoryNumber || "").toLowerCase().includes(term);
-        return matchName || matchInv;
+        const matchCat = ((i as any).category || "").toLowerCase().includes(term);
+        return matchName || matchInv || matchCat;
     });
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -186,13 +193,15 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
                 <div className="flex-1 flex flex-col md:flex-row gap-6 overflow-hidden mt-2">
                     <div className="w-full md:w-1/2 flex flex-col border border-slate-200 rounded-xl overflow-hidden bg-slate-50">
                         <div className="p-3 bg-white border-b">
-                            <div className="flex gap-2 mb-3 bg-slate-100 p-1 rounded-lg w-fit">
-                                <button type="button" onClick={() => { setActiveTab("UNIQUE"); setItemId(""); }} className={`px-4 py-1.5 rounded-md text-xs font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>NARZĘDZIA</button>
-                                <button type="button" onClick={() => { setActiveTab("BULK"); setItemId(""); }} className={`px-4 py-1.5 rounded-md text-xs font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>MATERIAŁY/INNE</button>
+                            <div className="flex flex-wrap gap-1.5 mb-3 bg-slate-100 p-1 rounded-lg">
+                                <button type="button" onClick={() => { setActiveTab("ALL"); setItemId(""); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${activeTab === 'ALL' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>WSZYSTKIE</button>
+                                <button type="button" onClick={() => { setActiveTab("BHP"); setItemId(""); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${activeTab === 'BHP' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>🦺 BHP / OCHRONA</button>
+                                <button type="button" onClick={() => { setActiveTab("UNIQUE"); setItemId(""); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${activeTab === 'UNIQUE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>NARZĘDZIA</button>
+                                <button type="button" onClick={() => { setActiveTab("BULK"); setItemId(""); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${activeTab === 'BULK' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>INNE</button>
                             </div>
                             <input
                                 type="text"
-                                placeholder="Szukaj nazwy lub nr..."
+                                placeholder="Szukaj nazwy lub nr/kodu..."
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
                                 className="w-full p-2 border rounded-lg text-sm outline-none focus:border-green-500 bg-white"
@@ -213,11 +222,20 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
                                         <div
                                             key={i.id}
                                             onClick={() => { setItemId(i.id); setQty(1); }}
-                                            className={`p-2 rounded-lg cursor-pointer border transition-all text-sm ${isSelected ? 'bg-green-100 border-green-400 shadow-sm' : 'bg-white border-transparent hover:border-slate-300'}`}
+                                            className={`p-2.5 rounded-lg cursor-pointer border transition-all text-sm ${isSelected ? 'bg-green-100 border-green-400 shadow-sm' : 'bg-white border-transparent hover:border-slate-300'}`}
                                         >
-                                            <p className="font-bold text-slate-800 leading-tight">{i.name}</p>
-                                            <div className="flex justify-between items-center mt-1">
-                                                <span className="text-[10px] font-mono text-slate-500">{i.inventoryNumber || "-"}</span>
+                                            <div className="flex justify-between items-start gap-2">
+                                                <p className="font-bold text-slate-800 leading-tight">{i.name}</p>
+                                                {i.inventoryNumber && (
+                                                    <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 shrink-0">
+                                                        Kod: {i.inventoryNumber}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="flex justify-between items-center mt-1.5">
+                                                <span className="text-[10px] text-slate-400 font-bold uppercase">
+                                                    {(i as any).category || (i.type === "UNIQUE" ? "Narzędzie" : "Sprzęt")}
+                                                </span>
                                                 <span className="text-[10px] font-bold text-green-600">Dostępne: {dostepne} {i.unit || "szt."}</span>
                                             </div>
                                         </div>
@@ -238,8 +256,10 @@ function IssueToWorkerModal({ worker, inventory, sites, user, canIssueWarehouse,
                                     <div className="bg-green-50 border border-green-200 rounded-xl p-4 animate-fade-in flex flex-col h-full overflow-y-auto space-y-4">
                                         <div>
                                             <p className="text-[10px] font-black text-green-800 uppercase mb-1">Wybrano do wydania:</p>
-                                            <p className="font-bold text-slate-800 mb-1">{selectedItem.name}</p>
-                                            <p className="text-xs font-mono text-slate-500">Nr Mag: {selectedItem.inventoryNumber || "BRAK"}</p>
+                                            <p className="font-bold text-slate-800 text-base mb-1">{selectedItem.name}</p>
+                                            <div className="inline-flex items-center gap-1.5 bg-blue-100/90 border border-blue-300 text-blue-900 px-2.5 py-1 rounded-lg text-xs font-bold font-mono my-1">
+                                                🏷️ Kod / Nr Mag: {selectedItem.inventoryNumber || "BRAK"}
+                                            </div>
                                             {(selectedItem as any).nextInspectionDate && (
                                                 <div className="mt-2 bg-purple-100 border border-purple-300 p-2 rounded-lg text-xs font-bold text-purple-900 flex items-center gap-2">
                                                     <span>🦺 Data przeglądu BHP:</span>
@@ -450,6 +470,7 @@ export default function WorkersPage() {
                 transaction.set(issueRef, {
                     itemId,
                     itemName: itemData.name,
+                    itemInventoryNumber: itemData.inventoryNumber || "",
                     qty,
                     date: recordDate,
                     issuedBy: `${user?.firstName} ${user?.lastName}`,
@@ -467,6 +488,7 @@ export default function WorkersPage() {
                     workerName: `${selectedWorker.firstName} ${selectedWorker.lastName}`,
                     itemId,
                     itemName: itemData.name,
+                    itemInventoryNumber: itemData.inventoryNumber || "",
                     qty,
                     date: new Date().toISOString(),
                     userId: user?.uid || "unknown",
@@ -494,7 +516,9 @@ export default function WorkersPage() {
         if (returnedToSource === "MAGAZYN" && !canIssueWarehouse) return alert("Ten sprzęt został pobrany z Magazynu. Tylko magazynier może go zwrócić na stan Magazynu.");
         if (returnedToSource === "BUDOWA" && !canIssueSite) return alert("Ten sprzęt został pobrany z Budowy. Tylko kierownik może go zwrócić na stan Budowy.");
 
-        const returnInput = prompt(`Ile sztuk "${historyItem.itemName}" pracownik zwraca na stan?`, historyItem.qty.toString());
+        const itemInvNum = historyItem.itemInventoryNumber || inventory.find(i => i.id === historyItem.itemId)?.inventoryNumber || "";
+        const codePromptText = itemInvNum ? ` (Kod: ${itemInvNum})` : "";
+        const returnInput = prompt(`Ile sztuk "${historyItem.itemName}${codePromptText}" pracownik zwraca na stan?`, historyItem.qty.toString());
         if (returnInput === null) return;
 
         const returnQty = parseInt(returnInput);
@@ -526,6 +550,7 @@ export default function WorkersPage() {
                 transaction.set(returnLogRef, {
                     itemId: historyItem.itemId,
                     itemName: historyItem.itemName,
+                    itemInventoryNumber: itemInvNum,
                     qty: returnQty,
                     date: new Date().toISOString(),
                     issuedBy: `${user?.firstName} ${user?.lastName}`,
@@ -543,6 +568,7 @@ export default function WorkersPage() {
                     workerName: `${selectedWorker.firstName} ${selectedWorker.lastName}`,
                     itemId: historyItem.itemId,
                     itemName: historyItem.itemName,
+                    itemInventoryNumber: itemInvNum,
                     qty: returnQty,
                     date: new Date().toISOString(),
                     userId: user?.uid || "unknown",
@@ -664,6 +690,7 @@ export default function WorkersPage() {
                             const activeMap: Record<string, {
                                 itemId: string;
                                 itemName: string;
+                                itemInventoryNumber?: string;
                                 qtyHeld: number;
                                 source: string;
                                 sourceSiteId?: string;
@@ -673,10 +700,12 @@ export default function WorkersPage() {
 
                             for (const h of workerHistory) {
                                 const key = `${h.itemId}_${h.source}_${h.sourceSiteId || 'NONE'}`;
+                                const invNum = h.itemInventoryNumber || inventory.find(i => i.id === h.itemId)?.inventoryNumber || "";
                                 if (!activeMap[key]) {
                                     activeMap[key] = {
                                         itemId: h.itemId,
                                         itemName: h.itemName,
+                                        itemInventoryNumber: invNum,
                                         qtyHeld: 0,
                                         source: h.source,
                                         sourceSiteId: h.sourceSiteId,
@@ -768,8 +797,15 @@ export default function WorkersPage() {
 
                                                         return (
                                                             <tr key={`${item.itemId}_${item.source}_${item.sourceSiteId}`} className="border-b border-slate-100 last:border-0 hover:bg-slate-50 transition">
-                                                                <td className="p-3 font-bold text-slate-800">
-                                                                    {item.itemName}
+                                                                <td className="p-3">
+                                                                    <div className="font-bold text-slate-800 flex items-center gap-2 flex-wrap">
+                                                                        <span>{item.itemName}</span>
+                                                                        {item.itemInventoryNumber && (
+                                                                            <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                                                                                Kod: {item.itemInventoryNumber}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
                                                                     {item.latestHistoryItem.notes && (
                                                                         <p className="text-[10px] text-slate-400 font-normal mt-0.5">{item.latestHistoryItem.notes}</p>
                                                                     )}
@@ -816,36 +852,46 @@ export default function WorkersPage() {
                                                     </tr>
                                                 </thead>
                                                 <tbody>
-                                                    {workerHistory.map((h) => (
-                                                        <tr key={h.id} className={`border-b border-slate-100 last:border-0 hover:bg-slate-50 transition ${h.type === "RETURN" ? "bg-slate-50/50 opacity-70" : ""}`}>
-                                                            <td className={`p-3 font-bold text-slate-800 ${h.type === "RETURN" ? "line-through text-slate-500" : ""}`}>
-                                                                {h.itemName}
-                                                                {h.notes && <p className="text-[10px] text-slate-400 font-normal no-underline mt-0.5">{h.notes}</p>}
-                                                            </td>
-                                                            <td className={`p-3 text-center font-black ${h.type === "RETURN" ? "text-orange-600" : "text-green-600"}`}>
-                                                                {h.type === "RETURN" ? `+${h.qty} (zwrot)` : `${h.qty} szt.`}
-                                                            </td>
-                                                            <td className="p-3">
-                                                                <span className={`px-2 py-1 rounded-md text-[9px] font-black uppercase ${h.source === "MAGAZYN" ? "bg-blue-100 text-blue-800 border border-blue-200" : "bg-green-100 text-green-800 border border-green-200"}`}>
-                                                                    {h.source === "MAGAZYN" ? "MAGAZYN" : `BUDOWA: ${h.sourceSiteName || "Nieznana"}`}
-                                                                </span>
-                                                            </td>
-                                                            <td className="p-3 text-xs text-slate-500 font-mono">
-                                                                {new Date(h.date).toLocaleDateString("pl-PL")}
-                                                            </td>
-                                                            <td className="p-3 text-right">
-                                                                {h.type === "RETURN" ? (
-                                                                    <span className="px-2.5 py-1 rounded-md text-[10px] font-black uppercase bg-orange-100 text-orange-800 border border-orange-200">
-                                                                        ↩️ Zwrot
+                                                    {workerHistory.map((h) => {
+                                                        const invNum = h.itemInventoryNumber || inventory.find(i => i.id === h.itemId)?.inventoryNumber || "";
+                                                        return (
+                                                            <tr key={h.id} className={`border-b border-slate-100 last:border-0 hover:bg-slate-50 transition ${h.type === "RETURN" ? "bg-slate-50/50 opacity-70" : ""}`}>
+                                                                <td className={`p-3 font-bold text-slate-800 ${h.type === "RETURN" ? "line-through text-slate-500" : ""}`}>
+                                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                                        <span>{h.itemName}</span>
+                                                                        {invNum && (
+                                                                            <span className="font-mono text-[11px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 no-underline">
+                                                                                Kod: {invNum}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    {h.notes && <p className="text-[10px] text-slate-400 font-normal no-underline mt-0.5">{h.notes}</p>}
+                                                                </td>
+                                                                <td className={`p-3 text-center font-black ${h.type === "RETURN" ? "text-orange-600" : "text-green-600"}`}>
+                                                                    {h.type === "RETURN" ? `+${h.qty} (zwrot)` : `${h.qty} szt.`}
+                                                                </td>
+                                                                <td className="p-3">
+                                                                    <span className={`px-2 py-1 rounded-md text-[9px] font-black uppercase ${h.source === "MAGAZYN" ? "bg-blue-100 text-blue-800 border border-blue-200" : "bg-green-100 text-green-800 border border-green-200"}`}>
+                                                                        {h.source === "MAGAZYN" ? "MAGAZYN" : `BUDOWA: ${h.sourceSiteName || "Nieznana"}`}
                                                                     </span>
-                                                                ) : (
-                                                                    <span className="px-2.5 py-1 rounded-md text-[10px] font-black uppercase bg-green-100 text-green-800 border border-green-200">
-                                                                        📤 Wydanie
-                                                                    </span>
-                                                                )}
-                                                            </td>
-                                                        </tr>
-                                                    ))}
+                                                                </td>
+                                                                <td className="p-3 text-xs text-slate-500 font-mono">
+                                                                    {new Date(h.date).toLocaleDateString("pl-PL")}
+                                                                </td>
+                                                                <td className="p-3 text-right">
+                                                                    {h.type === "RETURN" ? (
+                                                                        <span className="px-2.5 py-1 rounded-md text-[10px] font-black uppercase bg-orange-100 text-orange-800 border border-orange-200">
+                                                                            ↩️ Zwrot
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="px-2.5 py-1 rounded-md text-[10px] font-black uppercase bg-green-100 text-green-800 border border-green-200">
+                                                                            📤 Wydanie
+                                                                        </span>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })}
                                                 </tbody>
                                             </table>
                                         )
