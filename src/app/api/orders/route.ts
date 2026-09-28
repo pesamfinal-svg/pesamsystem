@@ -173,28 +173,62 @@ async function generateOrderPdf(payload: OrderPayload): Promise<Uint8Array> {
 
     const wrapText = (text: string, font: any, fontSize: number, maxWidth: number): string[] => {
         if (!text || !text.trim()) return ['—'];
-        const words = text.trim().split(/\s+/);
+
+        const getWidth = (str: string) => {
+            try {
+                return font.widthOfTextAtSize(str, fontSize);
+            } catch (_) {
+                return font.widthOfTextAtSize(toAscii(str), fontSize);
+            }
+        };
+
+        const paragraphs = text.split('\n');
         const lines: string[] = [];
-        let currentLine = '';
-        for (const word of words) {
-            const testLine = currentLine ? `${currentLine} ${word}` : word;
-            let textWidth = 0;
-            try { textWidth = font.widthOfTextAtSize(testLine, fontSize); } catch (_) { textWidth = font.widthOfTextAtSize(toAscii(testLine), fontSize); }
-            if (textWidth > maxWidth && currentLine !== '') {
+
+        for (const paragraph of paragraphs) {
+            if (!paragraph.trim()) continue;
+            const words = paragraph.trim().split(/\s+/);
+            let currentLine = '';
+
+            for (const word of words) {
+                if (getWidth(word) > maxWidth) {
+                    if (currentLine) {
+                        lines.push(currentLine);
+                        currentLine = '';
+                    }
+                    let subWord = '';
+                    for (const char of word) {
+                        if (getWidth(subWord + char) > maxWidth) {
+                            if (subWord) lines.push(subWord);
+                            subWord = char;
+                        } else {
+                            subWord += char;
+                        }
+                    }
+                    if (subWord) {
+                        currentLine = subWord;
+                    }
+                } else {
+                    const testLine = currentLine ? `${currentLine} ${word}` : word;
+                    if (getWidth(testLine) > maxWidth) {
+                        if (currentLine) lines.push(currentLine);
+                        currentLine = word;
+                    } else {
+                        currentLine = testLine;
+                    }
+                }
+            }
+            if (currentLine) {
                 lines.push(currentLine);
-                currentLine = word;
-            } else {
-                currentLine = testLine;
             }
         }
-        if (currentLine) lines.push(currentLine);
         return lines.length > 0 ? lines : ['—'];
     };
 
     const drawTableRow = (lp: number, item: OrderItem, shade: boolean) => {
         const nameLines = wrapText(item.name, fontRegular, 8, COL_NAME - 12);
         const lineH = 11;
-        const dynamicRowH = Math.max(20, nameLines.length * lineH + 8);
+        const dynamicRowH = Math.max(22, nameLines.length * lineH + 8);
 
         if (shade) {
             page.drawRectangle({ x: TABLE_LEFT, y: y - dynamicRowH, width: TABLE_WIDTH, height: dynamicRowH, color: rgb(0.972, 0.976, 0.984) });
@@ -204,7 +238,7 @@ async function generateOrderPdf(payload: OrderPayload): Promise<Uint8Array> {
         // Lp.
         page.drawText(`${lp}.`, { x: TABLE_LEFT + 6, y: y - 14, size: 8, font: fontRegular, color: colorSlate });
 
-        // Nazwa przedmiotu (wielowierszowa, BEZ przycinania)
+        // Nazwa przedmiotu (wielowierszowa, zawijana bez wychodzenia poza kolumnę)
         nameLines.forEach((lineText, idx) => {
             let safeText = lineText;
             try { fontRegular.widthOfTextAtSize(safeText, 8); } catch (_) { safeText = toAscii(safeText); }
@@ -262,29 +296,22 @@ async function generateOrderPdf(payload: OrderPayload): Promise<Uint8Array> {
 
     // ── Uwagi ────────────────────────────────────────────────────────────────
     if (notes?.trim()) {
-        y -= 6;
-        page.drawRectangle({ x: TABLE_LEFT, y: y - 46, width: TABLE_WIDTH, height: 46, color: rgb(1, 0.98, 0.93) });
-        page.drawRectangle({ x: TABLE_LEFT, y: y - 46, width: 4, height: 46, color: colorOrange });
-        page.drawText('UWAGI DO ZAMOWIENIA:', { x: TABLE_LEFT + 12, y: y - 14, size: 7.5, font: fontBold, color: colorOrange });
+        const notesLines = wrapText(notes.trim(), fontRegular, 8.5, TABLE_WIDTH - 24);
+        const notesH = Math.max(46, notesLines.length * 12 + 20);
 
-        const words = toAscii(notes).split(' ');
-        let line = '';
+        page.drawRectangle({ x: TABLE_LEFT, y: y - notesH, width: TABLE_WIDTH, height: notesH, color: rgb(1, 0.98, 0.93), borderColor: rgb(0.95, 0.88, 0.75), borderWidth: 0.8 });
+        page.drawRectangle({ x: TABLE_LEFT, y: y - notesH, width: 4, height: notesH, color: colorOrange });
+        page.drawText('UWAGI DO ZAMÓWIENIA:', { x: TABLE_LEFT + 12, y: y - 14, size: 7.5, font: fontBold, color: colorOrange });
+
         let lineY = y - 26;
-        const maxWidth = TABLE_WIDTH - 24;
-        for (const word of words) {
-            const test = line ? `${line} ${word}` : word;
-            if (fontRegular.widthOfTextAtSize(test, 8.5) > maxWidth) {
-                page.drawText(line, { x: TABLE_LEFT + 12, y: lineY, size: 8.5, font: fontRegular, color: colorDark });
-                line = word;
-                lineY -= 12;
-            } else {
-                line = test;
-            }
-        }
-        if (line) {
-            page.drawText(line, { x: TABLE_LEFT + 12, y: lineY, size: 8.5, font: fontRegular, color: colorDark });
-        }
-        y -= 60;
+        notesLines.forEach(lineText => {
+            let safeText = lineText;
+            try { fontRegular.widthOfTextAtSize(safeText, 8.5); } catch (_) { safeText = toAscii(safeText); }
+            page.drawText(safeText, { x: TABLE_LEFT + 12, y: lineY, size: 8.5, font: fontRegular, color: colorDark });
+            lineY -= 12;
+        });
+
+        y -= notesH + 16;
     }
 
     // ── Podpisy ──────────────────────────────────────────────────────────────
