@@ -194,7 +194,7 @@ export default function InventoryPage() {
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
     const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
 
-    // NOWE STANY DLA KATEGORII I ZDJĘĆ POGLĄDOWYCH
+    // STANY KATEGORII I ZDJĘĆ POGLĄDOWYCH
     const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
     const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);
     const [newCategoryInput, setNewCategoryInput] = useState("");
@@ -202,6 +202,14 @@ export default function InventoryPage() {
     const [newSubcategoryInput, setNewSubcategoryInput] = useState("");
     const [syncImageToAllMatching, setSyncImageToAllMatching] = useState(true);
     const [autoFoundImageNotice, setAutoFoundImageNotice] = useState<string | null>(null);
+
+    // PANEL ZARZĄDZANIA KATEGORIAMI
+    const [isCategoryManagerOpen, setIsCategoryManagerOpen] = useState(false);
+    const [managedCatImages, setManagedCatImages] = useState<Record<string, string>>({}); // key: "Kategoria" or "Kategoria::Podkategoria"
+    const [cmSelectedCat, setCmSelectedCat] = useState<string | null>(null);
+    const [cmNewCatInput, setCmNewCatInput] = useState("");
+    const [cmNewSubInput, setCmNewSubInput] = useState("");
+    const [cmImageUrlInput, setCmImageUrlInput] = useState("");
 
     // STANY PRZEGLĄDÓW BHP
     const [isInspectionModalOpen, setIsInspectionModalOpen] = useState(false);
@@ -1383,11 +1391,23 @@ export default function InventoryPage() {
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto">
-            <div className="flex justify-between items-center mb-8">
+            <div className="flex justify-between items-center mb-8 gap-3 flex-wrap">
                 <h1 className="text-3xl font-bold text-slate-800 tracking-tighter">Katalog Sprzętu PESAM</h1>
-                <button onClick={() => { setEditingItem(null); setFormData(INITIAL_FORM_STATE); setIsFormOpen(true); }} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold shadow-lg hover:bg-blue-700">
-                    + Dodaj Sprzęt
-                </button>
+                <div className="flex gap-2 flex-wrap">
+                    {/* Przycisk zarządzania kategoriami tylko dla uprawnionych */}
+                    <button
+                        onClick={() => { setIsCategoryManagerOpen(true); setCmSelectedCat(null); }}
+                        className="px-4 py-2 bg-slate-700 text-white rounded-lg font-bold text-sm shadow hover:bg-slate-800 flex items-center gap-2 transition"
+                    >
+                        🗂️ Zarządzaj Kategoriami
+                    </button>
+                    <button
+                        onClick={() => { setEditingItem(null); setFormData(INITIAL_FORM_STATE); setIsFormOpen(true); }}
+                        className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold shadow-lg hover:bg-blue-700"
+                    >
+                        + Dodaj Sprzęt
+                    </button>
+                </div>
             </div>
 
             {/* CZTERY FILTRY ZAKŁADEK */}
@@ -1838,78 +1858,42 @@ export default function InventoryPage() {
 
                             {formData.type === "UNIQUE" && (
                                 <>
-                                    {/* NOWE: Drzewo kategorii z przyciskami */}
-                                    <div className="md:col-span-2">
-                                        <div className="flex justify-between items-center mb-1">
-                                            <label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria główna</label>
-                                            {!isAddingNewCategory ? (
-                                                <button type="button" onClick={() => setIsAddingNewCategory(true)} className="text-[10px] font-bold text-blue-600 hover:underline">+ Nowa kategoria</button>
-                                            ) : (
-                                                <div className="flex gap-1">
-                                                    <input autoFocus value={newCategoryInput} onChange={e => setNewCategoryInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleAddCustomCategory())} placeholder="np. Wiertarki" className="text-xs p-1 border rounded w-32 outline-none" />
-                                                    <button type="button" onClick={handleAddCustomCategory} className="text-[10px] bg-blue-600 text-white px-2 py-1 rounded font-bold">OK</button>
-                                                    <button type="button" onClick={() => { setIsAddingNewCategory(false); setNewCategoryInput(""); }} className="text-[10px] text-slate-400 px-1">✕</button>
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div className="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-slate-50 min-h-[2.5rem]">
+                                    {/* UPROSZCZONY SELEKTOR — dwa selecty zamiast tablicy przycisków */}
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria główna</label>
+                                        <select
+                                            value={formData.category || ""}
+                                            onChange={e => handleCategorySelect(e.target.value)}
+                                            className="w-full p-2 border rounded-xl outline-none focus:ring-2 focus:ring-blue-400 bg-white"
+                                        >
+                                            <option value="">— wybierz kategorię —</option>
                                             {Object.keys(categoryTree).map(cat => (
-                                                <button
-                                                    key={cat}
-                                                    type="button"
-                                                    onClick={() => handleCategorySelect(cat)}
-                                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition border ${
-                                                        formData.category === cat
-                                                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                                                            : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400 hover:text-blue-600'
-                                                    }`}
-                                                >
-                                                    {cat}
-                                                </button>
+                                                <option key={cat} value={cat}>{cat}</option>
                                             ))}
-                                        </div>
+                                        </select>
                                     </div>
 
-                                    {/* Podkategoria - pokazuj tylko gdy wybrana kategoria */}
-                                    {formData.category && (
-                                        <div className="md:col-span-2">
-                                            <div className="flex justify-between items-center mb-1">
-                                                <label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria / Model</label>
-                                                {!isAddingNewSubcategory ? (
-                                                    <button type="button" onClick={() => setIsAddingNewSubcategory(true)} className="text-[10px] font-bold text-green-600 hover:underline">+ Nowa podkategoria</button>
-                                                ) : (
-                                                    <div className="flex gap-1">
-                                                        <input autoFocus value={newSubcategoryInput} onChange={e => setNewSubcategoryInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleAddCustomSubcategory())} placeholder="np. Szlifierka mała" className="text-xs p-1 border rounded w-40 outline-none" />
-                                                        <button type="button" onClick={handleAddCustomSubcategory} className="text-[10px] bg-green-600 text-white px-2 py-1 rounded font-bold">OK</button>
-                                                        <button type="button" onClick={() => { setIsAddingNewSubcategory(false); setNewSubcategoryInput(""); }} className="text-[10px] text-slate-400 px-1">✕</button>
-                                                    </div>
-                                                )}
-                                            </div>
-                                            <div className="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-slate-50 min-h-[2.5rem]">
-                                                {(categoryTree[formData.category] || []).map(sub => (
-                                                    <button
-                                                        key={sub}
-                                                        type="button"
-                                                        onClick={() => handleSubcategorySelect(sub)}
-                                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition border ${
-                                                            formData.subcategory === sub
-                                                                ? 'bg-green-600 text-white border-green-600 shadow-sm'
-                                                                : 'bg-white text-slate-600 border-slate-200 hover:border-green-400 hover:text-green-600'
-                                                        }`}
-                                                    >
-                                                        {sub}
-                                                    </button>
-                                                ))}
-                                                {(categoryTree[formData.category] || []).length === 0 && (
-                                                    <p className="text-[10px] text-slate-400 italic">Brak podkategorii — kliknij &quot;+ Nowa podkategoria&quot; aby dodać</p>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
+                                    <div>
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria / Model</label>
+                                        <select
+                                            value={formData.subcategory || ""}
+                                            onChange={e => handleSubcategorySelect(e.target.value)}
+                                            className="w-full p-2 border rounded-xl outline-none focus:ring-2 focus:ring-green-400 bg-white"
+                                            disabled={!formData.category}
+                                        >
+                                            <option value="">— wybierz podkategorię —</option>
+                                            {(categoryTree[formData.category || ""] || []).map(sub => (
+                                                <option key={sub} value={sub}>{sub}</option>
+                                            ))}
+                                        </select>
+                                        {!formData.category && (
+                                            <p className="text-[10px] text-slate-400 mt-1">Najpierw wybierz kategorię główną</p>
+                                        )}
+                                    </div>
 
                                     {/* Powiadomienie o automatycznym zdjęciu */}
                                     {autoFoundImageNotice && (
-                                        <div className="md:col-span-2 text-[11px] font-bold text-green-700 bg-green-50 border border-green-200 px-3 py-2 rounded-xl flex items-center gap-2 animate-fade-in">
+                                        <div className="md:col-span-2 text-[11px] font-bold text-green-700 bg-green-50 border border-green-200 px-3 py-2 rounded-xl flex items-center gap-2">
                                             <span>🖼️</span> {autoFoundImageNotice}
                                             <button type="button" onClick={() => setAutoFoundImageNotice(null)} className="ml-auto text-slate-400 hover:text-slate-600">✕</button>
                                         </div>
@@ -2529,6 +2513,272 @@ export default function InventoryPage() {
                                 className="w-2/3 py-3.5 bg-orange-600 hover:bg-orange-700 text-white font-black rounded-xl text-sm shadow-lg disabled:bg-slate-300 transition"
                             >
                                 {isCleanupSubmitting ? "USUWANIE..." : `USUŃ ZAZNACZONE POZYCJE (${Object.values(selectedCleanupIds).filter(Boolean).length})`}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ================================================================= */}
+            {/* MODAL: PANEL ZARZĄDZANIA KATEGORIAMI I ZDJĘCIAMI POGLĄDOWYMI      */}
+            {/* ================================================================= */}
+            {isCategoryManagerOpen && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-start justify-center p-4 overflow-y-auto">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl my-8">
+                        {/* Nagłówek */}
+                        <div className="bg-gradient-to-r from-slate-800 to-slate-700 text-white px-8 py-6 rounded-t-3xl flex justify-between items-start">
+                            <div>
+                                <h2 className="text-2xl font-black tracking-tight">🗂️ Zarządzanie Kategoriami</h2>
+                                <p className="text-slate-300 text-sm mt-1">Definiuj kategorie, podkategorie i przypisz zdjęcia poglądowe dla całych grup sprzętu.</p>
+                            </div>
+                            <button onClick={() => setIsCategoryManagerOpen(false)} className="text-slate-300 hover:text-white text-2xl leading-none mt-1">✕</button>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 min-h-[500px]">
+                            {/* LEWA KOLUMNA: Lista kategorii */}
+                            <div className="border-r border-slate-100 p-5 bg-slate-50/70">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Kategorie główne</h3>
+                                    <span className="text-[10px] bg-slate-200 text-slate-500 font-bold px-2 py-0.5 rounded-full">{Object.keys(categoryTree).length}</span>
+                                </div>
+
+                                <div className="space-y-1 mb-4 max-h-80 overflow-y-auto pr-1">
+                                    {Object.keys(categoryTree).map(cat => (
+                                        <button
+                                            key={cat}
+                                            onClick={() => { setCmSelectedCat(cat); setCmImageUrlInput(managedCatImages[cat] || ""); }}
+                                            className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-bold transition ${
+                                                cmSelectedCat === cat
+                                                    ? "bg-blue-600 text-white shadow-sm"
+                                                    : "hover:bg-white hover:shadow-sm text-slate-700 border border-transparent hover:border-slate-200"
+                                            }`}
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                {managedCatImages[cat] && (
+                                                    <img src={managedCatImages[cat]} className="w-6 h-6 rounded object-cover border border-white/30" alt="" />
+                                                )}
+                                                <span className="truncate">{cat}</span>
+                                                <span className={`ml-auto text-[10px] ${cmSelectedCat === cat ? "text-blue-200" : "text-slate-400"}`}>
+                                                    {(categoryTree[cat] || []).length} sub
+                                                </span>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {/* Dodaj nową kategorię */}
+                                <div className="border-t pt-3">
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">Dodaj nową kategorię</p>
+                                    <div className="flex gap-1.5">
+                                        <input
+                                            value={cmNewCatInput}
+                                            onChange={e => setCmNewCatInput(e.target.value)}
+                                            onKeyDown={e => {
+                                                if (e.key === "Enter") {
+                                                    e.preventDefault();
+                                                    const cat = cmNewCatInput.trim();
+                                                    if (!cat || categoryTree[cat]) return;
+                                                    setCustomCategories(prev => ({ ...prev, [cat]: [] }));
+                                                    setCmNewCatInput("");
+                                                    setCmSelectedCat(cat);
+                                                }
+                                            }}
+                                            placeholder="np. Wiertarki..."
+                                            className="flex-1 text-xs p-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-400"
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                const cat = cmNewCatInput.trim();
+                                                if (!cat || categoryTree[cat]) return;
+                                                setCustomCategories(prev => ({ ...prev, [cat]: [] }));
+                                                setCmNewCatInput("");
+                                                setCmSelectedCat(cat);
+                                            }}
+                                            className="px-3 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 transition"
+                                        >
+                                            Dodaj
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* ŚRODKOWA + PRAWA KOLUMNA: Podkategorie i zdjęcia */}
+                            <div className="col-span-2 p-6">
+                                {!cmSelectedCat ? (
+                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center py-16">
+                                        <div className="text-5xl mb-4">👈</div>
+                                        <p className="font-bold">Kliknij kategorię po lewej</p>
+                                        <p className="text-sm">aby zarządzać podkategoriami i zdjęciami</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-6">
+                                        <div className="flex items-center justify-between">
+                                            <h3 className="text-xl font-black text-slate-800">{cmSelectedCat}</h3>
+                                            <button
+                                                onClick={() => {
+                                                    if (!confirm(`Usunąć kategorię "${cmSelectedCat}" z listy? (Nie usuwa sprzętu z bazy)`)) return;
+                                                    setCustomCategories(prev => {
+                                                        const next = { ...prev };
+                                                        delete next[cmSelectedCat];
+                                                        return next;
+                                                    });
+                                                    setCmSelectedCat(null);
+                                                }}
+                                                className="text-xs text-red-400 hover:text-red-600 font-bold"
+                                            >
+                                                Usuń kategorię
+                                            </button>
+                                        </div>
+
+                                        {/* Zdjęcie dla kategorii */}
+                                        <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
+                                            <p className="text-[10px] font-black text-blue-600 uppercase mb-2">🖼️ Zdjęcie poglądowe dla całej kategorii</p>
+                                            <div className="flex gap-3 items-start">
+                                                {managedCatImages[cmSelectedCat] && (
+                                                    <img src={managedCatImages[cmSelectedCat]} className="w-20 h-20 object-cover rounded-xl border-2 border-blue-200 shadow" alt="" />
+                                                )}
+                                                <div className="flex-1">
+                                                    <input
+                                                        value={cmImageUrlInput}
+                                                        onChange={e => setCmImageUrlInput(e.target.value)}
+                                                        placeholder="Wklej URL zdjęcia z internetu..."
+                                                        className="w-full text-xs p-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-400 mb-2"
+                                                    />
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => {
+                                                                const url = cmImageUrlInput.trim();
+                                                                if (!url) return;
+                                                                setManagedCatImages(prev => ({ ...prev, [cmSelectedCat]: url }));
+                                                                // Propaguj zdjęcie do wszystkich przedmiotów tej kategorii
+                                                                const matchingItems = items.filter(i => i.category === cmSelectedCat && !i.imageUrl);
+                                                                if (matchingItems.length > 0) {
+                                                                    const batch = writeBatch(db);
+                                                                    matchingItems.forEach(item => {
+                                                                        batch.update(doc(db, "inventory", item.id), { imageUrl: url, isUsingTemplateImage: true });
+                                                                    });
+                                                                    batch.commit().then(() => fetchItems());
+                                                                }
+                                                                alert(`✅ Zdjęcie zapisano dla kategorii "${cmSelectedCat}"${matchingItems.length > 0 ? ` i przypisano do ${matchingItems.length} przedmiotów bez zdjęcia` : ""}`);
+                                                            }}
+                                                            className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700"
+                                                        >
+                                                            Zapisz zdjęcie
+                                                        </button>
+                                                        {managedCatImages[cmSelectedCat] && (
+                                                            <button
+                                                                onClick={() => setManagedCatImages(prev => { const n = {...prev}; delete n[cmSelectedCat]; return n; })}
+                                                                className="px-3 py-1.5 text-red-400 text-xs font-bold border border-red-200 rounded-lg hover:bg-red-50"
+                                                            >
+                                                                Wyczyść
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Podkategorie */}
+                                        <div>
+                                            <p className="text-[10px] font-black text-slate-500 uppercase mb-3">Podkategorie / Modele ({(categoryTree[cmSelectedCat] || []).length})</p>
+                                            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                                                {(categoryTree[cmSelectedCat] || []).map(sub => {
+                                                    const imgKey = `${cmSelectedCat}::${sub}`;
+                                                    return (
+                                                        <div key={sub} className="flex items-center gap-3 p-2.5 border border-slate-100 rounded-xl hover:border-slate-200 bg-white hover:shadow-sm transition">
+                                                            {managedCatImages[imgKey] ? (
+                                                                <img src={managedCatImages[imgKey]} className="w-10 h-10 object-cover rounded-lg border" alt="" />
+                                                            ) : (
+                                                                <div className="w-10 h-10 rounded-lg border border-dashed border-slate-200 flex items-center justify-center text-slate-300 text-lg">📷</div>
+                                                            )}
+                                                            <div className="flex-1 min-w-0">
+                                                                <p className="font-bold text-sm text-slate-700 truncate">{sub}</p>
+                                                                {managedCatImages[imgKey] && (
+                                                                    <p className="text-[10px] text-green-600 font-bold">✓ Zdjęcie przypisane</p>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex gap-1.5">
+                                                                <input
+                                                                    className="text-[11px] p-1.5 border rounded-lg outline-none w-36 focus:ring-1 focus:ring-green-400"
+                                                                    placeholder="URL zdjęcia..."
+                                                                    defaultValue={managedCatImages[imgKey] || ""}
+                                                                    onBlur={e => {
+                                                                        const url = e.target.value.trim();
+                                                                        if (url) {
+                                                                            setManagedCatImages(prev => ({ ...prev, [imgKey]: url }));
+                                                                        }
+                                                                    }}
+                                                                />
+                                                                <button
+                                                                    onClick={() => {
+                                                                        if (!confirm(`Usunąć podkategorię "${sub}" z listy?`)) return;
+                                                                        setCustomCategories(prev => ({
+                                                                            ...prev,
+                                                                            [cmSelectedCat]: (prev[cmSelectedCat] || []).filter(s => s !== sub)
+                                                                        }));
+                                                                    }}
+                                                                    className="text-red-300 hover:text-red-500 text-sm font-bold px-1"
+                                                                    title="Usuń podkategorię"
+                                                                >
+                                                                    ✕
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                                {(categoryTree[cmSelectedCat] || []).length === 0 && (
+                                                    <p className="text-slate-400 text-sm text-center py-4">Brak podkategorii — dodaj pierwszą poniżej</p>
+                                                )}
+                                            </div>
+
+                                            {/* Dodaj podkategorię */}
+                                            <div className="flex gap-2 mt-3">
+                                                <input
+                                                    value={cmNewSubInput}
+                                                    onChange={e => setCmNewSubInput(e.target.value)}
+                                                    onKeyDown={e => {
+                                                        if (e.key === "Enter") {
+                                                            e.preventDefault();
+                                                            const sub = cmNewSubInput.trim();
+                                                            if (!sub) return;
+                                                            setCustomCategories(prev => ({
+                                                                ...prev,
+                                                                [cmSelectedCat]: [...(prev[cmSelectedCat] || []), sub]
+                                                            }));
+                                                            setCmNewSubInput("");
+                                                        }
+                                                    }}
+                                                    placeholder="np. Szlifierka mała 125mm..."
+                                                    className="flex-1 text-sm p-2.5 border rounded-xl outline-none focus:ring-2 focus:ring-green-400"
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        const sub = cmNewSubInput.trim();
+                                                        if (!sub) return;
+                                                        setCustomCategories(prev => ({
+                                                            ...prev,
+                                                            [cmSelectedCat]: [...(prev[cmSelectedCat] || []), sub]
+                                                        }));
+                                                        setCmNewSubInput("");
+                                                    }}
+                                                    className="px-4 py-2.5 bg-green-600 text-white text-sm font-bold rounded-xl hover:bg-green-700 transition whitespace-nowrap"
+                                                >
+                                                    + Dodaj
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="px-8 py-4 border-t bg-slate-50 rounded-b-3xl flex justify-between items-center">
+                            <p className="text-xs text-slate-400">Kategorie i zdjęcia poglądowe są widoczne dla wszystkich użytkowników przy dodawaniu sprzętu.</p>
+                            <button
+                                onClick={() => setIsCategoryManagerOpen(false)}
+                                className="px-6 py-2.5 bg-slate-800 text-white font-bold rounded-xl text-sm hover:bg-slate-900 transition"
+                            >
+                                Gotowe
                             </button>
                         </div>
                     </div>
