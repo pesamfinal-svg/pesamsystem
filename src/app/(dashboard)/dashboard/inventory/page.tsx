@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, Fragment } from "react";
+import React, { useState, useEffect, Fragment, useMemo } from "react";
 import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction, where, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
@@ -48,6 +48,67 @@ interface InventoryItem {
     isPermanent?: boolean;
     isTemporary?: boolean;
 }
+
+const DEFAULT_CATEGORY_TREE: Record<string, string[]> = {
+    "Urządzenia tnące": [
+        "Szlifierka kątowa mała (125mm)",
+        "Szlifierka kątowa duża (230mm)",
+        "Szlifierka na baterie (akumulatorowa)",
+        "Piła tarczowa / Pilarka",
+        "Przecinarka do betonu / stali",
+        "Ukośnica do drewna / metalu",
+        "Bruzdownica"
+    ],
+    "Urządzenia mieszające": [
+        "Betoniarka 150L",
+        "Betoniarka 160L",
+        "Betoniarka 200L",
+        "Mieszarka do zapraw / kleju"
+    ],
+    "Elektronarzędzia": [
+        "Młotowiertarka SDS+",
+        "Młot wyburzeniowy SDS-MAX",
+        "Wkrętarka akumulatorowa",
+        "Wiertarka udarowa",
+        "Wyrzynarka / Lisica",
+        "Opalarka",
+        "Odkurzacz przemysłowy"
+    ],
+    "Agregaty i zasilanie": [
+        "Agregat prądotwórczy 1-fazowy",
+        "Agregat prądotwórczy 3-fazowy",
+        "Rozdzielnica budowlana",
+        "Przedłużacz siłowy / bębnowy"
+    ],
+    "Nagrzewnice i osuszacze": [
+        "Nagrzewnica olejowa",
+        "Nagrzewnica elektryczna",
+        "Nagrzewnica gazowa",
+        "Osuszacz powietrza przemysłowy"
+    ],
+    "Zagęszczarki i wibratory": [
+        "Zagęszczarka płytowa",
+        "Stopa wibracyjna (skoczek)",
+        "Wibrator do betonu (buława)"
+    ],
+    "Ochrona osobista (BHP)": [
+        "Szelki bezpieczeństwa",
+        "Linka asekuracyjna z amortyzatorem",
+        "Urządzenie samohamowne",
+        "Statyw ewakuacyjny / trójnóg",
+        "Kask ochronny z atestem"
+    ],
+    "Pompy i odwadnianie": [
+        "Pompa szlamowa spalinowa",
+        "Pompa zanurzeniowa elektryczna",
+        "Wąż tłoczny / strażacki"
+    ],
+    "Technika pomiarowa": [
+        "Niwelator optyczny",
+        "Niwelator laserowy obrotowy",
+        "Dalmierz laserowy"
+    ]
+};
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
     name: "",
@@ -132,6 +193,15 @@ export default function InventoryPage() {
     const [historyLoading, setItemHistoryLoading] = useState(false);
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
     const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
+
+    // NOWE STANY DLA KATEGORII I ZDJĘĆ POGLĄDOWYCH
+    const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
+    const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);
+    const [newCategoryInput, setNewCategoryInput] = useState("");
+    const [isAddingNewSubcategory, setIsAddingNewSubcategory] = useState(false);
+    const [newSubcategoryInput, setNewSubcategoryInput] = useState("");
+    const [syncImageToAllMatching, setSyncImageToAllMatching] = useState(true);
+    const [autoFoundImageNotice, setAutoFoundImageNotice] = useState<string | null>(null);
 
     // STANY PRZEGLĄDÓW BHP
     const [isInspectionModalOpen, setIsInspectionModalOpen] = useState(false);
@@ -297,14 +367,143 @@ export default function InventoryPage() {
         }
     };
 
-    // Funkcja pobierająca wyłącznie sprawne, zdjęcia pasujące do nazwy/kategorii
+    // Drzewo kategorii łączące predefiniowane szablony, własne dodane oraz istniejące w bazie
+    const categoryTree = useMemo(() => {
+        const tree: Record<string, string[]> = {};
+
+        // 1. Dodaj domyślne
+        Object.entries(DEFAULT_CATEGORY_TREE).forEach(([cat, subs]) => {
+            tree[cat] = [...subs];
+        });
+
+        // 2. Dodaj z bazy Firestore
+        items.forEach(item => {
+            if (item.category && item.category.trim()) {
+                const catTrim = item.category.trim();
+                if (!tree[catTrim]) {
+                    tree[catTrim] = [];
+                }
+                if (item.subcategory && item.subcategory.trim()) {
+                    const subTrim = item.subcategory.trim();
+                    if (!tree[catTrim].includes(subTrim)) {
+                        tree[catTrim].push(subTrim);
+                    }
+                }
+            }
+        });
+
+        // 3. Dodaj dodane dynamicznie przez użytkownika w tej sesji
+        Object.entries(customCategories).forEach(([cat, subs]) => {
+            if (!tree[cat]) tree[cat] = [];
+            subs.forEach(s => {
+                if (!tree[cat].includes(s)) tree[cat].push(s);
+            });
+        });
+
+        return tree;
+    }, [items, customCategories]);
+
+    // Wyszukiwanie wspólnego zdjęcia poglądowego na podstawie nazwy lub podkategorii
+    const findMatchingImage = (name?: string, subcategory?: string): string => {
+        const cleanName = (name || "").trim().toLowerCase();
+        const cleanSub = (subcategory || "").trim().toLowerCase();
+        if (!cleanName && !cleanSub) return "";
+
+        // Najpierw szukamy dokładnej nazwy w bazie ze sprawnym zdjęciem
+        if (cleanName) {
+            const matchByName = items.find(i => i.imageUrl && i.name?.trim().toLowerCase() === cleanName);
+            if (matchByName?.imageUrl) return matchByName.imageUrl;
+        }
+
+        // Następnie szukamy po podkategorii
+        if (cleanSub) {
+            const matchBySub = items.find(i => i.imageUrl && i.subcategory?.trim().toLowerCase() === cleanSub);
+            if (matchBySub?.imageUrl) return matchBySub.imageUrl;
+        }
+
+        return "";
+    };
+
+    // Obliczanie kolejnego wolnego numeru magazynowego
+    const getNextFreeNumber = (currentNum?: string): string => {
+        const occupied = new Set(
+            items.map(i => parseInt(i.inventoryNumber, 10)).filter(n => !isNaN(n))
+        );
+        let candidate = 1;
+        if (currentNum && !isNaN(parseInt(currentNum, 10))) {
+            candidate = parseInt(currentNum, 10) + 1;
+        }
+        while (occupied.has(candidate)) {
+            candidate++;
+        }
+        return String(candidate);
+    };
+
+    // Obsługa wyboru kategorii
+    const handleCategorySelect = (selectedCat: string) => {
+        const subcategoriesForCat = categoryTree[selectedCat] || [];
+        setFormData(prev => ({
+            ...prev,
+            category: selectedCat,
+            // Resetujemy podkategorię jeśli nie pasuje do nowej kategorii
+            subcategory: subcategoriesForCat.includes(prev.subcategory || "") ? prev.subcategory : ""
+        }));
+    };
+
+    // Obsługa wyboru podkategorii (z automatycznym uzupełnieniem zdjęcia poglądowego i nazwy)
+    const handleSubcategorySelect = (selectedSub: string) => {
+        const matchingImg = findMatchingImage(formData.name, selectedSub);
+        const shouldSetName = !formData.name || Object.values(categoryTree).flat().includes(formData.name);
+
+        setFormData(prev => ({
+            ...prev,
+            subcategory: selectedSub,
+            name: shouldSetName ? selectedSub : prev.name,
+            imageUrl: matchingImg || prev.imageUrl,
+            isUsingTemplateImage: matchingImg ? true : prev.isUsingTemplateImage
+        }));
+
+        if (matchingImg) {
+            setAutoFoundImageNotice(`✓ Automatycznie załadowano wspólne zdjęcie poglądowe dla "${selectedSub}" z bazy`);
+        }
+    };
+
+    // Dodanie nowej kategorii w locie
+    const handleAddCustomCategory = () => {
+        const cat = newCategoryInput.trim();
+        if (!cat) return;
+        setCustomCategories(prev => ({
+            ...prev,
+            [cat]: prev[cat] || []
+        }));
+        setFormData(prev => ({ ...prev, category: cat, subcategory: "" }));
+        setNewCategoryInput("");
+        setIsAddingNewCategory(false);
+    };
+
+    // Dodanie nowej podkategorii w locie
+    const handleAddCustomSubcategory = () => {
+        const sub = newSubcategoryInput.trim();
+        const currentCat = formData.category?.trim();
+        if (!sub) return;
+
+        if (currentCat) {
+            setCustomCategories(prev => ({
+                ...prev,
+                [currentCat]: [...(prev[currentCat] || []), sub]
+            }));
+        }
+        handleSubcategorySelect(sub);
+        setNewSubcategoryInput("");
+        setIsAddingNewSubcategory(false);
+    };
+
+    // Funkcja pobierająca wyłącznie sprawne zdjęcia pasujące do nazwy/kategorii
     const getGallerySuggestions = (): string[] => {
         if (!formData.name && !formData.subcategory && !formData.category) return [];
 
         const filtered = items.filter(item => {
             if (!item.imageUrl) return false;
-
-            // FILTR: Pokazuj tylko zdjęcia z Firebase Storage.
             if (!item.imageUrl.includes("firebasestorage")) return false;
 
             const sameName = formData.name && item.name.toLowerCase().trim() === formData.name.toLowerCase().trim();
@@ -345,8 +544,8 @@ export default function InventoryPage() {
         }
     };
 
-    const handleSave = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleSave = async (e: React.FormEvent, addAnother = false) => {
+        if (e && e.preventDefault) e.preventDefault();
         setIsUploading(true);
         try {
             let finalImageUrl = formData.imageUrl || "";
@@ -375,13 +574,13 @@ export default function InventoryPage() {
                 }
             }
 
-            let finalCategory = formData.category;
-            let finalSubcategory = formData.subcategory;
+            let finalCategory = formData.category || "";
+            let finalSubcategory = formData.subcategory || "";
 
             if (formData.type === "BULK" && formData.subType === "SUB_ITEM") {
                 const parent = items.find(i => i.id === formData.mainCategoryId);
                 finalCategory = parent?.name || "Rusztowania i inne";
-                finalSubcategory = formData.name;
+                finalSubcategory = formData.name || "";
             }
 
             // Jeśli tworzymy luźny materiał (MANUAL), to nie ma on systemu nadrzędnego
@@ -406,6 +605,8 @@ export default function InventoryPage() {
                 nextInspectionDate: calculatedNextDate
             };
 
+            let savedDocId = "";
+
             if (editingItem) {
                 const { availableQuantity, allocations, createdAt } = editingItem;
                 await updateDoc(doc(db, "inventory", editingItem.id), {
@@ -420,6 +621,7 @@ export default function InventoryPage() {
                     allocations,
                     createdAt
                 });
+                savedDocId = editingItem.id;
             } else {
                 const newDocData = {
                     ...itemDataToSave,
@@ -436,17 +638,59 @@ export default function InventoryPage() {
 
                 if (generatedDocId) {
                     await setDoc(doc(db, "inventory", generatedDocId), newDocData);
+                    savedDocId = generatedDocId;
                 } else {
-                    await addDoc(collection(db, "inventory"), newDocData);
+                    const docRef = await addDoc(collection(db, "inventory"), newDocData);
+                    savedDocId = docRef.id;
                 }
             }
 
-            setIsFormOpen(false);
-            setEditingItem(null);
-            setImageFile(null);
-            setShowGallerySelector(false);
-            setFormData(INITIAL_FORM_STATE);
-            fetchItems();
+            // MASOWA AKTUALIZACJA ZDJĘCIA DLA INNYCH EGZEMPLARZY TEGO TYPU
+            if (syncImageToAllMatching && finalImageUrl) {
+                const targetName = (formData.name || "").trim().toLowerCase();
+                const targetSub = (formData.subcategory || "").trim().toLowerCase();
+
+                const matchingToUpdate = items.filter(i => {
+                    if (i.id === savedDocId || (editingItem && i.id === editingItem.id)) return false;
+                    const nameMatch = targetName && i.name?.trim().toLowerCase() === targetName;
+                    const subMatch = targetSub && i.subcategory?.trim().toLowerCase() === targetSub;
+                    return nameMatch || subMatch;
+                });
+
+                if (matchingToUpdate.length > 0) {
+                    const batch = writeBatch(db);
+                    matchingToUpdate.forEach(matchItem => {
+                        batch.update(doc(db, "inventory", matchItem.id), {
+                            imageUrl: finalImageUrl,
+                            isUsingTemplateImage: true
+                        });
+                    });
+                    await batch.commit();
+                }
+            }
+
+            await fetchItems();
+
+            if (addAnother) {
+                // Przygotuj formularz na kolejną sztukę tego samego modelu
+                const nextFree = getNextFreeNumber(finalInvNumber);
+                setImageFile(null);
+                setEditingItem(null);
+                setFormData(prev => ({
+                    ...prev,
+                    inventoryNumber: nextFree,
+                    imageUrl: finalImageUrl,
+                    isUsingTemplateImage: true
+                }));
+                setAutoFoundImageNotice(`✅ Zapisano Nr ${finalInvNumber}! Przygotowano kolejną sztukę z numerem: ${nextFree}`);
+            } else {
+                setIsFormOpen(false);
+                setEditingItem(null);
+                setImageFile(null);
+                setShowGallerySelector(false);
+                setFormData(INITIAL_FORM_STATE);
+                setAutoFoundImageNotice(null);
+            }
         } catch (error: any) {
             alert("Błąd zapisu: " + error.message);
         } finally {
