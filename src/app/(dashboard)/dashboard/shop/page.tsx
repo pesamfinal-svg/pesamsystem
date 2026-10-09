@@ -17,13 +17,16 @@ interface InventoryItem {
     id: string;
     name: string;
     type: "UNIQUE" | "BULK";
-    subType?: "MAIN_CAT" | "SUB_ITEM";
+    subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL";
     mainCategoryId?: string;
     inventoryNumber: string;
     imageUrl: string;
     availableQuantity: number;
     status: string;
     category: string;
+    requiresInspection?: boolean;
+    isTemporary?: boolean;
+    unit?: string;
 }
 interface Site {
     id: string;
@@ -41,6 +44,9 @@ interface CartItem {
     quantity: number;
     imageUrl?: string;
     maxQty?: number;
+    isBhp?: boolean;
+    isDrobnica?: boolean;
+    assignedWorkerName?: string;
 }
 
 // Draft zapisywany do Firestore (wszystko co potrzeba do przywrócenia koszyka)
@@ -193,6 +199,86 @@ function ManualEntryModal({
     );
 }
 
+// ─── KOMPONENT: Modal wpisu pracownika dla BHP ──────────────────────────────
+
+function BhpWorkerModal({
+    item,
+    onConfirm,
+    onCancel,
+}: {
+    item: InventoryItem;
+    onConfirm: (workerName: string) => void;
+    onCancel: () => void;
+}) {
+    const [name, setName] = useState("");
+
+    return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 backdrop-blur-sm" style={{ zIndex: 9999999 }}>
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border-t-4 border-purple-600 animate-slide-in">
+                <div className="p-5 bg-purple-50 border-b border-purple-100 flex justify-between items-center">
+                    <div className="flex items-center gap-3">
+                        <span className="text-3xl">🦺</span>
+                        <div>
+                            <h3 className="text-lg font-black text-purple-900 uppercase tracking-tight">Sprzęt BHP / Ochrona Osobista</h3>
+                            <p className="text-xs text-purple-600 font-medium">Wymagane imię i nazwisko pracownika</p>
+                        </div>
+                    </div>
+                    <button onClick={onCancel} className="text-2xl text-slate-400 hover:text-slate-700 leading-none">&times;</button>
+                </div>
+
+                <form onSubmit={e => { e.preventDefault(); if (name.trim()) onConfirm(name.trim()); }} className="p-6 space-y-4">
+                    <div className="bg-slate-50 border rounded-2xl p-3.5 flex items-center gap-3">
+                        {item.imageUrl ? (
+                            <img src={item.imageUrl} className="w-12 h-12 rounded-xl object-contain border bg-white flex-shrink-0" alt="" />
+                        ) : (
+                            <div className="w-12 h-12 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center text-xl font-bold flex-shrink-0">🦺</div>
+                        )}
+                        <div className="min-w-0">
+                            <p className="font-black text-xs text-slate-800 uppercase truncate">{item.name}</p>
+                            <p className="text-[10px] font-mono font-bold text-purple-700 mt-0.5">KOD: {item.inventoryNumber || "BHP"}</p>
+                        </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                        <label className="block text-xs font-black text-slate-700 uppercase tracking-wider">
+                            👤 Imię i nazwisko pracownika (Wymagane):
+                        </label>
+                        <input
+                            type="text"
+                            required
+                            autoFocus
+                            placeholder="np. Jan Kowalski"
+                            value={name}
+                            onChange={e => setName(e.target.value)}
+                            className="w-full p-3.5 border-2 border-purple-300 rounded-xl text-sm font-bold outline-none focus:border-purple-600 focus:ring-2 focus:ring-purple-100 bg-white"
+                        />
+                        <p className="text-[10px] text-slate-500 leading-tight">
+                            Środki ochrony indywidualnej (szelki, liny, amortyzatory) muszą być imiennie przypisane do osoby wykonującej pracę na budowie.
+                        </p>
+                    </div>
+
+                    <div className="flex gap-3 pt-3 border-t">
+                        <button
+                            type="button"
+                            onClick={onCancel}
+                            className="flex-1 py-3 text-slate-600 bg-slate-100 hover:bg-slate-200 font-bold rounded-xl text-xs transition"
+                        >
+                            ANULUJ
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={!name.trim()}
+                            className="flex-1 py-3 bg-purple-700 hover:bg-purple-800 text-white font-black rounded-xl text-xs shadow-lg disabled:opacity-50 transition"
+                        >
+                            DODAJ DO KOSZYKA ➡️
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+}
+
 // ─── STRONA GŁÓWNA: SKLEP ─────────────────────────────────────────────────────
 
 export default function ShopPage() {
@@ -224,7 +310,7 @@ export default function ShopPage() {
 
     // Filtrowanie katalogu
     const [searchTerm, setSearchTerm] = useState("");
-    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK">("UNIQUE");
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE");
     const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
 
@@ -241,6 +327,7 @@ export default function ShopPage() {
     const [isManualModalOpen, setIsManualModalOpen] = useState(false);
     const [manualText, setManualText] = useState("");
     const [bulkPickModal, setBulkPickModal] = useState<{ item: InventoryItem; qty: number } | null>(null);
+    const [bhpWorkerModal, setBhpWorkerModal] = useState<{ item: InventoryItem; workerName: string } | null>(null);
 
     // 🤖 AI States (Weryfikacja koszyka)
     const [isVerifyingCart, setIsVerifyingCart] = useState(false);
@@ -363,16 +450,74 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         }, 1200);
     }, [user]);
 
+    // ── Rozpoznawanie kategorii sprzętu (BHP vs Drobnica) ───────────────────────
+
+    const isBhpItem = (i: InventoryItem): boolean => {
+        if (i.requiresInspection) return true;
+        const cat = (i.category || "").toUpperCase();
+        if (cat.includes("OCHRONA OSOBISTA") || cat.includes("BHP OSOBISTE") || cat.includes("BHP")) return true;
+        const name = (i.name || "").toLowerCase();
+        if (name.includes("szelki") || name.includes("lina do szelek") || name.includes("amortyzator")) return true;
+        return false;
+    };
+
+    const isDrobnicaItem = (i: InventoryItem): boolean => {
+        if (isBhpItem(i)) return false;
+        // Ścisłe wykluczenie zaległego osprzętu i pozycji tymczasowych
+        if (i.category === "Zaległości osprzętu") return false;
+        const name = (i.name || "").toLowerCase();
+        if (name.startsWith("[zaległy osprzęt]") || name.includes("zaległy osprzęt") || name.includes("zalegly osprzet")) return false;
+        if (i.isTemporary) return false;
+
+        return i.subType === "MANUAL" ||
+            i.category === "Drobnica i materiały" ||
+            i.category === "Materiały i osprzęt" ||
+            i.category === "Drobnica" ||
+            i.inventoryNumber === "OSPRZĘT";
+    };
+
     // ── Helpery koszyka (każda zmiana → zapis draftu) ─────────────────────────
 
     const addToCart = (item: InventoryItem) => {
         if (item.availableQuantity <= 0) return alert("Brak na magazynie głównym.");
         if (cart.find(i => i.dbId === item.id)) return;
 
+        // Jeśli to sprzęt BHP, nakazujemy podanie pracownika
+        if (isBhpItem(item)) {
+            setBhpWorkerModal({ item, workerName: "" });
+            return;
+        }
+
         // Jeśli to sprzęt ilościowy (BULK), pokaż modal z pytaniem o ilość
         if (item.type === "BULK") {
             setBulkPickModal({ item, qty: 1 });
             return;
+        }
+
+        const isDrobnica = isDrobnicaItem(item);
+
+        const newCart: CartItem[] = [...cart, {
+            cartId: Date.now().toString(),
+            isManual: false,
+            dbId: item.id,
+            name: item.name,
+            type: item.type,
+            inventoryNumber: item.inventoryNumber,
+            quantity: 1,
+            imageUrl: item.imageUrl,
+            maxQty: item.availableQuantity,
+            isBhp: false,
+            isDrobnica,
+        }];
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+    };
+
+    const confirmBhpAdd = () => {
+        if (!bhpWorkerModal) return;
+        const { item, workerName } = bhpWorkerModal;
+        if (!workerName.trim()) {
+            return alert("Wpisz imię i nazwisko pracownika, dla którego zamawiasz sprzęt BHP!");
         }
 
         const newCart: CartItem[] = [...cart, {
@@ -385,9 +530,14 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             quantity: 1,
             imageUrl: item.imageUrl,
             maxQty: item.availableQuantity,
+            isBhp: true,
+            isDrobnica: false,
+            assignedWorkerName: workerName.trim(),
         }];
+
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
+        setBhpWorkerModal(null);
     };
 
     const confirmBulkAdd = () => {
@@ -397,6 +547,8 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         if (qty <= 0 || qty > item.availableQuantity) {
             return alert(`Podaj ilość od 1 do ${item.availableQuantity}`);
         }
+
+        const isDrobnica = isDrobnicaItem(item);
 
         const newCart: CartItem[] = [...cart, {
             cartId: Date.now().toString(),
@@ -408,6 +560,8 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             quantity: qty,
             imageUrl: item.imageUrl,
             maxQty: item.availableQuantity,
+            isBhp: false,
+            isDrobnica,
         }];
 
         setCart(newCart);
@@ -424,6 +578,12 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
     const updateQty = (cartId: string, qty: number) => {
         const safeQty = Math.max(1, qty);
         const newCart = cart.map(i => i.cartId === cartId ? { ...i, quantity: safeQty } : i);
+        setCart(newCart);
+        saveDraft(newCart, selectedSiteId, orderNotes);
+    };
+
+    const updateWorkerName = (cartId: string, name: string) => {
+        const newCart = cart.map(i => i.cartId === cartId ? { ...i, assignedWorkerName: name } : i);
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
     };
@@ -969,24 +1129,60 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         const emptyManuals = cart.filter(i => i.isManual && !i.name.trim());
         if (emptyManuals.length > 0) return alert("Uzupełnij wpisy ręczne lub je usuń z koszyka!");
 
+        // Weryfikacja pozycji BHP - bezwzględny wymóg wskazania pracownika
+        const missingBhp = cart.filter(i => i.isBhp && !i.assignedWorkerName?.trim());
+        if (missingBhp.length > 0) {
+            setIsCartOpen(true);
+            return alert(
+                `⚠️ Sprzęt Ochrony Osobistej (BHP) wymaga wskazania pracownika!\n\n` +
+                `Podaj imię i nazwisko dla:\n` +
+                missingBhp.map(i => `• ${i.name}`).join("\n") +
+                `\n\nUzupełnij dane w koszyku przed wysłaniem zamówienia.`
+            );
+        }
+
         setIsSubmitting(true);
         const orderId = `ZAM-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`;
 
         try {
             const narzedzia = cart
-                .filter(i => !i.isManual && i.type === "UNIQUE")
-                .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: 1, section: "NARZĘDZIA" }));
+                .filter(i => !i.isManual && i.type === "UNIQUE" && !i.isBhp && !i.isDrobnica)
+                .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: 1, section: "NARZĘDZIA" as const }));
+
+            const bhpItems = cart
+                .filter(i => !i.isManual && i.isBhp)
+                .map(i => ({
+                    name: `${i.name} [Dla: ${i.assignedWorkerName?.trim()}]`,
+                    inventoryNumber: i.inventoryNumber,
+                    quantity: i.quantity || 1,
+                    section: "NARZĘDZIA" as const,
+                }));
+
             const rusztowania = cart
-                .filter(i => !i.isManual && i.type === "BULK")
-                .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: i.quantity, section: "RUSZTOWANIA" }));
-            const materialyDodatkowe = cart
-                .filter(i => i.isManual)
-                .flatMap(i =>
-                    i.name.split("\n")
-                        .filter(l => l.trim() !== "")
-                        .map(l => ({ name: l.trim(), quantity: 1, section: "MATERIAŁY DODATKOWE" }))
-                );
-            const processedCart = [...narzedzia, ...rusztowania, ...materialyDodatkowe];
+                .filter(i => !i.isManual && i.type === "BULK" && !i.isDrobnica && !i.isBhp)
+                .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: i.quantity, section: "RUSZTOWANIA" as const }));
+
+            const drobnica = cart
+                .filter(i => !i.isManual && i.isDrobnica)
+                .map(i => ({
+                    name: `${i.name}${i.inventoryNumber && i.inventoryNumber !== "OSPRZĘT" ? ` (Kod: ${i.inventoryNumber})` : ""}`,
+                    inventoryNumber: i.inventoryNumber,
+                    quantity: i.quantity,
+                    section: "MATERIAŁY DODATKOWE" as const
+                }));
+
+            const materialyDodatkowe = [
+                ...drobnica,
+                ...cart
+                    .filter(i => i.isManual)
+                    .flatMap(i =>
+                        i.name.split("\n")
+                            .filter(l => l.trim() !== "")
+                            .map(l => ({ name: l.trim(), quantity: 1, section: "MATERIAŁY DODATKOWE" as const }))
+                    )
+            ];
+
+            const processedCart = [...narzedzia, ...bhpItems, ...rusztowania, ...materialyDodatkowe];
 
             const res = await fetch("/api/orders", {
                 method: "POST",
@@ -1003,7 +1199,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                         email: user?.email,
                     },
                     cart: processedCart,
-                    sections: { narzedzia, rusztowania, materialyDodatkowe },
+                    sections: { narzedzia: [...narzedzia, ...bhpItems], rusztowania, materialyDodatkowe },
                     notes: orderNotes,
                 }),
             });
@@ -1029,7 +1225,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
     // ── Filtrowanie katalogu ───────────────────────────────────────────────────
 
     const uniqueCategories = Array.from(
-        new Set(items.filter(i => i.type === "UNIQUE").map(i => i.category).filter(Boolean))
+        new Set(items.filter(i => i.type === "UNIQUE" && !isBhpItem(i) && !isDrobnicaItem(i)).map(i => i.category).filter(Boolean))
     ).sort();
 
     const getVisibleItems = (): InventoryItem[] => {
@@ -1038,17 +1234,25 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             i.name.toLowerCase().includes(searchTerm.toLowerCase())
         );
         if (activeTab === "UNIQUE") {
-            let uniqueItems = filtered.filter(i => i.type === "UNIQUE" && i.availableQuantity > 0);
+            let uniqueItems = filtered.filter(i => i.type === "UNIQUE" && i.availableQuantity > 0 && !isBhpItem(i) && !isDrobnicaItem(i));
             if (selectedCategory !== "ALL") {
                 uniqueItems = uniqueItems.filter(i => i.category === selectedCategory);
             }
             return uniqueItems;
-        } else {
+        } else if (activeTab === "BULK") {
+            const bulkItems = filtered.filter(i => i.type === "BULK" && !isDrobnicaItem(i) && !isBhpItem(i) && i.category !== "Zaległości osprzętu");
             if (selectedSystemId) {
-                return filtered.filter(i => i.type === "BULK" && i.subType === "SUB_ITEM" && i.mainCategoryId === selectedSystemId);
+                return bulkItems.filter(i => i.subType === "SUB_ITEM" && i.mainCategoryId === selectedSystemId);
             }
-            return filtered.filter(i => i.type === "BULK" && i.subType === "MAIN_CAT");
+            return bulkItems.filter(i => i.subType === "MAIN_CAT");
+        } else if (activeTab === "OTHER") {
+            // Zakładka Drobnica / Osprzęt - ŚCIŚLE BEZ ZALEGŁEGO OSPRZĘTU I BEZ TYMCZASOWYCH
+            return filtered.filter(i => isDrobnicaItem(i) && i.availableQuantity > 0);
+        } else if (activeTab === "BHP") {
+            // Zakładka Ochrona Osobista (BHP)
+            return filtered.filter(i => isBhpItem(i) && i.availableQuantity > 0);
         }
+        return [];
     };
 
     // ─── RENDER ───────────────────────────────────────────────────────────────
@@ -1113,15 +1317,23 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                         ))}
                     </select>
                 )}
-                <div className="flex bg-slate-100 p-1 rounded-lg shadow-inner border border-slate-200">
+                <div className="flex bg-slate-100 p-1 rounded-xl shadow-inner border border-slate-200 flex-wrap gap-1">
                     <button
                         onClick={() => { setActiveTab("UNIQUE"); setSelectedSystemId(null); setSelectedCategory("ALL"); }}
-                        className={`px-4 py-1.5 rounded-md text-[11px] font-black transition-all ${activeTab === "UNIQUE" ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                        className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "UNIQUE" ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
                     >NARZĘDZIA</button>
                     <button
                         onClick={() => { setActiveTab("BULK"); setSelectedSystemId(null); }}
-                        className={`px-4 py-1.5 rounded-md text-[11px] font-black transition-all ${activeTab === "BULK" ? "bg-white text-orange-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                        className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "BULK" ? "bg-white text-orange-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
                     >RUSZTOWANIA</button>
+                    <button
+                        onClick={() => { setActiveTab("OTHER"); setSelectedSystemId(null); }}
+                        className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "OTHER" ? "bg-white text-emerald-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                    >DROBNICA / OSPRZĘT</button>
+                    <button
+                        onClick={() => { setActiveTab("BHP"); setSelectedSystemId(null); }}
+                        className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "BHP" ? "bg-white text-purple-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                    >🦺 OCHRONA OSOBISTA (BHP)</button>
                 </div>
                 {selectedSystemId && (
                     <button
@@ -1158,6 +1370,11 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
 
                 {loading ? (
                     <div className="text-center p-10 text-slate-400 font-bold uppercase text-xs">Ładowanie asortymentu...</div>
+                ) : getVisibleItems().length === 0 ? (
+                    <div className="p-12 text-center text-slate-400 bg-white rounded-2xl border border-dashed border-slate-200">
+                        <p className="text-base font-bold text-slate-600">Brak dostępnych pozycji w tej zakładce.</p>
+                        <p className="text-xs text-slate-400 mt-1">Brak przedmiotów na stanie lub pasujących do filtra wyszukiwania.</p>
+                    </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
                         {getVisibleItems().map(item => {
@@ -1213,9 +1430,23 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                     <div className="p-3 flex-1 flex flex-col justify-between h-full z-10">
                                         <div>
                                             <h3 className="font-bold text-slate-800 text-[11px] leading-tight line-clamp-2 uppercase" title={item.name}>{item.name}</h3>
-                                            {item.type === "UNIQUE" && (
+                                            {isBhpItem(item) ? (
+                                                <div className="flex items-center gap-1.5 mt-0.5">
+                                                    <span className="text-[9px] font-black text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">🦺 BHP</span>
+                                                    {item.inventoryNumber && (
+                                                        <span className="text-[10px] font-mono font-bold text-slate-500">{item.inventoryNumber}</span>
+                                                    )}
+                                                </div>
+                                            ) : isDrobnicaItem(item) ? (
+                                                <div className="flex items-center gap-1.5 mt-0.5">
+                                                    <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">📦 DROBNICA</span>
+                                                    {item.inventoryNumber && (
+                                                        <span className="text-[10px] font-mono font-bold text-slate-500">{item.inventoryNumber}</span>
+                                                    )}
+                                                </div>
+                                            ) : item.type === "UNIQUE" ? (
                                                 <p className="text-[10px] font-black text-blue-600 mt-0.5">NR MAG: {item.inventoryNumber}</p>
-                                            )}
+                                            ) : null}
                                         </div>
                                         <div className="flex items-center justify-between mt-auto">
                                             <div className="flex flex-col">
@@ -1276,6 +1507,15 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* ── Modal wyboru pracownika (BHP) ── */}
+            {bhpWorkerModal && (
+                <BhpWorkerModal
+                    item={bhpWorkerModal.item}
+                    onConfirm={confirmBhpAdd}
+                    onCancel={() => setBhpWorkerModal(null)}
+                />
             )}
 
             {/* ── Modal wpisu ręcznego ── */}
@@ -1503,34 +1743,72 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                                 </div>
                                             </div>
                                         ) : (
-                                            <div className="flex items-center gap-3 p-3">
-                                                <img
-                                                    src={c.imageUrl || "https://via.placeholder.com/40"}
-                                                    className="w-10 h-10 rounded-lg object-cover border flex-shrink-0"
-                                                    alt=""
-                                                />
-                                                <div className="flex-1 min-w-0">
-                                                    <p className="font-bold truncate text-xs uppercase leading-tight">{c.name}</p>
-                                                    <p className="text-[9px] text-blue-500 font-bold mt-0.5">NR: {c.inventoryNumber || "-"}</p>
+                                            <div className="flex flex-col p-3 gap-2">
+                                                <div className="flex items-center gap-3">
+                                                    <img
+                                                        src={c.imageUrl || "https://via.placeholder.com/40"}
+                                                        className="w-10 h-10 rounded-lg object-cover border flex-shrink-0"
+                                                        alt=""
+                                                    />
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <p className="font-bold truncate text-xs uppercase leading-tight">{c.name}</p>
+                                                            {c.isBhp && (
+                                                                <span className="text-[9px] font-black text-purple-700 bg-purple-100 px-1 rounded">BHP</span>
+                                                            )}
+                                                            {c.isDrobnica && (
+                                                                <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1 rounded">DROBNICA</span>
+                                                            )}
+                                                        </div>
+                                                        <p className="text-[9px] text-blue-500 font-bold mt-0.5">NR: {c.inventoryNumber || "-"}</p>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                                        {c.type === "BULK" && !c.isBhp ? (
+                                                            <input
+                                                                type="number"
+                                                                min="1"
+                                                                max={c.maxQty || 9999}
+                                                                value={c.quantity}
+                                                                onChange={e => updateQty(c.cartId, Number(e.target.value))}
+                                                                className="w-12 p-1 border rounded text-center text-xs font-bold outline-none focus:border-blue-500"
+                                                            />
+                                                        ) : (
+                                                            <span className="font-black text-xs bg-slate-100 px-3 py-2 rounded-xl border">1</span>
+                                                        )}
+                                                        <button
+                                                            onClick={() => removeFromCart(c.cartId)}
+                                                            className="text-red-500 bg-red-50 hover:bg-red-500 hover:text-white transition-colors w-7 h-7 rounded flex items-center justify-center font-bold text-lg leading-none"
+                                                        >&times;</button>
+                                                    </div>
                                                 </div>
-                                                <div className="flex items-center gap-2 flex-shrink-0">
-                                                    {c.type === "BULK" ? (
+
+                                                {c.isBhp && (
+                                                    <div className="mt-1 pt-2 border-t border-purple-100 bg-purple-50/70 p-2.5 rounded-xl">
+                                                        <div className="flex items-center justify-between mb-1">
+                                                            <span className="text-[10px] font-black text-purple-900 uppercase flex items-center gap-1">
+                                                                🦺 Przypisano pracownika (Wymagane):
+                                                            </span>
+                                                            <span className="text-[9px] font-bold text-purple-600">BHP</span>
+                                                        </div>
                                                         <input
-                                                            type="number"
-                                                            min="1"
-                                                            max={c.maxQty || 9999}
-                                                            value={c.quantity}
-                                                            onChange={e => updateQty(c.cartId, Number(e.target.value))}
-                                                            className="w-12 p-1 border rounded text-center text-xs font-bold outline-none focus:border-blue-500"
+                                                            type="text"
+                                                            required
+                                                            placeholder="Wpisz imię i nazwisko pracownika..."
+                                                            value={c.assignedWorkerName || ""}
+                                                            onChange={e => updateWorkerName(c.cartId, e.target.value)}
+                                                            className={`w-full p-2 text-xs font-bold border rounded-lg outline-none bg-white transition ${
+                                                                !c.assignedWorkerName?.trim()
+                                                                    ? "border-red-400 ring-2 ring-red-200 placeholder:text-red-400"
+                                                                    : "border-purple-300 focus:border-purple-600"
+                                                            }`}
                                                         />
-                                                    ) : (
-                                                        <span className="font-black text-xs bg-slate-100 px-3 py-2 rounded-xl border">1</span>
-                                                    )}
-                                                    <button
-                                                        onClick={() => removeFromCart(c.cartId)}
-                                                        className="text-red-500 bg-red-50 hover:bg-red-500 hover:text-white transition-colors w-7 h-7 rounded flex items-center justify-center font-bold text-lg leading-none"
-                                                    >&times;</button>
-                                                </div>
+                                                        {!c.assignedWorkerName?.trim() && (
+                                                            <p className="text-[9px] text-red-600 font-bold mt-1">
+                                                                ⚠️ Podaj imię i nazwisko osoby, dla której zamawiasz ten sprzęt!
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
                                     </div>
