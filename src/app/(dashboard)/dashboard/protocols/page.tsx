@@ -21,12 +21,15 @@ interface InventoryItem {
     category: string; availableQuantity: number; totalQuantity: number; unit?: string;
     currentLocation: string; status: string; allocations: Record<string, number>;
     lastOperationDate?: string; // <-- Ochrona chronologiczna
+    isPermanent?: boolean;
+    isTemporary?: boolean;
 }
 interface Accessory { id: string; name: string; quantity: number; mustReturn: boolean; }
 interface CartItem {
     cartItemId: string; isManual: boolean; dbId?: string; type?: "UNIQUE" | "BULK";
     inventoryNumber?: string; availableQuantity?: number; currentLocation?: string; status?: string;
     name: string; issueQty: number; unit?: string; accessories: Accessory[];
+    isPermanent?: boolean;
 }
 
 // Interfejsy dla ZWROTÓW APLIKACYJNYCH
@@ -41,6 +44,7 @@ interface ReturnCartItem {
     parentInventoryId?: string;
     returnedAccessoryName?: string;
     returnedAccessoryQty?: number;
+    isPermanent?: boolean;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -57,6 +61,8 @@ interface PaperReturnCartItem {
     parentInventoryId?: string;
     returnedAccessoryName?: string;
     returnedAccessoryQty?: number;
+    isPermanent?: boolean;
+    isTemporary?: boolean;
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -78,6 +84,7 @@ export default function ProtocolsHub() {
     const [manualName, setManualName] = useState("");
     const [manualQty, setManualQty] = useState<number | "">("");
     const [manualUnit, setManualUnit] = useState("szt.");
+    const [manualIsPermanent, setManualIsPermanent] = useState(false);
 
     // --- NOWE: Wyszukiwarka dla wpisów ręcznych ---
     const [manualSuggestions, setManualSuggestions] = useState<InventoryItem[]>([]);
@@ -546,6 +553,7 @@ export default function ProtocolsHub() {
         setCart(prev => [...prev, {
             cartItemId: Date.now().toString(),
             isManual: true,
+            isPermanent: manualIsPermanent,
             dbId: foundExistingItem ? foundExistingItem.id : undefined,
             inventoryNumber: foundExistingItem ? foundExistingItem.inventoryNumber : "RĘCZNY",
             name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
@@ -557,6 +565,7 @@ export default function ProtocolsHub() {
         setIsManualModalOpen(false);
         setManualSuggestions([]);
         setSelectedManualItem(null);
+        setManualIsPermanent(false);
     };
 
     const removeFromCart = (cartItemId: string) => setCart(cart.filter(i => i.cartItemId !== cartItemId));
@@ -704,13 +713,16 @@ export default function ProtocolsHub() {
                             });
                         } else {
                             // SCENARIUSZ 2: Całkowicie nowy wpis z palca, którego w bazie nie ma
+                            const isPermanent = cartItem.isPermanent === true;
                             const newDocRef = doc(collection(db, "inventory"));
                             transaction.set(newDocRef, {
                                 name: cartItem.name,
                                 type: "BULK",
                                 subType: "MANUAL",
                                 inventoryNumber: "RĘCZNY",
-                                category: "Wpis ręczny",
+                                category: isPermanent ? "Drobnica i materiały" : "Wpis ręczny jednorazowy",
+                                isPermanent: isPermanent,
+                                isTemporary: !isPermanent,
                                 unit: cartItem.unit || "szt.",
                                 availableQuantity: 0,
                                 totalQuantity: cartItem.issueQty,
@@ -722,6 +734,7 @@ export default function ProtocolsHub() {
                             finalProtocolItems.push({
                                 inventoryId: newDocRef.id,
                                 isManual: true,
+                                isPermanent: isPermanent,
                                 name: cartItem.name,
                                 inventoryNumber: "RĘCZNY",
                                 quantity: cartItem.issueQty,
@@ -874,7 +887,7 @@ export default function ProtocolsHub() {
                         .map((acc: any) => ({
                             name: acc.name,
                             mustReturn: true,
-                            isReturning: false,
+                            isReturning: true,
                             quantity: acc.quantity || 1
                         }));
                 }
@@ -908,12 +921,14 @@ export default function ProtocolsHub() {
         setReturnCart(prev => [...prev, {
             dbId: foundExistingItem ? foundExistingItem.id : `temp-manual-${Date.now()}`,
             isManual: !foundExistingItem,
+            isPermanent: manualIsPermanent,
             name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
             type: "BULK",
             inventoryNumber: foundExistingItem ? foundExistingItem.inventoryNumber : "RĘCZNY ZWROT",
             unit: manualUnit, maxQty: 999999, returnQty: Number(manualQty), declaredStatus: "sprawne", accessories: []
         }]);
         setIsReturnManualModalOpen(false);
+        setManualIsPermanent(false);
     };
     // --- NOWOŚĆ: Funkcja zdejmująca zwrócony osprzęt z panelu kierownika ---
     const clearReturnedAccessoriesFromIssue = async (siteId: string, ghostItems: any[]) => {
@@ -950,6 +965,54 @@ export default function ProtocolsHub() {
             }
         } catch (error) {
             console.error("Błąd podczas czyszczenia osprzętu z Wydania:", error);
+        }
+    };
+
+    // --- NOWOŚĆ: Funkcja usuwająca wirtualne długi [Zaległy osprzęt] z bazy po ich fizycznym zwrocie ---
+    const clearReturnedAccessoriesAndDebts = async (siteId: string, itemsList: any[]) => {
+        try {
+            const returnedAccList: { accName: string }[] = [];
+            for (const item of itemsList) {
+                if (item.isGhostItem && item.returnedAccessoryName) {
+                    returnedAccList.push({ accName: normalizeString(item.returnedAccessoryName) });
+                }
+                if (item.accessories && item.accessories.length > 0) {
+                    for (const acc of item.accessories) {
+                        if (acc.isReturning !== false && acc.verifiedReturning !== false) {
+                            returnedAccList.push({ accName: normalizeString(acc.name) });
+                        }
+                    }
+                }
+            }
+
+            if (returnedAccList.length === 0) return;
+
+            const invSnap = await getDocs(query(collection(db, "inventory"), where("category", "==", "Zaległości osprzętu")));
+            for (const docSnap of invSnap.docs) {
+                const data = docSnap.data();
+                const allocations = data.allocations || {};
+                const siteQty = allocations[siteId] || 0;
+                const cleanDebtName = normalizeString(data.name || "");
+
+                const match = returnedAccList.find(r => cleanDebtName.includes(r.accName));
+                if (match) {
+                    const otherAllocations = Object.entries(allocations).filter(([sId, q]) => sId !== siteId && Number(q) > 0);
+                    if (otherAllocations.length === 0 || siteQty >= (data.totalQuantity || 1)) {
+                        await deleteDoc(doc(db, "inventory", docSnap.id));
+                    } else {
+                        const newAlloc = { ...allocations };
+                        delete newAlloc[siteId];
+                        const newTotal = otherAllocations.reduce((sum, [, q]) => sum + Number(q), 0);
+                        await setDoc(doc(db, "inventory", docSnap.id), {
+                            allocations: newAlloc,
+                            totalQuantity: newTotal,
+                            availableQuantity: 0
+                        }, { merge: true });
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Błąd podczas czyszczenia dokumentów zaległego osprzętu:", err);
         }
     };
 
@@ -1006,7 +1069,7 @@ export default function ProtocolsHub() {
                 }
             } else {
                 finalReturnItems.push({
-                    inventoryId: i.dbId, isNewManual: i.isManual, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber, unit: i.unit || "szt.",
+                    inventoryId: i.dbId, isNewManual: i.isManual, isPermanent: i.isPermanent, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber, unit: i.unit || "szt.",
                     declaredQty: i.returnQty, declaredStatus: i.type === "UNIQUE" ? i.declaredStatus : null, accessories: i.accessories
                 });
             }
@@ -1168,6 +1231,7 @@ export default function ProtocolsHub() {
             cartItemId: Date.now().toString(),
             dbId: foundExistingItem ? foundExistingItem.id : undefined,
             isManual: !foundExistingItem,
+            isPermanent: manualIsPermanent,
             name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
             type: "BULK",
             inventoryNumber: foundExistingItem ? (foundExistingItem.inventoryNumber || "RĘCZNY PAPIER") : "RĘCZNY PAPIER",
@@ -1180,6 +1244,7 @@ export default function ProtocolsHub() {
             isReturningMainItem: true
         }]);
         setIsPaperManualModalOpen(false);
+        setManualIsPermanent(false);
     };
 
     const handlePaperReturnSubmit = async () => {
@@ -1297,39 +1362,78 @@ export default function ProtocolsHub() {
                     }
 
                     if (cartItem.isManual) {
-                        const newDocRef = doc(collection(db, "inventory"));
-                        transaction.set(newDocRef, {
-                            name: cartItem.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Wpis ręczny z papieru",
-                            unit: cartItem.unit || "szt.", availableQuantity: cartItem.receivedQty, totalQuantity: cartItem.receivedQty,
-                            status: "sprawne", allocations: {}, createdAt: new Date().toISOString()
-                        });
+                        if (cartItem.isPermanent) {
+                            const newDocRef = doc(collection(db, "inventory"));
+                            transaction.set(newDocRef, {
+                                name: cartItem.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Drobnica i materiały",
+                                unit: cartItem.unit || "szt.", availableQuantity: cartItem.receivedQty, totalQuantity: cartItem.receivedQty,
+                                status: "sprawne", allocations: {}, createdAt: new Date().toISOString(), isPermanent: true
+                            });
 
-                        finalProtocolItems.push({
-                            inventoryId: newDocRef.id,
-                            isNewManual: true,
-                            name: cartItem.name,
-                            type: "BULK",
-                            inventoryNumber: "RĘCZNY ZWROT",
-                            unit: cartItem.unit,
-                            declaredQty: cartItem.declaredQty,
-                            receivedQty: cartItem.receivedQty,
-                            finalStatus: "sprawne",
-                            warehouseNotes: cartItem.notes,
-                            accessories: []
-                        });
+                            finalProtocolItems.push({
+                                inventoryId: newDocRef.id,
+                                isNewManual: true,
+                                isPermanent: true,
+                                name: cartItem.name,
+                                type: "BULK",
+                                inventoryNumber: "RĘCZNY ZWROT",
+                                unit: cartItem.unit,
+                                declaredQty: cartItem.declaredQty,
+                                receivedQty: cartItem.receivedQty,
+                                finalStatus: "sprawne",
+                                warehouseNotes: cartItem.notes,
+                                accessories: []
+                            });
+                        } else {
+                            finalProtocolItems.push({
+                                inventoryId: `manual-temp-${Date.now()}`,
+                                isNewManual: true,
+                                isTemporary: true,
+                                name: cartItem.name,
+                                type: "BULK",
+                                inventoryNumber: "RĘCZNY ZWROT",
+                                unit: cartItem.unit,
+                                declaredQty: cartItem.declaredQty,
+                                receivedQty: cartItem.receivedQty,
+                                finalStatus: "sprawne",
+                                warehouseNotes: cartItem.notes,
+                                accessories: []
+                            });
+                        }
                     } else {
                         const { ref: itemRef, doc: itemDoc } = itemDocs[cartItem.dbId!];
                         const itemData = itemDoc.data();
 
                         if (itemData.type === "BULK") {
+                            const isDebt = itemData.category === "Zaległości osprzętu" || (itemData.name && itemData.name.startsWith("[Zaległy osprzęt]"));
+                            const isTempManual = itemData.isTemporary || itemData.category === "Wpis ręczny jednorazowy";
+
                             const currentSiteQty = itemData.allocations?.[paperReturnSiteId] || 0;
                             const newSiteQty = Math.max(0, currentSiteQty - cartItem.receivedQty);
-                            const newAvailable = itemData.availableQuantity + cartItem.receivedQty;
 
-                            transaction.update(itemRef, {
-                                [`allocations.${paperReturnSiteId}`]: newSiteQty,
-                                availableQuantity: newAvailable
-                            });
+                            if (isDebt || isTempManual) {
+                                const currentAllocations = itemData.allocations || {};
+                                const remainingAllSites = Object.entries(currentAllocations).reduce(
+                                    (sum, [sId, qty]) => sId === paperReturnSiteId ? sum + newSiteQty : sum + (Number(qty) || 0),
+                                    0
+                                );
+
+                                if (remainingAllSites <= 0) {
+                                    transaction.delete(itemRef);
+                                } else {
+                                    transaction.update(itemRef, {
+                                        [`allocations.${paperReturnSiteId}`]: newSiteQty,
+                                        totalQuantity: remainingAllSites,
+                                        availableQuantity: 0
+                                    });
+                                }
+                            } else {
+                                const newAvailable = itemData.availableQuantity + cartItem.receivedQty;
+                                transaction.update(itemRef, {
+                                    [`allocations.${paperReturnSiteId}`]: newSiteQty,
+                                    availableQuantity: newAvailable
+                                });
+                            }
                         } else if (itemData.type === "UNIQUE") {
                             const lastOpDate = itemData.lastOperationDate || resolvedLastOpDates[cartItem.dbId!] || "";
                             const isNewerOrEqual = !lastOpDate || (paperDocDate >= lastOpDate);
@@ -1484,6 +1588,7 @@ export default function ProtocolsHub() {
             if (ghostItems.length > 0) {
                 await clearReturnedAccessoriesFromIssue(paperReturnSiteId, ghostItems);
             }
+            await clearReturnedAccessoriesAndDebts(paperReturnSiteId, processedCart);
             await clearReturnedWorkerPpe(processedCart);
 
             alert("Papierowy protokół zwrotu został wprowadzony i zaakceptowany!");
@@ -1570,12 +1675,12 @@ export default function ProtocolsHub() {
         setIsAddFromSiteOpen(false);
     };
 
-    const openAddManualToAccept = () => { setManualName(""); setManualQty(""); setManualUnit("szt."); setIsAddManualToAcceptOpen(true); };
+    const openAddManualToAccept = () => { setManualName(""); setManualQty(""); setManualUnit("szt."); setManualIsPermanent(false); setIsAddManualToAcceptOpen(true); };
     const confirmAddManualToAccept = () => {
         if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
         const tempId = `temp-${Date.now()}`;
         const newItem = {
-            inventoryId: tempId, isNewManual: true, isManual: true, name: manualName.trim(), type: "BULK", unit: manualUnit,
+            inventoryId: tempId, isNewManual: true, isManual: true, isPermanent: manualIsPermanent, name: manualName.trim(), type: "BULK", unit: manualUnit,
             declaredQty: 0, declaredStatus: null, accessories: []
         };
         setSelectedProtocol((prev: any) => ({ ...prev, items: [...prev.items, newItem] }));
@@ -1584,6 +1689,7 @@ export default function ProtocolsHub() {
             [tempId]: { receivedQty: Number(manualQty), finalStatus: "sprawne", notes: "Wpis ręczny (Dopisane przez magazyn)", createClaim: false, verifiedAccessories: {} }
         }));
         setIsAddManualToAcceptOpen(false);
+        setManualIsPermanent(false);
     };
 
     const removeItemFromAcceptProtocol = (inventoryIdToRemove: string) => {
@@ -1712,13 +1818,17 @@ export default function ProtocolsHub() {
                     }
 
                     if (item.isNewManual) {
-                        const newDocRef = doc(collection(db, "inventory"));
-                        transaction.set(newDocRef, {
-                            name: item.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Wpis ręczny",
-                            unit: item.unit || "szt.", availableQuantity: workerInput.receivedQty, totalQuantity: workerInput.receivedQty,
-                            status: "sprawne", allocations: {}, createdAt: new Date().toISOString()
-                        });
-                        updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
+                        if (item.isPermanent) {
+                            const newDocRef = doc(collection(db, "inventory"));
+                            transaction.set(newDocRef, {
+                                name: item.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Drobnica i materiały",
+                                unit: item.unit || "szt.", availableQuantity: workerInput.receivedQty, totalQuantity: workerInput.receivedQty,
+                                status: "sprawne", allocations: {}, createdAt: new Date().toISOString(), isPermanent: true
+                            });
+                            updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
+                        } else {
+                            updatedItemsForProtocol.push({ ...item, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
+                        }
                         continue;
                     }
 
@@ -1765,15 +1875,35 @@ export default function ProtocolsHub() {
                     }
 
                     if (itemData.type === "BULK") {
+                        const isDebt = itemData.category === "Zaległości osprzętu" || (itemData.name && itemData.name.startsWith("[Zaległy osprzęt]"));
+                        const isTempManual = itemData.isTemporary || itemData.category === "Wpis ręczny jednorazowy";
+
                         const currentAllocations = itemData.allocations || {};
                         const currentSiteQty = currentAllocations[selectedProtocol.sourceId] || 0;
                         const newSiteQty = Math.max(0, currentSiteQty - workerInput.receivedQty);
-                        const newAvailable = itemData.availableQuantity + workerInput.receivedQty;
 
-                        transaction.update(itemRef, {
-                            [`allocations.${selectedProtocol.sourceId}`]: newSiteQty,
-                            availableQuantity: newAvailable
-                        });
+                        if (isDebt || isTempManual) {
+                            const remainingAllSites = Object.entries(currentAllocations).reduce(
+                                (sum, [sId, qty]) => sId === selectedProtocol.sourceId ? sum + newSiteQty : sum + (Number(qty) || 0),
+                                0
+                            );
+
+                            if (remainingAllSites <= 0) {
+                                transaction.delete(itemRef);
+                            } else {
+                                transaction.update(itemRef, {
+                                    [`allocations.${selectedProtocol.sourceId}`]: newSiteQty,
+                                    totalQuantity: remainingAllSites,
+                                    availableQuantity: 0
+                                });
+                            }
+                        } else {
+                            const newAvailable = itemData.availableQuantity + workerInput.receivedQty;
+                            transaction.update(itemRef, {
+                                [`allocations.${selectedProtocol.sourceId}`]: newSiteQty,
+                                availableQuantity: newAvailable
+                            });
+                        }
                     } else if (itemData.type === "UNIQUE") {
                         // Generowanie długu dla manualnie zgłoszonych braków osprzętu przy akceptacji
                         if (workerInput.manualDebts && workerInput.manualDebts.length > 0) {
@@ -1869,6 +1999,7 @@ export default function ProtocolsHub() {
             if (ghostItems.length > 0) {
                 await clearReturnedAccessoriesFromIssue(selectedProtocol.sourceId, ghostItems);
             }
+            await clearReturnedAccessoriesAndDebts(selectedProtocol.sourceId, selectedProtocol.items);
             await clearReturnedWorkerPpe(selectedProtocol.items);
 
             alert("Zwrot został pomyślnie przyjęty!");
@@ -3082,6 +3213,22 @@ export default function ProtocolsHub() {
                                     </select>
                                 </div>
                             </div>
+                            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-orange-50/80 border border-orange-200 cursor-pointer hover:bg-orange-100/80 transition">
+                                <input
+                                    type="checkbox"
+                                    checked={manualIsPermanent}
+                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    className="w-4 h-4 mt-0.5 text-orange-600 rounded border-slate-300 focus:ring-orange-500"
+                                />
+                                <div className="flex flex-col">
+                                    <span className="text-xs font-bold text-slate-800">
+                                        Dodaj do stałych pozycji w dziale Drobnica / Materiały
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 leading-tight">
+                                        {manualIsPermanent ? "Pozycja zostanie na stałe w bazie magazynu" : "Wpis doraźny (zostanie usunięty z bazy po rozliczeniu/zwrocie)"}
+                                    </span>
+                                </div>
+                            </label>
                         </div>
                         <div className="flex gap-3">
                             <button onClick={() => setIsManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
@@ -3276,6 +3423,22 @@ export default function ProtocolsHub() {
                                     </select>
                                 </div>
                             </div>
+                            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-blue-50/80 border border-blue-200 cursor-pointer hover:bg-blue-100/80 transition">
+                                <input
+                                    type="checkbox"
+                                    checked={manualIsPermanent}
+                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    className="w-4 h-4 mt-0.5 text-blue-600 rounded border-slate-300 focus:ring-blue-500"
+                                />
+                                <div className="flex flex-col">
+                                    <span className="text-xs font-bold text-slate-800">
+                                        Dodaj do stałych pozycji w dziale Drobnica / Materiały
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 leading-tight">
+                                        {manualIsPermanent ? "Pozycja zostanie na stałe w bazie magazynu" : "Wpis doraźny (zostanie usunięty z bazy po rozliczeniu/zwrocie)"}
+                                    </span>
+                                </div>
+                            </label>
                         </div>
                         <div className="flex gap-3">
                             <button onClick={() => setIsReturnManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
@@ -3680,6 +3843,22 @@ export default function ProtocolsHub() {
                                     </select>
                                 </div>
                             </div>
+                            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-orange-50/80 border border-orange-200 cursor-pointer hover:bg-orange-100/80 transition">
+                                <input
+                                    type="checkbox"
+                                    checked={manualIsPermanent}
+                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    className="w-4 h-4 mt-0.5 text-orange-600 rounded border-slate-300 focus:ring-orange-500"
+                                />
+                                <div className="flex flex-col">
+                                    <span className="text-xs font-bold text-slate-800">
+                                        Dodaj do stałych pozycji w dziale Drobnica / Materiały
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 leading-tight">
+                                        {manualIsPermanent ? "Pozycja zostanie na stałe w bazie magazynu" : "Wpis doraźny (zostanie usunięty z bazy po rozliczeniu/zwrocie)"}
+                                    </span>
+                                </div>
+                            </label>
                         </div>
                         <div className="flex gap-3">
                             <button onClick={() => setIsPaperManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
@@ -4036,6 +4215,22 @@ export default function ProtocolsHub() {
                                     </select>
                                 </div>
                             </div>
+                            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-purple-50/80 border border-purple-200 cursor-pointer hover:bg-purple-100/80 transition">
+                                <input
+                                    type="checkbox"
+                                    checked={manualIsPermanent}
+                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    className="w-4 h-4 mt-0.5 text-purple-600 rounded border-slate-300 focus:ring-purple-500"
+                                />
+                                <div className="flex flex-col">
+                                    <span className="text-xs font-bold text-slate-800">
+                                        Dodaj do stałych pozycji w dziale Drobnica / Materiały
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 leading-tight">
+                                        {manualIsPermanent ? "Pozycja zostanie na stałe w bazie magazynu" : "Wpis doraźny (zostanie usunięty z bazy po rozliczeniu/zwrocie)"}
+                                    </span>
+                                </div>
+                            </label>
                         </div>
                         <div className="flex gap-3">
                             <button onClick={() => setIsAddManualToAcceptOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>

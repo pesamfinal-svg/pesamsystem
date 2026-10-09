@@ -44,6 +44,8 @@ interface InventoryItem {
     nextInspectionDate?: string;
     assignedWorkerId?: string;
     assignedWorkerName?: string;
+    isPermanent?: boolean;
+    isTemporary?: boolean;
 }
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
@@ -473,6 +475,38 @@ export default function InventoryPage() {
         }
     };
 
+    // FUNKCJA: Czyszczenie zwróconego osprzętu (który ma stan 0 na budowach)
+    const handleCleanupReturnedDebts = async () => {
+        const debtsToClean = items.filter(item => {
+            const isDebt = item.category === "Zaległości osprzętu" || (item.name && item.name.startsWith("[Zaległy osprzęt]")) || item.isTemporary;
+            if (!isDebt) return false;
+            const totalAllocated = Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+            return totalAllocated <= 0;
+        });
+
+        if (debtsToClean.length === 0) {
+            alert("Brak zwróconych zaległości do wyczyszczenia – baza Drobnica jest czysta!");
+            return;
+        }
+
+        if (!window.confirm(`Czy na pewno chcesz usunąć z bazy ${debtsToClean.length} pozycji zwróconego osprzętu/materiałów, które mają 0 szt. na budowach?`)) return;
+
+        try {
+            setLoading(true);
+            const batch = writeBatch(db);
+            debtsToClean.forEach(item => {
+                batch.delete(doc(db, "inventory", item.id));
+            });
+            await batch.commit();
+            alert(`✅ Pomyślnie wyczyszczono ${debtsToClean.length} pozycji z bazy!`);
+            fetchItems();
+        } catch (e: any) {
+            alert("Błąd podczas czyszczenia: " + (e.message || e));
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const openItemCard = async (item: InventoryItem) => {
         setSelectedItem(item);
         setShowSpecs(false);
@@ -744,6 +778,16 @@ export default function InventoryPage() {
             // Zakładka Drobnica: Wszystkie BULK będące wpisami ręcznymi lub zaległym osprzętem
             const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT";
             if (item.type !== "BULK" || !isLoose) return false;
+
+            // UKRYWANIE ROZLICZONEGO ZALEGŁEGO OSPRZĘTU (brak długu na budowach):
+            if (item.category === "Zaległości osprzętu" || (item.name && item.name.startsWith("[Zaległy osprzęt]"))) {
+                const totalAllocated = Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+                if (totalAllocated <= 0) return false;
+            }
+            // UKRYWANIE JEDNORAZOWYCH WPISÓW RĘCZNYCH, KTÓRE JUŻ WRÓCIŁY Z BUDOWY:
+            if (item.isTemporary && Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0) <= 0) {
+                return false;
+            }
         } else if (activeTab === "BHP") {
             const isBhpPersonal = item.requiresInspection || (item.category || "").toUpperCase().includes("OCHRONA OSOBISTA") || (item.category || "").toUpperCase().includes("BHP OSOBISTE");
             if (!isBhpPersonal) return false;
@@ -944,6 +988,13 @@ export default function InventoryPage() {
                             <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">Wpisy ręczne z palca, zaległy osprzęt oraz materiały pomocnicze</p>
                         </div>
                     </div>
+                    <button
+                        onClick={handleCleanupReturnedDebts}
+                        className="px-3.5 py-2 bg-white/20 hover:bg-white/30 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5 border border-white/30 shadow-sm"
+                        title="Usuwa z bazy pozycje zaległego osprzętu, które mają już 0 szt. na budowach i zostały w pełni zwrócone"
+                    >
+                        <span>🧹</span> Wyczyść zwrócony osprzęt
+                    </button>
                 </div>
                 <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
