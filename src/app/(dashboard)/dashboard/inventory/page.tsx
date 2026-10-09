@@ -1838,33 +1838,83 @@ export default function InventoryPage() {
 
                             {formData.type === "UNIQUE" && (
                                 <>
-                                    {/* DODANO: Inteligente listy (datalist) z autouzupełnianiem z bazy dla Kategorii i Podkategorii */}
-                                    <div>
-                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria</label>
-                                        <input
-                                            list="categories-datalist"
-                                            value={formData.category}
-                                            onChange={e => setFormData({ ...formData, category: e.target.value })}
-                                            className="w-full p-2 border rounded-xl outline-none"
-                                            placeholder="Wpisz lub wybierz..."
-                                        />
-                                        <datalist id="categories-datalist">
-                                            {existingCategories.map(cat => <option key={cat} value={cat} />)}
-                                        </datalist>
+                                    {/* NOWE: Drzewo kategorii z przyciskami */}
+                                    <div className="md:col-span-2">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-[10px] font-bold text-slate-400 uppercase">Kategoria główna</label>
+                                            {!isAddingNewCategory ? (
+                                                <button type="button" onClick={() => setIsAddingNewCategory(true)} className="text-[10px] font-bold text-blue-600 hover:underline">+ Nowa kategoria</button>
+                                            ) : (
+                                                <div className="flex gap-1">
+                                                    <input autoFocus value={newCategoryInput} onChange={e => setNewCategoryInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleAddCustomCategory())} placeholder="np. Wiertarki" className="text-xs p-1 border rounded w-32 outline-none" />
+                                                    <button type="button" onClick={handleAddCustomCategory} className="text-[10px] bg-blue-600 text-white px-2 py-1 rounded font-bold">OK</button>
+                                                    <button type="button" onClick={() => { setIsAddingNewCategory(false); setNewCategoryInput(""); }} className="text-[10px] text-slate-400 px-1">✕</button>
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-slate-50 min-h-[2.5rem]">
+                                            {Object.keys(categoryTree).map(cat => (
+                                                <button
+                                                    key={cat}
+                                                    type="button"
+                                                    onClick={() => handleCategorySelect(cat)}
+                                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition border ${
+                                                        formData.category === cat
+                                                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                                            : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400 hover:text-blue-600'
+                                                    }`}
+                                                >
+                                                    {cat}
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
-                                    <div>
-                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria</label>
-                                        <input
-                                            list="subcategories-datalist"
-                                            value={formData.subcategory}
-                                            onChange={e => setFormData({ ...formData, subcategory: e.target.value })}
-                                            className="w-full p-2 border rounded-xl outline-none"
-                                            placeholder="Wpisz lub wybierz..."
-                                        />
-                                        <datalist id="subcategories-datalist">
-                                            {existingSubcategories.map(sub => <option key={sub} value={sub} />)}
-                                        </datalist>
-                                    </div>
+
+                                    {/* Podkategoria - pokazuj tylko gdy wybrana kategoria */}
+                                    {formData.category && (
+                                        <div className="md:col-span-2">
+                                            <div className="flex justify-between items-center mb-1">
+                                                <label className="text-[10px] font-bold text-slate-400 uppercase">Podkategoria / Model</label>
+                                                {!isAddingNewSubcategory ? (
+                                                    <button type="button" onClick={() => setIsAddingNewSubcategory(true)} className="text-[10px] font-bold text-green-600 hover:underline">+ Nowa podkategoria</button>
+                                                ) : (
+                                                    <div className="flex gap-1">
+                                                        <input autoFocus value={newSubcategoryInput} onChange={e => setNewSubcategoryInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleAddCustomSubcategory())} placeholder="np. Szlifierka mała" className="text-xs p-1 border rounded w-40 outline-none" />
+                                                        <button type="button" onClick={handleAddCustomSubcategory} className="text-[10px] bg-green-600 text-white px-2 py-1 rounded font-bold">OK</button>
+                                                        <button type="button" onClick={() => { setIsAddingNewSubcategory(false); setNewSubcategoryInput(""); }} className="text-[10px] text-slate-400 px-1">✕</button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="flex flex-wrap gap-1.5 p-2 border rounded-xl bg-slate-50 min-h-[2.5rem]">
+                                                {(categoryTree[formData.category] || []).map(sub => (
+                                                    <button
+                                                        key={sub}
+                                                        type="button"
+                                                        onClick={() => handleSubcategorySelect(sub)}
+                                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition border ${
+                                                            formData.subcategory === sub
+                                                                ? 'bg-green-600 text-white border-green-600 shadow-sm'
+                                                                : 'bg-white text-slate-600 border-slate-200 hover:border-green-400 hover:text-green-600'
+                                                        }`}
+                                                    >
+                                                        {sub}
+                                                    </button>
+                                                ))}
+                                                {(categoryTree[formData.category] || []).length === 0 && (
+                                                    <p className="text-[10px] text-slate-400 italic">Brak podkategorii — kliknij &quot;+ Nowa podkategoria&quot; aby dodać</p>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Powiadomienie o automatycznym zdjęciu */}
+                                    {autoFoundImageNotice && (
+                                        <div className="md:col-span-2 text-[11px] font-bold text-green-700 bg-green-50 border border-green-200 px-3 py-2 rounded-xl flex items-center gap-2 animate-fade-in">
+                                            <span>🖼️</span> {autoFoundImageNotice}
+                                            <button type="button" onClick={() => setAutoFoundImageNotice(null)} className="ml-auto text-slate-400 hover:text-slate-600">✕</button>
+                                        </div>
+                                    )}
+
 
                                     {/* DODANO: Asystent dynamicznego wykrywania i podpowiedzi wolnych numerów magazynowych */}
                                     <div className="relative">
@@ -2041,9 +2091,38 @@ export default function InventoryPage() {
                                 </>
                             )}
 
+                            {/* Opcja masowej synchronizacji zdjęcia */}
+                            {!editingItem && formData.type === "UNIQUE" && (formData.imageUrl || imageFile) && (
+                                <div className="md:col-span-2">
+                                    <label className="flex items-center gap-2 cursor-pointer bg-blue-50 border border-blue-200 rounded-xl px-3 py-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={syncImageToAllMatching}
+                                            onChange={e => setSyncImageToAllMatching(e.target.checked)}
+                                            className="w-4 h-4 text-blue-600 rounded"
+                                        />
+                                        <span className="text-[11px] font-bold text-blue-800">
+                                            🔄 Zastosuj to zdjęcie poglądowe do wszystkich istniejących egzemplarzy tej samej podkategorii/nazwy
+                                        </span>
+                                    </label>
+                                </div>
+                            )}
+
                             <div className="md:col-span-2 flex gap-3 pt-6 border-t mt-2">
-                                <button type="button" onClick={() => setIsFormOpen(false)} className="flex-1 py-3 text-slate-500 border rounded-2xl font-bold">Anuluj</button>
-                                <button type="submit" disabled={isUploading} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700">{isUploading ? "WGRYWANIE..." : "ZAPISZ"}</button>
+                                <button type="button" onClick={() => { setIsFormOpen(false); setAutoFoundImageNotice(null); }} className="py-3 px-5 text-slate-500 border rounded-2xl font-bold">Anuluj</button>
+                                {!editingItem && formData.type === "UNIQUE" && (
+                                    <button
+                                        type="button"
+                                        disabled={isUploading}
+                                        onClick={(e) => handleSave(e as any, true)}
+                                        className="flex-1 py-3 bg-emerald-600 text-white font-black rounded-2xl shadow-lg hover:bg-emerald-700 disabled:opacity-50 text-sm"
+                                    >
+                                        {isUploading ? "WGRYWANIE..." : "✅ ZAPISZ + Dodaj kolejną sztukę"}
+                                    </button>
+                                )}
+                                <button type="submit" disabled={isUploading} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700 disabled:opacity-50">
+                                    {isUploading ? "WGRYWANIE..." : (editingItem ? "ZAPISZ ZMIANY" : "ZAPISZ i Zamknij")}
+                                </button>
                             </div>
                         </form>
                     </div>
