@@ -44,6 +44,7 @@ interface InventoryItem {
     nextInspectionDate?: string;
     assignedWorkerId?: string;
     assignedWorkerName?: string;
+    unit?: string;
     isPermanent?: boolean;
     isTemporary?: boolean;
 }
@@ -137,6 +138,12 @@ export default function InventoryPage() {
     const [inspectionDate, setInspectionDate] = useState(new Date().toISOString().split("T")[0]);
     const [inspectionNotes, setInspectionNotes] = useState("");
     const [isInspectionSubmitting, setIsInspectionSubmitting] = useState(false);
+
+    // STANY MODALU CZYSZCZENIA ZWROTÓW OSPRZĘTU
+    const [isCleanupModalOpen, setIsCleanupModalOpen] = useState(false);
+    const [cleanupItemsList, setCleanupItemsList] = useState<InventoryItem[]>([]);
+    const [selectedCleanupIds, setSelectedCleanupIds] = useState<Record<string, boolean>>({});
+    const [isCleanupSubmitting, setIsCleanupSubmitting] = useState(false);
 
     // HELPERY PRZEGLĄDOWE
     const calculateNextInspectionDate = (lastDateStr: string, intervalMonths: number = 12): string => {
@@ -475,8 +482,8 @@ export default function InventoryPage() {
         }
     };
 
-    // FUNKCJA: Czyszczenie zwróconego osprzętu (który ma stan 0 na budowach)
-    const handleCleanupReturnedDebts = async () => {
+    // FUNKCJA: Otwieranie interaktywnej checklisty czyszczenia zwróconego osprzętu
+    const handleCleanupReturnedDebts = () => {
         const debtsToClean = items.filter(item => {
             const isDebt = item.category === "Zaległości osprzętu" || (item.name && item.name.startsWith("[Zaległy osprzęt]")) || item.isTemporary;
             if (!isDebt) return false;
@@ -489,21 +496,35 @@ export default function InventoryPage() {
             return;
         }
 
-        if (!window.confirm(`Czy na pewno chcesz usunąć z bazy ${debtsToClean.length} pozycji zwróconego osprzętu/materiałów, które mają 0 szt. na budowach?`)) return;
+        const initialSelected: Record<string, boolean> = {};
+        debtsToClean.forEach(i => { initialSelected[i.id] = true; });
 
+        setCleanupItemsList(debtsToClean);
+        setSelectedCleanupIds(initialSelected);
+        setIsCleanupModalOpen(true);
+    };
+
+    const confirmCleanupSelected = async () => {
+        const toDelete = cleanupItemsList.filter(i => selectedCleanupIds[i.id]);
+        if (toDelete.length === 0) {
+            alert("Zaznacz przynajmniej jedną pozycję do usunięcia!");
+            return;
+        }
+
+        setIsCleanupSubmitting(true);
         try {
-            setLoading(true);
             const batch = writeBatch(db);
-            debtsToClean.forEach(item => {
+            toDelete.forEach(item => {
                 batch.delete(doc(db, "inventory", item.id));
             });
             await batch.commit();
-            alert(`✅ Pomyślnie wyczyszczono ${debtsToClean.length} pozycji z bazy!`);
+            alert(`✅ Pomyślnie wyczyszczono ${toDelete.length} pozycji z bazy!`);
+            setIsCleanupModalOpen(false);
             fetchItems();
         } catch (e: any) {
             alert("Błąd podczas czyszczenia: " + (e.message || e));
         } finally {
-            setLoading(false);
+            setIsCleanupSubmitting(false);
         }
     };
 
@@ -2090,6 +2111,105 @@ export default function InventoryPage() {
                     warehouseNotes={investigationData.warehouseNotes}
                     declaredStatus={investigationData.declaredStatus}
                 />
+            )}
+
+            {/* MODAL: Weryfikacja i czyszczenie zwróconego osprzętu */}
+            {isCleanupModalOpen && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-fade-in border border-orange-200 flex flex-col max-h-[90vh]">
+                        <div className="p-5 bg-orange-600 text-white flex justify-between items-center">
+                            <div className="flex items-center gap-3">
+                                <span className="text-2xl">🧹</span>
+                                <div>
+                                    <h3 className="text-lg font-black uppercase tracking-tight">Czyszczenie Zwróconego Osprzętu</h3>
+                                    <p className="text-[11px] text-orange-200 font-bold">Sprawdź pozycje przed trwałym usunięciem z bazy Drobnicy</p>
+                                </div>
+                            </div>
+                            <button onClick={() => setIsCleanupModalOpen(false)} className="text-white text-3xl font-bold hover:text-orange-200 leading-none">&times;</button>
+                        </div>
+
+                        <div className="p-6 overflow-y-auto space-y-4 flex-1">
+                            <div className="bg-orange-50 border border-orange-200 p-3.5 rounded-2xl text-xs text-orange-900 leading-relaxed flex items-start gap-2.5">
+                                <span className="text-lg">💡</span>
+                                <div>
+                                    <p className="font-bold">Informacja dla Magazyniera:</p>
+                                    <p className="text-[11px] text-orange-800">
+                                        Poniższe pozycje to rozliczony zaległy osprzęt oraz wpisy jednorazowe, które posiadają obecnie <span className="font-bold">0 szt. na budowach</span>. Zostały w całości zwrócone. Odznacz elementy, których nie chcesz jeszcze usuwać z bazy.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="flex justify-between items-center px-1">
+                                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                                    Znaleziono pozycji: {cleanupItemsList.length} (Zaznaczono: {Object.values(selectedCleanupIds).filter(Boolean).length})
+                                </span>
+                                <button
+                                    onClick={() => {
+                                        const allSelected = Object.values(selectedCleanupIds).every(Boolean);
+                                        const newSelected: Record<string, boolean> = {};
+                                        cleanupItemsList.forEach(i => { newSelected[i.id] = !allSelected; });
+                                        setSelectedCleanupIds(newSelected);
+                                    }}
+                                    className="text-xs font-bold text-orange-600 hover:underline"
+                                >
+                                    {Object.values(selectedCleanupIds).every(Boolean) ? "Odznacz wszystkie" : "Zaznacz wszystkie"}
+                                </button>
+                            </div>
+
+                            <div className="space-y-2 max-h-80 overflow-y-auto pr-1 divide-y divide-slate-100">
+                                {cleanupItemsList.map(item => {
+                                    const totalAllocated = Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+                                    const isChecked = !!selectedCleanupIds[item.id];
+
+                                    return (
+                                        <label
+                                            key={item.id}
+                                            className={`flex items-start gap-3 p-3.5 border-2 rounded-2xl cursor-pointer transition ${isChecked ? 'bg-orange-50/60 border-orange-300' : 'bg-slate-50 border-slate-200 opacity-60'}`}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={isChecked}
+                                                onChange={e => setSelectedCleanupIds({ ...selectedCleanupIds, [item.id]: e.target.checked })}
+                                                className="w-5 h-5 mt-0.5 text-orange-600 rounded border-slate-300 focus:ring-orange-500 cursor-pointer"
+                                            />
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <p className="font-bold text-sm text-slate-800 truncate">{item.name}</p>
+                                                    <span className="font-mono text-xs font-bold text-orange-600 bg-orange-100 px-2 py-0.5 rounded border border-orange-200 whitespace-nowrap">
+                                                        {item.inventoryNumber || 'OSPRZĘT'}
+                                                    </span>
+                                                </div>
+                                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1.5 text-[11px] text-slate-500">
+                                                    <span>Kategoria: <strong className="text-slate-700">{item.category || "Drobnica"}</strong></span>
+                                                    <span>Magazyn / Razem: <strong className="text-slate-700">{item.availableQuantity} / {item.totalQuantity} {item.unit || "szt."}</strong></span>
+                                                    <span className="text-green-700 font-bold bg-green-50 px-1.5 py-0.5 rounded border border-green-200">
+                                                        ✓ Stan na budowach: {totalAllocated} szt.
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </label>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        <div className="p-5 border-t bg-slate-50 flex gap-3">
+                            <button
+                                onClick={() => setIsCleanupModalOpen(false)}
+                                className="w-1/3 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl text-sm transition"
+                            >
+                                ANULUJ
+                            </button>
+                            <button
+                                onClick={confirmCleanupSelected}
+                                disabled={isCleanupSubmitting || Object.values(selectedCleanupIds).filter(Boolean).length === 0}
+                                className="w-2/3 py-3.5 bg-orange-600 hover:bg-orange-700 text-white font-black rounded-xl text-sm shadow-lg disabled:bg-slate-300 transition"
+                            >
+                                {isCleanupSubmitting ? "USUWANIE..." : `USUŃ ZAZNACZONE POZYCJE (${Object.values(selectedCleanupIds).filter(Boolean).length})`}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );
