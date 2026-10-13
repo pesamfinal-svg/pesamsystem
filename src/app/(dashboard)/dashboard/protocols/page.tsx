@@ -1050,6 +1050,22 @@ export default function ProtocolsHub() {
         }
     };
 
+    const cleanFirestorePayload = (obj: any): any => {
+        if (obj === undefined) return null;
+        if (obj === null) return null;
+        if (Array.isArray(obj)) return obj.map(cleanFirestorePayload);
+        if (typeof obj === "object" && !(obj instanceof Date)) {
+            const cleaned: Record<string, any> = {};
+            for (const [k, v] of Object.entries(obj)) {
+                if (v !== undefined) {
+                    cleaned[k] = cleanFirestorePayload(v);
+                }
+            }
+            return cleaned;
+        }
+        return obj;
+    };
+
     const handleReturnSubmit = async () => {
         if (!returnSiteId || returnCart.length === 0) return alert("Wybierz budowę i przedmioty do zwrotu!");
 
@@ -1060,17 +1076,39 @@ export default function ProtocolsHub() {
                 if (returnedAccs.length === 0) return alert(`Zwracasz sam osprzęt od "${i.name}", ale nie zaznaczyłeś co wróciło!`);
                 for (const acc of returnedAccs) {
                     finalReturnItems.push({
-                        inventoryId: `ghost-${Date.now()}-${Math.random()}`, isNewManual: false, isGhostItem: true,
-                        parentInventoryId: i.dbId, returnedAccessoryName: acc.name, returnedAccessoryQty: acc.quantity || 1, // ZNACZNIKI DLA SPRZĄTACZA
-                        name: `${acc.name} (od: ${i.name} ${i.inventoryNumber ? 'nr ' + i.inventoryNumber : ''})`,
-                        type: "BULK", inventoryNumber: "ZWRÓCONY OSPRZĘT", unit: "szt.",
-                        declaredQty: acc.quantity || 1, declaredStatus: "sprawne", accessories: []
+                        inventoryId: `ghost-${Date.now()}-${Math.random()}`,
+                        isNewManual: false,
+                        isGhostItem: true,
+                        isPermanent: false,
+                        parentInventoryId: i.dbId || "",
+                        returnedAccessoryName: acc.name || "",
+                        returnedAccessoryQty: Number(acc.quantity) || 1, // ZNACZNIKI DLA SPRZĄTACZA
+                        name: `${acc.name} (od: ${i.name || ''} ${i.inventoryNumber ? 'nr ' + i.inventoryNumber : ''})`.trim(),
+                        type: "BULK",
+                        inventoryNumber: "ZWRÓCONY OSPRZĘT",
+                        unit: "szt.",
+                        declaredQty: Number(acc.quantity) || 1,
+                        declaredStatus: "sprawne",
+                        accessories: []
                     });
                 }
             } else {
                 finalReturnItems.push({
-                    inventoryId: i.dbId, isNewManual: i.isManual, isPermanent: i.isPermanent, name: i.name, type: i.type, inventoryNumber: i.inventoryNumber, unit: i.unit || "szt.",
-                    declaredQty: i.returnQty, declaredStatus: i.type === "UNIQUE" ? i.declaredStatus : null, accessories: i.accessories
+                    inventoryId: i.dbId || "",
+                    isNewManual: Boolean(i.isManual),
+                    isPermanent: Boolean(i.isPermanent),
+                    name: i.name || "",
+                    type: i.type || "UNIQUE",
+                    inventoryNumber: i.inventoryNumber || "",
+                    unit: i.unit || "szt.",
+                    declaredQty: Number(i.returnQty) || 1,
+                    declaredStatus: i.type === "UNIQUE" ? (i.declaredStatus || "sprawne") : null,
+                    accessories: (i.accessories || []).map((acc: any) => ({
+                        name: acc.name || "",
+                        mustReturn: Boolean(acc.mustReturn),
+                        isReturning: Boolean(acc.isReturning),
+                        quantity: Number(acc.quantity) || 1
+                    }))
                 });
             }
         }
@@ -1081,12 +1119,22 @@ export default function ProtocolsHub() {
             const protocolRef = doc(collection(db, "protocols"));
             const protocolId = `ZWR-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
 
-            await setDoc(protocolRef, {
-                protocolId, type: "ZWROT", documentSource: "APP_ELECTRONIC", sourceId: returnSiteId, sourceName: siteName, destinationId: "MAGAZYN",
-                createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "OCZEKUJACY", createdAt: new Date().toISOString(),
+            const rawData = {
+                protocolId,
+                type: "ZWROT",
+                documentSource: "APP_ELECTRONIC",
+                sourceId: returnSiteId,
+                sourceName: siteName,
+                destinationId: "MAGAZYN",
+                createdBy: user?.uid || "",
+                createdByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || "Użytkownik",
+                status: "OCZEKUJACY",
+                createdAt: new Date().toISOString(),
                 documentDate: returnDocDate || new Date().toISOString().split("T")[0],
                 items: finalReturnItems
-            });
+            };
+
+            await setDoc(protocolRef, cleanFirestorePayload(rawData));
             alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
             closeModal();
             fetchPendingProtocols();
