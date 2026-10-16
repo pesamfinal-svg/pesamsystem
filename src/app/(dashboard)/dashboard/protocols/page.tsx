@@ -4242,14 +4242,38 @@ export default function ProtocolsHub() {
                                                             <div className="flex items-start justify-between mb-3">
                                                                 <div className="flex-1">
                                                                     <div className="flex items-center gap-3 flex-wrap">
-                                                                        <p className="font-bold text-slate-800 pr-4">
-                                                                            {item.name}
-                                                                            {!item.isNewManual && item.inventoryNumber && <span className="text-purple-700 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
-                                                                            {item.isResidual && <span className="ml-2 text-[9px] bg-amber-200 text-amber-950 px-2 py-0.5 rounded font-black uppercase border border-amber-400">🧱 Resztki (AI)</span>}
-                                                                            {item.isNewManual && !item.isResidual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
-                                                                            {item.isGhostItem && <span className="ml-2 text-[9px] bg-slate-200 text-slate-700 px-2 rounded uppercase border border-slate-300">Tylko Osprzęt</span>}
-                                                                            {item.declaredQty === 0 && !item.isNewManual && !item.isGhostItem && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
-                                                                        </p>
+                                                                        {item.isNewManual || item.isResidual ? (
+                                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                                <div className="flex items-center gap-1.5">
+                                                                                    <input
+                                                                                        type="text"
+                                                                                        value={item.name}
+                                                                                        onChange={(e) => {
+                                                                                            const updatedName = e.target.value;
+                                                                                            setSelectedProtocol((prev: any) => ({
+                                                                                                ...prev,
+                                                                                                items: prev.items.map((it: any) =>
+                                                                                                    it.inventoryId === item.inventoryId ? { ...it, name: updatedName } : it
+                                                                                                )
+                                                                                            }));
+                                                                                        }}
+                                                                                        placeholder="Wpisz / doprecyzuj nazwę materiału..."
+                                                                                        title="Kliknij, aby dopisać szczegóły (np. klej do styropianu)"
+                                                                                        className="font-bold text-sm text-slate-900 bg-white border border-amber-300 focus:border-purple-600 rounded-lg px-2.5 py-1 outline-none shadow-xs w-64 sm:w-80"
+                                                                                    />
+                                                                                    <span className="text-[10px] text-amber-700 font-bold whitespace-nowrap">✏️ Edytuj nazwę</span>
+                                                                                </div>
+                                                                                {item.isResidual && <span className="text-[9px] bg-amber-200 text-amber-950 px-2 py-0.5 rounded font-black uppercase border border-amber-400">🧱 Resztki (AI)</span>}
+                                                                                {item.isNewManual && !item.isResidual && <span className="text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <p className="font-bold text-slate-800 pr-4">
+                                                                                {item.name}
+                                                                                {!item.isNewManual && item.inventoryNumber && <span className="text-purple-700 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
+                                                                                {item.isGhostItem && <span className="ml-2 text-[9px] bg-slate-200 text-slate-700 px-2 rounded uppercase border border-slate-300">Tylko Osprzęt</span>}
+                                                                                {item.declaredQty === 0 && !item.isNewManual && !item.isGhostItem && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
+                                                                            </p>
+                                                                        )}
                                                                         {/* PRZYCISK ZGŁASZANIA NOWYCH BRAKÓW DLA AKCEPTACJI ZWROTÓW */}
                                                                         {!item.isNewManual && (
                                                                             <button
@@ -4431,15 +4455,22 @@ export default function ProtocolsHub() {
                                             </div>
 
                                             <div className="flex gap-4">
-                                                <div className="flex-1 bg-slate-50 border border-slate-200 p-4 rounded-xl">
-                                                    <div className="flex justify-between items-center mb-2">
-                                                        <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">📸 Zdjęcia do protokołu</h4>
+                                                <div className="flex-1 bg-slate-50 border-2 border-purple-200 p-4 rounded-xl">
+                                                    <div className="flex flex-wrap justify-between items-center gap-2 mb-2">
+                                                        <div>
+                                                            <h4 className="text-xs font-black text-purple-950 uppercase tracking-wider flex items-center gap-1.5">
+                                                                <span>📸</span> Zdjęcia przywiezionych materiałów / dostawy
+                                                            </h4>
+                                                            <p className="text-[10px] text-slate-500">
+                                                                Dodaj zdjęcia paki auta, palety lub worków, aby AI porównało je ze zgłoszeniem kierownika.
+                                                            </p>
+                                                        </div>
                                                         {returnPhotos.length > 0 && (
                                                             <button
                                                                 type="button"
                                                                 onClick={handleVerifyPhotoWithAi}
                                                                 disabled={isVerifyingPhoto}
-                                                                className="bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-black px-3 py-1.5 rounded-lg shadow transition flex items-center gap-1.5 disabled:bg-purple-300"
+                                                                className="bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-black px-3.5 py-1.5 rounded-lg shadow transition flex items-center gap-1.5 disabled:bg-purple-300"
                                                             >
                                                                 {isVerifyingPhoto ? (
                                                                     <>
@@ -4448,13 +4479,18 @@ export default function ProtocolsHub() {
                                                                     </>
                                                                 ) : (
                                                                     <>
-                                                                        <span>🔍</span> Zweryfikuj zdjęcie ze zgłoszeniem (AI)
+                                                                        <span>🔍</span> Zweryfikuj zdjęcia z notatką (AI)
                                                                     </>
                                                                 )}
                                                             </button>
                                                         )}
                                                     </div>
-                                                    <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200 cursor-pointer mb-3" />
+                                                    <div className="mb-3">
+                                                        <label className="flex items-center justify-center gap-2 w-full p-2.5 bg-white hover:bg-purple-50 text-purple-700 border-2 border-dashed border-purple-300 rounded-xl text-xs font-bold cursor-pointer transition shadow-2xs">
+                                                            <span>📷</span> Wybierz / zrób zdjęcia przywiezionych materiałów
+                                                            <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="hidden" />
+                                                        </label>
+                                                    </div>
                                                     {returnPhotos.length > 0 && (
                                                         <div className="flex gap-2 flex-wrap">
                                                             {returnPhotos.map((photo, index) => (
