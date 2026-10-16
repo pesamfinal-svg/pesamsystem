@@ -149,6 +149,18 @@ export default function ProtocolsHub() {
     const [isAddManualToAcceptOpen, setIsAddManualToAcceptOpen] = useState(false);
     const [acceptReturnDocDate, setAcceptReturnDocDate] = useState(() => new Date().toISOString().split('T')[0]);
 
+    // Stany dla Pozostałości budowlanych (Krok 1, 2, 3)
+    const [isResidualModalOpen, setIsResidualModalOpen] = useState(false);
+    const [returnResidualNotes, setReturnResidualNotes] = useState("");
+    const [isParsingResiduals, setIsParsingResiduals] = useState(false);
+    const [isVerifyingPhoto, setIsVerifyingPhoto] = useState(false);
+    const [aiPhotoReport, setAiPhotoReport] = useState<{
+        verdict: string;
+        summary: string;
+        detectedItems: string[];
+        recommendations: string;
+    } | null>(null);
+
     // Stany dla ZWROTÓW PAPIEROWYCH
     const [isPaperReturnModalOpen, setIsPaperReturnModalOpen] = useState(false);
     const [paperReturnSiteId, setPaperReturnSiteId] = useState("");
@@ -442,6 +454,11 @@ export default function ProtocolsHub() {
         setReturnPhotos([]);
         setIsAddFromSiteOpen(false);
         setIsAddManualToAcceptOpen(false);
+        setIsResidualModalOpen(false);
+        setReturnResidualNotes("");
+        setIsParsingResiduals(false);
+        setIsVerifyingPhoto(false);
+        setAiPhotoReport(null);
         setPaperBulkPickModal(null);
         setIsHardDeleteModalOpen(false);
         setHardDeleteProtocol(null);
@@ -930,6 +947,25 @@ export default function ProtocolsHub() {
         setIsReturnManualModalOpen(false);
         setManualIsPermanent(false);
     };
+
+    const cleanFirestorePayload = (obj: any): any => {
+        if (obj === undefined) return null;
+        if (obj === null) return null;
+        if (Array.isArray(obj)) {
+            return obj.map(cleanFirestorePayload).filter(x => x !== undefined);
+        }
+        if (typeof obj === "object" && !(obj instanceof Date)) {
+            const cleaned: Record<string, any> = {};
+            for (const [k, v] of Object.entries(obj)) {
+                if (v !== undefined) {
+                    cleaned[k] = cleanFirestorePayload(v);
+                }
+            }
+            return cleaned;
+        }
+        return obj;
+    };
+
     // --- NOWOŚĆ: Funkcja zdejmująca zwrócony osprzęt z panelu kierownika ---
     const clearReturnedAccessoriesFromIssue = async (siteId: string, ghostItems: any[]) => {
         try {
@@ -960,7 +996,7 @@ export default function ProtocolsHub() {
                     });
 
                     // Aktualizuj protokół wydania (Wykreśla osprzęt z listy kierownika)
-                    await setDoc(doc(db, "protocols", targetProtocol.docId), { items: updatedItems }, { merge: true });
+                    await setDoc(doc(db, "protocols", targetProtocol.docId), cleanFirestorePayload({ items: updatedItems }), { merge: true });
                 }
             }
         } catch (error) {
@@ -1003,11 +1039,11 @@ export default function ProtocolsHub() {
                         const newAlloc = { ...allocations };
                         delete newAlloc[siteId];
                         const newTotal = otherAllocations.reduce((sum, [, q]) => sum + Number(q), 0);
-                        await setDoc(doc(db, "inventory", docSnap.id), {
+                        await setDoc(doc(db, "inventory", docSnap.id), cleanFirestorePayload({
                             allocations: newAlloc,
                             totalQuantity: newTotal,
                             availableQuantity: 0
-                        }, { merge: true });
+                        }), { merge: true });
                     }
                 }
             }
@@ -1032,7 +1068,7 @@ export default function ProtocolsHub() {
                     const issueRecord = activeIssues.find(i => i.itemId === itemId && i.type === "ISSUE");
                     if (issueRecord) {
                         const returnLogRef = doc(collection(db, `workers/${workerId}/issues`));
-                        await setDoc(returnLogRef, {
+                        await setDoc(returnLogRef, cleanFirestorePayload({
                             itemId: itemId,
                             itemName: item.name || issueRecord.itemName,
                             qty: item.receivedQty || item.declaredQty || issueRecord.qty,
@@ -1041,7 +1077,7 @@ export default function ProtocolsHub() {
                             notes: `Automatyczne rozliczenie po zwrocie z budowy protokołem`,
                             source: "MAGAZYN",
                             type: "RETURN"
-                        });
+                        }));
                     }
                 }
             }
@@ -1050,24 +1086,10 @@ export default function ProtocolsHub() {
         }
     };
 
-    const cleanFirestorePayload = (obj: any): any => {
-        if (obj === undefined) return null;
-        if (obj === null) return null;
-        if (Array.isArray(obj)) return obj.map(cleanFirestorePayload);
-        if (typeof obj === "object" && !(obj instanceof Date)) {
-            const cleaned: Record<string, any> = {};
-            for (const [k, v] of Object.entries(obj)) {
-                if (v !== undefined) {
-                    cleaned[k] = cleanFirestorePayload(v);
-                }
-            }
-            return cleaned;
-        }
-        return obj;
-    };
-
     const handleReturnSubmit = async () => {
-        if (!returnSiteId || returnCart.length === 0) return alert("Wybierz budowę i przedmioty do zwrotu!");
+        if (!returnSiteId || (returnCart.length === 0 && !returnResidualNotes.trim())) {
+            return alert("Wybierz budowę i dodaj przedmioty lub wpisz notatkę pozostałości budowlanych!");
+        }
 
         const finalReturnItems: any[] = [];
         for (const i of returnCart) {
@@ -1131,10 +1153,12 @@ export default function ProtocolsHub() {
                 status: "OCZEKUJACY",
                 createdAt: new Date().toISOString(),
                 documentDate: returnDocDate || new Date().toISOString().split("T")[0],
-                items: finalReturnItems
+                items: finalReturnItems,
+                residualNotes: returnResidualNotes.trim() || null
             };
 
             await setDoc(protocolRef, cleanFirestorePayload(rawData));
+            setReturnResidualNotes("");
             alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
             closeModal();
             fetchPendingProtocols();
@@ -1685,10 +1709,119 @@ export default function ProtocolsHub() {
         setAcceptInputs(initialInputs);
         setSelectedProtocol(protocol);
         setReturnPhotos([]);
+        setAiPhotoReport(protocol.aiInspectionReport || null);
+        setIsParsingResiduals(false);
+        setIsVerifyingPhoto(false);
 
         // Domyślnie ustawiamy datę fizycznego przyjęcia na datę zgłoszenia zwrotu przez kierownika
         const protocolDate = protocol.createdAt ? protocol.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
         setAcceptReturnDocDate(protocolDate);
+    };
+
+    // --- NOWOŚĆ: Parsowanie zadeklarowanych pozostałości budowlanych przez Gemini Flash ---
+    const handleParseResiduals = async () => {
+        if (!selectedProtocol?.residualNotes?.trim()) return;
+        setIsParsingResiduals(true);
+        try {
+            const res = await fetch("/api/protocols/parse-residuals", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: selectedProtocol.residualNotes })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Błąd parsowania pozostałości");
+
+            if (!data.items || data.items.length === 0) {
+                alert("AI nie rozpoznało żadnych konkretnych pozycji w notatce.");
+                return;
+            }
+
+            const newItems: any[] = [];
+            const newInputs: Record<string, any> = { ...acceptInputs };
+
+            data.items.forEach((item: any, idx: number) => {
+                const tempId = `temp-residual-${Date.now()}-${idx}`;
+                newItems.push({
+                    inventoryId: tempId,
+                    isNewManual: true,
+                    isManual: true,
+                    isResidual: true,
+                    isPermanent: false,
+                    isWaste: Boolean(item.isWaste),
+                    name: item.name || "Pozostałość budowlana",
+                    type: "BULK",
+                    unit: item.unit || "szt.",
+                    declaredQty: Number(item.quantity) || 1,
+                    declaredStatus: item.isWaste ? "odpad_utylizacja" : "sprawne",
+                    condition: item.condition || "",
+                    accessories: []
+                });
+
+                newInputs[tempId] = {
+                    receivedQty: Number(item.quantity) || 1,
+                    finalStatus: item.isWaste ? "odpad_utylizacja" : "sprawne",
+                    notes: `[Pozostałości] ${item.condition ? item.condition + ' ' : ''}${item.isWaste ? '(Odpad do utylizacji)' : ''}`.trim(),
+                    createClaim: false,
+                    verifiedAccessories: {},
+                    manualDebts: []
+                };
+            });
+
+            setSelectedProtocol((prev: any) => ({
+                ...prev,
+                items: [...prev.items, ...newItems]
+            }));
+            setAcceptInputs(newInputs);
+            alert(`AI pomyślnie rozpoznało i dodało ${newItems.length} pozycji pozostałości do listy!`);
+        } catch (err: any) {
+            console.error("Błąd parsowania:", err);
+            alert("Błąd analizy AI: " + err.message);
+        } finally {
+            setIsParsingResiduals(false);
+        }
+    };
+
+    // --- NOWOŚĆ: Weryfikacja zdjęcia paki/palety z notatką przez Gemini Flash Multimodal ---
+    const handleVerifyPhotoWithAi = async () => {
+        if (returnPhotos.length === 0) {
+            alert("Najpierw wybierz co najmniej jedno zdjęcie do protokołu!");
+            return;
+        }
+        setIsVerifyingPhoto(true);
+        try {
+            const firstPhoto = returnPhotos[0];
+            const reader = new FileReader();
+            const base64Promise = new Promise<string>((resolve, reject) => {
+                reader.onload = () => resolve(reader.result as string);
+                reader.onerror = reject;
+                reader.readAsDataURL(firstPhoto);
+            });
+
+            const photoBase64 = await base64Promise;
+            const declaredItemNames = (selectedProtocol?.items || []).map((i: any) => `${i.name} (${i.declaredQty || 1} ${i.unit || 'szt.'})`);
+
+            const res = await fetch("/api/protocols/verify-residuals-photo", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    photoBase64,
+                    mimeType: firstPhoto.type || 'image/jpeg',
+                    residualNotes: selectedProtocol?.residualNotes || "",
+                    declaredItems: declaredItemNames
+                })
+            });
+
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Błąd analizy zdjęcia");
+
+            setAiPhotoReport(data);
+            setSelectedProtocol((prev: any) => ({ ...prev, aiInspectionReport: data }));
+        } catch (err: any) {
+            console.error("Błąd weryfikacji zdjęcia:", err);
+            alert("Błąd analizy zdjęcia: " + err.message);
+        } finally {
+            setIsVerifyingPhoto(false);
+        }
     };
 
     const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2031,15 +2164,17 @@ export default function ProtocolsHub() {
                     });
                 }
 
-                transaction.update(protocolRef, {
+                transaction.update(protocolRef, cleanFirestorePayload({
                     status: "ZAAKCEPTOWANY",
-                    acceptedBy: user?.uid,
-                    acceptedByName: `${user?.firstName} ${user?.lastName}`,
+                    acceptedBy: user?.uid || null,
+                    acceptedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || "Magazynier",
                     acceptedAt: new Date().toISOString(),
                     documentDate: acceptReturnDocDate,
                     items: updatedItemsForProtocol,
-                    ...(photoURLs.length > 0 && { photos: photoURLs })
-                });
+                    ...(photoURLs.length > 0 && { photos: photoURLs }),
+                    ...(selectedProtocol.residualNotes && { residualNotes: selectedProtocol.residualNotes }),
+                    ...(aiPhotoReport && { aiInspectionReport: aiPhotoReport })
+                }));
             });
 
             // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił zaakceptowany osprzęt z listy Kierownika oraz wyczyścił kartotekę pracownika z BHP
@@ -3353,13 +3488,60 @@ export default function ProtocolsHub() {
                             <div className="w-[50%] flex flex-col bg-white">
                                 <div className="p-6 border-b bg-white flex justify-between items-center">
                                     <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest">2. Koszyk Zwrotu</label>
-                                    <button onClick={() => { setManualName(""); setManualQty(""); setIsReturnManualModalOpen(true); }} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm border border-blue-200">
-                                        + Dodaj z palca (Wpis Ręczny)
-                                    </button>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsResidualModalOpen(true)}
+                                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm border flex items-center gap-1.5 ${
+                                                returnResidualNotes.trim()
+                                                    ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-400'
+                                                    : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                                            }`}
+                                        >
+                                            <span>🧱</span> Pozostałości budowlane
+                                            {returnResidualNotes.trim() && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse"></span>}
+                                        </button>
+                                        <button onClick={() => { setManualName(""); setManualQty(""); setIsReturnManualModalOpen(true); }} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-sm border border-blue-200">
+                                            + Dodaj z palca (Wpis Ręczny)
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="flex-1 p-6 overflow-y-auto">
-                                    {returnCart.length === 0 ? (
-                                        <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">Wybierz przedmioty z lewej strony lub dodaj ręcznie</div>
+                                    {/* KROK 1: KARTA ZADEKLAROWANYCH POZOSTAŁOŚCI BUDOWLANYCH */}
+                                    {returnResidualNotes.trim() && (
+                                        <div className="p-4 border-2 border-amber-300 bg-amber-50/90 rounded-2xl shadow-sm mb-4">
+                                            <div className="flex justify-between items-start gap-2 mb-1.5">
+                                                <span className="text-xs font-black text-amber-950 uppercase tracking-wider flex items-center gap-1.5">
+                                                    <span>🧱</span> Zadeklarowane pozostałości budowlane:
+                                                </span>
+                                                <div className="flex gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setIsResidualModalOpen(true)}
+                                                        className="text-[11px] font-bold text-amber-900 hover:bg-amber-200 px-2 py-0.5 bg-amber-100 rounded transition"
+                                                    >
+                                                        Edytuj
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setReturnResidualNotes("")}
+                                                        className="text-[11px] font-bold text-red-600 hover:bg-red-100 px-2 py-0.5 bg-white/70 rounded transition"
+                                                    >
+                                                        Usuń
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <p className="text-xs text-slate-800 italic bg-white/90 p-2.5 rounded-xl border border-amber-200 font-medium whitespace-pre-wrap">
+                                                "{returnResidualNotes}"
+                                            </p>
+                                            <p className="text-[10px] text-amber-800 mt-1.5 font-semibold flex items-center gap-1">
+                                                <span>ℹ️</span> Notatka zostanie zapisana w protokole i zweryfikowana przez magazyniera przy odbiorze (AI).
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {returnCart.length === 0 && !returnResidualNotes.trim() ? (
+                                        <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-xl">Wybierz przedmioty z lewej strony lub dodaj ręcznie / pozostałości</div>
                                     ) : (
                                         <div className="space-y-3">
                                             {returnCart.map(cItem => (
@@ -3441,9 +3623,61 @@ export default function ProtocolsHub() {
                                 </div>
                                 <div className="p-6 border-t bg-slate-50 flex gap-4">
                                     <button onClick={closeModal} className="w-1/3 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl">ANULUJ</button>
-                                    <button onClick={handleReturnSubmit} disabled={isSubmitting || returnCart.length === 0} className="w-2/3 py-4 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-lg shadow-xl disabled:bg-slate-300">WYŚLIJ ZGŁOSZENIE ZWROTU</button>
+                                    <button onClick={handleReturnSubmit} disabled={isSubmitting || (returnCart.length === 0 && !returnResidualNotes.trim())} className="w-2/3 py-4 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-lg shadow-xl disabled:bg-slate-300">WYŚLIJ ZGŁOSZENIE ZWROTU</button>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MINI-MODAL: Pozostałości budowlane dla protokołu zwrotu (Kierownik) */}
+            {isResidualModalOpen && (
+                <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 animate-fade-in border-2 border-amber-300">
+                        <div className="flex justify-between items-center mb-3">
+                            <h3 className="text-lg font-black text-amber-950 flex items-center gap-2">
+                                <span>🧱</span> Pozostałości budowlane / Resztki z budowy
+                            </h3>
+                            <button
+                                type="button"
+                                onClick={() => setIsResidualModalOpen(false)}
+                                className="text-2xl text-slate-400 hover:text-slate-700 leading-none"
+                            >
+                                &times;
+                            </button>
+                        </div>
+                        <p className="text-xs text-slate-600 mb-3 leading-relaxed">
+                            Wpisz jednym ciągiem lub podyktuj to, co zwracasz w resztkach, otwartych workach, napoczętej chemii budowlanej itp.
+                            <br />
+                            <span className="text-[11px] text-amber-800 font-semibold">
+                                Przykład: "4 worki cementu po połowie, 2 regipsy, 3 worki szpachli, pół wiadra gruntu"
+                            </span>
+                        </p>
+                        <div className="mb-4">
+                            <textarea
+                                rows={4}
+                                value={returnResidualNotes}
+                                onChange={(e) => setReturnResidualNotes(e.target.value)}
+                                placeholder="Wpisz listę pozostałości jednym ciągiem..."
+                                className="w-full p-3 border-2 rounded-xl outline-none focus:border-amber-500 font-medium text-slate-800 text-sm bg-slate-50 focus:bg-white transition"
+                            />
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setIsResidualModalOpen(false)}
+                                className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition text-sm"
+                            >
+                                Anuluj
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setIsResidualModalOpen(false)}
+                                className="flex-1 py-3 bg-amber-600 hover:bg-amber-700 text-white font-black rounded-xl shadow-md transition text-sm flex items-center justify-center gap-2"
+                            >
+                                <span>✅</span> Zapisz notatkę zwrotu
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -3950,6 +4184,46 @@ export default function ProtocolsHub() {
                                     <>
                                         <div className="flex-1 p-6 overflow-y-auto bg-white">
                                             <h3 className="font-black text-lg text-slate-800 mb-4 border-b pb-2">Pozycje w protokole: {selectedProtocol.protocolId}</h3>
+
+                                            {/* KROK 2: SEKCJA POZOSTAŁOŚCI BUDOWLANYCH DEKLAROWANYCH PRZEZ KIEROWNIKA */}
+                                            {selectedProtocol.residualNotes && (
+                                                <div className="mb-6 p-4 rounded-2xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 shadow-sm">
+                                                    <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-2xl">🧱</span>
+                                                            <div>
+                                                                <h4 className="font-black text-amber-950 text-sm uppercase tracking-wide">
+                                                                    Pozostałości budowlane (Deklaracja kierownika)
+                                                                </h4>
+                                                                <p className="text-[10px] text-amber-800">
+                                                                    Kierownik zgłosił poniższy tekst jako zjeżdżające resztki / materiały
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleParseResiduals}
+                                                            disabled={isParsingResiduals}
+                                                            className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-xl text-xs font-black transition shadow flex items-center gap-2 disabled:bg-amber-300"
+                                                        >
+                                                            {isParsingResiduals ? (
+                                                                <>
+                                                                    <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                                                    <span>Analizowanie AI...</span>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <span>✨</span> Rozpoznaj pozycje (AI)
+                                                                </>
+                                                            )}
+                                                        </button>
+                                                    </div>
+                                                    <div className="p-3 bg-white/90 rounded-xl border border-amber-200 text-xs font-semibold text-slate-800 italic whitespace-pre-wrap">
+                                                        "{selectedProtocol.residualNotes}"
+                                                    </div>
+                                                </div>
+                                            )}
+
                                             <div className="space-y-4 mb-8">
                                                 {selectedProtocol.items.map((item: any) => {
                                                     const inputState = acceptInputs[item.inventoryId] || { receivedQty: item.declaredQty, finalStatus: item.declaredStatus || "sprawne", notes: "", createClaim: false, verifiedAccessories: {} };
@@ -3963,7 +4237,7 @@ export default function ProtocolsHub() {
                                                     }
 
                                                     return (
-                                                        <div key={item.inventoryId} className={`p-4 border rounded-xl shadow-sm relative ${isQtyDifferent || isStatusDifferent ? 'bg-orange-50 border-orange-300' : 'bg-slate-50'}`}>
+                                                        <div key={item.inventoryId} className={`p-4 border rounded-xl shadow-sm relative ${isQtyDifferent || isStatusDifferent ? 'bg-orange-50 border-orange-300' : item.isResidual ? 'bg-amber-50/60 border-amber-300' : 'bg-slate-50'}`}>
 
                                                             <div className="flex items-start justify-between mb-3">
                                                                 <div className="flex-1">
@@ -3971,7 +4245,8 @@ export default function ProtocolsHub() {
                                                                         <p className="font-bold text-slate-800 pr-4">
                                                                             {item.name}
                                                                             {!item.isNewManual && item.inventoryNumber && <span className="text-purple-700 font-mono ml-2 font-bold text-sm">Nr Mag: {item.inventoryNumber}</span>}
-                                                                            {item.isNewManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
+                                                                            {item.isResidual && <span className="ml-2 text-[9px] bg-amber-200 text-amber-950 px-2 py-0.5 rounded font-black uppercase border border-amber-400">🧱 Resztki (AI)</span>}
+                                                                            {item.isNewManual && !item.isResidual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
                                                                             {item.isGhostItem && <span className="ml-2 text-[9px] bg-slate-200 text-slate-700 px-2 rounded uppercase border border-slate-300">Tylko Osprzęt</span>}
                                                                             {item.declaredQty === 0 && !item.isNewManual && !item.isGhostItem && <span className="ml-2 text-[9px] bg-purple-200 text-purple-800 px-2 rounded uppercase">ZAPOMNIANY (Z BUDOWY)</span>}
                                                                         </p>
@@ -4157,7 +4432,28 @@ export default function ProtocolsHub() {
 
                                             <div className="flex gap-4">
                                                 <div className="flex-1 bg-slate-50 border border-slate-200 p-4 rounded-xl">
-                                                    <h4 className="text-xs font-bold text-slate-800 mb-2 uppercase tracking-wider">📸 Zdjęcia do protokołu (Opcjonalnie)</h4>
+                                                    <div className="flex justify-between items-center mb-2">
+                                                        <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">📸 Zdjęcia do protokołu</h4>
+                                                        {returnPhotos.length > 0 && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={handleVerifyPhotoWithAi}
+                                                                disabled={isVerifyingPhoto}
+                                                                className="bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-black px-3 py-1.5 rounded-lg shadow transition flex items-center gap-1.5 disabled:bg-purple-300"
+                                                            >
+                                                                {isVerifyingPhoto ? (
+                                                                    <>
+                                                                        <span className="w-2.5 h-2.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                                                        <span>Weryfikacja AI...</span>
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <span>🔍</span> Zweryfikuj zdjęcie ze zgłoszeniem (AI)
+                                                                    </>
+                                                                )}
+                                                            </button>
+                                                        )}
+                                                    </div>
                                                     <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200 cursor-pointer mb-3" />
                                                     {returnPhotos.length > 0 && (
                                                         <div className="flex gap-2 flex-wrap">
@@ -4167,6 +4463,43 @@ export default function ProtocolsHub() {
                                                                     <button onClick={() => removePhoto(index)} className="absolute top-1 right-1 bg-red-500 text-white w-4 h-4 rounded-full text-[10px] font-bold leading-none">&times;</button>
                                                                 </div>
                                                             ))}
+                                                        </div>
+                                                    )}
+
+                                                    {/* KROK 3: RAPORT WERYFIKACJI WIZUALNEJ AI */}
+                                                    {aiPhotoReport && (
+                                                        <div className={`mt-3 p-3.5 rounded-xl border text-xs animate-fade-in ${
+                                                            aiPhotoReport.verdict === 'ZGODNE'
+                                                                ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                                                                : aiPhotoReport.verdict === 'ROZBIEŻNOŚCI'
+                                                                    ? 'bg-red-50 border-red-300 text-red-950'
+                                                                    : 'bg-amber-50 border-amber-300 text-amber-950'
+                                                        }`}>
+                                                            <div className="flex items-center justify-between mb-1.5">
+                                                                <span className="font-black text-xs uppercase tracking-wide flex items-center gap-1.5">
+                                                                    <span>🤖</span> Raport weryfikacji ze zdjęciem (AI):
+                                                                </span>
+                                                                <span className={`px-2 py-0.5 rounded font-black text-[10px] uppercase border ${
+                                                                    aiPhotoReport.verdict === 'ZGODNE'
+                                                                        ? 'bg-emerald-200 border-emerald-400 text-emerald-950'
+                                                                        : aiPhotoReport.verdict === 'ROZBIEŻNOŚCI'
+                                                                            ? 'bg-red-200 border-red-400 text-red-950 animate-pulse'
+                                                                            : 'bg-amber-200 border-amber-400 text-amber-950'
+                                                                }`}>
+                                                                    {aiPhotoReport.verdict}
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-xs mb-2 font-medium leading-relaxed">{aiPhotoReport.summary}</p>
+                                                            {aiPhotoReport.detectedItems && aiPhotoReport.detectedItems.length > 0 && (
+                                                                <div className="text-[11px] opacity-90 mb-1.5">
+                                                                    <b>Wykryte obiekty/materiały:</b> {aiPhotoReport.detectedItems.join(', ')}
+                                                                </div>
+                                                            )}
+                                                            {aiPhotoReport.recommendations && (
+                                                                <div className="text-[11px] font-bold mt-1.5 pt-1.5 border-t border-black/10">
+                                                                    💡 Zalecenie dla magazyniera: {aiPhotoReport.recommendations}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </div>
