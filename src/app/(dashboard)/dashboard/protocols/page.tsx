@@ -255,6 +255,19 @@ export default function ProtocolsHub() {
     const [histFilterDateFrom, setHistFilterDateFrom] = useState("");
     const [histFilterDateTo, setHistFilterDateTo] = useState("");
 
+    // STANY SPRAWDZANIA DUPLIKATÓW POZOSTAŁOŚCI BUDOWLANYCH
+    type ResidualDuplicateSuggestion = {
+        cartId: string;
+        name: string;
+        receivedQty: number;
+        unit: string;
+        matches: InventoryItem[];
+    };
+    const [isDuplicateCheckModalOpen, setIsDuplicateCheckModalOpen] = useState(false);
+    const [residualDuplicateSuggestions, setResidualDuplicateSuggestions] = useState<ResidualDuplicateSuggestion[]>([]);
+    const [residualDuplicateDecisions, setResidualDuplicateDecisions] = useState<Record<string, { action: 'new' | 'merge'; targetId?: string }>>({});
+    const [pendingSubmitContext, setPendingSubmitContext] = useState<'paper' | 'accept' | null>(null);
+
     const fetchData = async () => {
         setLoading(true);
         try {
@@ -1364,6 +1377,40 @@ export default function ProtocolsHub() {
         setIsSubmitting(true);
         const resolvedLastOpDates: Record<string, string> = {};
 
+        // Sprawdzenie duplikatów pozostałości — przed zapisem do Firestore
+        // (Uruchamiane tylko gdy nie ma otwartego modalu duplikatów — tzn. użytkownik jeszcze nie podjął decyzji)
+        if (!isDuplicateCheckModalOpen) {
+            const residualsToCheck = processedCart.filter(ci => ci.isResidual && ci.finalStatus !== 'odpad_utylizacja');
+            const existingResiduals = inventory.filter(i =>
+                i.category === 'Pozostałości budowlane' || i.inventoryNumber === 'RESZTKI' || (i as any).isResidual
+            );
+            const suggestions: ResidualDuplicateSuggestion[] = [];
+            for (const ri of residualsToCheck) {
+                const cleanNew = normalizeString(ri.name);
+                const matches = existingResiduals.filter(ex => {
+                    const cleanEx = normalizeString(ex.name);
+                    return cleanEx === cleanNew ||
+                        (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) ||
+                        (cleanEx.length >= 4 && cleanNew.includes(cleanEx));
+                });
+                if (matches.length > 0) {
+                    suggestions.push({ cartId: ri.cartItemId, name: ri.name, receivedQty: ri.receivedQty, unit: ri.unit || 'szt.', matches });
+                }
+            }
+            if (suggestions.length > 0) {
+                setIsSubmitting(false);
+                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string }> = {};
+                for (const s of suggestions) {
+                    defaultDecisions[s.cartId] = { action: 'merge', targetId: s.matches[0].id };
+                }
+                setResidualDuplicateSuggestions(suggestions);
+                setResidualDuplicateDecisions(defaultDecisions);
+                setPendingSubmitContext('paper');
+                setIsDuplicateCheckModalOpen(true);
+                return;
+            }
+        }
+
         try {
             for (const cartItem of processedCart) {
                 if (cartItem.isManual || cartItem.isGhostItem || cartItem.type !== "UNIQUE" || !cartItem.dbId) continue;
@@ -1454,6 +1501,39 @@ export default function ProtocolsHub() {
 
                     if (cartItem.isManual) {
                         if (cartItem.isResidual && cartItem.finalStatus !== "odpad_utylizacja") {
+                            // Sprawdzamy decyzję użytkownika (scalenie vs nowy wpis)
+                            const decision = residualDuplicateDecisions[cartItem.cartItemId];
+                            if (decision?.action === 'merge' && decision.targetId) {
+                                // Scal ilość z istniejącym wpisem
+                                const existingRef = doc(db, 'inventory', decision.targetId);
+                                const existingDoc = await transaction.get(existingRef);
+                                if (existingDoc.exists()) {
+                                    const existingData = existingDoc.data();
+                                    const newQty = (existingData.availableQuantity || 0) + (cartItem.receivedQty || 0);
+                                    transaction.update(existingRef, {
+                                        availableQuantity: newQty,
+                                        totalQuantity: Math.max(existingData.totalQuantity || 0, newQty)
+                                    });
+                                    finalProtocolItems.push({
+                                        inventoryId: decision.targetId,
+                                        isMergedResidual: true,
+                                        isPermanent: true,
+                                        isResidual: true,
+                                        isWaste: false,
+                                        name: cartItem.name,
+                                        type: "BULK",
+                                        inventoryNumber: "RESZTKI",
+                                        unit: cartItem.unit || "szt.",
+                                        declaredQty: cartItem.declaredQty,
+                                        receivedQty: cartItem.receivedQty,
+                                        finalStatus: cartItem.finalStatus || "sprawne",
+                                        warehouseNotes: (cartItem.notes || "") + " [scalono z istniejącym wpisem]",
+                                        accessories: []
+                                    });
+                                    continue;
+                                }
+                            }
+                            // Tworz nowy wpis (domyślne jeśli brak decyzji lub action === 'new')
                             const newDocRef = doc(collection(db, "inventory"));
                             transaction.set(newDocRef, cleanFirestorePayload({
                                 name: cartItem.name,
@@ -2065,6 +2145,41 @@ export default function ProtocolsHub() {
 
         setIsSubmitting(true);
 
+        // Sprawdzenie duplikatów pozostałości przed zapisem
+        if (!isDuplicateCheckModalOpen) {
+            const residualsToCheck = selectedProtocol.items.filter((item: any) => item.isNewManual && item.isResidual);
+            const existingResiduals = inventory.filter((i: InventoryItem) =>
+                i.category === 'Pozostałości budowlane' || i.inventoryNumber === 'RESZTKI' || (i as any).isResidual
+            );
+            const suggestions: ResidualDuplicateSuggestion[] = [];
+            for (const ri of residualsToCheck) {
+                const input = acceptInputs[ri.inventoryId];
+                if (!input || input.finalStatus === 'odpad_utylizacja') continue;
+                const cleanNew = normalizeString(ri.name);
+                const matches = existingResiduals.filter((ex: InventoryItem) => {
+                    const cleanEx = normalizeString(ex.name);
+                    return cleanEx === cleanNew ||
+                        (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) ||
+                        (cleanEx.length >= 4 && cleanNew.includes(cleanEx));
+                });
+                if (matches.length > 0) {
+                    suggestions.push({ cartId: ri.inventoryId, name: ri.name, receivedQty: input.receivedQty, unit: ri.unit || 'szt.', matches });
+                }
+            }
+            if (suggestions.length > 0) {
+                setIsSubmitting(false);
+                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string }> = {};
+                for (const s of suggestions) {
+                    defaultDecisions[s.cartId] = { action: 'merge', targetId: s.matches[0].id };
+                }
+                setResidualDuplicateSuggestions(suggestions);
+                setResidualDuplicateDecisions(defaultDecisions);
+                setPendingSubmitContext('accept');
+                setIsDuplicateCheckModalOpen(true);
+                return;
+            }
+        }
+
         const resolvedLastOpDates: Record<string, string> = {};
         const acceptDate = acceptReturnDocDate; // Używamy wybranej przez magazyniera daty fizycznego przyjęcia
 
@@ -2161,6 +2276,23 @@ export default function ProtocolsHub() {
 
                     if (item.isNewManual) {
                         if (item.isResidual && workerInput.finalStatus !== "odpad_utylizacja") {
+                            // Sprawdz decyzje użytkownika co do duplikatów
+                            const decision = residualDuplicateDecisions[item.inventoryId];
+                            if (decision?.action === 'merge' && decision.targetId) {
+                                const existingRef = doc(db, 'inventory', decision.targetId);
+                                const existingDoc = await transaction.get(existingRef);
+                                if (existingDoc.exists()) {
+                                    const existingData = existingDoc.data();
+                                    const newQty = (existingData.availableQuantity || 0) + (workerInput.receivedQty || 0);
+                                    transaction.update(existingRef, {
+                                        availableQuantity: newQty,
+                                        totalQuantity: Math.max(existingData.totalQuantity || 0, newQty)
+                                    });
+                                    updatedItemsForProtocol.push({ ...item, inventoryId: decision.targetId, isMergedResidual: true, isPermanent: true, isResidual: true, isWaste: false, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: (workerInput.notes || '') + ' [scalono z istniejącym]', accessories: [] });
+                                    continue;
+                                }
+                            }
+                            // Nowy wpis
                             const newDocRef = doc(collection(db, "inventory"));
                             transaction.set(newDocRef, cleanFirestorePayload({
                                 name: item.name,
@@ -5772,6 +5904,120 @@ export default function ProtocolsHub() {
                             </button>
                             <button onClick={confirmHardDelete} disabled={isSubmitting} className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-black rounded-xl shadow-md disabled:bg-slate-400 transition flex items-center gap-2">
                                 {isSubmitting ? "Usuwanie z bazy..." : "Potwierdzam, Usuń Trwale"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL SPRAWDZANIA DUPLIKATÓW POZOSTAŁOŚCI BUDOWLANYCH */}
+            {isDuplicateCheckModalOpen && residualDuplicateSuggestions.length > 0 && (
+                <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-fade-in">
+                        <div className="bg-gradient-to-r from-amber-600 to-orange-500 p-6 rounded-t-3xl text-white">
+                            <div className="flex items-center gap-3">
+                                <span className="text-3xl">🧱</span>
+                                <div>
+                                    <h2 className="text-xl font-black">Podobne pozostałości już istnieją!</h2>
+                                    <p className="text-amber-100 text-sm mt-0.5">Zdecyduj, czy dodać do istniejącego wpisu czy stworzyć nowy</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            {residualDuplicateSuggestions.map(suggestion => {
+                                const decision = residualDuplicateDecisions[suggestion.cartId] || { action: 'merge', targetId: suggestion.matches[0]?.id };
+                                return (
+                                    <div key={suggestion.cartId} className="border-2 border-amber-200 rounded-2xl p-4 bg-amber-50">
+                                        <div className="flex items-center gap-2 mb-3">
+                                            <span className="text-lg">📦</span>
+                                            <div>
+                                                <p className="font-black text-slate-800">{suggestion.name}</p>
+                                                <p className="text-xs text-slate-500">Do przyjęcia: <strong>{suggestion.receivedQty} {suggestion.unit}</strong></p>
+                                            </div>
+                                        </div>
+
+                                        <p className="text-xs font-black text-amber-700 uppercase mb-2">Podobne wpisy w magazynie:</p>
+                                        <div className="space-y-2 mb-3">
+                                            {suggestion.matches.map(match => (
+                                                <label key={match.id} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition ${
+                                                    decision.action === 'merge' && decision.targetId === match.id
+                                                        ? 'border-amber-500 bg-amber-100'
+                                                        : 'border-slate-200 bg-white hover:border-amber-300'
+                                                }`}>
+                                                    <input
+                                                        type="radio"
+                                                        name={`residual-decision-${suggestion.cartId}`}
+                                                        checked={decision.action === 'merge' && decision.targetId === match.id}
+                                                        onChange={() => setResidualDuplicateDecisions(prev => ({
+                                                            ...prev,
+                                                            [suggestion.cartId]: { action: 'merge', targetId: match.id }
+                                                        }))}
+                                                        className="accent-amber-600"
+                                                    />
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="font-bold text-sm text-slate-800 truncate">{match.name}</p>
+                                                        <p className="text-xs text-slate-500">
+                                                            Stan: <strong>{match.availableQuantity} {match.unit || 'szt.'}</strong>
+                                                            {" → "}
+                                                            <strong className="text-amber-700">{(match.availableQuantity || 0) + suggestion.receivedQty} {match.unit || 'szt.'}</strong>
+                                                            {" po scaleniu"}
+                                                        </p>
+                                                    </div>
+                                                    <span className="text-xs font-black text-amber-700 bg-amber-200 px-2 py-0.5 rounded-lg whitespace-nowrap">➕ Scalaj</span>
+                                                </label>
+                                            ))}
+                                        </div>
+
+                                        <label className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition ${
+                                            decision.action === 'new'
+                                                ? 'border-blue-500 bg-blue-50'
+                                                : 'border-slate-200 bg-white hover:border-blue-300'
+                                        }`}>
+                                            <input
+                                                type="radio"
+                                                name={`residual-decision-${suggestion.cartId}`}
+                                                checked={decision.action === 'new'}
+                                                onChange={() => setResidualDuplicateDecisions(prev => ({
+                                                    ...prev,
+                                                    [suggestion.cartId]: { action: 'new' }
+                                                }))}
+                                                className="accent-blue-600"
+                                            />
+                                            <div>
+                                                <p className="font-bold text-sm text-blue-700">Utwórz nowy oddzielny wpis</p>
+                                                <p className="text-xs text-slate-500">Np. to inny rodzaj / inne źródło</p>
+                                            </div>
+                                            <span className="text-xs font-black text-blue-700 bg-blue-100 px-2 py-0.5 rounded-lg ml-auto whitespace-nowrap">Nowy wpis</span>
+                                        </label>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        <div className="border-t p-6 flex justify-between gap-3">
+                            <button
+                                onClick={() => {
+                                    setIsDuplicateCheckModalOpen(false);
+                                    setResidualDuplicateSuggestions([]);
+                                    setPendingSubmitContext(null);
+                                }}
+                                className="px-5 py-2.5 text-slate-600 font-bold border border-slate-200 rounded-xl hover:bg-slate-50 transition"
+                            >
+                                Anuluj
+                            </button>
+                            <button
+                                onClick={() => {
+                                    const ctx = pendingSubmitContext;
+                                    setIsDuplicateCheckModalOpen(false);
+                                    setResidualDuplicateSuggestions([]);
+                                    setPendingSubmitContext(null);
+                                    if (ctx === 'paper') handlePaperReturnSubmit();
+                                    else if (ctx === 'accept') handleAcceptSubmit(true);
+                                }}
+                                className="px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-black rounded-xl shadow transition flex items-center gap-2"
+                            >
+                                ✅ Zatwierdź i Zapisz
                             </button>
                         </div>
                     </div>

@@ -198,6 +198,13 @@ export default function InventoryPage() {
     const [imageFile, setImageFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
 
+    // STANY KARTY POZOSTAŁOŚCI BUDOWLANYCH
+    const [residualPhotoFile, setResidualPhotoFile] = useState<File | null>(null);
+    const [isResidualPhotoUploading, setIsResidualPhotoUploading] = useState(false);
+    const [residualNoteEdit, setResidualNoteEdit] = useState<string>("");
+    const [isResidualNoteEditing, setIsResidualNoteEditing] = useState(false);
+    const [isResidualNoteSaving, setIsResidualNoteSaving] = useState(false);
+
     const [itemHistory, setItemHistory] = useState<HistoryEntry[]>([]);
     const [historyLoading, setItemHistoryLoading] = useState(false);
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
@@ -1560,144 +1567,352 @@ export default function InventoryPage() {
                 )
             )}
 
-            {/* KARTA URZĄDZENIA */}
-            {selectedItem && (
-                <div className="fixed inset-0 bg-black/60 z-40 flex justify-end" onClick={() => setSelectedItem(null)}>
-                    <div className="bg-white w-full max-w-xl h-full p-8 shadow-2xl animate-slide-in overflow-y-auto" onClick={e => e.stopPropagation()}>
-                        <div className="flex justify-between items-start mb-4">
-                            <div className="flex-1">
-                                <h2 className="text-2xl font-black text-slate-800">{selectedItem.name}</h2>
-                                {selectedItem.status === "do nadania numeru" && (
-                                    <span className="inline-block bg-red-100 text-red-800 text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-wider mt-1 animate-pulse">
-                                        ⚠️ Oczekuje na kod magazynowy
-                                    </span>
+            {/* KARTA URZĄDZENIA / POZOSTAŁOŚCI BUDOWLANYCH */}
+            {selectedItem && (() => {
+                const isResidualCard = selectedItem.category === "Pozostałości budowlane" || selectedItem.inventoryNumber === "RESZTKI" || (selectedItem as any).isResidual;
+
+                if (isResidualCard) {
+                    // ===== KARTA POZOSTAŁOŚCI BUDOWLANYCH (lekka) =====
+                    const handleResidualPhotoUpload = async (file: File) => {
+                        setIsResidualPhotoUploading(true);
+                        try {
+                            const storageRef = ref(storage, `inventory/residuals/${Date.now()}_${file.name}`);
+                            const snapshot = await uploadBytes(storageRef, file);
+                            const url = await getDownloadURL(snapshot.ref);
+                            await updateDoc(doc(db, "inventory", selectedItem.id), { imageUrl: url });
+                            setSelectedItem({ ...selectedItem, imageUrl: url });
+                            setResidualPhotoFile(null);
+                            alert("✅ Zdjęcie zostało zapisane!");
+                        } catch (e: any) {
+                            alert("Błąd uploadu zdjęcia: " + (e.message || e));
+                        } finally {
+                            setIsResidualPhotoUploading(false);
+                        }
+                    };
+
+                    const handleResidualNoteSave = async () => {
+                        setIsResidualNoteSaving(true);
+                        try {
+                            await updateDoc(doc(db, "inventory", selectedItem.id), { additionalInfo: residualNoteEdit });
+                            setSelectedItem({ ...selectedItem, additionalInfo: residualNoteEdit });
+                            setIsResidualNoteEditing(false);
+                        } catch (e: any) {
+                            alert("Błąd zapisu notatki: " + (e.message || e));
+                        } finally {
+                            setIsResidualNoteSaving(false);
+                        }
+                    };
+
+                    return (
+                        <div className="fixed inset-0 bg-black/60 z-40 flex justify-end" onClick={() => setSelectedItem(null)}>
+                            <div className="bg-white w-full max-w-xl h-full shadow-2xl animate-slide-in overflow-y-auto" onClick={e => e.stopPropagation()}>
+                                {/* Nagłówek */}
+                                <div className="bg-gradient-to-r from-amber-600 to-orange-500 p-6 text-white">
+                                    <div className="flex justify-between items-start">
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className="text-2xl">🧱</span>
+                                                <span className="bg-white/20 text-white text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider border border-white/30">Pozostałości budowlane</span>
+                                            </div>
+                                            <h2 className="text-xl font-black leading-tight break-words">{selectedItem.name}</h2>
+                                            <p className="text-amber-100 text-xs mt-1">{selectedItem.subcategory || "Materiały z budowy"}</p>
+                                        </div>
+                                        <button onClick={() => setSelectedItem(null)} className="text-white/70 hover:text-white text-3xl leading-none ml-4 flex-shrink-0">&times;</button>
+                                    </div>
+                                </div>
+
+                                <div className="p-6 space-y-5">
+                                    {/* Stan ilościowy */}
+                                    <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 flex items-center justify-between shadow-sm">
+                                        <div>
+                                            <p className="text-[10px] font-black text-amber-700 uppercase tracking-wider">Stan magazynowy</p>
+                                            <p className="text-3xl font-black text-amber-900 mt-0.5">
+                                                {selectedItem.availableQuantity}
+                                                <span className="text-base font-bold text-amber-600 ml-1">{selectedItem.unit || "szt."}</span>
+                                            </p>
+                                            <p className="text-[10px] text-amber-600 mt-0.5">Razem w systemie: {selectedItem.totalQuantity} {selectedItem.unit || "szt."}</p>
+                                        </div>
+                                        <div className="text-right">
+                                            <button
+                                                onClick={() => { setAdjustItem(selectedItem); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
+                                                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl shadow transition"
+                                            >
+                                                ⚙️ Korekta stanu
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Zdjęcie */}
+                                    <div className="rounded-2xl overflow-hidden border-2 border-dashed border-amber-200 bg-amber-50/30 relative">
+                                        {selectedItem.imageUrl ? (
+                                            <img
+                                                src={selectedItem.imageUrl}
+                                                alt="Zdjęcie pozostałości"
+                                                className="w-full h-52 object-cover"
+                                            />
+                                        ) : (
+                                            <div className="w-full h-52 flex flex-col items-center justify-center text-amber-400">
+                                                <span className="text-5xl mb-2">📷</span>
+                                                <p className="text-xs font-bold">Brak zdjęcia</p>
+                                            </div>
+                                        )}
+                                        <label className="absolute bottom-3 right-3 bg-amber-600 hover:bg-amber-700 text-white text-xs font-black px-3 py-2 rounded-xl shadow-lg cursor-pointer transition flex items-center gap-1.5">
+                                            {isResidualPhotoUploading ? (
+                                                <><span className="animate-spin">⏳</span> Zapisywanie...</>
+                                            ) : (
+                                                <><span>📷</span> {selectedItem.imageUrl ? "Zmień zdjęcie" : "Dodaj zdjęcie"}</>
+                                            )}
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                className="hidden"
+                                                disabled={isResidualPhotoUploading}
+                                                onChange={e => {
+                                                    const file = e.target.files?.[0];
+                                                    if (file) handleResidualPhotoUpload(file);
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+
+                                    {/* Notatka / Opis */}
+                                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <p className="text-[10px] font-black text-slate-500 uppercase tracking-wider">📝 Notatka / Opis</p>
+                                            {!isResidualNoteEditing ? (
+                                                <button
+                                                    onClick={() => { setResidualNoteEdit(selectedItem.additionalInfo || ""); setIsResidualNoteEditing(true); }}
+                                                    className="text-xs font-bold text-amber-700 hover:underline"
+                                                >
+                                                    ✏️ Edytuj
+                                                </button>
+                                            ) : (
+                                                <div className="flex gap-2">
+                                                    <button onClick={() => setIsResidualNoteEditing(false)} className="text-xs text-slate-400 hover:underline">Anuluj</button>
+                                                    <button
+                                                        onClick={handleResidualNoteSave}
+                                                        disabled={isResidualNoteSaving}
+                                                        className="text-xs font-black text-white bg-amber-600 px-3 py-1 rounded-lg hover:bg-amber-700 transition disabled:opacity-50"
+                                                    >
+                                                        {isResidualNoteSaving ? "Zapisuję..." : "💾 Zapisz"}
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                        {isResidualNoteEditing ? (
+                                            <textarea
+                                                value={residualNoteEdit}
+                                                onChange={e => setResidualNoteEdit(e.target.value)}
+                                                rows={4}
+                                                className="w-full text-sm p-3 border rounded-xl outline-none focus:ring-2 focus:ring-amber-400 bg-white resize-none"
+                                                placeholder="Dodaj opis, np. klej do styropianu, stan worka, data dostawy..."
+                                            />
+                                        ) : (
+                                            <p className="text-sm text-slate-700 whitespace-pre-wrap min-h-[2.5rem]">
+                                                {selectedItem.additionalInfo || <span className="text-slate-400 italic">Brak notatki — kliknij Edytuj, aby dodać opis.</span>}
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    {/* Skąd pochodzi */}
+                                    <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
+                                        <p className="text-[10px] font-black text-blue-700 uppercase tracking-wider mb-1">📍 Aktualna lokalizacja</p>
+                                        <p className="text-sm font-bold text-blue-900">{selectedItem.currentLocation || "Magazyn PESAM"}</p>
+                                        <p className="text-[10px] text-blue-500 mt-0.5">Dodano: {selectedItem.createdAt ? new Date(selectedItem.createdAt).toLocaleDateString("pl-PL") : "---"}</p>
+                                    </div>
+
+                                    {/* Historia skąd przyszło */}
+                                    <div>
+                                        <h3 className="font-black uppercase text-[10px] text-slate-400 mb-3 tracking-widest flex items-center gap-2">
+                                            <span>📋</span> Historia — skąd przyszło?
+                                        </h3>
+                                        {historyLoading ? (
+                                            <div className="text-center p-4 text-slate-400 animate-pulse text-sm">Ładowanie historii...</div>
+                                        ) : itemHistory.length === 0 ? (
+                                            <div className="text-center p-6 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                                                <p className="text-slate-400 text-sm">Brak wpisów historii.</p>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {itemHistory.map((h, i) => (
+                                                    <div key={i} className="bg-white border border-slate-100 rounded-xl p-3 flex gap-3 items-start shadow-sm">
+                                                        <span className="text-lg mt-0.5">📦</span>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex justify-between items-start gap-2">
+                                                                <p className="text-xs font-black text-slate-700 truncate">{h.type}</p>
+                                                                <p className="text-[10px] text-slate-400 whitespace-nowrap flex-shrink-0">
+                                                                    {new Date((h as any).documentDate || h.date).toLocaleDateString("pl-PL")}
+                                                                </p>
+                                                            </div>
+                                                            <p className="text-[11px] text-slate-600 mt-0.5 line-clamp-2">{h.description}</p>
+                                                            {h.user && <p className="text-[10px] text-slate-400 mt-0.5">👤 {h.user}</p>}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Akcje dolne */}
+                                    <div className="flex gap-3 pt-2 border-t">
+                                        <button
+                                            onClick={() => { setEditingItem(selectedItem); setFormData({ ...selectedItem }); setSelectedItem(null); setIsFormOpen(true); }}
+                                            className="flex-1 py-3 border border-slate-200 text-slate-600 font-bold text-xs rounded-xl hover:bg-slate-50 transition flex items-center justify-center gap-2"
+                                        >
+                                            ✏️ Edytuj dane
+                                        </button>
+                                        <button
+                                            onClick={() => handleDelete(selectedItem)}
+                                            className="px-4 py-3 border border-red-200 text-red-500 font-bold text-xs rounded-xl hover:bg-red-50 transition flex items-center justify-center gap-2"
+                                        >
+                                            🗑️ Usuń
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+
+                // ===== KARTA URZĄDZENIA (standardowa) =====
+                return (
+                    <div className="fixed inset-0 bg-black/60 z-40 flex justify-end" onClick={() => setSelectedItem(null)}>
+                        <div className="bg-white w-full max-w-xl h-full p-8 shadow-2xl animate-slide-in overflow-y-auto" onClick={e => e.stopPropagation()}>
+                            <div className="flex justify-between items-start mb-4">
+                                <div className="flex-1">
+                                    <h2 className="text-2xl font-black text-slate-800">{selectedItem.name}</h2>
+                                    {selectedItem.status === "do nadania numeru" && (
+                                        <span className="inline-block bg-red-100 text-red-800 text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-wider mt-1 animate-pulse">
+                                            ⚠️ Oczekuje na kod magazynowy
+                                        </span>
+                                    )}
+                                </div>
+                                <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
+                            </div>
+
+                            {selectedItem.status === "do nadania numeru" && (
+                                <div className="bg-yellow-50 border-2 border-yellow-200 rounded-2xl p-4 mb-6 flex flex-col sm:flex-row items-center justify-between gap-3 animate-fade-in shadow-sm">
+                                    <div className="text-xs text-yellow-800 font-bold text-center sm:text-left">
+                                        <span className="text-lg">📢</span> Ten sprzęt został kupiony bezpośrednio na budowę. <br />
+                                        Nie posiada jeszcze kodu kreskowego ani numeru!
+                                    </div>
+                                    <button
+                                        onClick={() => { setNewInvNumber(""); setIsAssignNumberOpen(true); }}
+                                        className="bg-yellow-500 hover:bg-yellow-600 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow transition whitespace-nowrap"
+                                    >
+                                        🏷️ Nadaj Numer Tymczasowo
+                                    </button>
+                                </div>
+                            )}
+
+                            <div className="flex flex-wrap gap-3 mb-8">
+                                <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
+
+                                {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
+                                    <button
+                                        onClick={openClaimInvestigation}
+                                        className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black"
+                                    >
+                                        ⚖️ Zgłoś do Sądu (Szkoda)
+                                    </button>
+                                )}
+
+                                {(hasOpenClaim === 'NOWA' || hasOpenClaim === 'W_TOKU') && (
+                                    <div className="flex-1 py-3 bg-orange-100 text-orange-800 border border-orange-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
+                                        <span>⏳</span> Sprawa w Sądzie w toku
+                                    </div>
+                                )}
+
+                                {hasOpenClaim === 'ZAMKNIETA' && (
+                                    <div className="flex-1 py-3 bg-slate-100 text-slate-500 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
+                                        <span>📁</span> Sprawa została zamknięta
+                                    </div>
                                 )}
                             </div>
-                            <button onClick={() => setSelectedItem(null)} className="text-3xl text-slate-400 hover:text-slate-900 leading-none">&times;</button>
-                        </div>
 
-                        {selectedItem.status === "do nadania numeru" && (
-                            <div className="bg-yellow-50 border-2 border-yellow-200 rounded-2xl p-4 mb-6 flex flex-col sm:flex-row items-center justify-between gap-3 animate-fade-in shadow-sm">
-                                <div className="text-xs text-yellow-800 font-bold text-center sm:text-left">
-                                    <span className="text-lg">📢</span> Ten sprzęt został kupiony bezpośrednio na budowę. <br />
-                                    Nie posiada jeszcze kodu kreskowego ani numeru!
-                                </div>
-                                <button
-                                    onClick={() => { setNewInvNumber(""); setIsAssignNumberOpen(true); }}
-                                    className="bg-yellow-500 hover:bg-yellow-600 text-white font-black text-xs px-4 py-2.5 rounded-xl shadow transition whitespace-nowrap"
-                                >
-                                    🏷️ Nadaj Numer Tymczasowo
-                                </button>
+                            <div className="relative mb-8">
+                                <img src={selectedItem.imageUrl || 'https://via.placeholder.com/400x300'} className="w-full h-64 object-cover rounded-2xl shadow-lg border" />
+                                <button onClick={() => setShowSpecs(!showSpecs)} className="absolute bottom-4 right-4 bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center font-serif italic text-xl shadow-lg hover:scale-110 transition"> i </button>
                             </div>
-                        )}
-
-                        <div className="flex flex-wrap gap-3 mb-8">
-                            <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
-
-                            {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
-                                <button
-                                    onClick={openClaimInvestigation}
-                                    className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black"
-                                >
-                                    ⚖️ Zgłoś do Sądu (Szkoda)
-                                </button>
-                            )}
-
-                            {(hasOpenClaim === 'NOWA' || hasOpenClaim === 'W_TOKU') && (
-                                <div className="flex-1 py-3 bg-orange-100 text-orange-800 border border-orange-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
-                                    <span>⏳</span> Sprawa w Sądzie w toku
+                            {showSpecs && (
+                                <div className="bg-blue-50 border border-blue-200 p-5 rounded-2xl mb-8 animate-fade-in">
+                                    <h4 className="text-xs font-bold text-blue-800 uppercase mb-2">Specyfikacja:</h4>
+                                    <p className="text-sm text-blue-900 whitespace-pre-wrap">{selectedItem.additionalInfo || "Brak informacji."}</p>
                                 </div>
                             )}
-
-                            {hasOpenClaim === 'ZAMKNIETA' && (
-                                <div className="flex-1 py-3 bg-slate-100 text-slate-500 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
-                                    <span>📁</span> Sprawa została zamknięta
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="relative mb-8">
-                            <img src={selectedItem.imageUrl || 'https://via.placeholder.com/400x300'} className="w-full h-64 object-cover rounded-2xl shadow-lg border" />
-                            <button onClick={() => setShowSpecs(!showSpecs)} className="absolute bottom-4 right-4 bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center font-serif italic text-xl shadow-lg hover:scale-110 transition"> i </button>
-                        </div>
-                        {showSpecs && (
-                            <div className="bg-blue-50 border border-blue-200 p-5 rounded-2xl mb-8 animate-fade-in">
-                                <h4 className="text-xs font-bold text-blue-800 uppercase mb-2">Specyfikacja:</h4>
-                                <p className="text-sm text-blue-900 whitespace-pre-wrap">{selectedItem.additionalInfo || "Brak informacji."}</p>
-                            </div>
-                        )}
-                        {/* WIDŻET PRZEGLĄDÓW DLA KARTEK Z WYMAGANIEM PRZEGLĄDU */}
-                        {(selectedItem.requiresInspection || selectedItem.lastInspectionDate) && (
-                            <div className="bg-purple-50 border-2 border-purple-200 p-5 rounded-2xl mb-8 animate-fade-in shadow-sm">
-                                <div className="flex justify-between items-center mb-3 border-b border-purple-200 pb-2">
-                                    <h4 className="text-xs font-black text-purple-900 uppercase tracking-wider flex items-center gap-2">
-                                        <span>🦺 Okresowy Przegląd Techniczny / BHP</span>
-                                    </h4>
-                                    <div>{getInspectionStatusBadge(selectedItem.nextInspectionDate)}</div>
-                                </div>
-                                <div className="grid grid-cols-2 gap-4 text-xs mb-4">
-                                    <div>
-                                        <p className="text-[10px] font-bold text-purple-600 uppercase">Ostatni przegląd</p>
-                                        <p className="font-bold text-slate-800 font-mono text-sm">{selectedItem.lastInspectionDate || "Brak rejestracji"}</p>
+                            {/* WIDŻET PRZEGLĄDÓW DLA KARTEK Z WYMAGANIEM PRZEGLĄDU */}
+                            {(selectedItem.requiresInspection || selectedItem.lastInspectionDate) && (
+                                <div className="bg-purple-50 border-2 border-purple-200 p-5 rounded-2xl mb-8 animate-fade-in shadow-sm">
+                                    <div className="flex justify-between items-center mb-3 border-b border-purple-200 pb-2">
+                                        <h4 className="text-xs font-black text-purple-900 uppercase tracking-wider flex items-center gap-2">
+                                            <span>🦺 Okresowy Przegląd Techniczny / BHP</span>
+                                        </h4>
+                                        <div>{getInspectionStatusBadge(selectedItem.nextInspectionDate)}</div>
                                     </div>
-                                    <div>
-                                        <p className="text-[10px] font-bold text-purple-600 uppercase">Termin następnego</p>
-                                        <p className="font-bold text-purple-900 font-mono text-sm">{selectedItem.nextInspectionDate || "Brak ustalonej daty"}</p>
+                                    <div className="grid grid-cols-2 gap-4 text-xs mb-4">
+                                        <div>
+                                            <p className="text-[10px] font-bold text-purple-600 uppercase">Ostatni przegląd</p>
+                                            <p className="font-bold text-slate-800 font-mono text-sm">{selectedItem.lastInspectionDate || "Brak rejestracji"}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-[10px] font-bold text-purple-600 uppercase">Termin następnego</p>
+                                            <p className="font-bold text-purple-900 font-mono text-sm">{selectedItem.nextInspectionDate || "Brak ustalonej daty"}</p>
+                                        </div>
                                     </div>
+                                    <button
+                                        onClick={() => { setInspectionDate(new Date().toISOString().split("T")[0]); setIsInspectionModalOpen(true); }}
+                                        className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-black text-xs rounded-xl shadow transition flex items-center justify-center gap-2"
+                                    >
+                                        📋 Zarejestruj Wykonanie Przeglądu
+                                    </button>
                                 </div>
-                                <button
-                                    onClick={() => { setInspectionDate(new Date().toISOString().split("T")[0]); setIsInspectionModalOpen(true); }}
-                                    className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-black text-xs rounded-xl shadow transition flex items-center justify-center gap-2"
-                                >
-                                    📋 Zarejestruj Wykonanie Przeglądu
-                                </button>
-                            </div>
-                        )}
+                            )}
 
-                        <div className="grid grid-cols-2 gap-4 mb-10 bg-slate-50 p-6 rounded-2xl border text-sm">
-                            <div><p className="text-[10px] font-bold text-slate-400 uppercase">Nr Magazynowy</p><p className="font-mono font-bold text-lg">{selectedItem.inventoryNumber}</p></div>
-                            <div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Status</p>
-                                <p className={`font-black uppercase 
-                                    ${selectedItem.status === 'sprawne' ? 'text-green-600' :
-                                        selectedItem.status === 'uszkodzone' ? 'text-red-600' :
-                                            selectedItem.status === 'do przeglądu' ? 'text-yellow-600' : 'text-slate-600'}`}>
-                                    {selectedItem.status}
-                                </p>
+                            <div className="grid grid-cols-2 gap-4 mb-10 bg-slate-50 p-6 rounded-2xl border text-sm">
+                                <div><p className="text-[10px] font-bold text-slate-400 uppercase">Nr Magazynowy</p><p className="font-mono font-bold text-lg">{selectedItem.inventoryNumber}</p></div>
+                                <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Status</p>
+                                    <p className={`font-black uppercase 
+                                        ${selectedItem.status === 'sprawne' ? 'text-green-600' :
+                                            selectedItem.status === 'uszkodzone' ? 'text-red-600' :
+                                                selectedItem.status === 'do przeglądu' ? 'text-yellow-600' : 'text-slate-600'}`}>
+                                        {selectedItem.status}
+                                    </p>
+                                </div>
+                                <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Cena / Faktura</p><p className="font-bold text-slate-800 text-xs">{selectedItem.purchasePrice} zł / {selectedItem.invoiceNumber || 'Brak'}</p></div>
+                                <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Data zakupu</p><p className="font-bold text-slate-800">{selectedItem.purchaseDate || "---"}</p></div>
                             </div>
-                            <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Cena / Faktura</p><p className="font-bold text-slate-800 text-xs">{selectedItem.purchasePrice} zł / {selectedItem.invoiceNumber || 'Brak'}</p></div>
-                            <div className="border-t pt-4"><p className="text-[10px] font-bold text-slate-400 uppercase">Data zakupu</p><p className="font-bold text-slate-800">{selectedItem.purchaseDate || "---"}</p></div>
+                            <h3 className="font-bold uppercase text-[10px] text-slate-400 mb-4 tracking-widest text-center border-b pb-2">Historia zdarzeń</h3>
+
+                            {historyLoading ? (
+                                <div className="text-center p-4 text-slate-400 animate-pulse">Ładowanie historii...</div>
+                            ) : (
+                                <div className="border rounded-xl overflow-hidden text-[11px]">
+                                    <table className="w-full text-left">
+                                        <thead className="bg-slate-100 border-b"><tr><th className="p-3">Data</th><th className="p-3">Typ</th><th className="p-3">Opis</th><th className="p-3">Osoba</th></tr></thead>
+                                        <tbody>
+                                            {itemHistory.length === 0 ? (
+                                                <tr><td colSpan={4} className="p-4 text-center text-slate-400">Brak historii operacji.</td></tr>
+                                            ) : (
+                                                itemHistory.map((h, i) => (
+                                                    <tr key={i} className="border-b last:border-0 hover:bg-slate-50">
+                                                        <td className="p-3 whitespace-nowrap">
+                                                            {new Date((h as any).documentDate || h.date).toLocaleDateString()}
+                                                        </td>
+                                                        <td className={`p-3 font-bold ${h.type.includes("SERWIS") ? 'text-blue-600' : ''}`}>{h.type}</td>
+                                                        <td className="p-3">{h.description}</td>
+                                                        <td className="p-3 text-slate-400">{h.user}</td>
+                                                    </tr>
+                                                ))
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
                         </div>
-                        <h3 className="font-bold uppercase text-[10px] text-slate-400 mb-4 tracking-widest text-center border-b pb-2">Historia zdarzeń</h3>
-
-                        {historyLoading ? (
-                            <div className="text-center p-4 text-slate-400 animate-pulse">Ładowanie historii...</div>
-                        ) : (
-                            <div className="border rounded-xl overflow-hidden text-[11px]">
-                                <table className="w-full text-left">
-                                    <thead className="bg-slate-100 border-b"><tr><th className="p-3">Data</th><th className="p-3">Typ</th><th className="p-3">Opis</th><th className="p-3">Osoba</th></tr></thead>
-                                    <tbody>
-                                        {itemHistory.length === 0 ? (
-                                            <tr><td colSpan={4} className="p-4 text-center text-slate-400">Brak historii operacji.</td></tr>
-                                        ) : (
-                                            itemHistory.map((h, i) => (
-                                                <tr key={i} className="border-b last:border-0 hover:bg-slate-50">
-                                                    <td className="p-3 whitespace-nowrap">
-                                                        {new Date((h as any).documentDate || h.date).toLocaleDateString()}
-                                                    </td>
-                                                    <td className={`p-3 font-bold ${h.type.includes("SERWIS") ? 'text-blue-600' : ''}`}>{h.type}</td>
-                                                    <td className="p-3">{h.description}</td>
-                                                    <td className="p-3 text-slate-400">{h.user}</td>
-                                                </tr>
-                                            ))
-                                        )}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
                     </div>
-                </div>
-            )}
+                );
+            })()}
 
             {/* FORMULARZ DODAWANIA/EDYCJI (GŁÓWNY) */}
             {isFormOpen && (
