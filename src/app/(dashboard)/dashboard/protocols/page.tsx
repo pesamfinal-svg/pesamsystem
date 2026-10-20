@@ -63,6 +63,8 @@ interface PaperReturnCartItem {
     returnedAccessoryQty?: number;
     isPermanent?: boolean;
     isTemporary?: boolean;
+    isResidual?: boolean;
+    isWaste?: boolean;
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -170,6 +172,18 @@ export default function ProtocolsHub() {
     const [paperReturnActiveTab, setPaperReturnActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE");
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
     const [paperBulkPickModal, setPaperBulkPickModal] = useState<{ item: InventoryItem & { availableToReturn: number }; qty: number } | null>(null);
+
+    // Stany dla Pozostałości budowlanych (Zwrot papierowy)
+    const [isPaperResidualModalOpen, setIsPaperResidualModalOpen] = useState(false);
+    const [paperResidualNotes, setPaperResidualNotes] = useState("");
+    const [isParsingPaperResiduals, setIsParsingPaperResiduals] = useState(false);
+    const [isVerifyingPaperPhoto, setIsVerifyingPaperPhoto] = useState(false);
+    const [paperAiPhotoReport, setPaperAiPhotoReport] = useState<{
+        verdict: string;
+        summary: string;
+        detectedItems: string[];
+        recommendations: string;
+    } | null>(null);
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
         inventoryName: string;
@@ -459,6 +473,11 @@ export default function ProtocolsHub() {
         setIsParsingResiduals(false);
         setIsVerifyingPhoto(false);
         setAiPhotoReport(null);
+        setIsPaperResidualModalOpen(false);
+        setPaperResidualNotes("");
+        setIsParsingPaperResiduals(false);
+        setIsVerifyingPaperPhoto(false);
+        setPaperAiPhotoReport(null);
         setPaperBulkPickModal(null);
         setIsHardDeleteModalOpen(false);
         setHardDeleteProtocol(null);
@@ -1434,13 +1453,65 @@ export default function ProtocolsHub() {
                     }
 
                     if (cartItem.isManual) {
-                        if (cartItem.isPermanent) {
+                        if (cartItem.isResidual && cartItem.finalStatus !== "odpad_utylizacja") {
                             const newDocRef = doc(collection(db, "inventory"));
-                            transaction.set(newDocRef, {
+                            transaction.set(newDocRef, cleanFirestorePayload({
+                                name: cartItem.name,
+                                type: "BULK",
+                                subType: "MANUAL",
+                                inventoryNumber: "RESZTKI",
+                                category: "Pozostałości budowlane",
+                                subcategory: "Materiały otwarte / Resztki",
+                                unit: cartItem.unit || "szt.",
+                                availableQuantity: cartItem.receivedQty,
+                                totalQuantity: cartItem.receivedQty,
+                                status: "sprawne",
+                                allocations: {},
+                                createdAt: new Date().toISOString(),
+                                isPermanent: true,
+                                isResidual: true
+                            }));
+
+                            finalProtocolItems.push({
+                                inventoryId: newDocRef.id,
+                                isNewManual: true,
+                                isPermanent: true,
+                                isResidual: true,
+                                isWaste: false,
+                                name: cartItem.name,
+                                type: "BULK",
+                                inventoryNumber: "RESZTKI",
+                                unit: cartItem.unit || "szt.",
+                                declaredQty: cartItem.declaredQty,
+                                receivedQty: cartItem.receivedQty,
+                                finalStatus: cartItem.finalStatus || "sprawne",
+                                warehouseNotes: cartItem.notes,
+                                accessories: []
+                            });
+                        } else if (cartItem.isResidual && cartItem.finalStatus === "odpad_utylizacja") {
+                            finalProtocolItems.push({
+                                inventoryId: `residual-waste-${Date.now()}-${Math.random()}`,
+                                isNewManual: true,
+                                isPermanent: false,
+                                isResidual: true,
+                                isWaste: true,
+                                name: cartItem.name,
+                                type: "BULK",
+                                inventoryNumber: "ODPAD",
+                                unit: cartItem.unit || "szt.",
+                                declaredQty: cartItem.declaredQty,
+                                receivedQty: cartItem.receivedQty,
+                                finalStatus: "odpad_utylizacja",
+                                warehouseNotes: cartItem.notes || "Odpad budowlany do utylizacji",
+                                accessories: []
+                            });
+                        } else if (cartItem.isPermanent) {
+                            const newDocRef = doc(collection(db, "inventory"));
+                            transaction.set(newDocRef, cleanFirestorePayload({
                                 name: cartItem.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Drobnica i materiały",
                                 unit: cartItem.unit || "szt.", availableQuantity: cartItem.receivedQty, totalQuantity: cartItem.receivedQty,
                                 status: "sprawne", allocations: {}, createdAt: new Date().toISOString(), isPermanent: true
-                            });
+                            }));
 
                             finalProtocolItems.push({
                                 inventoryId: newDocRef.id,
@@ -1632,7 +1703,7 @@ export default function ProtocolsHub() {
                     }
                 }
 
-                transaction.set(protocolRef, {
+                transaction.set(protocolRef, cleanFirestorePayload({
                     protocolId,
                     type: "ZWROT",
                     documentSource: "PAPER",
@@ -1651,8 +1722,10 @@ export default function ProtocolsHub() {
                     acceptedAt: new Date().toISOString(),
                     items: finalProtocolItems,
                     requiresManagerAlert,
+                    residualNotes: paperResidualNotes.trim() || null,
+                    aiInspectionReport: paperAiPhotoReport || null,
                     ...(photoURLs.length > 0 && { photos: photoURLs })
-                });
+                }));
             });
 
             // NOWOŚĆ: Uruchamiamy "Sprzątacza", aby wykreślił osprzęt z listy Kierownika oraz wyczyścił kartotekę pracownika z BHP
@@ -1821,6 +1894,94 @@ export default function ProtocolsHub() {
             alert("Błąd analizy zdjęcia: " + err.message);
         } finally {
             setIsVerifyingPhoto(false);
+        }
+    };
+
+    // --- NOWOŚĆ: Parsowanie zadeklarowanych pozostałości w Zwrocie Papierowym przez Gemini Flash ---
+    const handleParsePaperResiduals = async () => {
+        if (!paperResidualNotes.trim()) return;
+        setIsParsingPaperResiduals(true);
+        try {
+            const res = await fetch("/api/protocols/parse-residuals", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: paperResidualNotes })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Błąd parsowania pozostałości");
+
+            if (!data.items || data.items.length === 0) {
+                alert("AI nie rozpoznało żadnych konkretnych pozycji w notatce.");
+                return;
+            }
+
+            const newCartItems: PaperReturnCartItem[] = data.items.map((item: any, idx: number) => ({
+                cartItemId: `paper-res-${Date.now()}-${idx}`,
+                isManual: true,
+                isResidual: true,
+                isPermanent: true,
+                isWaste: Boolean(item.isWaste),
+                name: item.name || "Pozostałość budowlana",
+                type: "BULK",
+                inventoryNumber: item.isWaste ? "ODPAD" : "RESZTKI",
+                unit: item.unit || "szt.",
+                maxQty: 999999,
+                declaredQty: Number(item.quantity) || 1,
+                receivedQty: Number(item.quantity) || 1,
+                finalStatus: item.isWaste ? "odpad_utylizacja" : "sprawne",
+                notes: `[Pozostałości] ${item.condition ? item.condition + ' ' : ''}${item.isWaste ? '(Odpad do utylizacji)' : ''}`.trim(),
+                isReturningMainItem: true
+            }));
+
+            setPaperReturnCart(prev => [...prev, ...newCartItems]);
+            alert(`AI pomyślnie rozpoznało i dodało ${newCartItems.length} pozycji pozostałości do koszyka zwrotu!`);
+        } catch (err: any) {
+            console.error("Błąd parsowania pozostałości papierowych:", err);
+            alert("Błąd analizy AI: " + err.message);
+        } finally {
+            setIsParsingPaperResiduals(false);
+        }
+    };
+
+    // --- NOWOŚĆ: Weryfikacja zdjęć w Zwrocie Papierowym przez Gemini Flash Multimodal ---
+    const handleVerifyPaperPhotoWithAi = async () => {
+        if (returnPhotos.length === 0) {
+            alert("Najpierw wybierz co najmniej jedno zdjęcie do protokołu!");
+            return;
+        }
+        setIsVerifyingPaperPhoto(true);
+        try {
+            const firstPhoto = returnPhotos[0];
+            const reader = new FileReader();
+            const base64Promise = new Promise<string>((resolve, reject) => {
+                reader.onload = () => resolve(reader.result as string);
+                reader.onerror = reject;
+                reader.readAsDataURL(firstPhoto);
+            });
+
+            const photoBase64 = await base64Promise;
+            const declaredItemNames = paperReturnCart.map(i => `${i.name} (${i.receivedQty || i.declaredQty || 1} ${i.unit || 'szt.'})`);
+
+            const res = await fetch("/api/protocols/verify-residuals-photo", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    photoBase64,
+                    mimeType: firstPhoto.type || 'image/jpeg',
+                    residualNotes: paperResidualNotes || "",
+                    declaredItems: declaredItemNames
+                })
+            });
+
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Błąd analizy zdjęcia");
+
+            setPaperAiPhotoReport(data);
+        } catch (err: any) {
+            console.error("Błąd weryfikacji zdjęcia w zwrocie papierowym:", err);
+            alert("Błąd analizy zdjęcia: " + err.message);
+        } finally {
+            setIsVerifyingPaperPhoto(false);
         }
     };
 
@@ -1999,13 +2160,34 @@ export default function ProtocolsHub() {
                     }
 
                     if (item.isNewManual) {
-                        if (item.isPermanent) {
+                        if (item.isResidual && workerInput.finalStatus !== "odpad_utylizacja") {
                             const newDocRef = doc(collection(db, "inventory"));
-                            transaction.set(newDocRef, {
+                            transaction.set(newDocRef, cleanFirestorePayload({
+                                name: item.name,
+                                type: "BULK",
+                                subType: "MANUAL",
+                                inventoryNumber: "RESZTKI",
+                                category: "Pozostałości budowlane",
+                                subcategory: "Materiały otwarte / Resztki",
+                                unit: item.unit || "szt.",
+                                availableQuantity: workerInput.receivedQty,
+                                totalQuantity: workerInput.receivedQty,
+                                status: "sprawne",
+                                allocations: {},
+                                createdAt: new Date().toISOString(),
+                                isPermanent: true,
+                                isResidual: true
+                            }));
+                            updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, isPermanent: true, isResidual: true, isWaste: false, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
+                        } else if (item.isResidual && workerInput.finalStatus === "odpad_utylizacja") {
+                            updatedItemsForProtocol.push({ ...item, isResidual: true, isWaste: true, receivedQty: workerInput.receivedQty, finalStatus: "odpad_utylizacja", warehouseNotes: workerInput.notes || "Odpad budowlany do utylizacji", accessories: [] });
+                        } else if (item.isPermanent) {
+                            const newDocRef = doc(collection(db, "inventory"));
+                            transaction.set(newDocRef, cleanFirestorePayload({
                                 name: item.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Drobnica i materiały",
                                 unit: item.unit || "szt.", availableQuantity: workerInput.receivedQty, totalQuantity: workerInput.receivedQty,
                                 status: "sprawne", allocations: {}, createdAt: new Date().toISOString(), isPermanent: true
-                            });
+                            }));
                             updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
                         } else {
                             updatedItemsForProtocol.push({ ...item, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
@@ -3893,6 +4075,18 @@ export default function ProtocolsHub() {
                                             <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="hidden" />
                                         </label>
                                         <button
+                                            type="button"
+                                            onClick={() => setIsPaperResidualModalOpen(true)}
+                                            className={`px-3 py-1.5 rounded-lg text-[11px] font-black transition shadow-sm border flex items-center gap-1 ${
+                                                paperResidualNotes.trim()
+                                                    ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-400'
+                                                    : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                                            }`}
+                                        >
+                                            <span>🧱</span> Pozostałości budowlane
+                                            {paperResidualNotes.trim() && <span className="w-2 h-2 rounded-full bg-amber-600 animate-pulse"></span>}
+                                        </button>
+                                        <button
                                             onClick={() => { setManualName(""); setManualQty(""); setIsPaperManualModalOpen(true); }}
                                             className="bg-white hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-[11px] font-bold transition shadow-sm border border-slate-300"
                                         >
@@ -3902,18 +4096,80 @@ export default function ProtocolsHub() {
                                 </div>
 
                                 {returnPhotos.length > 0 && (
-                                    <div className="px-4 py-2 border-b bg-slate-50 flex gap-2 overflow-x-auto">
-                                        {returnPhotos.map((photo, index) => (
-                                            <div key={index} className="relative w-12 h-12 shrink-0 rounded border bg-white shadow-sm overflow-hidden flex items-center justify-center">
-                                                <img src={URL.createObjectURL(photo)} alt="preview" className="object-cover w-full h-full" />
-                                                <button onClick={() => removePhoto(index)} className="absolute top-0.5 right-0.5 bg-red-500 text-white w-4 h-4 rounded-full text-[10px] font-bold leading-none flex items-center justify-center">&times;</button>
+                                    <div className="px-4 py-2 border-b bg-slate-50">
+                                        <div className="flex gap-2 overflow-x-auto pb-1">
+                                            {returnPhotos.map((photo, index) => (
+                                                <div key={index} className="relative w-12 h-12 shrink-0 rounded border bg-white shadow-sm overflow-hidden flex items-center justify-center">
+                                                    <img src={URL.createObjectURL(photo)} alt="preview" className="object-cover w-full h-full" />
+                                                    <button onClick={() => removePhoto(index)} className="absolute top-0.5 right-0.5 bg-red-500 text-white w-4 h-4 rounded-full text-[10px] font-bold leading-none flex items-center justify-center">&times;</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {(paperResidualNotes.trim() || paperReturnCart.length > 0) && (
+                                            <button
+                                                type="button"
+                                                disabled={isVerifyingPaperPhoto}
+                                                onClick={handleVerifyPaperPhotoWithAi}
+                                                className="mt-2 w-full py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white text-[11px] font-black rounded-lg shadow transition flex items-center justify-center gap-1.5"
+                                            >
+                                                {isVerifyingPaperPhoto ? "⏳ AI analizuje zdjęcia ładunku..." : "🔍 Zweryfikuj zdjęcia z notatką (AI Gemini)"}
+                                            </button>
+                                        )}
+                                        {paperAiPhotoReport && (
+                                            <div className={`mt-2 p-2.5 rounded-lg border text-xs ${paperAiPhotoReport.verdict === 'ZGODNY' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-amber-50 border-amber-300 text-amber-900'}`}>
+                                                <div className="flex justify-between items-center mb-1">
+                                                    <span className="font-black text-[10px] uppercase tracking-wide">
+                                                        {paperAiPhotoReport.verdict === 'ZGODNY' ? '✅ Wynik AI: ZGODNY' : '⚠️ Wynik AI: ROZBIEŻNOŚĆ / UWAGI'}
+                                                    </span>
+                                                    <button onClick={() => setPaperAiPhotoReport(null)} className="text-[10px] text-slate-400 hover:text-slate-600">&times; Zamknij</button>
+                                                </div>
+                                                <p className="text-[11px] mb-1">{paperAiPhotoReport.summary}</p>
+                                                {paperAiPhotoReport.detectedItems && paperAiPhotoReport.detectedItems.length > 0 && (
+                                                    <div className="text-[10px] font-mono text-slate-600 bg-white/60 p-1 rounded mb-1">
+                                                        <b>Wykryto na zdjęciu:</b> {paperAiPhotoReport.detectedItems.join(", ")}
+                                                    </div>
+                                                )}
+                                                {paperAiPhotoReport.recommendations && (
+                                                    <p className="text-[10px] text-purple-700 font-semibold italic">💡 {paperAiPhotoReport.recommendations}</p>
+                                                )}
                                             </div>
-                                        ))}
+                                        )}
                                     </div>
                                 )}
 
                                 <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-2">
-                                    {paperReturnCart.length === 0 ? (
+                                    {/* KROK 1: KARTA ZADEKLAROWANYCH POZOSTAŁOŚCI BUDOWLANYCH */}
+                                    {paperResidualNotes.trim() && (
+                                        <div className="p-3 bg-amber-50 border-2 border-amber-200 rounded-xl mb-3 shadow-sm animate-fade-in">
+                                            <div className="flex justify-between items-center mb-1 flex-wrap gap-2">
+                                                <span className="text-[11px] font-black text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
+                                                    <span>🧱</span> Zadeklarowane pozostałości budowlane:
+                                                </span>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setIsPaperResidualModalOpen(true)}
+                                                        className="text-amber-800 hover:text-amber-950 font-bold text-xs underline"
+                                                    >
+                                                        Edytuj notatkę
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={isParsingPaperResiduals}
+                                                        onClick={handleParsePaperResiduals}
+                                                        className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-black shadow transition flex items-center gap-1.5"
+                                                    >
+                                                        {isParsingPaperResiduals ? "⏳ AI analizuje..." : "✨ Rozpoznaj pozycje (AI)"}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <p className="text-xs text-amber-900 italic font-mono bg-white/80 p-2 rounded border border-amber-200 whitespace-pre-wrap">
+                                                {paperResidualNotes}
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {paperReturnCart.length === 0 && !paperResidualNotes.trim() ? (
                                         <div className="text-center p-8 text-slate-400 border-2 border-dashed rounded-xl">Wybierz pozycje z lewej strony lub dodaj ręcznie.</div>
                                     ) : (
                                         paperReturnCart.map(cItem => (
@@ -3934,11 +4190,27 @@ export default function ProtocolsHub() {
                                                                     </span>
                                                                 </label>
                                                             )}
-                                                            <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
-                                                                {cItem.name}
-                                                                {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
-                                                                {!cItem.isManual && cItem.inventoryNumber && <span className={`text-slate-500 font-mono ml-2 font-bold text-sm ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber}</span>}
-                                                            </p>
+                                                            {cItem.isResidual ? (
+                                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                                    <span className="text-sm">🧱</span>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={cItem.name}
+                                                                        onChange={(e) => updatePaperReturnItem(cItem.cartItemId, 'name', e.target.value)}
+                                                                        className="font-bold text-sm text-slate-800 border-b border-dashed border-amber-400 bg-amber-50 px-2 py-0.5 rounded outline-none focus:bg-white focus:border-amber-600"
+                                                                        title="Kliknij, aby doprecyzować nazwę resztki (np. klej do styropianu)"
+                                                                    />
+                                                                    <span className="text-[9px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full uppercase border border-amber-300 font-black">
+                                                                        Resztki
+                                                                    </span>
+                                                                </div>
+                                                            ) : (
+                                                                <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
+                                                                    {cItem.name}
+                                                                    {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-100 text-orange-800 px-2 py-0.5 rounded uppercase border border-orange-200">Ręczny</span>}
+                                                                    {!cItem.isManual && cItem.inventoryNumber && <span className={`text-slate-500 font-mono ml-2 font-bold text-sm ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber}</span>}
+                                                                </p>
+                                                            )}
                                                             {!cItem.isManual && cItem.isReturningMainItem !== false && (
                                                                 <button
                                                                     type="button"
@@ -4063,7 +4335,7 @@ export default function ProtocolsHub() {
                                                     {cItem.isReturningMainItem === false ? (
                                                         <span className="text-[11px] font-bold text-slate-400 px-2 uppercase border-r border-slate-200 mr-2">↳ Parametry urządzenia zablokowane</span>
                                                     ) : cItem.type === "BULK" || cItem.isManual ? (
-                                                        <div className="flex items-center gap-3">
+                                                        <div className="flex items-center gap-3 flex-wrap">
                                                             <div className="flex items-center gap-1.5 bg-white px-2 py-1 rounded border border-slate-200">
                                                                 <label className="text-[10px] text-slate-500 font-bold uppercase">Kwity:</label>
                                                                 <input type="number" min="0.01" step="any" value={cItem.declaredQty} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'declaredQty', Number(e.target.value))} className="w-12 text-center text-sm font-bold outline-none text-slate-700" />
@@ -4073,6 +4345,19 @@ export default function ProtocolsHub() {
                                                                 <input type="number" min="0.01" step="any" max={cItem.isManual ? undefined : cItem.maxQty} value={cItem.receivedQty} onChange={e => updatePaperReturnItem(cItem.cartItemId, 'receivedQty', Number(e.target.value))} className="w-12 bg-transparent text-center text-sm font-bold outline-none text-red-600" />
                                                                 <span className="text-[10px] font-bold text-orange-700">{cItem.unit}</span>
                                                             </div>
+                                                            {cItem.isResidual && (
+                                                                <div className="flex items-center gap-1.5 bg-amber-50 px-2 py-1 rounded border border-amber-300">
+                                                                    <label className="text-[10px] text-amber-900 font-black uppercase">Stan:</label>
+                                                                    <select
+                                                                        value={cItem.finalStatus}
+                                                                        onChange={e => updatePaperReturnItem(cItem.cartItemId, 'finalStatus', e.target.value)}
+                                                                        className="bg-transparent text-[11px] font-bold outline-none text-amber-950 cursor-pointer"
+                                                                    >
+                                                                        <option value="sprawne">✅ Użyteczne (Na magazyn)</option>
+                                                                        <option value="odpad_utylizacja">🗑️ Odpad (Do utylizacji)</option>
+                                                                    </select>
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     ) : (
                                                         <div className="flex items-center gap-1.5">
@@ -4145,6 +4430,58 @@ export default function ProtocolsHub() {
                         <div className="flex gap-3">
                             <button onClick={() => setIsPaperManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                             <button onClick={confirmPaperManualAdd} className="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl hover:bg-orange-600 shadow-md transition">Dodaj</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MINI-MODAL: Pozostałości budowlane dla protokołu zwrotu z papieru */}
+            {isPaperResidualModalOpen && (
+                <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 animate-fade-in border-2 border-amber-300">
+                        <div className="flex justify-between items-center mb-3">
+                            <h3 className="text-lg font-black text-amber-950 flex items-center gap-2">
+                                <span>🧱</span> Pozostałości budowlane (Zwrot z papieru)
+                            </h3>
+                            <button
+                                type="button"
+                                onClick={() => setIsPaperResidualModalOpen(false)}
+                                className="text-2xl text-slate-400 hover:text-slate-700 leading-none"
+                            >
+                                &times;
+                            </button>
+                        </div>
+                        <p className="text-xs text-slate-600 mb-3 leading-relaxed">
+                            Przepisz z papierowego kwitu lub wpisz odręcznie listę resztek budowlanych (otwarte worki, chemia, płyty).
+                            <br />
+                            <span className="text-[11px] text-amber-800 font-semibold">
+                                Po zapisaniu kliknij <b>"✨ Rozpoznaj pozycje (AI)"</b> w koszyku zwrotu, aby automatycznie dodać je do listy!
+                            </span>
+                        </p>
+                        <div className="mb-4">
+                            <textarea
+                                rows={4}
+                                value={paperResidualNotes}
+                                onChange={(e) => setPaperResidualNotes(e.target.value)}
+                                placeholder="np. 4 worki kleju do styropianu po połowie, 2 regipsy, 3 worki szpachli..."
+                                className="w-full p-3 border-2 rounded-xl outline-none focus:border-amber-500 font-medium text-slate-800 text-sm bg-slate-50 focus:bg-white transition"
+                            />
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setIsPaperResidualModalOpen(false)}
+                                className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition text-sm"
+                            >
+                                Anuluj
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setIsPaperResidualModalOpen(false)}
+                                className="flex-1 py-3 bg-amber-600 hover:bg-amber-700 text-white font-black rounded-xl shadow-md transition text-sm flex items-center justify-center gap-2"
+                            >
+                                <span>💾</span> Zapisz notatkę
+                            </button>
                         </div>
                     </div>
                 </div>

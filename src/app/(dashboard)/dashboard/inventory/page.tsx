@@ -107,6 +107,14 @@ const DEFAULT_CATEGORY_TREE: Record<string, string[]> = {
         "Niwelator optyczny",
         "Niwelator laserowy obrotowy",
         "Dalmierz laserowy"
+    ],
+    "Pozostałości budowlane": [
+        "Worki z zaprawą / klejem",
+        "Płyty GK / Regipsy",
+        "Profile i listwy",
+        "Pianki, silikony i uszczelniacze",
+        "Farby i grunty",
+        "Inne pozostałości"
     ]
 };
 
@@ -138,6 +146,7 @@ export default function InventoryPage() {
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE"); // Aktywne zakładki (w tym BHP)
+    const [drobnicaFilter, setDrobnicaFilter] = useState<"ALL" | "RESIDUALS" | "OTHER">("ALL");
 
     // FILTRY
     const [searchTerm, setSearchTerm] = useState("");
@@ -1048,8 +1057,9 @@ export default function InventoryPage() {
             // Zakładka Rusztowania: Tylko BULK, które nie są manualnymi ubytkami ani zaległym osprzętem
             if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu") return false;
         } else if (activeTab === "OTHER") {
-            // Zakładka Drobnica: Wszystkie BULK będące wpisami ręcznymi lub zaległym osprzętem
-            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT";
+            // Zakładka Drobnica: Wszystkie BULK będące wpisami ręcznymi, zaległym osprzętem lub pozostałościami budowlanymi
+            const isResidualItem = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || isResidualItem;
             if (item.type !== "BULK" || !isLoose) return false;
 
             // UKRYWANIE ROZLICZONEGO ZALEGŁEGO OSPRZĘTU (brak długu na budowach):
@@ -1057,10 +1067,14 @@ export default function InventoryPage() {
                 const totalAllocated = Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0);
                 if (totalAllocated <= 0) return false;
             }
-            // UKRYWANIE JEDNORAZOWYCH WPISÓW RĘCZNYCH, KTÓRE JUŻ WRÓCIŁY Z BUDOWY:
-            if (item.isTemporary && Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0) <= 0) {
+            // UKRYWANIE JEDNORAZOWYCH WPISÓW RĘCZNYCH, KTÓRE JUŻ WRÓCIŁY Z BUDOWY (nie dotyczy trwałych pozostałości):
+            if (!isResidualItem && item.isTemporary && Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0) <= 0) {
                 return false;
             }
+
+            // Podfiltr Drobnicy (Wszystko / Resztki / Inne)
+            if (drobnicaFilter === "RESIDUALS" && !isResidualItem) return false;
+            if (drobnicaFilter === "OTHER" && isResidualItem) return false;
         } else if (activeTab === "BHP") {
             const isBhpPersonal = item.requiresInspection || (item.category || "").toUpperCase().includes("OCHRONA OSOBISTA") || (item.category || "").toUpperCase().includes("BHP OSOBISTE");
             if (!isBhpPersonal) return false;
@@ -1258,7 +1272,7 @@ export default function InventoryPage() {
                         <span className="text-2xl">📦</span>
                         <div>
                             <h2 className="text-lg font-black uppercase tracking-tight">Drobnica, Osprzęt i Materiały</h2>
-                            <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">Wpisy ręczne z palca, zaległy osprzęt oraz materiały pomocnicze</p>
+                            <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">Wpisy ręczne z palca, zaległy osprzęt oraz pozostałości budowlane</p>
                         </div>
                     </div>
                     <button
@@ -1269,20 +1283,55 @@ export default function InventoryPage() {
                         <span>🧹</span> Wyczyść zwrócony osprzęt
                     </button>
                 </div>
+                {/* SZYBKIE FILTRY DLA DROBNICY / POZOSTAŁOŚCI */}
+                <div className="bg-orange-50/80 border-b border-orange-100 p-2.5 px-4 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-black uppercase text-orange-900 tracking-wider">Kategoria:</span>
+                        <div className="flex gap-1 bg-white p-1 rounded-xl border border-orange-200 shadow-sm">
+                            <button
+                                onClick={() => setDrobnicaFilter("ALL")}
+                                className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "ALL" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}
+                            >
+                                Wszystko
+                            </button>
+                            <button
+                                onClick={() => setDrobnicaFilter("RESIDUALS")}
+                                className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 ${drobnicaFilter === "RESIDUALS" ? "bg-amber-500 text-white shadow-sm" : "text-amber-800 hover:bg-amber-50"}`}
+                            >
+                                🧱 Pozostałości budowlane
+                            </button>
+                            <button
+                                onClick={() => setDrobnicaFilter("OTHER")}
+                                className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "OTHER" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}
+                            >
+                                Osprzęt i Materiały
+                            </button>
+                        </div>
+                    </div>
+                </div>
                 <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
                         <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Nazwa materiału</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
                     </thead>
                     <tbody className="text-sm">
-                        {sortedFilteredItems.map(item => (
-                            <tr key={item.id} className="border-b last:border-0 hover:bg-slate-50 transition">
-                                <td className="p-3"><img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
-                                <td className="p-4 cursor-pointer" onClick={() => openItemCard(item)}>
-                                    <p className="font-bold text-slate-700">{item.name}</p>
-                                    <p className="text-[10px] text-slate-400">{item.category || "Wpis ręczny"}</p>
-                                </td>
-                                <td className="p-4 text-center font-mono text-xs text-orange-600 font-bold">{item.inventoryNumber}</td>
-                                <td className="p-4 text-center font-black">{item.availableQuantity} / {item.totalQuantity}</td>
+                        {sortedFilteredItems.map(item => {
+                            const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+                            return (
+                                <tr key={item.id} className={`border-b last:border-0 hover:bg-slate-50 transition ${isResidual ? 'bg-amber-50/20' : ''}`}>
+                                    <td className="p-3"><img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                    <td className="p-4 cursor-pointer" onClick={() => openItemCard(item)}>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <p className="font-bold text-slate-700">{item.name}</p>
+                                            {isResidual && (
+                                                <span className="bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1 shadow-sm">
+                                                    🧱 Resztki
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="text-[10px] text-slate-400">{item.category || "Wpis ręczny"}</p>
+                                    </td>
+                                    <td className={`p-4 text-center font-mono text-xs font-bold ${isResidual ? 'text-amber-700' : 'text-orange-600'}`}>{item.inventoryNumber}</td>
+                                    <td className="p-4 text-center font-black">{item.availableQuantity} / {item.totalQuantity} {item.unit || "szt."}</td>
                                 <td className="p-4 text-right space-x-3 whitespace-nowrap">
                                     <button
                                         onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
@@ -1296,7 +1345,8 @@ export default function InventoryPage() {
                                     <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
                                 </td>
                             </tr>
-                        ))}
+                        );
+                    })}
                     </tbody>
                 </table>
             </div>
