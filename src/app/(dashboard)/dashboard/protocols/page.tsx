@@ -1514,6 +1514,22 @@ export default function ProtocolsHub() {
                                         availableQuantity: newQty,
                                         totalQuantity: Math.max(existingData.totalQuantity || 0, newQty)
                                     });
+
+                                    const historyRef = doc(collection(db, `inventory/${decision.targetId}/history`));
+                                    transaction.set(historyRef, cleanFirestorePayload({
+                                        date: new Date().toISOString(),
+                                        documentDate: paperDocDate,
+                                        type: "ZWROT PAPIEROWY (SCALENIE)",
+                                        siteName: siteName,
+                                        quantity: cartItem.receivedQty,
+                                        unit: cartItem.unit || "szt.",
+                                        protocolId: protocolId,
+                                        residualNotes: paperResidualNotes.trim() || cartItem.notes || "",
+                                        description: `Przyjęto i scalono ${cartItem.receivedQty} ${cartItem.unit || "szt."} z budowy: ${siteName}. Protokół: ${protocolId}.${cartItem.notes ? ' Uwagi: ' + cartItem.notes : ''}`,
+                                        status: cartItem.finalStatus || "sprawne",
+                                        user: `${user?.firstName} ${user?.lastName}`
+                                    }));
+
                                     finalProtocolItems.push({
                                         inventoryId: decision.targetId,
                                         isMergedResidual: true,
@@ -1550,6 +1566,21 @@ export default function ProtocolsHub() {
                                 createdAt: new Date().toISOString(),
                                 isPermanent: true,
                                 isResidual: true
+                            }));
+
+                            const historyRef = doc(collection(db, `inventory/${newDocRef.id}/history`));
+                            transaction.set(historyRef, cleanFirestorePayload({
+                                date: new Date().toISOString(),
+                                documentDate: paperDocDate,
+                                type: "ZWROT PAPIEROWY",
+                                siteName: siteName,
+                                quantity: cartItem.receivedQty,
+                                unit: cartItem.unit || "szt.",
+                                protocolId: protocolId,
+                                residualNotes: paperResidualNotes.trim() || cartItem.notes || "",
+                                description: `Przyjęto ${cartItem.receivedQty} ${cartItem.unit || "szt."} z budowy: ${siteName}. Protokół: ${protocolId}.${cartItem.notes ? ' Uwagi: ' + cartItem.notes : ''}`,
+                                status: cartItem.finalStatus || "sprawne",
+                                user: `${user?.firstName} ${user?.lastName}`
                             }));
 
                             finalProtocolItems.push({
@@ -2288,6 +2319,22 @@ export default function ProtocolsHub() {
                                         availableQuantity: newQty,
                                         totalQuantity: Math.max(existingData.totalQuantity || 0, newQty)
                                     });
+
+                                    const historyRef = doc(collection(db, `inventory/${decision.targetId}/history`));
+                                    transaction.set(historyRef, cleanFirestorePayload({
+                                        date: new Date().toISOString(),
+                                        documentDate: acceptDate,
+                                        type: "ZWROT Z BUDOWY (SCALENIE)",
+                                        siteName: selectedProtocol.sourceName,
+                                        quantity: workerInput.receivedQty,
+                                        unit: item.unit || "szt.",
+                                        protocolId: selectedProtocol.protocolId,
+                                        residualNotes: selectedProtocol.residualNotes || workerInput.notes || "",
+                                        description: `Przyjęto i scalono ${workerInput.receivedQty} ${item.unit || "szt."} z budowy: ${selectedProtocol.sourceName}. Protokół: ${selectedProtocol.protocolId}.${workerInput.notes ? ' Uwagi: ' + workerInput.notes : ''}`,
+                                        status: workerInput.finalStatus || "sprawne",
+                                        user: `${user?.firstName} ${user?.lastName}`
+                                    }));
+
                                     updatedItemsForProtocol.push({ ...item, inventoryId: decision.targetId, isMergedResidual: true, isPermanent: true, isResidual: true, isWaste: false, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: (workerInput.notes || '') + ' [scalono z istniejącym]', accessories: [] });
                                     continue;
                                 }
@@ -2310,6 +2357,22 @@ export default function ProtocolsHub() {
                                 isPermanent: true,
                                 isResidual: true
                             }));
+
+                            const historyRef = doc(collection(db, `inventory/${newDocRef.id}/history`));
+                            transaction.set(historyRef, cleanFirestorePayload({
+                                date: new Date().toISOString(),
+                                documentDate: acceptDate,
+                                type: "ZWROT Z BUDOWY",
+                                siteName: selectedProtocol.sourceName,
+                                quantity: workerInput.receivedQty,
+                                unit: item.unit || "szt.",
+                                protocolId: selectedProtocol.protocolId,
+                                residualNotes: selectedProtocol.residualNotes || workerInput.notes || "",
+                                description: `Przyjęto ${workerInput.receivedQty} ${item.unit || "szt."} z budowy: ${selectedProtocol.sourceName}. Protokół: ${selectedProtocol.protocolId}.${workerInput.notes ? ' Uwagi: ' + workerInput.notes : ''}`,
+                                status: workerInput.finalStatus || "sprawne",
+                                user: `${user?.firstName} ${user?.lastName}`
+                            }));
+
                             updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, isPermanent: true, isResidual: true, isWaste: false, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
                         } else if (item.isResidual && workerInput.finalStatus === "odpad_utylizacja") {
                             updatedItemsForProtocol.push({ ...item, isResidual: true, isWaste: true, receivedQty: workerInput.receivedQty, finalStatus: "odpad_utylizacja", warehouseNotes: workerInput.notes || "Odpad budowlany do utylizacji", accessories: [] });

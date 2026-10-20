@@ -14,6 +14,12 @@ interface HistoryEntry {
     description: string;
     status: string;
     user: string;
+    documentDate?: string;
+    siteName?: string;
+    quantity?: number;
+    unit?: string;
+    protocolId?: string;
+    residualNotes?: string;
 }
 
 interface InventoryItem {
@@ -803,7 +809,63 @@ export default function InventoryPage() {
         setHasOpenClaim(false);
         try {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
-            const rawHistory = historySnap.docs.map(d => d.data() as HistoryEntry);
+            let rawHistory = historySnap.docs.map(d => d.data() as HistoryEntry);
+
+            // Jeśli to pozycja resztek budowlanych lub nie ma jeszcze wpisów w subkolekcji history:
+            // Skanujemy kolekcję protocols, aby odnaleźć z jakiej budowy przyszedł ten materiał i ile dokładnie
+            const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+            if (isResidual || rawHistory.length === 0) {
+                try {
+                    const protocolsQ = query(collection(db, "protocols"), orderBy("createdAt", "desc"), limit(150));
+                    const protocolsSnap = await getDocs(protocolsQ);
+                    const protocolHistories: HistoryEntry[] = [];
+
+                    protocolsSnap.docs.forEach(docSnap => {
+                        const p = docSnap.data();
+                        if (!p.items || !Array.isArray(p.items)) return;
+
+                        const cleanItemName = item.name.trim().toLowerCase();
+                        const matchingItem = p.items.find((it: any) =>
+                            it.inventoryId === item.id ||
+                            (it.name && it.name.trim().toLowerCase() === cleanItemName) ||
+                            (it.name && cleanItemName.length >= 6 && (it.name.trim().toLowerCase().includes(cleanItemName) || cleanItemName.includes(it.name.trim().toLowerCase())))
+                        );
+
+                        if (matchingItem) {
+                            const qty = matchingItem.receivedQty ?? matchingItem.declaredQty ?? (item as any).availableQuantity ?? 1;
+                            const unit = matchingItem.unit || item.unit || "szt.";
+                            const docDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
+                            const pId = p.protocolId || docSnap.id;
+                            const site = p.sourceName || (p.type === "WYDANIE" ? p.destinationName : "Magazyn");
+
+                            const alreadyInRaw = rawHistory.some(h =>
+                                (h.protocolId && h.protocolId === pId) ||
+                                (h.description && h.description.includes(pId))
+                            );
+
+                            if (!alreadyInRaw) {
+                                protocolHistories.push({
+                                    date: p.createdAt || new Date().toISOString(),
+                                    documentDate: docDate,
+                                    type: p.documentSource === "PAPER" ? "ZWROT PAPIEROWY" : (p.type === "WYDANIE" ? "WYDANIE" : "ZWROT Z BUDOWY"),
+                                    siteName: site,
+                                    quantity: qty,
+                                    unit: unit,
+                                    protocolId: pId,
+                                    residualNotes: p.residualNotes || matchingItem.warehouseNotes || "",
+                                    description: `Zwrócono ${qty} ${unit} z: ${site}. Protokół: ${pId}.${matchingItem.warehouseNotes ? ' Uwagi: ' + matchingItem.warehouseNotes : ''}`,
+                                    status: matchingItem.finalStatus || "sprawne",
+                                    user: p.acceptedByName || p.createdByName || "Magazynier"
+                                });
+                            }
+                        }
+                    });
+
+                    rawHistory = [...rawHistory, ...protocolHistories];
+                } catch (protErr) {
+                    console.error("Błąd doładowywania historii z protokołów:", protErr);
+                }
+            }
 
             const sortedHistory = rawHistory.sort((a: any, b: any) => {
                 const dateA = new Date(a.documentDate || a.date).getTime();
@@ -1724,31 +1786,72 @@ export default function InventoryPage() {
                                     {/* Historia skąd przyszło */}
                                     <div>
                                         <h3 className="font-black uppercase text-[10px] text-slate-400 mb-3 tracking-widest flex items-center gap-2">
-                                            <span>📋</span> Historia — skąd przyszło?
+                                            <span>📋</span> Historia — skąd przyszło i ile?
                                         </h3>
                                         {historyLoading ? (
-                                            <div className="text-center p-4 text-slate-400 animate-pulse text-sm">Ładowanie historii...</div>
+                                            <div className="text-center p-4 text-slate-400 animate-pulse text-sm">Ładowanie historii z protokołów...</div>
                                         ) : itemHistory.length === 0 ? (
                                             <div className="text-center p-6 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                                                <p className="text-slate-400 text-sm">Brak wpisów historii.</p>
+                                                <p className="text-slate-400 text-sm">Brak wpisów historii dla tej pozycji.</p>
+                                                <p className="text-[11px] text-slate-400 mt-1">Gdy kierownik lub magazynier przyjmie zwrot, pojawi się tutaj budowa, data i dokładna ilość.</p>
                                             </div>
                                         ) : (
-                                            <div className="space-y-2">
-                                                {itemHistory.map((h, i) => (
-                                                    <div key={i} className="bg-white border border-slate-100 rounded-xl p-3 flex gap-3 items-start shadow-sm">
-                                                        <span className="text-lg mt-0.5">📦</span>
-                                                        <div className="flex-1 min-w-0">
+                                            <div className="space-y-3">
+                                                {itemHistory.map((h, i) => {
+                                                    const site = h.siteName || (h.description?.match(/z budowy:\s*([^.]+)/i)?.[1]) || (h.description?.match(/Zwrócono z:\s*([^.]+)/i)?.[1]);
+                                                    const pId = h.protocolId || (h.description?.match(/Protokół:\s*([^\s.]+)/i)?.[1]);
+                                                    const notes = h.residualNotes || (h.description?.match(/Uwagi:\s*([^.]+)/i)?.[1]) || (h.description?.match(/Zgłoszenie:\s*([^.]+)/i)?.[1]);
+                                                    const displayDate = h.documentDate || (h.date ? h.date.split("T")[0] : "");
+                                                    const formattedDate = displayDate ? new Date(displayDate).toLocaleDateString("pl-PL") : "---";
+
+                                                    return (
+                                                        <div key={i} className="bg-white border-2 border-amber-100 rounded-2xl p-4 shadow-sm hover:border-amber-300 transition space-y-2">
                                                             <div className="flex justify-between items-start gap-2">
-                                                                <p className="text-xs font-black text-slate-700 truncate">{h.type}</p>
-                                                                <p className="text-[10px] text-slate-400 whitespace-nowrap flex-shrink-0">
-                                                                    {new Date((h as any).documentDate || h.date).toLocaleDateString("pl-PL")}
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-[10px] font-black px-2.5 py-1 bg-amber-500 text-white rounded-lg uppercase tracking-wide">
+                                                                        {h.type || "ZWROT"}
+                                                                    </span>
+                                                                    {h.quantity !== undefined && (
+                                                                        <span className="text-xs font-black px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg">
+                                                                            +{h.quantity} {h.unit || selectedItem.unit || "szt."}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <p className="text-[11px] font-bold text-slate-400 whitespace-nowrap">
+                                                                    📅 {formattedDate}
                                                                 </p>
                                                             </div>
-                                                            <p className="text-[11px] text-slate-600 mt-0.5 line-clamp-2">{h.description}</p>
-                                                            {h.user && <p className="text-[10px] text-slate-400 mt-0.5">👤 {h.user}</p>}
+
+                                                            {site && (
+                                                                <div className="bg-amber-50/70 p-2.5 rounded-xl border border-amber-200/60 flex items-center gap-2.5">
+                                                                    <span className="text-lg">🏗️</span>
+                                                                    <div className="min-w-0 flex-1">
+                                                                        <p className="text-[9px] font-black uppercase text-amber-800 tracking-wider">Budowa źródłowa</p>
+                                                                        <p className="text-xs font-black text-slate-800 truncate">{site}</p>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+
+                                                            {pId && (
+                                                                <p className="text-[11px] text-slate-500 font-mono">
+                                                                    Nr protokołu: <strong className="text-slate-700">{pId}</strong>
+                                                                </p>
+                                                            )}
+
+                                                            {notes && (
+                                                                <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-[11px] text-slate-600">
+                                                                    <span className="font-bold text-slate-700">Szczegóły / Notatka: </span>
+                                                                    {notes}
+                                                                </div>
+                                                            )}
+
+                                                            <div className="flex justify-between items-center pt-1 text-[10px] text-slate-400 border-t border-slate-100">
+                                                                {h.user && <span>👤 Przyjął: <b className="text-slate-600">{h.user}</b></span>}
+                                                                <span className="capitalize">Stan: <b className="text-emerald-600">{h.status || "sprawne"}</b></span>
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         )}
                                     </div>
