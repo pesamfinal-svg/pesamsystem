@@ -1,0 +1,875 @@
+"use client";
+
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { useRouter } from "next/navigation";
+import { collection, getDocs, doc, setDoc, updateDoc, addDoc, query, orderBy } from "firebase/firestore";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { db, storage } from "@/lib/firebase/config";
+import Link from "next/link";
+
+interface ResidualItem {
+    id: string;
+    name: string;
+    availableQuantity: number;
+    totalQuantity: number;
+    unit?: string;
+    currentLocation?: string;
+    imageUrl?: string;
+    category?: string;
+    inventoryNumber?: string;
+    isResidual?: boolean;
+    additionalInfo?: string;
+    updatedAt?: string;
+}
+
+// Funkcja kompresji zdjęć z aparatu telefonu przed wysłaniem na Firebase Storage
+async function compressImage(file: File, maxWidth = 1200, quality = 0.8): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const imgElement = new Image();
+            imgElement.src = event.target?.result as string;
+            imgElement.onload = () => {
+                const canvas = document.createElement("canvas");
+                const context = canvas.getContext("2d");
+                let width = imgElement.width;
+                let height = imgElement.height;
+
+                if (width > maxWidth) {
+                    height = Math.round((height * maxWidth) / width);
+                    width = maxWidth;
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+                context?.drawImage(imgElement, 0, 0, width, height);
+                canvas.toBlob(
+                    (blob) => {
+                        if (blob) resolve(blob);
+                        else resolve(file);
+                    },
+                    "image/jpeg",
+                    quality
+                );
+            };
+            imgElement.onerror = () => resolve(file);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+export default function PlacResidualsPage() {
+    const { user, loading, signOut } = useAuth();
+    const router = useRouter();
+    const [items, setItems] = useState<ResidualItem[]>([]);
+    const [search, setSearch] = useState("");
+    const [filter, setFilter] = useState<"ALL" | "NO_PHOTO" | "LOW_STOCK">("ALL");
+    const [isOnline, setIsOnline] = useState(true);
+    const [uploadingId, setUploadingId] = useState<string | null>(null);
+    const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+    const [isPwaModalOpen, setIsPwaModalOpen] = useState(false);
+    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+    const [toast, setToast] = useState<string | null>(null);
+    const [isSubmittingNew, setIsSubmittingNew] = useState(false);
+
+    // Formularz nowej resztki
+    const [newItem, setNewItem] = useState<{
+        name: string;
+        qty: number;
+        unit: string;
+        location: string;
+        notes: string;
+        photoFile: File | null;
+        photoPreview: string | null;
+    }>({
+        name: "",
+        qty: 1,
+        unit: "szt.",
+        location: "Plac Główny",
+        notes: "",
+        photoFile: null,
+        photoPreview: null
+    });
+
+    // Pokaż toast
+    const showToast = (msg: string) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 3500);
+    };
+
+    // 1. Ładowanie danych i obsługa offline cache
+    useEffect(() => {
+        setIsOnline(navigator.onLine);
+
+        // Dynamiczne ustawienie manifestu PWA dla Placu (żeby przeglądarka instalowała PESAM Plac zamiast Voice)
+        let manifestLink = document.querySelector<HTMLLinkElement>("link[rel~='manifest']");
+        if (manifestLink) {
+            manifestLink.href = "/manifest-plac.json";
+        } else {
+            manifestLink = document.createElement("link");
+            manifestLink.rel = "manifest";
+            manifestLink.href = "/manifest-plac.json";
+            document.head.appendChild(manifestLink);
+        }
+        document.title = "PESAM Plac & Resztki";
+
+        // Natychmiastowe załadowanie z pamięci telefonu (0 ms opóźnienia na placu)
+        const cachedItems = localStorage.getItem("pesam_residuals_cache");
+        if (cachedItems) {
+            try {
+                setItems(JSON.parse(cachedItems));
+            } catch (e) {
+                console.error("Błąd odczytu cache:", e);
+            }
+        }
+
+        const handleOnline = () => {
+            setIsOnline(true);
+            showToast("🟢 Połączono z siecią (Online)");
+            fetchFreshData();
+        };
+        const handleOffline = () => {
+            setIsOnline(false);
+            showToast("🟠 Tryb offline - korzystasz z pamięci telefonu");
+        };
+
+        window.addEventListener("online", handleOnline);
+        window.addEventListener("offline", handleOffline);
+
+        if (!loading && !user && localStorage.getItem("pesam_logged_in") !== "true") {
+            router.push("/login?redirect=/plac");
+        } else if (user) {
+            localStorage.setItem("pesam_logged_in", "true");
+            fetchFreshData();
+        }
+
+        return () => {
+            window.removeEventListener("online", handleOnline);
+            window.removeEventListener("offline", handleOffline);
+        };
+    }, [loading, user, router]);
+
+    const fetchFreshData = async () => {
+        try {
+            const q = query(collection(db, "inventory"), orderBy("name"));
+            const querySnapshot = await getDocs(q);
+            const filteredItems = querySnapshot.docs
+                .map(docSnap => ({
+                    id: docSnap.id,
+                    ...docSnap.data()
+                } as ResidualItem))
+                .filter(item =>
+                    item.category === "Pozostałości budowlane" ||
+                    item.inventoryNumber === "RESZTKI" ||
+                    item.isResidual
+                );
+
+            setItems(filteredItems);
+            localStorage.setItem("pesam_residuals_cache", JSON.stringify(filteredItems));
+        } catch (error) {
+            console.warn("Błąd pobierania danych (możliwy brak sieci):", error);
+        }
+    };
+
+    // 2. Bezpośrednie zrobienie zdjęcia aparatem telefonu dla danej pozycji
+    const handleCameraCapture = async (item: ResidualItem, file: File) => {
+        try {
+            setUploadingId(item.id);
+            showToast("⏳ Kompresja i wgrywanie zdjęcia z placu...");
+            const compressedBlob = await compressImage(file, 1200, 0.8);
+            const storageRef = ref(storage, `inventory/residuals_${item.id}_${Date.now()}.jpg`);
+            await uploadBytes(storageRef, compressedBlob);
+            const downloadURL = await getDownloadURL(storageRef);
+
+            await updateDoc(doc(db, "inventory", item.id), {
+                imageUrl: downloadURL,
+                updatedAt: new Date().toISOString()
+            });
+
+            const updatedItems = items.map(i => (i.id === item.id ? { ...i, imageUrl: downloadURL } : i));
+            setItems(updatedItems);
+            localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+            showToast("✅ Zdjęcie materiału zaktualizowane!");
+        } catch (error: any) {
+            console.error("Błąd wgrywania zdjęcia: ", error);
+            alert("Błąd wgrywania zdjęcia: " + (error?.message || error));
+        } finally {
+            setUploadingId(null);
+        }
+    };
+
+    // 3. Szybka zmiana stanu na placu (+ / -)
+    const handleQuickDelta = async (item: ResidualItem, delta: number) => {
+        try {
+            const currentAvail = Number(item.availableQuantity) || 0;
+            const currentTotal = Number(item.totalQuantity) || 0;
+            const newAvail = Math.max(0, currentAvail + delta);
+            const newTotal = Math.max(0, currentTotal + delta);
+
+            await updateDoc(doc(db, "inventory", item.id), {
+                availableQuantity: newAvail,
+                totalQuantity: newTotal,
+                updatedAt: new Date().toISOString()
+            });
+
+            const updatedItems = items.map(i =>
+                i.id === item.id ? { ...i, availableQuantity: newAvail, totalQuantity: newTotal } : i
+            );
+            setItems(updatedItems);
+            localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+            showToast(`Zaktualizowano stan: ${newAvail} ${item.unit || "szt."}`);
+        } catch (error: any) {
+            console.error("Błąd aktualizacji ilości: ", error);
+            alert("Błąd aktualizacji ilości: " + (error?.message || error));
+        }
+    };
+
+    // 4. Wpisanie dokładnego stanu (np. po inwentaryzacji placowej)
+    const handleExactQty = async (item: ResidualItem) => {
+        const promptVal = prompt(
+            `Podaj aktualny stan dla:\n${item.name}\n(Obecnie: ${item.availableQuantity} ${item.unit || "szt."}):`,
+            String(item.availableQuantity ?? 0)
+        );
+        if (promptVal !== null) {
+            const parsed = parseFloat(promptVal.replace(",", "."));
+            if (!isNaN(parsed) && parsed >= 0) {
+                try {
+                    await updateDoc(doc(db, "inventory", item.id), {
+                        availableQuantity: parsed,
+                        totalQuantity: parsed,
+                        updatedAt: new Date().toISOString()
+                    });
+
+                    const updatedItems = items.map(i =>
+                        i.id === item.id ? { ...i, availableQuantity: parsed, totalQuantity: parsed } : i
+                    );
+                    setItems(updatedItems);
+                    localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+                    showToast(`✅ Zapisano stan: ${parsed} ${item.unit || "szt."}`);
+                } catch (error: any) {
+                    alert("Błąd zapisu ilości: " + error.message);
+                }
+            }
+        }
+    };
+
+    // 5. Utworzenie nowej pozycji bezpośrednio z placu
+    const handleCreateNew = async () => {
+        if (!newItem.name.trim()) {
+            alert("Podaj nazwę resztki budowlanej!");
+            return;
+        }
+
+        try {
+            setIsSubmittingNew(true);
+            let finalImageUrl = "";
+
+            if (newItem.photoFile) {
+                showToast("⏳ Zapisywanie zdjęcia z aparatu...");
+                const compressedBlob = await compressImage(newItem.photoFile, 1200, 0.8);
+                const storageRef = ref(storage, `inventory/residuals_new_${Date.now()}.jpg`);
+                await uploadBytes(storageRef, compressedBlob);
+                finalImageUrl = await getDownloadURL(storageRef);
+            }
+
+            const docData = {
+                name: newItem.name.trim(),
+                availableQuantity: Number(newItem.qty) || 1,
+                totalQuantity: Number(newItem.qty) || 1,
+                unit: newItem.unit || "szt.",
+                currentLocation: newItem.location || "Plac Główny",
+                additionalInfo: newItem.notes || "",
+                imageUrl: finalImageUrl,
+                category: "Pozostałości budowlane",
+                inventoryNumber: "RESZTKI",
+                isResidual: true,
+                type: "BULK",
+                subType: "MANUAL",
+                status: "DOSTĘPNY",
+                createdAt: new Date().toISOString()
+            };
+
+            const docRef = await addDoc(collection(db, "inventory"), docData);
+            const createdItem: ResidualItem = { id: docRef.id, ...docData };
+
+            const updatedItems = [createdItem, ...items].sort((a, b) => a.name.localeCompare(b.name));
+            setItems(updatedItems);
+            localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+
+            showToast("🎉 Nowa resztka dodana do bazy placu!");
+            setIsAddModalOpen(false);
+            setNewItem({
+                name: "",
+                qty: 1,
+                unit: "szt.",
+                location: "Plac Główny",
+                notes: "",
+                photoFile: null,
+                photoPreview: null
+            });
+        } catch (error: any) {
+            console.error("Błąd dodawania pozycji: ", error);
+            alert("Błąd dodawania: " + (error?.message || error));
+        } finally {
+            setIsSubmittingNew(false);
+        }
+    };
+
+    // 6. Przefiltrowane elementy (wyszukiwarka + filtry)
+    const filteredItems = useMemo(() => {
+        const queryLower = search.toLowerCase().trim();
+        return items.filter(item => {
+            const matchesSearch =
+                !queryLower ||
+                (item.name && item.name.toLowerCase().includes(queryLower)) ||
+                (item.currentLocation && item.currentLocation.toLowerCase().includes(queryLower)) ||
+                (item.additionalInfo && item.additionalInfo.toLowerCase().includes(queryLower));
+
+            if (!matchesSearch) return false;
+
+            if (filter === "NO_PHOTO") return !item.imageUrl;
+            if (filter === "LOW_STOCK") return (item.availableQuantity || 0) <= 1;
+            return true;
+        });
+    }, [items, search, filter]);
+
+    const countNoPhoto = useMemo(() => items.filter(i => !i.imageUrl).length, [items]);
+    const countLowStock = useMemo(() => items.filter(i => (i.availableQuantity || 0) <= 1).length, [items]);
+
+    return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans pb-20 select-none">
+            {/* Sticky Header dostosowany do pracy w słońcu na placu */}
+            <header className="sticky top-0 z-30 bg-slate-900/95 backdrop-blur border-b border-slate-800 shadow-xl px-4 py-3">
+                <div className="flex justify-between items-center mb-3">
+                    <div className="flex items-center gap-2">
+                        <Link
+                            href="/plac"
+                            title="Wróć do menu głównego"
+                            className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center border border-slate-700 text-sm active:scale-95 transition"
+                        >
+                            🔙
+                        </Link>
+                        <span className="text-2xl">🏗️</span>
+                        <div>
+                            <h1 className="text-lg font-black tracking-wider text-amber-400 uppercase leading-none">
+                                PESAM PLAC
+                            </h1>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                                Magazyn Resztek & Pozostałości
+                            </p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <span
+                            className={`text-[10px] font-black px-2 py-1 rounded-full uppercase tracking-wider border ${
+                                isOnline
+                                    ? "bg-emerald-950/80 text-emerald-400 border-emerald-700/60"
+                                    : "bg-amber-950/80 text-amber-400 border-amber-700/60"
+                            }`}
+                        >
+                            {isOnline ? "🟢 Online" : "🟠 Pamięć"}
+                        </span>
+
+                        <button
+                            onClick={fetchFreshData}
+                            title="Odśwież dane"
+                            className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center border border-slate-700 text-sm active:scale-95 transition"
+                        >
+                            🔄
+                        </button>
+
+                        <button
+                            onClick={() => setIsPwaModalOpen(true)}
+                            title="Zainstaluj na telefonie"
+                            className="h-9 px-2.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 flex items-center gap-1 border border-blue-500/30 text-xs font-bold active:scale-95 transition"
+                        >
+                            📱 <span className="hidden sm:inline">Na telefon</span>
+                        </button>
+
+                        <Link
+                            href="/dashboard/inventory"
+                            title="Przejdź do pełnego panelu na komputerze"
+                            className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center border border-slate-700 text-sm active:scale-95 transition"
+                        >
+                            🖥️
+                        </Link>
+                    </div>
+                </div>
+
+                {/* Duży, kontrastowy przycisk: NOWA RESZTKA Z PLACU */}
+                <button
+                    onClick={() => setIsAddModalOpen(true)}
+                    className="w-full py-3.5 px-4 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-black text-sm uppercase tracking-wider rounded-2xl shadow-lg shadow-orange-600/30 flex items-center justify-center gap-2 active:scale-[0.98] transition border border-amber-300/40"
+                >
+                    <span className="text-xl">➕</span>
+                    <span>Dodaj nową pozycję z placu</span>
+                </button>
+
+                {/* Szybka wyszukiwarka i filtry kafelkowe */}
+                <div className="mt-3 flex gap-2">
+                    <div className="relative flex-1">
+                        <input
+                            type="text"
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                            placeholder="Szukaj resztki (np. Klej, Folia, 25x4)..."
+                            className="w-full bg-slate-800/90 border border-slate-700/80 rounded-xl px-3 py-2 pl-9 text-xs text-white placeholder-slate-400 outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition"
+                        />
+                        <span className="absolute left-3 top-2.5 text-xs text-slate-400">🔍</span>
+                        {search && (
+                            <button
+                                onClick={() => setSearch("")}
+                                className="absolute right-2.5 top-2 text-xs text-slate-400 hover:text-white p-0.5"
+                            >
+                                ✕
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                {/* Filtry (Wszystko / Bez zdjęcia / Kończące się) */}
+                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1 text-[11px] no-scrollbar">
+                    <button
+                        onClick={() => setFilter("ALL")}
+                        className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition ${
+                            filter === "ALL"
+                                ? "bg-amber-500 text-slate-950 font-black shadow"
+                                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                        }`}
+                    >
+                        Wszystko ({items.length})
+                    </button>
+                    <button
+                        onClick={() => setFilter("NO_PHOTO")}
+                        className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition flex items-center gap-1 ${
+                            filter === "NO_PHOTO"
+                                ? "bg-amber-500 text-slate-950 font-black shadow"
+                                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                        }`}
+                    >
+                        📷 Bez fotki ({countNoPhoto})
+                    </button>
+                    <button
+                        onClick={() => setFilter("LOW_STOCK")}
+                        className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition flex items-center gap-1 ${
+                            filter === "LOW_STOCK"
+                                ? "bg-amber-500 text-slate-950 font-black shadow"
+                                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                        }`}
+                    >
+                        ⚠️ Kończące się ({countLowStock})
+                    </button>
+                </div>
+            </header>
+
+            {/* Lista kafelków resztek budowlanych */}
+            <main className="flex-1 p-3 max-w-4xl mx-auto w-full">
+                {filteredItems.length === 0 ? (
+                    <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 text-center mt-6">
+                        <span className="text-4xl block mb-2">🧱</span>
+                        <h3 className="text-base font-black text-slate-200">Brak pozycji spełniających kryteria</h3>
+                        <p className="text-xs text-slate-400 mt-1">
+                            Zmień wyszukiwaną frazę lub dodaj nową resztkę przyciskiem powyżej.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {filteredItems.map(item => {
+                            const isThisUploading = uploadingId === item.id;
+                            const hasPhoto = !!item.imageUrl;
+
+                            return (
+                                <div
+                                    key={item.id}
+                                    className="bg-slate-900 border border-slate-800/90 rounded-2xl p-3.5 shadow-md flex flex-col justify-between relative overflow-hidden transition hover:border-slate-700"
+                                >
+                                    {/* Loader podczas wgrywania fotki */}
+                                    {isThisUploading && (
+                                        <div className="absolute inset-0 bg-slate-950/85 z-20 flex flex-col items-center justify-center gap-2 backdrop-blur-sm animate-fade-in">
+                                            <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+                                            <span className="text-xs font-black text-amber-400 uppercase tracking-wider">
+                                                Wgrywanie zdjęcia...
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {/* Górny wiersz kafelka: Miniaturka ze skrótem do aparatu + Nazwa + Badges */}
+                                    <div className="flex gap-3 items-start">
+                                        {/* Kontener zdjęcia */}
+                                        <div className="relative flex-shrink-0">
+                                            {hasPhoto ? (
+                                                <div
+                                                    onClick={() => setLightboxUrl(item.imageUrl!)}
+                                                    className="w-18 h-18 sm:w-20 sm:h-20 rounded-xl overflow-hidden border border-slate-700 bg-slate-800 cursor-pointer shadow relative group"
+                                                >
+                                                    <img
+                                                        src={item.imageUrl}
+                                                        alt={item.name}
+                                                        className="w-full h-full object-cover group-hover:scale-105 transition"
+                                                    />
+                                                    <span className="absolute bottom-0 right-0 bg-black/60 text-white text-[9px] px-1 rounded-tl font-bold">
+                                                        🔍
+                                                    </span>
+                                                </div>
+                                            ) : (
+                                                <label
+                                                    htmlFor={`camera-${item.id}`}
+                                                    className="w-18 h-18 sm:w-20 sm:h-20 rounded-xl border-2 border-dashed border-amber-500/50 hover:border-amber-400 bg-amber-500/10 flex flex-col items-center justify-center cursor-pointer active:scale-95 transition"
+                                                >
+                                                    <span className="text-2xl">📸</span>
+                                                    <span className="text-[9px] font-black text-amber-300 uppercase tracking-tighter mt-0.5">
+                                                        Zrób foto
+                                                    </span>
+                                                </label>
+                                            )}
+
+                                            {/* Ukryty input aparatu telefonu */}
+                                            <input
+                                                id={`camera-${item.id}`}
+                                                type="file"
+                                                accept="image/*"
+                                                capture="environment"
+                                                className="hidden"
+                                                onChange={e => {
+                                                    if (e.target.files && e.target.files[0]) {
+                                                        handleCameraCapture(item, e.target.files[0]);
+                                                    }
+                                                }}
+                                            />
+                                        </div>
+
+                                        {/* Informacje o materiale */}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                                <span className="bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
+                                                    🧱 Resztki
+                                                </span>
+                                                <span className="text-[10px] text-slate-400 truncate">
+                                                    📍 {item.currentLocation || "Plac"}
+                                                </span>
+                                            </div>
+
+                                            <h3 className="font-black text-sm text-slate-100 mt-1 leading-snug line-clamp-2">
+                                                {item.name}
+                                            </h3>
+
+                                            {item.additionalInfo && (
+                                                <p className="text-[10px] text-slate-400 mt-0.5 italic line-clamp-1">
+                                                    {item.additionalInfo}
+                                                </p>
+                                            )}
+
+                                            {/* Przycisk zmiany/dodania zdjęcia jeśli już jakieś jest */}
+                                            {hasPhoto && (
+                                                <label
+                                                    htmlFor={`camera-${item.id}`}
+                                                    className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold text-amber-400 hover:text-amber-300 cursor-pointer active:scale-95 transition"
+                                                >
+                                                    <span>📸 Zmień zdjęcie</span>
+                                                </label>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Dolny wiersz: Duży stan magazynowy + Przyciski szybkiej korekty na placu */}
+                                    <div className="mt-3 pt-2.5 border-t border-slate-800 flex items-center justify-between gap-2">
+                                        <div
+                                            onClick={() => handleExactQty(item)}
+                                            className="cursor-pointer group flex flex-col"
+                                            title="Kliknij, aby wpisać dokładną liczbę"
+                                        >
+                                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">
+                                                Stan na placu:
+                                            </span>
+                                            <div className="flex items-baseline gap-1">
+                                                <span className="text-base font-black text-amber-400 group-hover:underline">
+                                                    {item.availableQuantity}
+                                                </span>
+                                                <span className="text-xs font-bold text-slate-300">
+                                                    {item.unit || "szt."}
+                                                </span>
+                                                <span className="text-[10px] text-slate-500">✏️</span>
+                                            </div>
+                                        </div>
+
+                                        {/* Kontrolki dotykowe min 44px wysokości dla wygodnej obsługi jedną ręką */}
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                onClick={() => handleQuickDelta(item, -1)}
+                                                className="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-red-400 border border-slate-700 font-black text-lg flex items-center justify-center active:scale-90 transition shadow-sm"
+                                                title="Odejmij 1"
+                                            >
+                                                −
+                                            </button>
+                                            <button
+                                                onClick={() => handleExactQty(item)}
+                                                className="h-11 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-amber-300 border border-slate-700 font-bold text-xs flex items-center justify-center active:scale-90 transition shadow-sm"
+                                                title="Wpisz stan"
+                                            >
+                                                Wpisz
+                                            </button>
+                                            <button
+                                                onClick={() => handleQuickDelta(item, 1)}
+                                                className="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-emerald-400 border border-slate-700 font-black text-lg flex items-center justify-center active:scale-90 transition shadow-sm"
+                                                title="Dodaj 1"
+                                            >
+                                                +
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </main>
+
+            {/* MODAL: Dodawanie nowej pozycji z placu */}
+            {isAddModalOpen && (
+                <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in">
+                    <div className="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl max-h-[92vh] overflow-y-auto">
+                        <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                            <div className="flex items-center gap-2">
+                                <span className="text-2xl">🧱</span>
+                                <h2 className="text-base font-black text-white uppercase tracking-wider">
+                                    Nowa resztka z placu
+                                </h2>
+                            </div>
+                            <button
+                                onClick={() => setIsAddModalOpen(false)}
+                                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center font-bold"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <form
+                            onSubmit={e => {
+                                e.preventDefault();
+                                handleCreateNew();
+                            }}
+                            className="mt-4 space-y-3.5"
+                        >
+                            {/* Nazwa materiału */}
+                            <div>
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                    Nazwa resztki / materiału *
+                                </label>
+                                <input
+                                    type="text"
+                                    required
+                                    value={newItem.name}
+                                    onChange={e => setNewItem({ ...newItem, name: e.target.value })}
+                                    placeholder="np. Klej Sopro S (25kg), Bednarka 25x4..."
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white placeholder-slate-500 outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                                />
+                            </div>
+
+                            {/* Ilość i Jednostka w 2 kolumnach */}
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                        Ilość na stanie *
+                                    </label>
+                                    <input
+                                        type="number"
+                                        step="any"
+                                        required
+                                        min="0"
+                                        value={newItem.qty}
+                                        onChange={e => setNewItem({ ...newItem, qty: parseFloat(e.target.value) || 0 })}
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm font-black text-amber-400 outline-none focus:border-amber-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                        Jednostka
+                                    </label>
+                                    <select
+                                        value={newItem.unit}
+                                        onChange={e => setNewItem({ ...newItem, unit: e.target.value })}
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white font-bold outline-none focus:border-amber-500"
+                                    >
+                                        <option value="szt.">szt. (sztuki)</option>
+                                        <option value="worki">worki / worek</option>
+                                        <option value="rolki">rolki / rolka</option>
+                                        <option value="krąg">krąg / zwoje</option>
+                                        <option value="mb">mb (metry bieżące)</option>
+                                        <option value="m2">m2 (metry kw.)</option>
+                                        <option value="op.">op. (opakowania)</option>
+                                        <option value="kg">kg (kilogramy)</option>
+                                        <option value="litry">litry</option>
+                                        <option value="paleta">paleta</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Zdjęcie z aparatu telefonu */}
+                            <div>
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                    Zdjęcie z placu (Aparat telefonu)
+                                </label>
+                                <div className="flex items-center gap-3">
+                                    <label
+                                        htmlFor="new-item-camera"
+                                        className="flex-1 py-3 px-4 rounded-xl border-2 border-dashed border-amber-500/50 hover:border-amber-400 bg-amber-500/10 text-amber-300 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer active:scale-98 transition"
+                                    >
+                                        <span className="text-xl">📸</span>
+                                        <span>{newItem.photoFile ? "Zmień zdjęcie" : "Zrób zdjęcie aparatem"}</span>
+                                    </label>
+                                    <input
+                                        id="new-item-camera"
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        className="hidden"
+                                        onChange={e => {
+                                            if (e.target.files && e.target.files[0]) {
+                                                const file = e.target.files[0];
+                                                setNewItem({
+                                                    ...newItem,
+                                                    photoFile: file,
+                                                    photoPreview: URL.createObjectURL(file)
+                                                });
+                                            }
+                                        }}
+                                    />
+
+                                    {newItem.photoPreview && (
+                                        <div className="w-14 h-14 rounded-xl overflow-hidden border border-slate-700 bg-slate-800 flex-shrink-0 relative">
+                                            <img
+                                                src={newItem.photoPreview}
+                                                alt="Podgląd"
+                                                className="w-full h-full object-cover"
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Lokalizacja na placu */}
+                            <div>
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                    Lokalizacja na placu / sektor
+                                </label>
+                                <input
+                                    type="text"
+                                    value={newItem.location}
+                                    onChange={e => setNewItem({ ...newItem, location: e.target.value })}
+                                    placeholder="np. Plac Główny - Wiata A, Kontener 2..."
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white placeholder-slate-500 outline-none focus:border-amber-500"
+                                />
+                            </div>
+
+                            {/* Uwagi / notatka */}
+                            <div>
+                                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                    Uwagi (np. skąd zjechało, stan materiału)
+                                </label>
+                                <textarea
+                                    value={newItem.notes}
+                                    onChange={e => setNewItem({ ...newItem, notes: e.target.value })}
+                                    placeholder="np. Zwrot z budowy Grunwaldzka, otwarty worek, ok. 15kg..."
+                                    rows={2}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 outline-none focus:border-amber-500"
+                                />
+                            </div>
+
+                            {/* Przyciski Zapisu */}
+                            <div className="pt-3 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsAddModalOpen(false)}
+                                    className="py-3 px-4 rounded-xl border border-slate-700 text-slate-300 font-bold text-xs"
+                                >
+                                    Anuluj
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={isSubmittingNew}
+                                    className="flex-1 py-3 px-4 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl shadow-lg disabled:opacity-50 flex items-center justify-center gap-2"
+                                >
+                                    {isSubmittingNew ? "ZAPISYWANIE..." : "✅ Zapisz na placu"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* LIGHTBOX: Pełnoekranowy podgląd zdjęcia */}
+            {lightboxUrl && (
+                <div
+                    onClick={() => setLightboxUrl(null)}
+                    className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-4 cursor-pointer animate-fade-in"
+                >
+                    <button
+                        onClick={() => setLightboxUrl(null)}
+                        className="absolute top-4 right-4 text-white font-bold bg-slate-800/80 px-4 py-2 rounded-full text-sm"
+                    >
+                        ✕ Zamknij
+                    </button>
+                    <img
+                        src={lightboxUrl}
+                        alt="Powiększenie"
+                        className="max-w-full max-h-[85vh] object-contain rounded-2xl border border-slate-800 shadow-2xl"
+                    />
+                </div>
+            )}
+
+            {/* MODAL: Instrukcja PWA (Dodaj do ekranu telefonu) */}
+            {isPwaModalOpen && (
+                <div
+                    onClick={() => setIsPwaModalOpen(false)}
+                    className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
+                >
+                    <div
+                        onClick={e => e.stopPropagation()}
+                        className="bg-slate-900 border border-slate-800 w-full max-w-sm rounded-3xl p-5 shadow-2xl text-left"
+                    >
+                        <div className="flex items-center gap-2 mb-3">
+                            <span className="text-3xl">📱</span>
+                            <div>
+                                <h3 className="font-black text-sm text-white uppercase">Aplikacja na telefon</h3>
+                                <p className="text-[10px] text-slate-400">Instalacja ikony na pulpicie telefonu</p>
+                            </div>
+                        </div>
+
+                        <div className="space-y-3 text-xs text-slate-300 bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/60 leading-relaxed">
+                            <div>
+                                <p className="font-bold text-amber-400 mb-0.5">🍏 iPhone (Safari):</p>
+                                <p>1. Kliknij ikonę <b>Udostępnij</b> (kwadrat ze strzałką w górę).</p>
+                                <p>2. Wybierz <b>„Do ekranu początkowego”</b>.</p>
+                            </div>
+                            <div className="border-t border-slate-700/60 pt-2">
+                                <p className="font-bold text-amber-400 mb-0.5">🤖 Android (Chrome):</p>
+                                <p>1. Kliknij <b>trzy kropki</b> w prawym górnym rogu.</p>
+                                <p>2. Wybierz <b>„Dodaj do ekranu głównego”</b> lub <b>„Zainstaluj aplikację”</b>.</p>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={() => setIsPwaModalOpen(false)}
+                            className="w-full mt-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl transition"
+                        >
+                            Rozumiem
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Powiadomienie Toast na dole ekranu */}
+            {toast && (
+                <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 z-50 bg-amber-500 text-slate-950 font-black text-xs py-2.5 px-4 rounded-2xl shadow-xl flex items-center justify-between animate-bounce">
+                    <span>{toast}</span>
+                    <button onClick={() => setToast(null)} className="ml-3 font-bold text-slate-900">
+                        ✕
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
