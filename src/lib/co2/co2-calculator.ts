@@ -1,8 +1,8 @@
 // src/lib/co2/co2-calculator.ts
 
 /**
- * Global CO2 emission and cost parameters for PESAM warehouse management system.
- * Based on 'baza_wskaznikow_co2.md' and official sources (KOBiZE 2026, DEFRA 2025).
+ * Globalne parametry emisyjne i kosztowe CO2 dla systemu PESAM.
+ * Oparte na 'baza_wskaznikow_co2.md' oraz oficjalnych źródłach (KOBiZE 2026, DEFRA 2025).
  */
 export const CO2_GLOBAL_PARAMS = {
   defaultConstructionDistanceKm: 100, // Domyślny promień zwrotu z budowy (km w jedną stronę)
@@ -95,9 +95,12 @@ export interface ProtocolItemInput {
   unit?: string;
   notes?: string;
   condition?: string;
+  category?: string;
+  subcategory?: string;
   isWaste?: boolean;
   isResidual?: boolean;
   inventoryNumber?: string;
+  finalStatus?: string;
   disposalMethodKey?: string;
 }
 
@@ -140,15 +143,66 @@ export interface ProtocolCo2Summary {
   siteName: string;
   date: string;
   distanceKm: number;
-  totalEstimatedWeightKg: number;
-  transportCo2Kg: number;
+  totalEstimatedWeightKg: number; // Masa samych resztek / odpadów
+  totalCargoWeightKg: number; // Masa całkowita całego ładunku pojazdu (wraz ze sprzętem)
+  allocationRatio: number; // Procentowy udział resztek w masie kursu (np. 0.1705 dla 17.05%)
+  transportCo2Kg: number; // Emisja transportu przypisana proporcjonalnie do resztek
+  fullCourseTransportCo2Kg: number; // Emisja całego kursu pojazdu (tam i z powrotem)
   disposalCo2Kg: number;
   totalCo2EmissionKg: number;
   totalCo2SavedKg: number;
   netCo2EmissionKg: number;
   costs: Co2CostResult;
-  itemDetails: ItemCo2Details[];
+  itemDetails: ItemCo2Details[]; // TYLKO pozycje resztek / odpadów
   hasResiduals: boolean;
+  residualItemsCount: number;
+  totalItemsCount: number;
+}
+
+/**
+ * Sprawdza jednoznacznie czy dana pozycja to resztka materiału budowlanego lub odpad zwożony z budowy,
+ * czy też regularny sprzęt magazynowy/inwentarzowy (ogrodzenia, rusztowania, szalunki, agregaty).
+ */
+export function isItemResidualOrWaste(item: ProtocolItemInput): boolean {
+  // 1. Bezpośrednie flagi z systemu
+  if (item.isResidual === true || item.isWaste === true) {
+    return true;
+  }
+
+  // 2. Numery inwentarzowe typowe dla resztek i odpadów
+  const invUpper = (item.inventoryNumber || "").toUpperCase().trim();
+  if (invUpper === "RESZTKI" || invUpper === "ODPAD") {
+    return true;
+  }
+
+  // 3. Kategorie systemowe resztek
+  if (item.category === "Pozostałości budowlane" || item.subcategory === "Materiały otwarte / Resztki") {
+    return true;
+  }
+
+  // 4. Status utylizacji
+  if (item.finalStatus === "odpad_utylizacja") {
+    return true;
+  }
+
+  // 5. Notatki i opisy wpisane przez kierownika lub magazyniera
+  const textToSearch = [item.notes, item.condition, item.name]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (
+    textToSearch.includes("[pozostałości]") ||
+    textToSearch.includes("[resztki]") ||
+    textToSearch.includes("odpad do utylizacji") ||
+    textToSearch.includes("otwarty worek") ||
+    textToSearch.includes("resztk")
+  ) {
+    return true;
+  }
+
+  // Jeśli pozycja ma regularny numer sprzętu (np. "og01-02", "SPRZ-") i nie spełnia powyższych, to jest to sprzęt, a NIE resztka!
+  return false;
 }
 
 /**
@@ -184,7 +238,7 @@ export function estimateItemWeightKg(item: { name: string; quantity?: number; re
     }
   }
 
-  // 2. Jeśli brak jawnej wagi w nazwie, sprawdzamy jednostki potoczne
+  // 2. Jeśli brak jawnej wagi w nazwie, sprawdzamy jednostki i typy materiałów
   if (estimatedWeightKg === 0) {
     if (unitLower === 'kg') {
       estimatedWeightKg = qty;
@@ -224,7 +278,7 @@ export function estimateItemWeightKg(item: { name: string; quantity?: number; re
 }
 
 /**
- * Wylicza emisję CO2 kursu transportowego (tam i z powrotem)
+ * Wylicza całkowitą emisję CO2 kursu transportowego pojazdu (tam i z powrotem)
  */
 export function calculateTransportCo2(
   distanceKm: number,
@@ -308,7 +362,10 @@ export function detectDefaultDisposalMethod(item: ProtocolItemInput): string {
 }
 
 /**
- * Podsumowuje protokół pod kątem emisji CO2 i kosztów
+ * Podsumowuje protokół pod kątem emisji CO2 i kosztów.
+ * KLUCZOWE: Uwzględnia TYLKO resztki materiałów budowlanych (isItemResidualOrWaste),
+ * wykluczając sprzęt (ogrodzenia, szalunki itp.), a emisję transportu alokuje wg wzoru z baza_wskaznikow_co2.md:
+ * E_zwrotu = E_kurs * (masa_resztki / masa_całkowita_ładunku).
  */
 export function calculateProtocolCo2Summary(
   protocol: ProtocolInput,
@@ -318,35 +375,37 @@ export function calculateProtocolCo2Summary(
     maxEurPerTon?: number;
     eurToPln?: number;
     fuelLPer100km?: number;
+    allocationMethod?: 'mass' | 'dedicated_100';
   }
 ): ProtocolCo2Summary {
   const minEur = params?.minEurPerTon ?? CO2_COST_PARAMS.defaultMinEurPerTon;
   const maxEur = params?.maxEurPerTon ?? CO2_COST_PARAMS.defaultMaxEurPerTon;
   const eurToPln = params?.eurToPln ?? CO2_COST_PARAMS.defaultEurToPlnRate;
   const fuelLPer100km = params?.fuelLPer100km ?? CO2_GLOBAL_PARAMS.defaultFleetVehicleFuelConsumptionLPer100km;
+  const allocationMethod = params?.allocationMethod ?? 'mass';
 
   const distanceKm = overrideDistanceKm ?? protocol.constructionDistanceKm ?? CO2_GLOBAL_PARAMS.defaultConstructionDistanceKm;
+  const allItems = Array.isArray(protocol.items) ? protocol.items : [];
 
-  let totalWeightKg = 0;
+  // 1. Oblicz masę CAŁEGO ładunku pojazdu (wraz ze sprzętem budowlanym)
+  let totalCargoWeightKg = 0;
+  for (const item of allItems) {
+    totalCargoWeightKg += estimateItemWeightKg(item);
+  }
+
+  // 2. Wyodrębnij TYLKO pozycje resztek materiałowych i odpadów
+  const residualItems = allItems.filter(isItemResidualOrWaste);
+  const hasResiduals = residualItems.length > 0;
+
+  let totalResidualWeightKg = 0;
   let totalDisposalCo2 = 0;
   let totalCo2Saved = 0;
   const itemDetails: ItemCo2Details[] = [];
 
-  const items = Array.isArray(protocol.items) ? protocol.items : [];
-  
-  // Czy protokół zawiera resztki lub odpady
-  const hasResiduals = items.some(i => 
-    i.isResidual || 
-    i.isWaste || 
-    i.inventoryNumber === "RESZTKI" || 
-    i.inventoryNumber === "ODPAD" ||
-    (i.name && (i.name.toLowerCase().includes("resztk") || i.name.toLowerCase().includes("odpad")))
-  );
-
-  for (let idx = 0; idx < items.length; idx++) {
-    const item = items[idx];
+  for (let idx = 0; idx < residualItems.length; idx++) {
+    const item = residualItems[idx];
     const weightKg = estimateItemWeightKg(item);
-    totalWeightKg += weightKg;
+    totalResidualWeightKg += weightKg;
 
     const methodKey = detectDefaultDisposalMethod(item);
     const isReuse = methodKey === "reuse_magazyn";
@@ -380,8 +439,22 @@ export function calculateProtocolCo2Summary(
     });
   }
 
-  // Emisja transportu
-  const transportCo2Kg = calculateTransportCo2(distanceKm, fuelLPer100km);
+  // 3. Emisja transportu i alokacja masowa zgodnie z baza_wskaznikow_co2.md
+  const fullCourseTransportCo2Kg = calculateTransportCo2(distanceKm, fuelLPer100km);
+  
+  let allocationRatio = 0;
+  if (hasResiduals) {
+    if (allocationMethod === 'dedicated_100') {
+      allocationRatio = 1.0;
+    } else {
+      // Alokacja proporcjonalna do masy resztek w całym przewożonym ładunku
+      allocationRatio = totalCargoWeightKg > 0
+        ? Math.min(1.0, totalResidualWeightKg / Math.max(totalResidualWeightKg, totalCargoWeightKg))
+        : 1.0;
+    }
+  }
+
+  const transportCo2Kg = Number((fullCourseTransportCo2Kg * allocationRatio).toFixed(3));
   const totalCo2EmissionKg = Number((transportCo2Kg + totalDisposalCo2).toFixed(3));
   const netCo2EmissionKg = Number((Math.max(0, totalCo2EmissionKg - totalCo2Saved)).toFixed(3));
 
@@ -393,14 +466,19 @@ export function calculateProtocolCo2Summary(
     siteName: protocol.sourceSiteName || "Magazyn / Budowa",
     date: protocol.documentDate || (protocol.createdAt ? protocol.createdAt.split("T")[0] : ""),
     distanceKm,
-    totalEstimatedWeightKg: Number(totalWeightKg.toFixed(2)),
+    totalEstimatedWeightKg: Number(totalResidualWeightKg.toFixed(2)), // Masa TYLKO resztek!
+    totalCargoWeightKg: Number(totalCargoWeightKg.toFixed(2)),
+    allocationRatio: Number(allocationRatio.toFixed(4)),
     transportCo2Kg,
+    fullCourseTransportCo2Kg,
     disposalCo2Kg: Number(totalDisposalCo2.toFixed(3)),
     totalCo2EmissionKg,
     totalCo2SavedKg: Number(totalCo2Saved.toFixed(3)),
     netCo2EmissionKg,
     costs,
-    itemDetails,
-    hasResiduals
+    itemDetails, // Zawiera TYLKO resztki
+    hasResiduals,
+    residualItemsCount: residualItems.length,
+    totalItemsCount: allItems.length
   };
 }

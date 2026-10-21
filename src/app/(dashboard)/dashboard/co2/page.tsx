@@ -39,6 +39,7 @@ export default function CO2ModulePage() {
   const [eurToPlnRate, setEurToPlnRate] = useState(CO2_COST_PARAMS.defaultEurToPlnRate);
   const [fuelConsumption, setFuelConsumption] = useState(CO2_GLOBAL_PARAMS.defaultFleetVehicleFuelConsumptionLPer100km);
   const [defaultDistance, setDefaultDistance] = useState(CO2_GLOBAL_PARAMS.defaultConstructionDistanceKm);
+  const [allocationMethod, setAllocationMethod] = useState<'mass' | 'dedicated_100'>('mass');
 
   // Stan symulatora szybkiego przeliczenia
   const [simName, setSimName] = useState("Gruz betonowy (kawałki)");
@@ -81,6 +82,9 @@ export default function CO2ModulePage() {
             unit: it.unit || "szt.",
             notes: it.notes || "",
             condition: it.condition || "",
+            category: it.category || "",
+            subcategory: it.subcategory || "",
+            finalStatus: it.finalStatus || "",
             isWaste: Boolean(it.isWaste || it.inventoryNumber === "ODPAD"),
             isResidual: Boolean(it.isResidual || it.inventoryNumber === "RESZTKI"),
             inventoryNumber: it.inventoryNumber || "",
@@ -108,10 +112,11 @@ export default function CO2ModulePage() {
         minEurPerTon,
         maxEurPerTon,
         eurToPln: eurToPlnRate,
-        fuelLPer100km: fuelConsumption
+        fuelLPer100km: fuelConsumption,
+        allocationMethod
       });
     });
-  }, [rawProtocols, defaultDistance, minEurPerTon, maxEurPerTon, eurToPlnRate, fuelConsumption]);
+  }, [rawProtocols, defaultDistance, minEurPerTon, maxEurPerTon, eurToPlnRate, fuelConsumption, allocationMethod]);
 
   // Filtrowanie listy protokołów
   const filteredSummaries = useMemo(() => {
@@ -348,7 +353,7 @@ export default function CO2ModulePage() {
         {activeTab === "register" && (
           <div className="bg-white p-6 rounded-b-2xl border-x border-b border-slate-200/80 shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="w-full sm:w-96 relative">
+              <div className="w-full sm:w-80 relative">
                 <input
                   type="text"
                   placeholder="Szukaj po numerze, budowie lub materiale..."
@@ -359,15 +364,29 @@ export default function CO2ModulePage() {
                 <span className="absolute left-3 top-2.5 text-slate-400 text-sm">🔍</span>
               </div>
 
-              <label className="flex items-center gap-2.5 cursor-pointer text-sm font-bold text-slate-700 bg-slate-50 px-4 py-2 border border-slate-200 rounded-xl">
-                <input
-                  type="checkbox"
-                  checked={filterWasteOnly}
-                  onChange={(e) => setFilterWasteOnly(e.target.checked)}
-                  className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                />
-                <span>Tylko zwroty z resztkami / odpadami</span>
-              </label>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-700 bg-slate-50 px-3 py-2 border border-slate-200 rounded-xl">
+                  <span>Alokacja transportu:</span>
+                  <select
+                    value={allocationMethod}
+                    onChange={(e) => setAllocationMethod(e.target.value as any)}
+                    className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold focus:outline-none"
+                  >
+                    <option value="mass">Proporcjonalna do masy resztek (wg wzoru)</option>
+                    <option value="dedicated_100">100% dedykowany kurs po zwrot</option>
+                  </select>
+                </div>
+
+                <label className="flex items-center gap-2.5 cursor-pointer text-sm font-bold text-slate-700 bg-slate-50 px-4 py-2 border border-slate-200 rounded-xl">
+                  <input
+                    type="checkbox"
+                    checked={filterWasteOnly}
+                    onChange={(e) => setFilterWasteOnly(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>Tylko zwroty z resztkami / odpadami</span>
+                </label>
+              </div>
             </div>
 
             {loading ? (
@@ -388,11 +407,11 @@ export default function CO2ModulePage() {
                       <th className="py-3 px-4">Nr Protokołu</th>
                       <th className="py-3 px-4">Budowa Źródłowa</th>
                       <th className="py-3 px-4">Data</th>
-                      <th className="py-3 px-4 text-center">Pozycje</th>
-                      <th className="py-3 px-4 text-right">Masa szac. (kg)</th>
-                      <th className="py-3 px-4 text-right">Transp. CO2 (kg)</th>
-                      <th className="py-3 px-4 text-right">Utyl. CO2 (kg)</th>
-                      <th className="py-3 px-4 text-right font-black text-slate-900">Łącznie CO2 (kg)</th>
+                      <th className="py-3 px-4 text-center">Pozycje Resztek</th>
+                      <th className="py-3 px-4 text-right">Masa Resztek (kg)</th>
+                      <th className="py-3 px-4 text-right">Transp. CO2 (alokacja)</th>
+                      <th className="py-3 px-4 text-right">Utyl. CO2</th>
+                      <th className="py-3 px-4 text-right font-black text-slate-900">Łącznie CO2</th>
                       <th className="py-3 px-4 text-right">Wycena ({minEurPerTon}–{maxEurPerTon} €/t)</th>
                       <th className="py-3 px-4 text-center">Szczegóły</th>
                     </tr>
@@ -413,10 +432,25 @@ export default function CO2ModulePage() {
                             </td>
                             <td className="py-3 px-4 font-bold text-slate-900">{s.siteName}</td>
                             <td className="py-3 px-4 text-slate-500">{s.date || "Brak daty"}</td>
-                            <td className="py-3 px-4 text-center">{s.itemDetails.length}</td>
-                            <td className="py-3 px-4 text-right font-bold">{s.totalEstimatedWeightKg.toLocaleString()} kg</td>
-                            <td className="py-3 px-4 text-right text-slate-600">{s.transportCo2Kg.toFixed(2)}</td>
-                            <td className="py-3 px-4 text-right text-slate-600">{s.disposalCo2Kg.toFixed(3)}</td>
+                            <td className="py-3 px-4 text-center">
+                              <span className="font-bold text-slate-900">{s.residualItemsCount}</span>
+                              <span className="text-[10px] text-slate-400 block font-normal">(z {s.totalItemsCount} w prot.)</span>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <span className="font-bold text-slate-900">{s.totalEstimatedWeightKg.toLocaleString()} kg</span>
+                              {s.totalCargoWeightKg > s.totalEstimatedWeightKg && (
+                                <span className="text-[10px] text-slate-400 block font-normal">
+                                  z {s.totalCargoWeightKg.toLocaleString()} kg ładunku
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right text-slate-700">
+                              <span className="font-bold text-slate-900">{s.transportCo2Kg.toFixed(2)} kg</span>
+                              <span className="text-[10px] text-blue-600 block font-semibold">
+                                alokacja {(s.allocationRatio * 100).toFixed(1)}%
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right text-slate-600">{s.disposalCo2Kg.toFixed(3)} kg</td>
                             <td className="py-3 px-4 text-right font-black text-rose-700">
                               {s.totalCo2EmissionKg.toFixed(2)} kg
                             </td>
@@ -445,7 +479,7 @@ export default function CO2ModulePage() {
                                 <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
                                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                                     <h4 className="font-black text-xs text-slate-800 uppercase tracking-wider">
-                                      Rozbicie pozycji zwrotu: {s.protocolNumber} (Budowa: {s.siteName}, Dystans przyjęty: {s.distanceKm} km w 1 stronę)
+                                      Zwiezione resztki materiałów: {s.protocolNumber} (Masa resztek: {s.totalEstimatedWeightKg} kg z {s.totalCargoWeightKg} kg całkowitego ładunku | Alokacja transportu: {(s.allocationRatio * 100).toFixed(1)}% | Budowa: {s.siteName})
                                     </h4>
                                     <span className="text-xs font-bold text-emerald-700">
                                       Odzyskane CO2 (Reuse): +{s.totalCo2SavedKg} kg CO2
