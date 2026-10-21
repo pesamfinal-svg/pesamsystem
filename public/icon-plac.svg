@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ea580c"/>
+    </linearGradient>
+  </defs>
+  <!-- Background with rounded corners -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="none" stroke="#f59e0b" stroke-width="8" stroke-opacity="0.3"/>
+  
+  <!-- Crane / Construction Tower Symbol -->
+  <g transform="translate(64, 48)">
+    <!-- Tower Crane Base -->
+    <path d="M 60 340 L 100 80 L 140 340 Z" fill="none" stroke="url(#amberGrad)" stroke-width="12" stroke-linejoin="round"/>
+    <!-- Truss struts -->
+    <line x1="75" y1="260" x2="125" y2="260" stroke="#f59e0b" stroke-width="8"/>
+    <line x1="85" y1="180" x2="115" y2="180" stroke="#f59e0b" stroke-width="8"/>
+    <line x1="75" y1="260" x2="115" y2="180" stroke="#f59e0b" stroke-width="6"/>
+    <line x1="125" y1="260" x2="85" y2="180" stroke="#f59e0b" stroke-width="6"/>
+    <line x1="85" y1="180" x2="100" y2="80" stroke="#f59e0b" stroke-width="6"/>
+    
+    <!-- Crane Jib (Boom) -->
+    <line x1="30" y1="80" x2="350" y2="80" stroke="url(#amberGrad)" stroke-width="16" stroke-linecap="round"/>
+    <!-- Counterweight -->
+    <rect x="20" y="65" width="40" height="30" rx="6" fill="#f59e0b"/>
+    <!-- Tie cables -->
+    <line x1="100" y1="30" x2="30" y2="80" stroke="#f59e0b" stroke-width="6"/>
+    <line x1="100" y1="30" x2="260" y2="80" stroke="#f59e0b" stroke-width="6"/>
+    <polygon points="100,20 85,80 115,80" fill="url(#amberGrad)"/>
+    
+    <!-- Hoist and hook cable -->
+    <line x1="280" y1="80" x2="280" y2="200" stroke="#e2e8f0" stroke-width="6" stroke-dasharray="10 6"/>
+    <rect x="270" y="195" width="20" height="15" rx="3" fill="#ea580c"/>
+    <path d="M 280 210 Q 280 240 265 240 Q 250 240 250 225" fill="none" stroke="#f59e0b" stroke-width="8" stroke-linecap="round"/>
+
+    <!-- Residual Materials Stack (Bricks & Pallet) -->
+    <g transform="translate(180, 240)">
+      <!-- Pallet base -->
+      <rect x="0" y="90" width="160" height="12" rx="3" fill="#78350f"/>
+      <rect x="10" y="102" width="25" height="10" fill="#78350f"/>
+      <rect x="67" y="102" width="25" height="10" fill="#78350f"/>
+      <rect x="125" y="102" width="25" height="10" fill="#78350f"/>
+      
+      <!-- Layer 1 Bricks -->
+      <rect x="10" y="65" width="42" height="22" rx="4" fill="url(#amberGrad)" stroke="#0f172a" stroke-width="3"/>
+      <rect x="56" y="65" width="42" height="22" rx="4" fill="url(#amberGrad)" stroke="#0f172a" stroke-width="3"/>
+      <rect x="102" y="65" width="42" height="22" rx="4" fill="url(#amberGrad)" stroke="#0f172a" stroke-width="3"/>
+      
+      <!-- Layer 2 Bricks -->
+      <rect x="30" y="40" width="42" height="22" rx="4" fill="url(#amberGrad)" stroke="#0f172a" stroke-width="3"/>
+      <rect x="76" y="40" width="42" height="22" rx="4" fill="url(#amberGrad)" stroke="#0f172a" stroke-width="3"/>
+      
+      <!-- Layer 3 Single Top Brick -->
+      <rect x="53" y="15" width="42" height="22" rx="4" fill="#fbbf24" stroke="#0f172a" stroke-width="3"/>
+    </g>
+  </g>
+  
+  <!-- Text Label -->
+  <text x="256" y="440" font-family="system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-weight="900" font-size="44" fill="#f59e0b" text-anchor="middle" letter-spacing="4">PESAM PLAC</text>
+</svg>

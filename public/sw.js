@@ -1,10 +1,12 @@
 // public/sw.js
-const CACHE_NAME = 'pesam-voice-v11';
+const CACHE_NAME = 'pesam-pwa-v12';
 
 // Cachujemy TYLKO pliki które na pewno istnieją i są statyczne
 const PRECACHE = [
   '/voice-order.html',
   '/manifest.json',
+  '/manifest-plac.json',
+  '/icon-plac.svg',
   '/favicon.ico',
 ];
 
@@ -21,7 +23,7 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then(keys => Promise.all(
         keys
-          .filter(k => k.startsWith('pesam-voice') && k !== CACHE_NAME)
+          .filter(k => (k.startsWith('pesam-voice') || k.startsWith('pesam-pwa')) && k !== CACHE_NAME)
           .map(k => caches.delete(k))
       ))
       .then(() => self.clients.claim())

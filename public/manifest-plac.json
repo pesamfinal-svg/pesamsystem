@@ -1,0 +1,24 @@
+{
+  "name": "PESAM Plac & Resztki",
+  "short_name": "PESAM Plac",
+  "description": "Mobilny magazyn resztek budowlanych i obchód placu",
+  "start_url": "/plac",
+  "scope": "/plac",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-plac.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}

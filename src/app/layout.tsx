@@ -5,11 +5,10 @@ import { AuthProvider } from "@/lib/auth/AuthContext";
 // Poprawny sposób definiowania meta tagów dla PWA w Next.js
 export const metadata: Metadata = {
   title: "PESAM — System Zarządzania Magazynem",
-  manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "PESAM Voice"
+    title: "PESAM"
   },
 };
 

@@ -103,6 +103,18 @@ export default function PlacResidualsPage() {
     useEffect(() => {
         setIsOnline(navigator.onLine);
 
+        // Dynamiczne ustawienie manifestu PWA dla Placu (żeby przeglądarka instalowała PESAM Plac zamiast Voice)
+        let manifestLink = document.querySelector<HTMLLinkElement>("link[rel~='manifest']");
+        if (manifestLink) {
+            manifestLink.href = "/manifest-plac.json";
+        } else {
+            manifestLink = document.createElement("link");
+            manifestLink.rel = "manifest";
+            manifestLink.href = "/manifest-plac.json";
+            document.head.appendChild(manifestLink);
+        }
+        document.title = "PESAM Plac & Resztki";
+
         // Natychmiastowe załadowanie z pamięci telefonu (0 ms opóźnienia na placu)
         const cachedItems = localStorage.getItem("pesam_residuals_cache");
         if (cachedItems) {
