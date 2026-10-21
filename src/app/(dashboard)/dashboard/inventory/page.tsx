@@ -188,7 +188,7 @@ export default function InventoryPage() {
 
     // MODAL SERWISOWY
     const [isServiceModalOpen, setIsServiceModalOpen] = useState(false);
-    const [serviceData, setServiceData] = useState({ newStatus: "sprawne", description: "", cost: "" });
+    const [serviceData, setServiceData] = useState({ newStatus: "sprawne", description: "", cost: "", date: new Date().toISOString().split("T")[0] });
     const [isServiceSubmitting, setIsServiceSubmitting] = useState(false);
 
     // MODAL ZGŁOSZENIA SZKODY - ClaimInvestigationModal
@@ -976,7 +976,8 @@ export default function InventoryPage() {
         setServiceData({
             newStatus: selectedItem.status || "sprawne",
             description: "",
-            cost: ""
+            cost: "",
+            date: new Date().toISOString().split("T")[0]
         });
         setIsServiceModalOpen(true);
     };
@@ -1010,8 +1011,11 @@ export default function InventoryPage() {
                     desc += ` | Koszt naprawy: ${serviceData.cost} PLN`;
                 }
 
+                const entryDateIso = serviceData.date ? new Date(`${serviceData.date}T12:00:00`).toISOString() : new Date().toISOString();
+
                 transaction.set(historyRef, {
-                    date: new Date().toISOString(),
+                    date: entryDateIso,
+                    documentDate: serviceData.date || entryDateIso.split("T")[0],
                     type: "SERWIS",
                     description: desc,
                     status: serviceData.newStatus.toLowerCase(),
@@ -1909,7 +1913,7 @@ export default function InventoryPage() {
                             )}
 
                             <div className="flex flex-wrap gap-3 mb-8">
-                                <button onClick={() => { setServiceData({ newStatus: selectedItem.status, description: "", cost: "" }); setIsServiceModalOpen(true); }} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
+                                <button onClick={openServiceModal} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
 
                                 {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
                                     <button
@@ -2563,6 +2567,17 @@ export default function InventoryPage() {
                         </div>
 
                         <form onSubmit={handleServiceSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Data wpisu / wykonania serwisu:</label>
+                                <input
+                                    type="date"
+                                    required
+                                    value={serviceData.date}
+                                    onChange={(e) => setServiceData({ ...serviceData, date: e.target.value })}
+                                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 font-bold bg-white text-sm"
+                                />
+                            </div>
+
                             <div>
                                 <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Nowy status urządzenia:</label>
                                 <select
