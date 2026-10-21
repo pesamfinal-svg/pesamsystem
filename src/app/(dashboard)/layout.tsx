@@ -47,6 +47,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             icon: "📝",
             requiredPermission: ["protocolsIssue", "protocolsReturnApp", "protocolsReturnPaper", "acceptReturns"]
         },
+        { name: "Ślad CO2 Odpadów", path: "/dashboard/co2", icon: "🌱" },
 
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
         { name: "Flota (Pojazdy)", path: "/dashboard/vehicles", icon: "🚚", requiredPermission: ["viewVehicles", "manageVehicles"] },
