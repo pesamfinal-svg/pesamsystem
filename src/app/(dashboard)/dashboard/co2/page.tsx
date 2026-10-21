@@ -140,6 +140,9 @@ export default function CO2ModulePage() {
   // KPI Agregaty
   const kpiData = useMemo(() => {
     let totalWeightKg = 0;
+    let totalReuseKg = 0;
+    let totalWasteKg = 0;
+    let totalDisposalCo2Kg = 0;
     let totalCo2Kg = 0;
     let totalSavedCo2Kg = 0;
     let totalMinEur = 0;
@@ -149,6 +152,9 @@ export default function CO2ModulePage() {
 
     for (const s of filteredSummaries) {
       totalWeightKg += s.totalEstimatedWeightKg;
+      totalReuseKg += s.totalReuseWeightKg;
+      totalWasteKg += s.totalWasteWeightKg;
+      totalDisposalCo2Kg += s.disposalCo2Kg;
       totalCo2Kg += s.totalCo2EmissionKg;
       totalSavedCo2Kg += s.totalCo2SavedKg;
       totalMinEur += s.costs.minEur;
@@ -159,6 +165,9 @@ export default function CO2ModulePage() {
 
     return {
       totalWeightKg,
+      totalReuseKg: Number(totalReuseKg.toFixed(2)),
+      totalWasteKg: Number(totalWasteKg.toFixed(2)),
+      totalDisposalCo2Kg: Number(totalDisposalCo2Kg.toFixed(3)),
       totalWeightTonnes: Number((totalWeightKg / 1000).toFixed(2)),
       totalCo2Kg: Number(totalCo2Kg.toFixed(2)),
       totalCo2Tonnes: Number((totalCo2Kg / 1000).toFixed(3)),
@@ -263,7 +272,7 @@ export default function CO2ModulePage() {
               {kpiData.totalWeightTonnes} <span className="text-sm font-semibold text-slate-500">t</span>
             </div>
             <div className="text-xs font-medium text-slate-500 mt-1">
-              Łącznie: <strong>{kpiData.totalWeightKg.toLocaleString()} kg</strong> materiałów
+              Łącznie: <strong>{kpiData.totalWeightKg.toLocaleString()} kg</strong> resztek (w tym {kpiData.totalReuseKg.toLocaleString()} kg reuse / {kpiData.totalWasteKg.toLocaleString()} kg utylizacja)
             </div>
           </div>
 
@@ -479,7 +488,7 @@ export default function CO2ModulePage() {
                                 <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
                                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                                     <h4 className="font-black text-xs text-slate-800 uppercase tracking-wider">
-                                      Zwiezione resztki materiałów: {s.protocolNumber} (Masa resztek: {s.totalEstimatedWeightKg} kg z {s.totalCargoWeightKg} kg całkowitego ładunku | Alokacja transportu: {(s.allocationRatio * 100).toFixed(1)}% | Budowa: {s.siteName})
+                                      Zwiezione resztki materiałów: {s.protocolNumber} (Masa resztek: {s.totalEstimatedWeightKg} kg: {s.totalReuseWeightKg} kg ponowne użycie + {s.totalWasteWeightKg} kg ścinki/odpad do utylizacji | Alokacja transportu: {(s.allocationRatio * 100).toFixed(1)}% | Budowa: {s.siteName})
                                     </h4>
                                     <span className="text-xs font-bold text-emerald-700">
                                       Odzyskane CO2 (Reuse): +{s.totalCo2SavedKg} kg CO2
@@ -501,23 +510,41 @@ export default function CO2ModulePage() {
                                       <tbody className="divide-y divide-slate-100">
                                         {s.itemDetails.map((it) => (
                                           <tr key={it.itemId} className="hover:bg-slate-50">
-                                            <td className="py-2 px-3 font-semibold text-slate-800">{it.itemName}</td>
-                                            <td className="py-2 px-3 text-center">{it.quantity} {it.unit}</td>
-                                            <td className="py-2 px-3 text-right font-bold">{it.estimatedWeightKg} kg</td>
-                                            <td className="py-2 px-3 text-slate-600">{it.disposalMethodName}</td>
-                                            <td className="py-2 px-3 text-right text-rose-700 font-bold">
-                                              {it.disposalCo2Kg > 0 ? `${it.disposalCo2Kg.toFixed(4)} kg` : "0 kg"}
-                                            </td>
-                                            <td className="py-2 px-3 text-right">
-                                              {it.isReuse ? (
-                                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded font-bold text-[10px]">
-                                                  ♻️ Ponowne użycie na magazynie
-                                                </span>
-                                              ) : (
-                                                <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded text-[10px]">
-                                                  Utylizacja zewnętrzna
-                                                </span>
+                                            <td className="py-2.5 px-3">
+                                              <div className="font-semibold text-slate-900">{it.itemName}</div>
+                                              {it.notesAnalysis && (
+                                                <div className="text-[10px] text-slate-500 font-medium">{it.notesAnalysis}</div>
                                               )}
+                                            </td>
+                                            <td className="py-2.5 px-3 text-center font-bold text-slate-800">{it.quantity} {it.unit}</td>
+                                            <td className="py-2.5 px-3 text-right">
+                                              <span className="font-bold text-slate-900">{it.estimatedWeightKg} kg</span>
+                                              <div className="text-[10px] text-slate-500">
+                                                {it.reuseWeightKg > 0 && <span className="text-emerald-700 font-bold">{it.reuseWeightKg} kg reuse</span>}
+                                                {it.reuseWeightKg > 0 && it.wasteWeightKg > 0 && <span> + </span>}
+                                                {it.wasteWeightKg > 0 && <span className="text-orange-700 font-bold">{it.wasteWeightKg} kg odpad</span>}
+                                              </div>
+                                            </td>
+                                            <td className="py-2.5 px-3 text-slate-600">
+                                              <div>{it.disposalMethodName}</div>
+                                              <div className="text-[10px] text-slate-400">DEFRA 2025</div>
+                                            </td>
+                                            <td className="py-2.5 px-3 text-right text-rose-700 font-black">
+                                              {it.disposalCo2Kg > 0 ? `${it.disposalCo2Kg.toFixed(4)} kg CO2e` : "0.0000 kg"}
+                                            </td>
+                                            <td className="py-2.5 px-3 text-right">
+                                              <div className="flex flex-col items-end gap-1">
+                                                {it.reuseWeightKg > 0 && (
+                                                  <span className="px-2 py-0.5 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded font-bold text-[10px]">
+                                                    ♻️ Reuse: {it.reuseWeightKg} kg
+                                                  </span>
+                                                )}
+                                                {it.wasteWeightKg > 0 && (
+                                                  <span className="px-2 py-0.5 bg-orange-100 text-orange-900 border border-orange-300 rounded font-bold text-[10px]">
+                                                    🗑️ Odpad/Ścinki: {it.wasteWeightKg} kg
+                                                  </span>
+                                                )}
+                                              </div>
                                             </td>
                                           </tr>
                                         ))}

@@ -17,13 +17,13 @@ export const CO2_GLOBAL_PARAMS = {
  */
 export const DISPOSAL_CO2_FACTORS_KG_PER_TONNE: Record<string, { name: string; factor: number; method: string; status: string }> = {
   util_budowlane_zamknieta_petla: {
-    name: "Odpady budowlane – recykling (closed-loop)",
+    name: "Odpady budowlane / Gips – recykling (closed-loop)",
     factor: 1.008,
     method: "recykling_closed_loop",
     status: "DEFRA 2025"
   },
   util_budowlane_otwarta_petla: {
-    name: "Odpady budowlane – recykling (open-loop)",
+    name: "Odpady budowlane / Gips – recykling (open-loop)",
     factor: 1.00835,
     method: "recykling_open_loop",
     status: "DEFRA 2025"
@@ -53,7 +53,7 @@ export const DISPOSAL_CO2_FACTORS_KG_PER_TONNE: Record<string, { name: string; f
     status: "DEFRA 2025"
   },
   util_budowlane_spalanie: {
-    name: "Odpady budowlane – spalanie z odzyskiem energii",
+    name: "Odpady budowlane / Tworzywa – spalanie z odzyskiem",
     factor: 4.68568,
     method: "spalanie_z_odzyskiem",
     status: "DEFRA 2025"
@@ -121,11 +121,14 @@ export interface ItemCo2Details {
   quantity: number;
   unit: string;
   estimatedWeightKg: number;
+  reuseWeightKg: number;
+  wasteWeightKg: number;
   disposalMethodKey: string;
   disposalMethodName: string;
   disposalCo2Kg: number;
   isReuse: boolean;
   co2SavedKg: number;
+  notesAnalysis: string;
 }
 
 export interface Co2CostResult {
@@ -144,11 +147,13 @@ export interface ProtocolCo2Summary {
   date: string;
   distanceKm: number;
   totalEstimatedWeightKg: number; // Masa samych resztek / odpadów
+  totalReuseWeightKg: number; // Część zdatna do ponownego użycia na magazynie
+  totalWasteWeightKg: number; // Część będąca odpadem/ścinkami podlegająca utylizacji
   totalCargoWeightKg: number; // Masa całkowita całego ładunku pojazdu (wraz ze sprzętem)
   allocationRatio: number; // Procentowy udział resztek w masie kursu (np. 0.1705 dla 17.05%)
   transportCo2Kg: number; // Emisja transportu przypisana proporcjonalnie do resztek
   fullCourseTransportCo2Kg: number; // Emisja całego kursu pojazdu (tam i z powrotem)
-  disposalCo2Kg: number;
+  disposalCo2Kg: number; // Emisja z utylizacji ścinek i odpadów (DEFRA 2025)
   totalCo2EmissionKg: number;
   totalCo2SavedKg: number;
   netCo2EmissionKg: number;
@@ -164,28 +169,23 @@ export interface ProtocolCo2Summary {
  * czy też regularny sprzęt magazynowy/inwentarzowy (ogrodzenia, rusztowania, szalunki, agregaty).
  */
 export function isItemResidualOrWaste(item: ProtocolItemInput): boolean {
-  // 1. Bezpośrednie flagi z systemu
   if (item.isResidual === true || item.isWaste === true) {
     return true;
   }
 
-  // 2. Numery inwentarzowe typowe dla resztek i odpadów
   const invUpper = (item.inventoryNumber || "").toUpperCase().trim();
   if (invUpper === "RESZTKI" || invUpper === "ODPAD") {
     return true;
   }
 
-  // 3. Kategorie systemowe resztek
   if (item.category === "Pozostałości budowlane" || item.subcategory === "Materiały otwarte / Resztki") {
     return true;
   }
 
-  // 4. Status utylizacji
   if (item.finalStatus === "odpad_utylizacja") {
     return true;
   }
 
-  // 5. Notatki i opisy wpisane przez kierownika lub magazyniera
   const textToSearch = [item.notes, item.condition, item.name]
     .filter(Boolean)
     .join(" ")
@@ -201,7 +201,6 @@ export function isItemResidualOrWaste(item: ProtocolItemInput): boolean {
     return true;
   }
 
-  // Jeśli pozycja ma regularny numer sprzętu (np. "og01-02", "SPRZ-") i nie spełnia powyższych, to jest to sprzęt, a NIE resztka!
   return false;
 }
 
@@ -216,8 +215,6 @@ export function estimateItemWeightKg(item: { name: string; quantity?: number; re
 
   const nameLower = (item.name || "").toLowerCase();
   const unitLower = (item.unit || "").toLowerCase();
-  const notesLower = (item.notes || "").toLowerCase();
-  const conditionLower = (item.condition || "").toLowerCase();
 
   // 1. Sprawdzenie jawnej wagi w nazwie lub jednostce (np. "25kg", "25 kg", "50kg")
   const weightRegex = /(\d+(\.\d+)?)\s*(kg|g|t|tona|tony|ton)/;
@@ -248,7 +245,7 @@ export function estimateItemWeightKg(item: { name: string; quantity?: number; re
       estimatedWeightKg = 25 * qty; // domyślny worek chemii / kleju / cementu = 25 kg
     } else if (nameLower.includes('wiadro') || nameLower.includes('wiadra') || unitLower.includes('wiad')) {
       estimatedWeightKg = 20 * qty; // wiadro tynku/farby/gruntu = 20 kg
-    } else if (nameLower.includes('płyta') || nameLower.includes('plyta') || nameLower.includes('g-k') || nameLower.includes('gk')) {
+    } else if (nameLower.includes('płyta') || nameLower.includes('plyta') || nameLower.includes('g-k') || nameLower.includes('gk') || nameLower.includes('regips')) {
       estimatedWeightKg = 28 * qty; // płyta GK standard 12.5mm 1200x2600 = ~28 kg
     } else if (nameLower.includes('podstawa betonowa') || nameLower.includes('stopa betonowa')) {
       estimatedWeightKg = 32 * qty; // stopa ogrodzenia betonowa = ok. 32 kg
@@ -261,20 +258,138 @@ export function estimateItemWeightKg(item: { name: string; quantity?: number; re
     }
   }
 
-  // 3. Mnożnik stopnia zużycia / resztki (np. "ok. 50%", "połowa", "resztka na dnie")
-  let multiplier = 1;
-  const percentMatch = (notesLower + " " + conditionLower).match(/(\d+(\.\d+)?)%/);
-  if (percentMatch) {
-    multiplier = parseFloat(percentMatch[1]) / 100;
-  } else if (notesLower.includes('połowa') || conditionLower.includes('połow') || notesLower.includes('50%')) {
-    multiplier = 0.5;
-  } else if (notesLower.includes('dnie') || conditionLower.includes('resztka')) {
-    multiplier = 0.25;
-  } else if (notesLower.includes('3/4') || notesLower.includes('trzy czwarte')) {
-    multiplier = 0.75;
+  return Math.max(0.1, Number(estimatedWeightKg.toFixed(2)));
+}
+
+/**
+ * Dobiera odpowiednią metodę utylizacji DEFRA 2025 dla odpadu w zależności od materiału.
+ */
+export function determineWasteDisposalMethod(item: ProtocolItemInput): { key: string; name: string } {
+  if (item.disposalMethodKey && DISPOSAL_CO2_FACTORS_KG_PER_TONNE[item.disposalMethodKey]) {
+    return {
+      key: item.disposalMethodKey,
+      name: DISPOSAL_CO2_FACTORS_KG_PER_TONNE[item.disposalMethodKey].name
+    };
   }
 
-  return Math.max(0.1, Number((estimatedWeightKg * multiplier).toFixed(2)));
+  const text = [item.name, item.notes, item.category].filter(Boolean).join(" ").toLowerCase();
+
+  if (text.includes("drewn") || text.includes("deski") || text.includes("palet")) {
+    return { key: "util_drewno_skladowisko", name: DISPOSAL_CO2_FACTORS_KG_PER_TONNE["util_drewno_skladowisko"].name };
+  }
+  if (text.includes("beton") || text.includes("gruz") || text.includes("korek betonowy")) {
+    return { key: "util_beton_skladowisko", name: DISPOSAL_CO2_FACTORS_KG_PER_TONNE["util_beton_skladowisko"].name };
+  }
+  if (text.includes("piasek") || text.includes("kruszyw") || text.includes("kamie")) {
+    return { key: "util_kruszywa_skladowisko", name: DISPOSAL_CO2_FACTORS_KG_PER_TONNE["util_kruszywa_skladowisko"].name };
+  }
+  if (text.includes("styropian") || text.includes("plastik") || text.includes("folia") || text.includes("piana")) {
+    return { key: "util_budowlane_spalanie", name: DISPOSAL_CO2_FACTORS_KG_PER_TONNE["util_budowlane_spalanie"].name };
+  }
+  if (text.includes("g-k") || text.includes("gk") || text.includes("regips") || text.includes("gips") || text.includes("gładź") || text.includes("gladź")) {
+    return { key: "util_budowlane_otwarta_petla", name: "Recykling odpadów gipsowych / G-K (open-loop)" };
+  }
+  return { key: "util_budowlane_otwarta_petla", name: "Recykling odpadów budowlanych (open-loop)" };
+}
+
+/**
+ * Analizuje pozycję resztek pod kątem podziału na część zdatną do ponownego użycia (Reuse)
+ * oraz część odpadową/ścinki (Waste) podlegającą fizycznej utylizacji.
+ */
+export function analyzeItemReuseAndWasteSplit(item: ProtocolItemInput, totalWeightKg: number): {
+  reuseWeightKg: number;
+  wasteWeightKg: number;
+  disposalMethodKey: string;
+  disposalMethodName: string;
+  notesAnalysis: string;
+} {
+  const method = determineWasteDisposalMethod(item);
+  const qty = typeof item.receivedQty === "number" && item.receivedQty > 0
+    ? item.receivedQty
+    : (typeof item.quantity === "number" && item.quantity > 0 ? item.quantity : 1);
+
+  const notesLower = (item.notes || "").toLowerCase();
+  const conditionLower = (item.condition || "").toLowerCase();
+
+  // 1. Pozycja jednoznacznie oznaczona jako odpad do utylizacji (np. gruz, śmieci, isWaste: true)
+  if (
+    item.isWaste === true ||
+    item.inventoryNumber === "ODPAD" ||
+    item.finalStatus === "odpad_utylizacja" ||
+    notesLower.includes("odpad do utylizacji") ||
+    notesLower.includes("gruz")
+  ) {
+    return {
+      reuseWeightKg: 0,
+      wasteWeightKg: totalWeightKg,
+      disposalMethodKey: method.key,
+      disposalMethodName: method.name,
+      notesAnalysis: "100% odpad do utylizacji"
+    };
+  }
+
+  // 2. Notatka precyzyjna o całych i ułamkach (np. "3 całe, 1 sztuka 50%", "1 pełny, 1 otwarty")
+  if (notesLower.includes("całe") || notesLower.includes("pełny")) {
+    const fullMatch = notesLower.match(/(\d+(\.\d+)?)\s*(całe|całych|cała|pełny|pełne|pełnych)/);
+    if (fullMatch) {
+      const fullQty = parseFloat(fullMatch[1]);
+      if (qty > fullQty) {
+        const wasteQty = qty - fullQty;
+        const wasteKg = Number(((wasteQty / qty) * totalWeightKg).toFixed(2));
+        const reuseKg = Number((totalWeightKg - wasteKg).toFixed(2));
+        return {
+          reuseWeightKg: reuseKg,
+          wasteWeightKg: wasteKg,
+          disposalMethodKey: method.key,
+          disposalMethodName: method.name,
+          notesAnalysis: `${fullQty} pełne (Reuse: ${reuseKg} kg) + ${wasteQty} ścinki/odpad (Utylizacja: ${wasteKg} kg)`
+        };
+      }
+    }
+  }
+
+  // 3. Ilość ułamkowa (np. 3.5 regipsa, 1.5 worka)
+  // Część całkowita to pełne elementy (Reuse), a część ułamkowa to ścinki/resztka (Utylizacja)
+  if (qty > 1 && qty % 1 > 0) {
+    const floorQty = Math.floor(qty);
+    const fraction = qty - floorQty; // np. 0.5
+    const wasteKg = Number(((fraction / qty) * totalWeightKg).toFixed(2));
+    const reuseKg = Number((totalWeightKg - wasteKg).toFixed(2));
+    return {
+      reuseWeightKg: reuseKg,
+      wasteWeightKg: wasteKg,
+      disposalMethodKey: method.key,
+      disposalMethodName: method.name,
+      notesAnalysis: `${floorQty} całe (Reuse: ${reuseKg} kg) + ${fraction} ścinki/odpad (${wasteKg} kg)`
+    };
+  }
+
+  // 4. Mała ilość (<= 1) z dopiskiem "otwarty", "ok. 50%", "resztka"
+  if (qty <= 1 && (notesLower.includes("otwart") || conditionLower.includes("otwart") || notesLower.includes("50%") || conditionLower.includes("50%"))) {
+    // 50% zdatne do użycia, 50% odpad / wyschnięta resztka do utylizacji
+    const wasteKg = Number((totalWeightKg * 0.5).toFixed(2));
+    const reuseKg = Number((totalWeightKg - wasteKg).toFixed(2));
+    return {
+      reuseWeightKg: reuseKg,
+      wasteWeightKg: wasteKg,
+      disposalMethodKey: method.key,
+      disposalMethodName: method.name,
+      notesAnalysis: `Otwarte opakowanie: 50% odzysk (${reuseKg} kg) + 50% odpad (${wasteKg} kg)`
+    };
+  }
+
+  // 5. Pełna resztka bez ułamków (np. 1 pełny worek kleju, który nie był otwarty)
+  // Domyślnie 90% ponowne użycie na magazynie, 10% straty transportowo-magazynowe / utylizacja opakowania
+  const lossRatio = 0.10;
+  const wasteKg = Number((totalWeightKg * lossRatio).toFixed(2));
+  const reuseKg = Number((totalWeightKg - wasteKg).toFixed(2));
+  return {
+    reuseWeightKg: reuseKg,
+    wasteWeightKg: wasteKg,
+    disposalMethodKey: method.key,
+    disposalMethodName: method.name,
+    notesAnalysis: `Materiał zdatny do reuse (${reuseKg} kg) + 10% odpad/opakowanie (${wasteKg} kg)`
+  };
 }
 
 /**
@@ -293,7 +408,7 @@ export function calculateTransportCo2(
 }
 
 /**
- * Wylicza emisję CO2 z utylizacji odpadu
+ * Wylicza emisję CO2 z utylizacji odpadu (DEFRA 2025)
  */
 export function calculateDisposalCo2(weightKg: number, disposalKey: string): number {
   if (weightKg <= 0) return 0;
@@ -332,40 +447,10 @@ export function calculateCo2Cost(
 }
 
 /**
- * Domyślna detekcja metody utylizacji na podstawie pozycji
- */
-export function detectDefaultDisposalMethod(item: ProtocolItemInput): string {
-  if (item.disposalMethodKey && DISPOSAL_CO2_FACTORS_KG_PER_TONNE[item.disposalMethodKey]) {
-    return item.disposalMethodKey;
-  }
-  const name = (item.name || "").toLowerCase();
-  const isWaste = item.isWaste || item.inventoryNumber === "ODPAD" || (item.condition || "").includes("odpad");
-
-  if (!isWaste) {
-    // Sprawne resztki wracające na stan magazynowy
-    return "reuse_magazyn";
-  }
-
-  if (name.includes("drewn") || name.includes("deski") || name.includes("palet")) {
-    return "util_drewno_skladowisko";
-  }
-  if (name.includes("beton") || name.includes("gruz")) {
-    return "util_beton_skladowisko";
-  }
-  if (name.includes("piasek") || name.includes("kruszyw") || name.includes("kamie")) {
-    return "util_kruszywa_skladowisko";
-  }
-  if (name.includes("styropian") || name.includes("plastik") || name.includes("folia") || name.includes("piana")) {
-    return "util_budowlane_spalanie";
-  }
-  return "util_budowlane_otwarta_petla";
-}
-
-/**
  * Podsumowuje protokół pod kątem emisji CO2 i kosztów.
- * KLUCZOWE: Uwzględnia TYLKO resztki materiałów budowlanych (isItemResidualOrWaste),
- * wykluczając sprzęt (ogrodzenia, szalunki itp.), a emisję transportu alokuje wg wzoru z baza_wskaznikow_co2.md:
- * E_zwrotu = E_kurs * (masa_resztki / masa_całkowita_ładunku).
+ * Rozbija pozycje resztek na:
+ * - Część Reuse (ponowne wykorzystanie na magazynie, np. 3 całe płyty)
+ * - Część Waste / Utylizacja (ścinki i odpady, np. 0.5 płyty) z naliczeniem fizycznej emisji utylizacji!
  */
 export function calculateProtocolCo2Summary(
   protocol: ProtocolInput,
@@ -398,6 +483,8 @@ export function calculateProtocolCo2Summary(
   const hasResiduals = residualItems.length > 0;
 
   let totalResidualWeightKg = 0;
+  let totalReuseWeightKg = 0;
+  let totalWasteWeightKg = 0;
   let totalDisposalCo2 = 0;
   let totalCo2Saved = 0;
   const itemDetails: ItemCo2Details[] = [];
@@ -407,23 +494,18 @@ export function calculateProtocolCo2Summary(
     const weightKg = estimateItemWeightKg(item);
     totalResidualWeightKg += weightKg;
 
-    const methodKey = detectDefaultDisposalMethod(item);
-    const isReuse = methodKey === "reuse_magazyn";
+    // Rozbicie na część ponownego użycia (Reuse) i część odpadową (Utylizacja)
+    const split = analyzeItemReuseAndWasteSplit(item, weightKg);
 
-    let disposalCo2 = 0;
-    let savedCo2 = 0;
+    totalReuseWeightKg += split.reuseWeightKg;
+    totalWasteWeightKg += split.wasteWeightKg;
 
-    if (isReuse) {
-      disposalCo2 = 0;
-      savedCo2 = Number(((weightKg / 1000) * REUSE_CO2_SAVINGS_KG_PER_TONNE).toFixed(3));
-    } else {
-      disposalCo2 = calculateDisposalCo2(weightKg, methodKey);
-    }
+    // Realnie naliczana emisja utylizacji dla ścinek/odpadów (DEFRA 2025)
+    const disposalCo2 = calculateDisposalCo2(split.wasteWeightKg, split.disposalMethodKey);
+    const savedCo2 = Number(((split.reuseWeightKg / 1000) * REUSE_CO2_SAVINGS_KG_PER_TONNE).toFixed(3));
 
     totalDisposalCo2 += disposalCo2;
     totalCo2Saved += savedCo2;
-
-    const methodName = DISPOSAL_CO2_FACTORS_KG_PER_TONNE[methodKey]?.name || methodKey;
 
     itemDetails.push({
       itemId: item.id || `item-${idx}`,
@@ -431,11 +513,14 @@ export function calculateProtocolCo2Summary(
       quantity: typeof item.receivedQty === "number" ? item.receivedQty : (item.quantity || 1),
       unit: item.unit || "szt.",
       estimatedWeightKg: weightKg,
-      disposalMethodKey: methodKey,
-      disposalMethodName: methodName,
+      reuseWeightKg: split.reuseWeightKg,
+      wasteWeightKg: split.wasteWeightKg,
+      disposalMethodKey: split.disposalMethodKey,
+      disposalMethodName: split.disposalMethodName,
       disposalCo2Kg: disposalCo2,
-      isReuse,
-      co2SavedKg: savedCo2
+      isReuse: split.reuseWeightKg > 0,
+      co2SavedKg: savedCo2,
+      notesAnalysis: split.notesAnalysis
     });
   }
 
@@ -447,7 +532,6 @@ export function calculateProtocolCo2Summary(
     if (allocationMethod === 'dedicated_100') {
       allocationRatio = 1.0;
     } else {
-      // Alokacja proporcjonalna do masy resztek w całym przewożonym ładunku
       allocationRatio = totalCargoWeightKg > 0
         ? Math.min(1.0, totalResidualWeightKg / Math.max(totalResidualWeightKg, totalCargoWeightKg))
         : 1.0;
@@ -466,7 +550,9 @@ export function calculateProtocolCo2Summary(
     siteName: protocol.sourceSiteName || "Magazyn / Budowa",
     date: protocol.documentDate || (protocol.createdAt ? protocol.createdAt.split("T")[0] : ""),
     distanceKm,
-    totalEstimatedWeightKg: Number(totalResidualWeightKg.toFixed(2)), // Masa TYLKO resztek!
+    totalEstimatedWeightKg: Number(totalResidualWeightKg.toFixed(2)),
+    totalReuseWeightKg: Number(totalReuseWeightKg.toFixed(2)),
+    totalWasteWeightKg: Number(totalWasteWeightKg.toFixed(2)),
     totalCargoWeightKg: Number(totalCargoWeightKg.toFixed(2)),
     allocationRatio: Number(allocationRatio.toFixed(4)),
     transportCo2Kg,
@@ -476,7 +562,7 @@ export function calculateProtocolCo2Summary(
     totalCo2SavedKg: Number(totalCo2Saved.toFixed(3)),
     netCo2EmissionKg,
     costs,
-    itemDetails, // Zawiera TYLKO resztki
+    itemDetails,
     hasResiduals,
     residualItemsCount: residualItems.length,
     totalItemsCount: allItems.length
