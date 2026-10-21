@@ -3,15 +3,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth/AuthContext";
-import {
-  collection,
-  getDocs,
-  query,
-  orderBy,
-  limit,
-  doc,
-  updateDoc,
-} from "firebase/firestore";
+import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 
 interface OrderItem {
@@ -35,12 +27,10 @@ interface Order {
   items?: OrderItem[];
 }
 
-type FilterType = "dzisiejsze" | "oczekujace" | "wszystkie";
+type FilterType = "aktualne" | "wszystkie";
 
 const CACHE_KEY = "pesam_plac_orders_cache";
-const STATUS_NEW = "NOWE";
-const STATUS_IN_PROGRESS = "W_REALIZACJI";
-const STATUS_DONE = "ZREALIZOWANE";
+const CHECKED_CACHE_KEY = "pesam_driver_checked_items";
 
 const WEEKDAYS = [
   "Niedziela",
@@ -54,10 +44,8 @@ const WEEKDAYS = [
 
 const pad = (n: number) => n.toString().padStart(2, "0");
 
-const toLocalDateKey = (date: Date) =>
-  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-
 const parseDate = (value: string): Date | null => {
+  if (!value) return null;
   const d = new Date(value);
   return isNaN(d.getTime()) ? null : d;
 };
@@ -67,41 +55,43 @@ const formatTime = (value: string) => {
   return d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : "--:--";
 };
 
-const isToday = (value: string, todayKey: string) => {
+const formatDateShort = (value: string) => {
   const d = parseDate(value);
-  return d ? toLocalDateKey(d) === todayKey : false;
+  if (!d) return "";
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}`;
 };
 
-const statusStyle = (status?: string) => {
-  switch (status) {
-    case STATUS_NEW:
-      return { label: "NOWE", cls: "bg-blue-600/20 text-blue-300 border-blue-500" };
-    case STATUS_IN_PROGRESS:
-      return {
-        label: "W REALIZACJI",
-        cls: "bg-amber-600/20 text-amber-300 border-amber-500",
-      };
-    case STATUS_DONE:
-      return {
-        label: "ZREALIZOWANE",
-        cls: "bg-emerald-600/20 text-emerald-300 border-emerald-500",
-      };
-    default:
-      return {
-        label: status ?? "NOWE",
-        cls: "bg-slate-700/40 text-slate-300 border-slate-600",
-      };
-  }
+/**
+ * Sprawdza, czy zamówienie należy do bieżącej tury dostawczej:
+ * - złożone w dniu dzisiejszym (o dowolnej porze)
+ * - LUB złożone w dniu poprzednim PO godzinie 15:00
+ */
+const isCurrentDeliveryWindow = (createdAtValue: string, nowDate: Date = new Date()): boolean => {
+  const orderDate = parseDate(createdAtValue);
+  if (!orderDate) return false;
+
+  // Próg odcięcia: Wczoraj o 15:00:00.000
+  const yesterday15 = new Date(
+    nowDate.getFullYear(),
+    nowDate.getMonth(),
+    nowDate.getDate() - 1,
+    15,
+    0,
+    0,
+    0
+  );
+
+  return orderDate.getTime() >= yesterday15.getTime();
 };
 
 const pluralizeItems = (count: number) => {
-  if (count === 1) return "1 pozycja materiałowa";
+  if (count === 1) return "1 pozycja";
   const mod10 = count % 10;
   const mod100 = count % 100;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-    return `${count} pozycje materiałowe`;
+    return `${count} pozycje`;
   }
-  return `${count} pozycji materiałowych`;
+  return `${count} pozycji`;
 };
 
 export default function PlacZamowieniaPage() {
@@ -110,31 +100,26 @@ export default function PlacZamowieniaPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [filter, setFilter] = useState<FilterType>("dzisiejsze");
+  const [filter, setFilter] = useState<FilterType>("aktualne");
   const [search, setSearch] = useState<string>("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [updatingId, setUpdatingId] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ type: "ok" | "warn" | "error"; text: string } | null>(
-    null
-  );
+  const [checkedMap, setCheckedMap] = useState<Record<string, boolean>>({});
+  const [toast, setToast] = useState<string | null>(null);
   const [now, setNow] = useState<Date>(new Date());
 
-  const todayKey = toLocalDateKey(now);
+  // Toast
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  };
 
-  // Toast auto-hide
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3500);
-    return () => clearTimeout(t);
-  }, [toast]);
-
-  // Odświeżanie daty
+  // Zegar dla aktualności okna 15:00
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 60_000);
     return () => clearInterval(t);
   }, []);
 
-  // Stan online/offline
+  // Monitorowanie połączenia
   useEffect(() => {
     if (typeof window === "undefined") return;
     setIsOnline(navigator.onLine);
@@ -150,6 +135,38 @@ export default function PlacZamowieniaPage() {
     };
   }, []);
 
+  // Wczytanie odznaczonych pozycji z pamięci telefonu
+  useEffect(() => {
+    try {
+      const savedChecked = localStorage.getItem(CHECKED_CACHE_KEY);
+      if (savedChecked) {
+        setCheckedMap(JSON.parse(savedChecked));
+      }
+    } catch (e) {
+      console.warn("Błąd odczytu checklisty kierowcy:", e);
+    }
+  }, []);
+
+  // Zapis checklisty
+  const toggleItemCheck = (orderId: string, itemIdx: number, itemName: string) => {
+    const key = `${orderId}_${itemIdx}_${itemName}`;
+    setCheckedMap((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      try {
+        localStorage.setItem(CHECKED_CACHE_KEY, JSON.stringify(next));
+      } catch (e) {
+        console.warn("Błąd zapisu checklisty:", e);
+      }
+      return next;
+    });
+  };
+
+  const isItemChecked = (orderId: string, itemIdx: number, itemName: string) => {
+    const key = `${orderId}_${itemIdx}_${itemName}`;
+    return !!checkedMap[key];
+  };
+
+  // Wczytanie zamówień z cache
   const loadFromCache = () => {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
@@ -157,10 +174,9 @@ export default function PlacZamowieniaPage() {
         const parsed = JSON.parse(raw) as Order[];
         if (Array.isArray(parsed)) {
           setOrders(parsed);
-          // Rozwiń domyślnie pierwsze zamówienie
-          if (parsed.length > 0) {
-            setExpanded(new Set([parsed[0].id]));
-          }
+          // Domyślnie rozwiń wszystkie zamówienia, żeby kierowca od razu widział listę
+          const ids = new Set(parsed.map((o) => o.id));
+          setExpanded(ids);
         }
       }
     } catch (err) {
@@ -168,6 +184,7 @@ export default function PlacZamowieniaPage() {
     }
   };
 
+  // Pobieranie świeżych zamówień z bazy
   const fetchOrders = async () => {
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       setIsOnline(false);
@@ -178,7 +195,7 @@ export default function PlacZamowieniaPage() {
       const q = query(
         collection(db, "orders"),
         orderBy("createdAt", "desc"),
-        limit(50)
+        limit(60)
       );
       const snapshot = await getDocs(q);
       const fresh: Order[] = snapshot.docs.map((d) => ({
@@ -187,9 +204,11 @@ export default function PlacZamowieniaPage() {
       }));
       setOrders(fresh);
       setIsOnline(true);
-      if (fresh.length > 0 && expanded.size === 0) {
-        setExpanded(new Set([fresh[0].id]));
-      }
+
+      // Rozwiń domyślnie zamówienia
+      const ids = new Set(fresh.map((o) => o.id));
+      setExpanded(ids);
+
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify(fresh));
       } catch (err) {
@@ -197,13 +216,13 @@ export default function PlacZamowieniaPage() {
       }
     } catch (err) {
       console.error("Błąd pobierania zamówień:", err);
-      setToast({ type: "error", text: "Nie udało się pobrać zamówień z bazy" });
+      showToast("⚠️ Nie udało się odświeżyć zamówień z bazy");
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Start: cache natychmiast, potem Firestore jeśli online
+  // Start
   useEffect(() => {
     loadFromCache();
     if (typeof navigator !== "undefined" && navigator.onLine) {
@@ -211,45 +230,6 @@ export default function PlacZamowieniaPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const updateStatus = async (order: Order, newStatus: string) => {
-    if (!isOnline) {
-      setToast({
-        type: "warn",
-        text: "Brak połączenia z internetem – zmiana statusu wymaga sieci",
-      });
-      return;
-    }
-    setUpdatingId(order.id);
-    try {
-      await updateDoc(doc(db, "orders", order.id), {
-        status: newStatus,
-        updatedAt: new Date().toISOString(),
-        updatedBy: user?.uid ?? null,
-      });
-      const next = orders.map((o) =>
-        o.id === order.id ? { ...o, status: newStatus } : o
-      );
-      setOrders(next);
-      try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify(next));
-      } catch (err) {
-        console.error("Nie udało się zaktualizować cache:", err);
-      }
-      setToast({
-        type: "ok",
-        text:
-          newStatus === STATUS_IN_PROGRESS
-            ? "🚚 Dostawa rozpoczęta"
-            : "✅ Oznaczono jako dostarczone",
-      });
-    } catch (err) {
-      console.error("Błąd aktualizacji statusu:", err);
-      setToast({ type: "error", text: "Nie udało się zmienić statusu" });
-    } finally {
-      setUpdatingId(null);
-    }
-  };
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => {
@@ -260,12 +240,15 @@ export default function PlacZamowieniaPage() {
     });
   };
 
+  // Filtrowanie
   const filteredOrders = useMemo(() => {
     const q = search.trim().toLowerCase();
 
     return orders.filter((o) => {
-      if (filter === "dzisiejsze" && !isToday(o.createdAt, todayKey)) return false;
-      if (filter === "oczekujace" && o.status === STATUS_DONE) return false;
+      // Filtr okna czasowego (Dziś lub wczoraj po 15:00)
+      if (filter === "aktualne" && !isCurrentDeliveryWindow(o.createdAt, now)) {
+        return false;
+      }
 
       if (!q) return true;
       const inSite = o.siteName?.toLowerCase().includes(q);
@@ -274,26 +257,25 @@ export default function PlacZamowieniaPage() {
       const inOrderId = o.orderId?.toLowerCase().includes(q);
       return Boolean(inSite || inOrderer || inItems || inOrderId);
     });
-  }, [orders, filter, search, todayKey]);
+  }, [orders, filter, search, now]);
+
+  // Licznik aktualnych zamówień
+  const currentWindowCount = useMemo(() => {
+    return orders.filter((o) => isCurrentDeliveryWindow(o.createdAt, now)).length;
+  }, [orders, now]);
 
   const dateLabel = `${WEEKDAYS[now.getDay()]}, ${pad(now.getDate())}.${pad(
     now.getMonth() + 1
   )}.${now.getFullYear()}`;
 
-  const filters: { key: FilterType; label: string }[] = [
-    { key: "dzisiejsze", label: "Dzisiejsze" },
-    { key: "oczekujace", label: "Oczekujące" },
-    { key: "wszystkie", label: "Wszystkie" },
-  ];
-
   return (
-    <div className="min-h-screen bg-slate-950 text-white font-sans pb-16 select-none">
+    <div className="min-h-screen bg-slate-950 text-white font-sans pb-20 select-none">
       {/* Sticky Header */}
       <header className="sticky top-0 z-30 bg-slate-900/95 backdrop-blur border-b border-slate-800 shadow-xl">
         <div className="flex items-center justify-between gap-2 px-4 py-3 max-w-xl mx-auto">
           <Link
             href="/plac"
-            className="shrink-0 flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2 text-xs font-bold text-slate-200 active:scale-95 transition"
+            className="shrink-0 flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2 text-xs font-bold text-slate-200 active:scale-95 transition"
           >
             <span>🔙</span>
             <span>Menu</span>
@@ -301,7 +283,7 @@ export default function PlacZamowieniaPage() {
 
           <div className="flex-1 min-w-0 text-center">
             <h1 className="text-base font-black tracking-wide text-white uppercase truncate">
-              📦 Zamówienia Dzisiejsze
+              📦 Zamówienia Materiałowe
             </h1>
             <p className="text-[11px] font-bold text-amber-400 truncate">{dateLabel}</p>
           </div>
@@ -328,15 +310,15 @@ export default function PlacZamowieniaPage() {
           </div>
         </div>
 
-        {/* Wyszukiwarka i filtry */}
+        {/* Wyszukiwarka i przełącznik filtrów */}
         <div className="px-4 pb-3 space-y-2.5 max-w-xl mx-auto">
           <div className="relative">
             <input
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Szukaj budowy, materiału, zamawiającego..."
-              className="w-full rounded-xl border border-slate-700/80 bg-slate-800/90 px-3.5 py-2 pl-9 text-xs text-white placeholder:text-slate-400 focus:border-blue-500 focus:outline-none transition"
+              placeholder="Szukaj: budowa, zamawiający, materiał..."
+              className="w-full rounded-xl border border-slate-700/80 bg-slate-800/90 px-3.5 py-2 pl-9 text-xs text-white placeholder:text-slate-400 focus:border-amber-500 focus:outline-none transition"
             />
             <span className="absolute left-3 top-2.5 text-xs text-slate-400">🔍</span>
             {search && (
@@ -349,24 +331,40 @@ export default function PlacZamowieniaPage() {
             )}
           </div>
 
-          <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
-            {filters.map((f) => {
-              const active = filter === f.key;
-              return (
-                <button
-                  key={f.key}
-                  type="button"
-                  onClick={() => setFilter(f.key)}
-                  className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold transition border ${
-                    active
-                      ? "bg-blue-600 border-blue-500 text-white shadow"
-                      : "bg-slate-800/80 border-slate-700/80 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  {f.label}
-                </button>
-              );
-            })}
+          {/* Przełącznik: Aktualne vs Wszystkie */}
+          <div className="flex gap-1.5 bg-slate-950/60 p-1 rounded-2xl border border-slate-800">
+            <button
+              type="button"
+              onClick={() => setFilter("aktualne")}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 ${
+                filter === "aktualne"
+                  ? "bg-amber-500 text-slate-950 shadow-md"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              <span>🚚 Na dziś (od 15:00)</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                filter === "aktualne" ? "bg-slate-950/20 text-slate-950 font-black" : "bg-slate-800 text-slate-300"
+              }`}>
+                {currentWindowCount}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilter("wszystkie")}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 ${
+                filter === "wszystkie"
+                  ? "bg-blue-600 text-white shadow-md"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              <span>📁 Archiwalne / Wszystkie</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                filter === "wszystkie" ? "bg-white/20 text-white font-black" : "bg-slate-800 text-slate-300"
+              }`}>
+                {orders.length}
+              </span>
+            </button>
           </div>
         </div>
       </header>
@@ -375,138 +373,173 @@ export default function PlacZamowieniaPage() {
       {toast && (
         <div
           role="status"
-          className={`fixed bottom-4 left-4 right-4 max-w-md mx-auto z-50 rounded-2xl px-4 py-3 text-xs font-black shadow-2xl border flex items-center justify-between animate-bounce ${
-            toast.type === "ok"
-              ? "bg-emerald-950 border-emerald-600 text-emerald-300"
-              : toast.type === "warn"
-              ? "bg-amber-950 border-amber-600 text-amber-300"
-              : "bg-red-950 border-red-600 text-red-300"
-          }`}
+          className="fixed bottom-4 left-4 right-4 max-w-md mx-auto z-50 rounded-2xl px-4 py-3 text-xs font-black shadow-2xl border bg-amber-950 border-amber-600 text-amber-300 flex items-center justify-between animate-bounce"
         >
-          <span>{toast.text}</span>
+          <span>{toast}</span>
           <button onClick={() => setToast(null)} className="ml-2 font-bold opacity-80 hover:opacity-100">
             ✕
           </button>
         </div>
       )}
 
-      {/* Główna lista zamówień */}
-      <main className="px-4 pt-4 space-y-3.5 max-w-xl mx-auto">
+      {/* Lista zamówień */}
+      <main className="px-4 pt-3.5 space-y-3.5 max-w-xl mx-auto">
         {filteredOrders.length === 0 ? (
           <div className="rounded-3xl border border-slate-800 bg-slate-900 p-8 text-center mt-6">
             <p className="text-4xl mb-3">📭</p>
             <h3 className="text-base font-black text-slate-200">
-              {filter === "dzisiejsze"
-                ? "Brak zamówień z dzisiejszego dnia"
-                : "Brak zamówień spełniających kryteria"}
+              {filter === "aktualne"
+                ? "Brak zamówień z dzisiaj ani po godz. 15:00 z wczoraj"
+                : "Brak zamówień w systemie"}
             </h3>
-            <p className="text-xs text-slate-400 mt-1">
-              Gdy kierownicy złożą zamówienia w sklepie lub notatką głosową, pojawią się one w tym miejscu.
+            <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+              {filter === "aktualne"
+                ? "Wszystkie wcześniejsze zlecenia znajdziesz w zakładce „Archiwalne / Wszystkie” powyżej."
+                : "Nowe zamówienia złożone przez kierowników pojawią się automatycznie."}
             </p>
           </div>
         ) : (
           filteredOrders.map((order) => {
-            const st = statusStyle(order.status);
             const items = order.items ?? [];
             const isExpanded = expanded.has(order.id);
-            const isBusy = updatingId === order.id;
             const displayNumber = order.orderId ?? order.id.slice(0, 8).toUpperCase();
+
+            // Oblicz ile pozycji jest już odhaczonych przez kierowcę
+            const checkedCount = items.filter((item, idx) =>
+              isItemChecked(order.id, idx, item.name)
+            ).length;
+            const isAllChecked = items.length > 0 && checkedCount === items.length;
 
             return (
               <article
                 key={order.id}
-                className="rounded-3xl border border-slate-800/90 bg-slate-900 p-4 shadow-lg flex flex-col justify-between relative overflow-hidden transition hover:border-slate-700"
+                className={`rounded-3xl border p-4 shadow-lg flex flex-col justify-between relative overflow-hidden transition ${
+                  isAllChecked
+                    ? "border-emerald-600/60 bg-gradient-to-br from-emerald-950/20 via-slate-900 to-slate-900"
+                    : "border-slate-800/90 bg-slate-900 hover:border-slate-700"
+                }`}
               >
                 {/* Górny wiersz */}
                 <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-1">
-                  <span className="font-mono font-bold text-amber-400/90">#{displayNumber}</span>
-                  <span className="font-bold text-slate-300 bg-slate-800/80 px-2 py-0.5 rounded-lg border border-slate-700/60">
-                    🕒 {formatTime(order.createdAt)}
-                  </span>
+                  <span className="font-mono font-bold text-amber-400">#{displayNumber}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-slate-300 bg-slate-800/90 px-2 py-0.5 rounded-lg border border-slate-700/60">
+                      📅 {formatDateShort(order.createdAt)} 🕒 {formatTime(order.createdAt)}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Budowa */}
-                <h2 className="text-base font-black text-white leading-snug">
+                <h2 className="text-lg font-black text-white leading-snug">
                   🏗️ {order.siteName ?? "Budowa bez nazwy"}
                 </h2>
 
-                {/* Zamawiający + status */}
+                {/* Osoba zamawiająca + postęp zakupów */}
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                   <p className="text-xs text-slate-300">
                     👤 <span className="font-semibold text-slate-200">{order.orderedByName ?? order.orderedBy ?? "Kierownik"}</span>
                   </p>
-                  <span
-                    className={`rounded-full border px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${st.cls}`}
-                  >
-                    {st.label}
-                  </span>
+
+                  {items.length > 0 && (
+                    <span
+                      className={`text-[11px] font-black px-2.5 py-0.5 rounded-full border ${
+                        isAllChecked
+                          ? "bg-emerald-950 text-emerald-300 border-emerald-500"
+                          : checkedCount > 0
+                          ? "bg-amber-950 text-amber-300 border-amber-600"
+                          : "bg-slate-800 text-slate-300 border-slate-700"
+                      }`}
+                    >
+                      {isAllChecked
+                        ? "✅ Wszystko skompletowane"
+                        : `Kupiono: ${checkedCount} / ${items.length}`}
+                    </span>
+                  )}
                 </div>
 
-                {/* Przycisk rozwijania pozycji */}
-                <button
-                  type="button"
-                  onClick={() => toggleExpanded(order.id)}
-                  className="mt-3 w-full flex items-center justify-between rounded-2xl bg-slate-800/70 hover:bg-slate-800 px-3.5 py-2.5 text-xs font-bold text-blue-300 active:scale-[0.99] transition border border-slate-700/50"
-                  aria-expanded={isExpanded}
-                >
-                  <span>📋 {pluralizeItems(items.length)}</span>
-                  <span className="text-slate-400">{isExpanded ? "▲ Zwiń" : "▼ Pokaż"}</span>
-                </button>
-
-                {isExpanded && (
-                  <div className="mt-3 space-y-2.5 pt-2 border-t border-slate-800">
-                    {items.length > 0 ? (
-                      <ul className="divide-y divide-slate-800/80 rounded-2xl border border-slate-800 bg-slate-950/60">
-                        {items.map((item, idx) => (
-                          <li
-                            key={item.id ?? `${order.id}-${idx}`}
-                            className="flex items-baseline justify-between gap-2 px-3.5 py-2.5 text-xs"
-                          >
-                            <span className="text-slate-200 font-semibold">{item.name}</span>
-                            <span className="font-black text-amber-400 whitespace-nowrap bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
-                              {item.quantity} {item.unit ?? "szt."}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-xs text-slate-500 italic px-2">Brak sprecyzowanych pozycji</p>
-                    )}
-
-                    {order.notes && (
-                      <div className="rounded-2xl border border-amber-500/50 bg-amber-500/10 p-3">
-                        <p className="text-[10px] font-black uppercase tracking-wider text-amber-300">
-                          ⚠️ Uwagi kierownika:
-                        </p>
-                        <p className="mt-1 text-xs text-amber-100 font-medium leading-relaxed">{order.notes}</p>
-                      </div>
-                    )}
+                {/* Uwagi kierownika wyróżnione w ramce */}
+                {order.notes && (
+                  <div className="mt-3 rounded-2xl border border-amber-500/60 bg-amber-500/10 p-3">
+                    <p className="text-[10px] font-black uppercase tracking-wider text-amber-300">
+                      ⚠️ Uwagi kierownika:
+                    </p>
+                    <p className="mt-0.5 text-xs text-amber-100 font-medium leading-relaxed">
+                      {order.notes}
+                    </p>
                   </div>
                 )}
 
-                {/* Akcje kierowcy / załadunku */}
-                {order.status !== STATUS_DONE && (
-                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {order.status !== STATUS_IN_PROGRESS && (
-                      <button
-                        type="button"
-                        disabled={isBusy || !isOnline}
-                        onClick={() => updateStatus(order, STATUS_IN_PROGRESS)}
-                        className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 px-3.5 py-2.5 text-xs font-black uppercase tracking-wider text-slate-950 active:scale-95 transition disabled:opacity-50 shadow"
-                      >
-                        🚚 W drodze / Załadunek
-                      </button>
+                {/* Nagłówek listy pozycji z przyciskiem zwijania */}
+                <button
+                  type="button"
+                  onClick={() => toggleExpanded(order.id)}
+                  className="mt-3 w-full flex items-center justify-between rounded-2xl bg-slate-800/80 hover:bg-slate-800 px-3.5 py-2.5 text-xs font-bold text-blue-300 active:scale-[0.99] transition border border-slate-700/60"
+                  aria-expanded={isExpanded}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>📋 {pluralizeItems(items.length)}</span>
+                    <span className="text-[10px] text-slate-400 font-normal">
+                      (dotknij pozycji aby odhaczyć zakup)
+                    </span>
+                  </span>
+                  <span className="text-slate-400">{isExpanded ? "▲ Zwiń" : "▼ Pokaż"}</span>
+                </button>
+
+                {/* Rozwijana lista pozycji z opcją ODHACZANIA dla kierowcy */}
+                {isExpanded && (
+                  <div className="mt-2.5 space-y-1.5 pt-1">
+                    {items.length > 0 ? (
+                      <ul className="space-y-1.5">
+                        {items.map((item, idx) => {
+                          const checked = isItemChecked(order.id, idx, item.name);
+                          return (
+                            <li
+                              key={item.id ?? `${order.id}-${idx}`}
+                              onClick={() => toggleItemCheck(order.id, idx, item.name)}
+                              className={`flex items-center justify-between gap-3 p-3 rounded-2xl border cursor-pointer active:scale-[0.98] transition ${
+                                checked
+                                  ? "bg-emerald-950/30 border-emerald-600/50 text-slate-400"
+                                  : "bg-slate-950/70 border-slate-800 text-white hover:border-slate-700"
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                {/* Checkbox dotykowy */}
+                                <div
+                                  className={`w-6 h-6 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 border transition ${
+                                    checked
+                                      ? "bg-emerald-500 border-emerald-400 text-slate-950"
+                                      : "bg-slate-900 border-slate-600 text-transparent"
+                                  }`}
+                                >
+                                  ✓
+                                </div>
+                                <span
+                                  className={`text-xs font-semibold leading-snug break-words ${
+                                    checked ? "line-through text-slate-400" : "text-slate-100"
+                                  }`}
+                                >
+                                  {item.name}
+                                </span>
+                              </div>
+
+                              <span
+                                className={`font-black text-xs whitespace-nowrap px-2.5 py-1 rounded-xl border shrink-0 ${
+                                  checked
+                                    ? "bg-emerald-950/60 border-emerald-700/40 text-emerald-300"
+                                    : "bg-amber-500/15 border-amber-500/30 text-amber-300"
+                                }`}
+                              >
+                                {item.quantity} {item.unit ?? "szt."}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-slate-500 italic px-2 py-1">
+                        Brak sprecyzowanych pozycji
+                      </p>
                     )}
-                    <button
-                      type="button"
-                      disabled={isBusy || !isOnline}
-                      onClick={() => updateStatus(order, STATUS_DONE)}
-                      className={`w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 px-3.5 py-2.5 text-xs font-black uppercase tracking-wider text-white active:scale-95 transition disabled:opacity-50 shadow ${
-                        order.status === STATUS_IN_PROGRESS ? "sm:col-span-2" : ""
-                      }`}
-                    >
-                      ✅ Oznacz jako dostarczone
-                    </button>
                   </div>
                 )}
               </article>

@@ -7,6 +7,13 @@ import { collection, getDocs, doc, setDoc, updateDoc, addDoc, query, orderBy } f
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import Link from "next/link";
+import {
+    savePendingPhoto,
+    getPendingPhotos,
+    deletePendingPhoto,
+    blobToDataUrl,
+    PendingPhotoUpload
+} from "@/lib/db/offline-plac-photos";
 
 interface ResidualItem {
     id: string;
@@ -21,6 +28,8 @@ interface ResidualItem {
     isResidual?: boolean;
     additionalInfo?: string;
     updatedAt?: string;
+    createdAt?: string;
+    isPendingUpload?: boolean;
 }
 
 // Funkcja kompresji zdjęć z aparatu telefonu przed wysłaniem na Firebase Storage
@@ -73,6 +82,8 @@ export default function PlacResidualsPage() {
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [toast, setToast] = useState<string | null>(null);
     const [isSubmittingNew, setIsSubmittingNew] = useState(false);
+    const [pendingPhotos, setPendingPhotos] = useState<PendingPhotoUpload[]>([]);
+    const [isSyncingPhotos, setIsSyncingPhotos] = useState(false);
 
     // Formularz nowej resztki
     const [newItem, setNewItem] = useState<{
@@ -99,11 +110,84 @@ export default function PlacResidualsPage() {
         setTimeout(() => setToast(null), 3500);
     };
 
+    // Odśwież listę oczekujących zdjęć w telefonie
+    const refreshPendingQueue = async () => {
+        try {
+            const list = await getPendingPhotos();
+            setPendingPhotos(list);
+            return list;
+        } catch {
+            return [];
+        }
+    };
+
+    // Synchronizacja oczekujących zdjęć z chmurą
+    const syncPendingPhotos = async () => {
+        if (!navigator.onLine) {
+            showToast("⚠️ Brak połączenia z internetem – połącz się z siecią, aby wysłać zdjęcia.");
+            return;
+        }
+
+        const queue = await getPendingPhotos();
+        if (queue.length === 0) return;
+
+        setIsSyncingPhotos(true);
+        showToast(`🚀 Wysyłanie ${queue.length} zdjęć z pamięci telefonu...`);
+
+        let successCount = 0;
+        for (const entry of queue) {
+            try {
+                const storageRef = ref(storage, `inventory/residuals_${entry.itemId}_${Date.now()}.jpg`);
+                await uploadBytes(storageRef, entry.photoBlob);
+                const downloadURL = await getDownloadURL(storageRef);
+
+                if (entry.isNewItem && entry.newItemData) {
+                    const docData = {
+                        name: entry.newItemData.name,
+                        availableQuantity: Number(entry.newItemData.qty) || 1,
+                        totalQuantity: Number(entry.newItemData.qty) || 1,
+                        unit: entry.newItemData.unit || "szt.",
+                        currentLocation: entry.newItemData.location || "Plac Główny",
+                        additionalInfo: entry.newItemData.notes || "",
+                        imageUrl: downloadURL,
+                        category: "Pozostałości budowlane",
+                        inventoryNumber: "RESZTKI",
+                        isResidual: true,
+                        type: "BULK",
+                        subType: "MANUAL",
+                        status: "DOSTĘPNY",
+                        createdAt: entry.createdAt || new Date().toISOString()
+                    };
+                    const docRef = await addDoc(collection(db, "inventory"), docData);
+                    setItems(prev => prev.map(i => i.id === entry.itemId ? { ...i, id: docRef.id, imageUrl: downloadURL, isPendingUpload: false } : i));
+                } else {
+                    await updateDoc(doc(db, "inventory", entry.itemId), {
+                        imageUrl: downloadURL,
+                        updatedAt: new Date().toISOString()
+                    });
+                    setItems(prev => prev.map(i => i.id === entry.itemId ? { ...i, imageUrl: downloadURL, isPendingUpload: false } : i));
+                }
+
+                await deletePendingPhoto(entry.id);
+                successCount++;
+            } catch (syncErr) {
+                console.warn(`Błąd synchronizacji zdjęcia ${entry.id}:`, syncErr);
+            }
+        }
+
+        await refreshPendingQueue();
+        setIsSyncingPhotos(false);
+        if (successCount > 0) {
+            showToast(`✅ Zsynchronizowano ${successCount} zdjęć z chmurą!`);
+            fetchFreshData();
+        }
+    };
+
     // 1. Ładowanie danych i obsługa offline cache
     useEffect(() => {
         setIsOnline(navigator.onLine);
 
-        // Dynamiczne ustawienie manifestu PWA dla Placu (żeby przeglądarka instalowała PESAM Plac zamiast Voice)
+        // Dynamiczne ustawienie manifestu PWA dla Placu
         let manifestLink = document.querySelector<HTMLLinkElement>("link[rel~='manifest']");
         if (manifestLink) {
             manifestLink.href = "/manifest-plac.json";
@@ -114,6 +198,9 @@ export default function PlacResidualsPage() {
             document.head.appendChild(manifestLink);
         }
         document.title = "PESAM Plac & Resztki";
+
+        // Załaduj oczekujące zdjęcia z IndexedDB
+        refreshPendingQueue();
 
         // Natychmiastowe załadowanie z pamięci telefonu (0 ms opóźnienia na placu)
         const cachedItems = localStorage.getItem("pesam_residuals_cache");
@@ -129,6 +216,7 @@ export default function PlacResidualsPage() {
             setIsOnline(true);
             showToast("🟢 Połączono z siecią (Online)");
             fetchFreshData();
+            syncPendingPhotos();
         };
         const handleOffline = () => {
             setIsOnline(false);
@@ -173,28 +261,83 @@ export default function PlacResidualsPage() {
         }
     };
 
-    // 2. Bezpośrednie zrobienie zdjęcia aparatem telefonu dla danej pozycji
+    // 2. Bezpośrednie zrobienie zdjęcia aparatem telefonu dla danej pozycji (z obsługą offline!)
     const handleCameraCapture = async (item: ResidualItem, file: File) => {
         try {
             setUploadingId(item.id);
-            showToast("⏳ Kompresja i wgrywanie zdjęcia z placu...");
+            showToast("⏳ Zapisywanie zdjęcia z placu...");
             const compressedBlob = await compressImage(file, 1200, 0.8);
-            const storageRef = ref(storage, `inventory/residuals_${item.id}_${Date.now()}.jpg`);
-            await uploadBytes(storageRef, compressedBlob);
-            const downloadURL = await getDownloadURL(storageRef);
+            const previewUrl = await blobToDataUrl(compressedBlob);
+
+            // TRYB OFFLINE: Jeśli brak sieci, od razu zapisujemy do IndexedDB i pokazujemy podgląd!
+            if (!navigator.onLine) {
+                await savePendingPhoto({
+                    id: `PHOTO_${item.id}_${Date.now()}`,
+                    itemId: item.id,
+                    itemName: item.name,
+                    photoBlob: compressedBlob,
+                    previewDataUrl: previewUrl,
+                    createdAt: new Date().toISOString(),
+                    status: "PENDING"
+                });
+
+                const updatedItems = items.map(i =>
+                    i.id === item.id ? { ...i, imageUrl: previewUrl, isPendingUpload: true } : i
+                );
+                setItems(updatedItems);
+                localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+                await refreshPendingQueue();
+                showToast("💾 Zdjęcie zapisane w telefonie (offline)! Wyśle się po powrocie zasięgu.");
+                return;
+            }
+
+            // TRYB ONLINE: Próba wysłania z limitem czasu 7s (aby wolny zasięg nie wieszał ekranu)
+            const uploadPromise = async () => {
+                const storageRef = ref(storage, `inventory/residuals_${item.id}_${Date.now()}.jpg`);
+                await uploadBytes(storageRef, compressedBlob);
+                return await getDownloadURL(storageRef);
+            };
+
+            const downloadURL = await Promise.race([
+                uploadPromise(),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 7000))
+            ]);
 
             await updateDoc(doc(db, "inventory", item.id), {
                 imageUrl: downloadURL,
                 updatedAt: new Date().toISOString()
             });
 
-            const updatedItems = items.map(i => (i.id === item.id ? { ...i, imageUrl: downloadURL } : i));
+            const updatedItems = items.map(i => (i.id === item.id ? { ...i, imageUrl: downloadURL, isPendingUpload: false } : i));
             setItems(updatedItems);
             localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
             showToast("✅ Zdjęcie materiału zaktualizowane!");
         } catch (error: any) {
-            console.error("Błąd wgrywania zdjęcia: ", error);
-            alert("Błąd wgrywania zdjęcia: " + (error?.message || error));
+            console.warn("Wgrywanie online nie powiodło się, zapisuję do kolejki offline:", error);
+            // Awaryjny fallback do pamięci telefonu IndexedDB
+            try {
+                const compressedBlob = await compressImage(file, 1200, 0.8);
+                const previewUrl = await blobToDataUrl(compressedBlob);
+                await savePendingPhoto({
+                    id: `PHOTO_${item.id}_${Date.now()}`,
+                    itemId: item.id,
+                    itemName: item.name,
+                    photoBlob: compressedBlob,
+                    previewDataUrl: previewUrl,
+                    createdAt: new Date().toISOString(),
+                    status: "PENDING"
+                });
+
+                const updatedItems = items.map(i =>
+                    i.id === item.id ? { ...i, imageUrl: previewUrl, isPendingUpload: true } : i
+                );
+                setItems(updatedItems);
+                localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+                await refreshPendingQueue();
+                showToast("💾 Słaby zasięg – zdjęcie zapisano w telefonie! Zostanie wysłane po powrocie zasięgu.");
+            } catch (saveErr) {
+                alert("Błąd zapisu zdjęcia: " + saveErr);
+            }
         } finally {
             setUploadingId(null);
         }
@@ -255,7 +398,7 @@ export default function PlacResidualsPage() {
         }
     };
 
-    // 5. Utworzenie nowej pozycji bezpośrednio z placu
+    // 5. Utworzenie nowej pozycji bezpośrednio z placu (z obsługą offline!)
     const handleCreateNew = async () => {
         if (!newItem.name.trim()) {
             alert("Podaj nazwę resztki budowlanej!");
@@ -265,13 +408,85 @@ export default function PlacResidualsPage() {
         try {
             setIsSubmittingNew(true);
             let finalImageUrl = "";
+            let photoBlobToSave: Blob | null = null;
+            let previewUrl = "";
 
             if (newItem.photoFile) {
                 showToast("⏳ Zapisywanie zdjęcia z aparatu...");
-                const compressedBlob = await compressImage(newItem.photoFile, 1200, 0.8);
-                const storageRef = ref(storage, `inventory/residuals_new_${Date.now()}.jpg`);
-                await uploadBytes(storageRef, compressedBlob);
-                finalImageUrl = await getDownloadURL(storageRef);
+                photoBlobToSave = await compressImage(newItem.photoFile, 1200, 0.8);
+                previewUrl = await blobToDataUrl(photoBlobToSave);
+            }
+
+            // Jeśli brak sieci: natychmiast zapisz do IndexedDB w telefonie i dodaj do listy
+            if (!navigator.onLine) {
+                const tempId = `OFFLINE_${Date.now()}`;
+                if (photoBlobToSave) {
+                    await savePendingPhoto({
+                        id: `PHOTO_NEW_${Date.now()}`,
+                        itemId: tempId,
+                        itemName: newItem.name.trim(),
+                        photoBlob: photoBlobToSave,
+                        previewDataUrl: previewUrl,
+                        isNewItem: true,
+                        newItemData: {
+                            name: newItem.name.trim(),
+                            qty: Number(newItem.qty) || 1,
+                            unit: newItem.unit || "szt.",
+                            location: newItem.location || "Plac Główny",
+                            notes: newItem.notes || ""
+                        },
+                        createdAt: new Date().toISOString(),
+                        status: "PENDING"
+                    });
+                    await refreshPendingQueue();
+                }
+
+                const createdItem: ResidualItem = {
+                    id: tempId,
+                    name: newItem.name.trim(),
+                    availableQuantity: Number(newItem.qty) || 1,
+                    totalQuantity: Number(newItem.qty) || 1,
+                    unit: newItem.unit || "szt.",
+                    currentLocation: newItem.location || "Plac Główny",
+                    additionalInfo: newItem.notes || "",
+                    imageUrl: previewUrl || "",
+                    category: "Pozostałości budowlane",
+                    inventoryNumber: "RESZTKI",
+                    isResidual: true,
+                    isPendingUpload: !!photoBlobToSave,
+                    createdAt: new Date().toISOString()
+                };
+
+                const updatedItems = [createdItem, ...items].sort((a, b) => a.name.localeCompare(b.name));
+                setItems(updatedItems);
+                localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+
+                showToast("💾 Nowa resztka zapisana w telefonie! Zostanie zsynchronizowana po uzyskaniu zasięgu.");
+                setIsAddModalOpen(false);
+                setNewItem({
+                    name: "",
+                    qty: 1,
+                    unit: "szt.",
+                    location: "Plac Główny",
+                    notes: "",
+                    photoFile: null,
+                    photoPreview: null
+                });
+                return;
+            }
+
+            // Tryb Online:
+            if (photoBlobToSave) {
+                const uploadPromise = async () => {
+                    const storageRef = ref(storage, `inventory/residuals_new_${Date.now()}.jpg`);
+                    await uploadBytes(storageRef, photoBlobToSave!);
+                    return await getDownloadURL(storageRef);
+                };
+
+                finalImageUrl = await Promise.race([
+                    uploadPromise(),
+                    new Promise<string>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 7000))
+                ]);
             }
 
             const docData = {
@@ -310,8 +525,57 @@ export default function PlacResidualsPage() {
                 photoPreview: null
             });
         } catch (error: any) {
-            console.error("Błąd dodawania pozycji: ", error);
-            alert("Błąd dodawania: " + (error?.message || error));
+            console.warn("Błąd online w handleCreateNew, zapis do offline:", error);
+            // Fallback: dodaj lokalnie z kolejką offline
+            const tempId = `OFFLINE_${Date.now()}`;
+            try {
+                if (newItem.photoFile) {
+                    const photoBlobToSave = await compressImage(newItem.photoFile, 1200, 0.8);
+                    const previewUrl = await blobToDataUrl(photoBlobToSave);
+                    await savePendingPhoto({
+                        id: `PHOTO_NEW_${Date.now()}`,
+                        itemId: tempId,
+                        itemName: newItem.name.trim(),
+                        photoBlob: photoBlobToSave,
+                        previewDataUrl: previewUrl,
+                        isNewItem: true,
+                        newItemData: {
+                            name: newItem.name.trim(),
+                            qty: Number(newItem.qty) || 1,
+                            unit: newItem.unit || "szt.",
+                            location: newItem.location || "Plac Główny",
+                            notes: newItem.notes || ""
+                        },
+                        createdAt: new Date().toISOString(),
+                        status: "PENDING"
+                    });
+                    await refreshPendingQueue();
+
+                    const createdItem: ResidualItem = {
+                        id: tempId,
+                        name: newItem.name.trim(),
+                        availableQuantity: Number(newItem.qty) || 1,
+                        totalQuantity: Number(newItem.qty) || 1,
+                        unit: newItem.unit || "szt.",
+                        currentLocation: newItem.location || "Plac Główny",
+                        additionalInfo: newItem.notes || "",
+                        imageUrl: previewUrl,
+                        category: "Pozostałości budowlane",
+                        inventoryNumber: "RESZTKI",
+                        isResidual: true,
+                        isPendingUpload: true,
+                        createdAt: new Date().toISOString()
+                    };
+
+                    const updatedItems = [createdItem, ...items].sort((a, b) => a.name.localeCompare(b.name));
+                    setItems(updatedItems);
+                    localStorage.setItem("pesam_residuals_cache", JSON.stringify(updatedItems));
+                }
+                showToast("💾 Zapisano w pamięci telefonu (offline)! Wyślemy po powrocie zasięgu.");
+                setIsAddModalOpen(false);
+            } catch (fallbackErr) {
+                alert("Błąd: " + fallbackErr);
+            }
         } finally {
             setIsSubmittingNew(false);
         }
@@ -463,6 +727,41 @@ export default function PlacResidualsPage() {
                         ⚠️ Kończące się ({countLowStock})
                     </button>
                 </div>
+
+                {/* BANNER KOLEJKI OFFLINE (Gdy są zdjęcia oczekujące na wysłanie) */}
+                {pendingPhotos.length > 0 && (
+                    <div className="mt-3 bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border border-amber-500/50 rounded-2xl p-3 flex items-center justify-between gap-2 shadow-lg animate-fade-in">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="text-2xl">📸</span>
+                            <div className="min-w-0">
+                                <p className="text-xs font-black text-amber-300 truncate">
+                                    Zdjęcia w pamięci telefonu: {pendingPhotos.length}
+                                </p>
+                                <p className="text-[10px] text-slate-300 truncate">
+                                    {isOnline
+                                        ? "Zasięg dostępny – kliknij, aby zsynchronizować z chmurą"
+                                        : "Zapisano bezpiecznie offline. Wyślesz po powrocie zasięgu."}
+                                </p>
+                            </div>
+                        </div>
+                        <button
+                            onClick={syncPendingPhotos}
+                            disabled={isSyncingPhotos || !isOnline}
+                            className="shrink-0 px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider active:scale-95 transition disabled:opacity-50 flex items-center gap-1.5 shadow"
+                        >
+                            {isSyncingPhotos ? (
+                                <>
+                                    <span className="inline-block animate-spin text-sm">🔄</span>
+                                    <span>Wysyłanie...</span>
+                                </>
+                            ) : (
+                                <>
+                                    <span>🚀 Wyślij teraz</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
+                )}
             </header>
 
             {/* Lista kafelków resztek budowlanych */}
@@ -480,6 +779,7 @@ export default function PlacResidualsPage() {
                         {filteredItems.map(item => {
                             const isThisUploading = uploadingId === item.id;
                             const hasPhoto = !!item.imageUrl;
+                            const isPending = item.isPendingUpload || pendingPhotos.some(p => p.itemId === item.id);
 
                             return (
                                 <div
@@ -510,6 +810,11 @@ export default function PlacResidualsPage() {
                                                         alt={item.name}
                                                         className="w-full h-full object-cover group-hover:scale-105 transition"
                                                     />
+                                                    {isPending && (
+                                                        <span className="absolute top-1 left-1 bg-amber-500 text-slate-950 text-[8px] font-black px-1 py-0.5 rounded shadow">
+                                                            ⏳ Offline
+                                                        </span>
+                                                    )}
                                                     <span className="absolute bottom-0 right-0 bg-black/60 text-white text-[9px] px-1 rounded-tl font-bold">
                                                         🔍
                                                     </span>
