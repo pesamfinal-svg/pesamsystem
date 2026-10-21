@@ -50,6 +50,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Ślad CO2 Odpadów", path: "/dashboard/co2", icon: "🌱" },
 
         { name: "Katalog Sprzętu", path: "/dashboard/inventory", icon: "📦", requiredPermission: "viewInventory" },
+        { name: "Plac (Resztki Mobilna)", path: "/plac", icon: "🏗️", requiredPermission: "viewInventory" },
         { name: "Flota (Pojazdy)", path: "/dashboard/vehicles", icon: "🚚", requiredPermission: ["viewVehicles", "manageVehicles"] },
         { name: "Budowy", path: "/dashboard/sites", icon: "🏗️", requiredPermission: "manageSites" },
         { name: "Rozliczenia Projektów", path: "/dashboard/closeouts", icon: "🏁", requiredPermission: "manageProjectCloseouts" },
@@ -139,9 +140,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <div className="p-4 border-t border-slate-800 bg-slate-950/40 space-y-2 flex-shrink-0">
                     <button
                         onClick={() => {
-                            alert("Aby zainstalować CZYSTĄ aplikację dyktafonu na telefonie:\n\n1. Wejdź na telefonie na adres:\n👉 pesam-magazyn--pesam-system-81165.europe-west4.hosted.app/voice-order\n\n2. Zaloguj się.\n\n3. Zainstaluj na ekranie głównym:\n📱 Android: Kliknij trzy kropki -> 'Dodaj do ekranu głównego'.\n🍏 iOS (Safari): Kliknij 'Udostępnij' -> 'Do ekranu początkowego'.\n\nOtrzymasz czystą, pełnoekranową aplikację bez zbędnych zakładek!");
+                            alert("DEDYKOWANE APLIKACJE MOBILNE NA TELEFON:\n\n1. 🏗️ Plac & Resztki (Dla magazynierów / kierowców):\n👉 Wejdź na: /plac\n\n2. 🎙️ Dyktafon Budowy (Dla kierowników):\n👉 Wejdź na: /voice-order\n\n📱 JAK DODAĆ DO EKRANU GŁÓWNEGO:\n• Android (Chrome): Menu (trzy kropki) -> 'Dodaj do ekranu głównego'\n• iOS (Safari): Przycisk Udostępnij -> 'Do ekranu początkowego'\n\nUzyskasz szybkie, pełnoekranowe aplikacje z natychmiastowym aparatem!");
                         }}
-                        className="w-full py-2.5 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-500/20 rounded-lg text-[10px] font-black transition uppercase tracking-wider"
+                        className="w-full py-2.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 rounded-lg text-[10px] font-black transition uppercase tracking-wider"
                     >
                         📲 Zainstaluj na telefonie
                     </button>

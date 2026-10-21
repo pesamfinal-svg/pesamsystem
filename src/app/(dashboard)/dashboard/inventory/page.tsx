@@ -1381,6 +1381,15 @@ export default function InventoryPage() {
                             </button>
                         </div>
                     </div>
+                    <a
+                        href="/plac"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs rounded-xl transition flex items-center gap-1.5 shadow-sm active:scale-95"
+                        title="Otwórz dedykowaną aplikację mobilną do obchodu placu i robienia zdjęć telefonem"
+                    >
+                        <span>📱</span> Otwórz Plac Mobilny
+                    </a>
                 </div>
                 <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
@@ -1391,7 +1400,34 @@ export default function InventoryPage() {
                             const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
                             return (
                                 <tr key={item.id} className={`border-b last:border-0 hover:bg-slate-50 transition ${isResidual ? 'bg-amber-50/20' : ''}`}>
-                                    <td className="p-3"><img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" /></td>
+                                    <td className="p-3">
+                                        <div className="relative group w-12 h-12">
+                                            <img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" />
+                                            <label
+                                                title="Szybka zmiana / dodanie zdjęcia"
+                                                className="absolute inset-0 bg-black/60 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center cursor-pointer rounded transition text-xs font-bold"
+                                            >
+                                                📷
+                                                <input
+                                                    type="file"
+                                                    accept="image/*"
+                                                    className="hidden"
+                                                    onChange={async (e) => {
+                                                        if (e.target.files && e.target.files[0]) {
+                                                            const file = e.target.files[0];
+                                                            try {
+                                                                const url = await uploadImage(file);
+                                                                await updateDoc(doc(db, "inventory", item.id), { imageUrl: url, updatedAt: new Date().toISOString() });
+                                                                setItems(prev => prev.map(i => i.id === item.id ? { ...i, imageUrl: url } : i));
+                                                            } catch (err: any) {
+                                                                alert("Błąd wgrywania zdjęcia: " + (err?.message || err));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                            </label>
+                                        </div>
+                                    </td>
                                     <td className="p-4 cursor-pointer" onClick={() => openItemCard(item)}>
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <p className="font-bold text-slate-700">{item.name}</p>

@@ -378,17 +378,14 @@ export function analyzeItemReuseAndWasteSplit(item: ProtocolItemInput, totalWeig
     };
   }
 
-  // 5. Pełna resztka bez ułamków (np. 1 pełny worek kleju, który nie był otwarty)
-  // Domyślnie 90% ponowne użycie na magazynie, 10% straty transportowo-magazynowe / utylizacja opakowania
-  const lossRatio = 0.10;
-  const wasteKg = Number((totalWeightKg * lossRatio).toFixed(2));
-  const reuseKg = Number((totalWeightKg - wasteKg).toFixed(2));
+  // 5. Materiał pełny / nieotwarty (liczba całkowita bez informacji o otwarciu lub uszkodzeniu)
+  // W 100% zdatny do ponownego użycia na magazynie (0 kg odpadu)
   return {
-    reuseWeightKg: reuseKg,
-    wasteWeightKg: wasteKg,
+    reuseWeightKg: totalWeightKg,
+    wasteWeightKg: 0,
     disposalMethodKey: method.key,
     disposalMethodName: method.name,
-    notesAnalysis: `Materiał zdatny do reuse (${reuseKg} kg) + 10% odpad/opakowanie (${wasteKg} kg)`
+    notesAnalysis: "100% ponowne użycie na magazynie (produkt pełny / nieotwarty)"
   };
 }
 
