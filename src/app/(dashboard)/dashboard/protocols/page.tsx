@@ -3,8 +3,8 @@
 
 import React, { useState, useEffect, Fragment } from "react";
 import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { db } from "@/lib/firebase/config";
+import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -181,6 +181,13 @@ export default function ProtocolsHub() {
     const [isLoadingDriverDrafts, setIsLoadingDriverDrafts] = useState(false);
     const [isDriverDraftsModalOpen, setIsDriverDraftsModalOpen] = useState(false);
     const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
+    const [loadedDraftAudioUrl, setLoadedDraftAudioUrl] = useState<string | null>(null);
+    const [loadedDraftPhotos, setLoadedDraftPhotos] = useState<string[]>([]);
+    const [isDeletingDraft, setIsDeletingDraft] = useState<string | null>(null);
+
+    // Stany dla Drukowania Protokołów
+    const [protocolToPrint, setProtocolToPrint] = useState<any | null>(null);
+    const [showPrintSuccessModal, setShowPrintSuccessModal] = useState<boolean>(false);
 
     // Stany dla Pozostałości budowlanych (Zwrot papierowy)
     const [isPaperResidualModalOpen, setIsPaperResidualModalOpen] = useState(false);
@@ -1200,31 +1207,55 @@ export default function ProtocolsHub() {
                 createdAt: new Date().toISOString(),
                 documentDate: returnDocDate || new Date().toISOString().split("T")[0],
                 items: finalReturnItems,
-                residualNotes: returnResidualNotes.trim() || null
+                residualNotes: returnResidualNotes.trim() || null,
+                photos: loadedDraftPhotos.length > 0 ? loadedDraftPhotos : undefined
             };
 
             await setDoc(protocolRef, cleanFirestorePayload(rawData));
 
-            // Jeśli zatwierdzono na bazie szkicu kierowcy, oznacz szkic jako WCZYTANY
+            // Jeśli zatwierdzono na bazie szkicu kierowcy:
+            // 1. Trwale usuwamy nagranie ze Storage, aby nie zajmowało miejsca w chmurze
+            // 2. Oznaczamy szkic jako WCZYTANY
             if (loadedDraftId) {
                 try {
+                    if (loadedDraftAudioUrl) {
+                        try {
+                            const audioRef = ref(storage, loadedDraftAudioUrl);
+                            await deleteObject(audioRef);
+                            console.log("Nagranie audio trwale usunięte z Firebase Storage.");
+                        } catch (audDelErr) {
+                            console.warn("Błąd usuwania nagrania ze Storage:", audDelErr);
+                        }
+                    }
+
                     await setDoc(doc(db, "protocols", loadedDraftId), {
                         status: "WCZYTANY",
+                        audioNoteUrl: null,
+                        audioDeleted: true,
                         loadedAt: new Date().toISOString(),
                         loadedBy: user?.uid || "",
                         loadedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || "Kierownik"
                     }, { merge: true });
                     setLoadedDraftId(null);
+                    setLoadedDraftAudioUrl(null);
+                    setLoadedDraftPhotos([]);
                 } catch (draftErr) {
                     console.error("Błąd aktualizacji statusu szkicu kierowcy:", draftErr);
                 }
             }
 
             setReturnResidualNotes("");
-            alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
             closeModal();
             fetchPendingProtocols();
             fetchHistoryProtocols();
+
+            // Ustawienie protokołu do podglądu/wydruku i otwarcie modalu sukcesu
+            setProtocolToPrint({
+                ...rawData,
+                docId: protocolRef.id,
+                items: finalReturnItems
+            });
+            setShowPrintSuccessModal(true);
         } catch (error: any) { alert("Błąd: " + error.message); } finally { setIsSubmitting(false); }
     };
 
@@ -1375,8 +1406,64 @@ export default function ProtocolsHub() {
         setReturnCart([...mappedItems, ...mappedResiduals]);
         setReturnResidualNotes(newResidualNotes);
         setLoadedDraftId(draft.docId);
+        setLoadedDraftAudioUrl(draft.audioNoteUrl || null);
+        setLoadedDraftPhotos(draft.photos || []);
         setIsDriverDraftsModalOpen(false);
         alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${mappedResiduals.length} pozycji resztek jako pozycje zwrotu.`);
+    };
+
+    const handleDeleteDriverDraft = async (draft: any) => {
+        if (!confirm(`Czy na pewno chcesz bezpowrotnie usunąć ten szkic protokołu (budowa: ${draft.sourceName})? Pliki nagrań audio i zdjęcia zostaną trwale skasowane z serwera.`)) return;
+        setIsDeletingDraft(draft.docId);
+        try {
+            if (draft.audioNoteUrl) {
+                try {
+                    const audioRef = ref(storage, draft.audioNoteUrl);
+                    await deleteObject(audioRef);
+                } catch (audErr) {
+                    console.warn("Błąd usuwania pliku audio:", audErr);
+                }
+            }
+            if (draft.photos && Array.isArray(draft.photos)) {
+                for (const pUrl of draft.photos) {
+                    try {
+                        const pRef = ref(storage, pUrl);
+                        await deleteObject(pRef);
+                    } catch (photoErr) {
+                        console.warn("Błąd usuwania zdjęcia:", photoErr);
+                    }
+                }
+            }
+            await deleteDoc(doc(db, "protocols", draft.docId));
+            setDriverDrafts(prev => prev.filter(d => d.docId !== draft.docId));
+            alert("Szkic oraz powiązane pliki zostały trwale usunięte.");
+        } catch (err: any) {
+            alert("Błąd podczas usuwania: " + (err.message || err));
+        } finally {
+            setIsDeletingDraft(null);
+        }
+    };
+
+    const handleDeleteDraftAudioOnly = async (draft: any) => {
+        if (!confirm("Czy na pewno chcesz trwale usunąć plik nagrania audio z tego szkicu? Zwolnisz miejsce na serwerze.")) return;
+        try {
+            if (draft.audioNoteUrl) {
+                try {
+                    const audioRef = ref(storage, draft.audioNoteUrl);
+                    await deleteObject(audioRef);
+                } catch (audErr) {
+                    console.warn("Błąd usuwania ze storage:", audErr);
+                }
+                await setDoc(doc(db, "protocols", draft.docId), {
+                    audioNoteUrl: null,
+                    audioDeleted: true
+                }, { merge: true });
+                setDriverDrafts(prev => prev.map(d => d.docId === draft.docId ? { ...d, audioNoteUrl: null } : d));
+                alert("Plik nagrania audio został trwale usunięty.");
+            }
+        } catch (err: any) {
+            alert("Błąd podczas usuwania nagrania: " + (err.message || err));
+        }
     };
 
     const filteredPaperInventory = inventory.filter(item => {
@@ -1996,13 +2083,27 @@ export default function ProtocolsHub() {
 
             if (loadedDraftId) {
                 try {
+                    if (loadedDraftAudioUrl) {
+                        try {
+                            const audioRef = ref(storage, loadedDraftAudioUrl);
+                            await deleteObject(audioRef);
+                            console.log("Nagranie audio trwale usunięte z Firebase Storage.");
+                        } catch (audDelErr) {
+                            console.warn("Błąd usuwania nagrania ze Storage:", audDelErr);
+                        }
+                    }
+
                     await setDoc(doc(db, "protocols", loadedDraftId), {
                         status: "WCZYTANY",
+                        audioNoteUrl: null,
+                        audioDeleted: true,
                         loadedAt: new Date().toISOString(),
                         loadedBy: user?.uid || "",
                         loadedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim()
                     }, { merge: true });
                     setLoadedDraftId(null);
+                    setLoadedDraftAudioUrl(null);
+                    setLoadedDraftPhotos([]);
                 } catch (draftErr) {
                     console.error("Błąd aktualizacji statusu szkicu kierowcy:", draftErr);
                 }
@@ -3663,7 +3764,15 @@ export default function ProtocolsHub() {
                                                                         </div>
                                                                     </div>
 
-                                                                    <div className="border-t pt-3 flex justify-end gap-3">
+                                                                    <div className="border-t pt-3 flex justify-end gap-3 flex-wrap">
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={isSubmitting}
+                                                                            onClick={(e) => { e.stopPropagation(); setProtocolToPrint(p); }}
+                                                                            className="bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                        >
+                                                                            🖨️ Drukuj Protokół
+                                                                        </button>
                                                                         {p.status !== "ANULOWANY" && p.type !== "KOREKTA" && (
                                                                             <>
                                                                                 <button
@@ -4934,14 +5043,26 @@ export default function ProtocolsHub() {
                                                     )}
                                                 </div>
 
-                                                <button
-                                                    type="button"
-                                                    onClick={() => loadDriverDraft(draft)}
-                                                    className="px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-md transition active:scale-95 flex items-center gap-1.5 shrink-0"
-                                                >
-                                                    <span>📥</span>
-                                                    <span>Załaduj ten protokół</span>
-                                                </button>
+                                                <div className="flex items-center gap-2 shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        disabled={isDeletingDraft === draft.docId}
+                                                        onClick={() => handleDeleteDriverDraft(draft)}
+                                                        className="px-3 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 font-bold text-xs transition active:scale-95 flex items-center gap-1 disabled:opacity-50"
+                                                        title="Usuń ten szkic i zwolnij miejsce w chmurze"
+                                                    >
+                                                        <span>🗑️</span>
+                                                        <span>{isDeletingDraft === draft.docId ? "Usuwanie..." : "Usuń szkic"}</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => loadDriverDraft(draft)}
+                                                        className="px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-md transition active:scale-95 flex items-center gap-1.5"
+                                                    >
+                                                        <span>📥</span>
+                                                        <span>Załaduj ten protokół</span>
+                                                    </button>
+                                                </div>
                                             </div>
 
                                             {/* Sekcja sprzętu */}
@@ -4989,11 +5110,44 @@ export default function ProtocolsHub() {
                                                 </div>
                                             )}
 
-                                            {/* Opcjonalny odsłuch nagrania */}
+                                            {/* Zdjęcia załączone przez kierowcę */}
+                                            {draft.photos && Array.isArray(draft.photos) && draft.photos.length > 0 && (
+                                                <div className="space-y-1.5 pt-2 border-t border-slate-100">
+                                                    <div className="text-[11px] font-black text-emerald-800 uppercase tracking-wide flex items-center gap-1">
+                                                        <span>📸</span>
+                                                        <span>Zdjęcia z budowy ({draft.photos.length}):</span>
+                                                    </div>
+                                                    <div className="flex gap-2 flex-wrap">
+                                                        {draft.photos.map((pUrl: string, pIdx: number) => (
+                                                            <a
+                                                                key={pIdx}
+                                                                href={pUrl}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="w-16 h-16 rounded-xl border-2 border-slate-200 overflow-hidden block shadow-sm hover:opacity-80 transition relative bg-black aspect-square"
+                                                            >
+                                                                <img src={pUrl} alt={`Foto ${pIdx + 1}`} className="w-full h-full object-cover" />
+                                                            </a>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Opcjonalny odsłuch nagrania z opcją usunięcia audio */}
                                             {draft.audioNoteUrl && (
-                                                <div className="flex items-center gap-2 pt-1 text-xs text-slate-500">
-                                                    <span>🎙️ Nagranie kierowcy:</span>
-                                                    <audio src={draft.audioNoteUrl} controls className="h-8 flex-1 max-w-sm" />
+                                                <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs text-slate-500 bg-slate-50/70 p-2.5 rounded-xl">
+                                                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                                                        <span className="shrink-0 font-bold text-slate-600">🎙️ Nagranie:</span>
+                                                        <audio src={draft.audioNoteUrl} controls className="h-8 flex-1 max-w-sm" />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleDeleteDraftAudioOnly(draft)}
+                                                        className="px-2.5 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-[11px] font-bold transition shrink-0"
+                                                        title="Usuń samo nagranie ze Storage"
+                                                    >
+                                                        🗑️ Usuń nagranie
+                                                    </button>
                                                 </div>
                                             )}
                                         </div>
@@ -6518,6 +6672,401 @@ export default function ProtocolsHub() {
                     </div>
                 </div>
             )}
+
+            {/* MODAL SUKCESU PO WYSTAWIENIU PROTOKOŁU: OPCJA WYDRUKU */}
+            {showPrintSuccessModal && protocolToPrint && (
+                <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4 print:hidden animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6 sm:p-8 space-y-6 text-center">
+                        <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-3xl mx-auto shadow-inner">
+                            ✅
+                        </div>
+                        <div className="space-y-2">
+                            <h2 className="text-2xl font-black text-slate-800">
+                                Protokół Zwrotu Został Wysłany!
+                            </h2>
+                            <p className="text-sm text-slate-600 leading-relaxed">
+                                Zgłoszenie zwrotu dla budowy{" "}
+                                <strong className="text-slate-900">{protocolToPrint.sourceName}</strong> zostało
+                                pomyślnie zarejestrowane w systemie (status: <span className="text-blue-600 font-bold">Oczekujący na magazynie</span>).
+                            </p>
+                        </div>
+
+                        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left space-y-2 text-xs">
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Numer / ID:</span>
+                                <span className="font-mono font-bold text-slate-700">{protocolToPrint.docId || protocolToPrint.protocolId || "-"}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Liczba pozycji sprzętu:</span>
+                                <span className="font-bold text-slate-700">{protocolToPrint.items?.length || 0} pozycji</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Data wystawienia:</span>
+                                <span className="font-bold text-slate-700">{protocolToPrint.documentDate || new Date().toISOString().split("T")[0]}</span>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-3">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowPrintSuccessModal(false);
+                                    setTimeout(() => window.print(), 250);
+                                }}
+                                className="flex-1 py-3.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-sm shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
+                            >
+                                <span>🖨️</span>
+                                <span>DRUKUJ PROTOKÓŁ</span>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowPrintSuccessModal(false);
+                                }}
+                                className="py-3.5 px-5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-sm transition"
+                            >
+                                Zamknij
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL PODGLĄDU I WYDRUKU PROTOKOŁU (Działa po kliknięciu 'Drukuj Protokół' lub po wysłaniu) */}
+            {protocolToPrint && !showPrintSuccessModal && (
+                <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4 print:hidden animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+                        <div className="p-4 sm:p-5 bg-slate-900 text-white flex justify-between items-center shrink-0">
+                            <div className="flex items-center gap-2.5">
+                                <span className="text-xl">🖨️</span>
+                                <div>
+                                    <h3 className="font-black text-sm sm:text-base">Podgląd Protokołu do Wydruku</h3>
+                                    <p className="text-[11px] text-slate-400">Możesz wydrukować ten protokół na drukarce lub zapisać jako PDF</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => window.print()}
+                                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs shadow-md transition active:scale-95 flex items-center gap-1.5"
+                                >
+                                    <span>🖨️</span>
+                                    <span>Drukuj (Ctrl+P)</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setProtocolToPrint(null)}
+                                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition"
+                                >
+                                    Zamknij
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Obszar podglądu dokumentu */}
+                        <div className="p-6 sm:p-8 overflow-y-auto bg-slate-100 flex-1">
+                            <div className="max-w-3xl mx-auto bg-white p-6 sm:p-8 rounded-2xl shadow-md border border-slate-200 text-slate-900 font-sans text-xs space-y-6">
+                                {/* Nagłówek protokołu */}
+                                <div className="border-b-2 border-slate-900 pb-4 flex justify-between items-start">
+                                    <div>
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-black text-lg tracking-wider text-slate-900">PESAM</span>
+                                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest border-l pl-2 border-slate-300">
+                                                System Magazynowy
+                                            </span>
+                                        </div>
+                                        <h1 className="text-base sm:text-lg font-black uppercase tracking-tight text-slate-900 mt-1">
+                                            {protocolToPrint.type === "WYDANIE" ? "PROTOKÓŁ WYDANIA SPRZĘTU" : "PROTOKÓŁ ZWROTU SPRZĘTU"}
+                                        </h1>
+                                        <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                                            Nr ID: {protocolToPrint.docId || protocolToPrint.protocolId || "-"}
+                                        </p>
+                                    </div>
+                                    <div className="text-right space-y-0.5">
+                                        <p className="font-bold text-slate-800">
+                                            Data: {protocolToPrint.documentDate || protocolToPrint.createdAt?.split("T")[0] || new Date().toISOString().split("T")[0]}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500">
+                                            Status: <strong>{protocolToPrint.status || "OCZEKUJĄCY"}</strong>
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Strony protokołu */}
+                                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                    <div>
+                                        <span className="text-[10px] font-black uppercase text-slate-400 block tracking-wider">
+                                            {protocolToPrint.type === "WYDANIE" ? "ŹRÓDŁO (WYDAJĄCY):" : "ŹRÓDŁO (BUDOWA / ZDAJĄCY):"}
+                                        </span>
+                                        <p className="font-black text-sm text-slate-900 mt-0.5">
+                                            {protocolToPrint.sourceName || "MAGAZYN GŁÓWNY"}
+                                        </p>
+                                        <p className="text-[11px] text-slate-600 mt-0.5">
+                                            Wystawił: <strong>{protocolToPrint.createdByName || "Kierownik"}</strong>
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] font-black uppercase text-slate-400 block tracking-wider">
+                                            {protocolToPrint.type === "WYDANIE" ? "MIEJSCE DOCELOWE (BUDOWA):" : "MIEJSCE DOCELOWE (PRZYJMUJĄCY):"}
+                                        </span>
+                                        <p className="font-black text-sm text-slate-900 mt-0.5">
+                                            {protocolToPrint.destinationName || "MAGAZYN GŁÓWNY"}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Tabela pozycji */}
+                                <div>
+                                    <h4 className="font-black text-xs uppercase tracking-wider text-slate-800 mb-2">
+                                        Wykaz pozycji ({protocolToPrint.items?.length || 0}):
+                                    </h4>
+                                    <table className="w-full text-left border-collapse border border-slate-300">
+                                        <thead>
+                                            <tr className="bg-slate-100 text-slate-800 text-[10px] font-black uppercase border-b border-slate-300">
+                                                <th className="p-2 border border-slate-300 w-8 text-center">Lp.</th>
+                                                <th className="p-2 border border-slate-300">Nazwa sprzętu / artykułu</th>
+                                                <th className="p-2 border border-slate-300 text-center w-28">Nr Magazynowy</th>
+                                                <th className="p-2 border border-slate-300 text-center w-20">Ilość</th>
+                                                <th className="p-2 border border-slate-300 text-center w-16">Jedn.</th>
+                                                <th className="p-2 border border-slate-300 w-28 text-center">Stan</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-200">
+                                            {protocolToPrint.items && protocolToPrint.items.length > 0 ? (
+                                                protocolToPrint.items.map((it: any, idx: number) => {
+                                                    const qty = it.returnQty ?? it.declaredQty ?? it.quantity ?? it.receivedQty ?? 1;
+                                                    const status = it.finalStatus || it.declaredStatus || "sprawne";
+                                                    return (
+                                                        <tr key={idx} className="border-b border-slate-200">
+                                                            <td className="p-2 border border-slate-300 text-center text-slate-500 font-mono">
+                                                                {idx + 1}
+                                                            </td>
+                                                            <td className="p-2 border border-slate-300 font-bold text-slate-900">
+                                                                <div>{it.name}</div>
+                                                                {it.accessories && Array.isArray(it.accessories) && it.accessories.length > 0 && (
+                                                                    <div className="mt-1 pl-2 border-l border-slate-300 text-[9px] text-slate-500">
+                                                                        <span className="font-semibold text-slate-600">Osprzęt: </span>
+                                                                        {it.accessories.map((acc: any, aIdx: number) => (
+                                                                            <span key={aIdx} className={acc.isReturning ? "text-slate-700 font-medium" : "text-slate-400 line-through"}>
+                                                                                {acc.name} ({acc.quantity || 1} szt.){aIdx < it.accessories.length - 1 ? ", " : ""}
+                                                                            </span>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                            <td className="p-2 border border-slate-300 text-center font-mono text-[11px] text-slate-700">
+                                                                {it.inventoryNumber || "-"}
+                                                            </td>
+                                                            <td className="p-2 border border-slate-300 text-center font-black text-slate-900">
+                                                                {qty}
+                                                            </td>
+                                                            <td className="p-2 border border-slate-300 text-center text-slate-600">
+                                                                {it.unit || "szt."}
+                                                            </td>
+                                                            <td className="p-2 border border-slate-300 text-center capitalize text-[10px] text-slate-700">
+                                                                {status}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })
+                                            ) : (
+                                                <tr>
+                                                    <td colSpan={6} className="p-4 text-center text-slate-400 italic">
+                                                        Brak pozycji sprzętowych w protokole
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                {/* Pozostałości budowlane / notatka */}
+                                {protocolToPrint.residualNotes && (
+                                    <div className="p-3 bg-amber-50/80 rounded-xl border border-amber-200">
+                                        <span className="text-[10px] font-black uppercase text-amber-900 block tracking-wider">
+                                            Pozostałości materiałowe / Resztki / Notatka:
+                                        </span>
+                                        <p className="text-slate-800 text-xs mt-1 whitespace-pre-line">
+                                            {protocolToPrint.residualNotes}
+                                        </p>
+                                    </div>
+                                )}
+
+                                {/* Sekcja podpisów */}
+                                <div className="pt-8 border-t border-slate-300 grid grid-cols-2 gap-12 mt-8">
+                                    <div className="text-center">
+                                        <div className="border-b border-dashed border-slate-400 pb-8 mb-2"></div>
+                                        <p className="font-bold text-slate-800 text-[11px]">Zdający (Kierownik Budowy)</p>
+                                        <p className="text-[9px] text-slate-400">czytelny podpis i data</p>
+                                    </div>
+                                    <div className="text-center">
+                                        <div className="border-b border-dashed border-slate-400 pb-8 mb-2"></div>
+                                        <p className="font-bold text-slate-800 text-[11px]">Przyjmujący (Magazynier)</p>
+                                        <p className="text-[9px] text-slate-400">czytelny podpis i data</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ARKUSZ WYDRUKU PROTOKOŁU (WIDOCZNY TYLKO W TRYBIE DRUKOWANIA) */}
+            {protocolToPrint && (
+                <div id="printable-protocol" className="hidden print:block p-8 bg-white text-black font-sans leading-tight">
+                    {/* Nagłówek protokołu */}
+                    <div className="border-b-4 border-slate-900 pb-4 mb-6 flex justify-between items-start">
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <span className="font-black text-xl tracking-wider text-slate-900">PESAM</span>
+                                <span className="text-xs font-bold text-slate-500 uppercase tracking-widest border-l-2 pl-2 border-slate-400">
+                                    System Zarządzania Magazynem
+                                </span>
+                            </div>
+                            <h1 className="text-xl font-black uppercase tracking-tight text-slate-900 mt-2">
+                                {protocolToPrint.type === "WYDANIE" ? "PROTOKÓŁ WYDANIA SPRZĘTU" : "PROTOKÓŁ ZWROTU SPRZĘTU"}
+                            </h1>
+                            <p className="text-xs font-mono text-slate-600 mt-1">
+                                Numer ID: {protocolToPrint.docId || protocolToPrint.protocolId || "-"}
+                            </p>
+                        </div>
+                        <div className="text-right space-y-1">
+                            <p className="text-sm font-bold text-slate-900">
+                                Data: {protocolToPrint.documentDate || protocolToPrint.createdAt?.split("T")[0] || new Date().toISOString().split("T")[0]}
+                            </p>
+                            <p className="text-xs text-slate-600">
+                                Status: <strong>{protocolToPrint.status || "OCZEKUJĄCY"}</strong>
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Strony protokołu */}
+                    <div className="grid grid-cols-2 gap-6 bg-slate-100 p-4 rounded-xl border border-slate-300 mb-6">
+                        <div>
+                            <span className="text-[10px] font-black uppercase text-slate-500 block tracking-wider">
+                                {protocolToPrint.type === "WYDANIE" ? "ŹRÓDŁO (WYDAJĄCY):" : "ŹRÓDŁO (BUDOWA / ZDAJĄCY):"}
+                            </span>
+                            <p className="font-black text-sm text-slate-900 mt-0.5">
+                                {protocolToPrint.sourceName || "MAGAZYN GŁÓWNY"}
+                            </p>
+                            <p className="text-xs text-slate-700 mt-0.5">
+                                Wystawił: <strong>{protocolToPrint.createdByName || "Kierownik"}</strong>
+                            </p>
+                        </div>
+                        <div>
+                            <span className="text-[10px] font-black uppercase text-slate-500 block tracking-wider">
+                                {protocolToPrint.type === "WYDANIE" ? "MIEJSCE DOCELOWE (BUDOWA):" : "MIEJSCE DOCELOWE (PRZYJMUJĄCY):"}
+                            </span>
+                            <p className="font-black text-sm text-slate-900 mt-0.5">
+                                {protocolToPrint.destinationName || "MAGAZYN GŁÓWNY"}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Tabela pozycji */}
+                    <div className="mb-6">
+                        <table className="w-full text-left border-collapse border-2 border-slate-800">
+                            <thead>
+                                <tr className="bg-slate-200 text-slate-900 text-xs font-black uppercase border-b-2 border-slate-800">
+                                    <th className="p-2.5 border border-slate-400 w-10 text-center">Lp.</th>
+                                    <th className="p-2.5 border border-slate-400">Przedmiot / Nazwa sprzętu</th>
+                                    <th className="p-2.5 border border-slate-400 text-center w-36">Nr Magazynowy</th>
+                                    <th className="p-2.5 border border-slate-400 text-center w-24">Ilość</th>
+                                    <th className="p-2.5 border border-slate-400 text-center w-20">Jedn.</th>
+                                    <th className="p-2.5 border border-slate-400 text-center w-32">Stan</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-300 text-xs">
+                                {protocolToPrint.items && protocolToPrint.items.length > 0 ? (
+                                    protocolToPrint.items.map((it: any, idx: number) => {
+                                        const qty = it.returnQty ?? it.declaredQty ?? it.quantity ?? it.receivedQty ?? 1;
+                                        const status = it.finalStatus || it.declaredStatus || "sprawne";
+                                        return (
+                                            <tr key={idx} className="border-b border-slate-300">
+                                                <td className="p-2 border border-slate-300 text-center font-mono">
+                                                    {idx + 1}
+                                                </td>
+                                                <td className="p-2 border border-slate-300 font-bold text-slate-900">
+                                                    <div>{it.name}</div>
+                                                    {it.accessories && Array.isArray(it.accessories) && it.accessories.length > 0 && (
+                                                        <div className="mt-1 pl-2 border-l-2 border-slate-400 text-[10px] text-slate-600">
+                                                            <span className="font-semibold">Osprzęt: </span>
+                                                            {it.accessories.map((acc: any, aIdx: number) => (
+                                                                <span key={aIdx} className={acc.isReturning ? "text-slate-800 font-medium" : "text-slate-400 line-through"}>
+                                                                    {acc.name} ({acc.quantity || 1} szt.){aIdx < it.accessories.length - 1 ? ", " : ""}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="p-2 border border-slate-300 text-center font-mono text-xs">
+                                                    {it.inventoryNumber || "-"}
+                                                </td>
+                                                <td className="p-2 border border-slate-300 text-center font-black text-sm">
+                                                    {qty}
+                                                </td>
+                                                <td className="p-2 border border-slate-300 text-center">
+                                                    {it.unit || "szt."}
+                                                </td>
+                                                <td className="p-2 border border-slate-300 text-center capitalize font-medium">
+                                                    {status}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
+                                ) : (
+                                    <tr>
+                                        <td colSpan={6} className="p-4 text-center text-slate-500 italic">
+                                            Brak pozycji sprzętowych w protokole
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Pozostałości budowlane / notatka */}
+                    {protocolToPrint.residualNotes && (
+                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-300 mb-6 text-xs">
+                            <span className="font-black uppercase text-slate-600 block mb-1">
+                                Pozostałości materiałowe / Resztki / Notatka:
+                            </span>
+                            <p className="text-slate-800 whitespace-pre-line">
+                                {protocolToPrint.residualNotes}
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Sekcja podpisów na wydruku */}
+                    <div className="pt-10 grid grid-cols-2 gap-16 mt-12">
+                        <div className="text-center">
+                            <div className="border-b-2 border-slate-800 pb-10 mb-2"></div>
+                            <p className="font-bold text-slate-900 text-xs">Zdający (Kierownik Budowy)</p>
+                            <p className="text-[10px] text-slate-500">czytelny podpis i data</p>
+                        </div>
+                        <div className="text-center">
+                            <div className="border-b-2 border-slate-800 pb-10 mb-2"></div>
+                            <p className="font-bold text-slate-900 text-xs">Przyjmujący (Magazynier)</p>
+                            <p className="text-[10px] text-slate-500">czytelny podpis i data</p>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <style jsx global>{`
+                @media print {
+                    body {
+                        background: white !important;
+                        color: black !important;
+                    }
+                    button, .print\\:hidden {
+                        display: none !important;
+                    }
+                    #printable-protocol {
+                        display: block !important;
+                    }
+                }
+            `}</style>
         </div>
     );
 }

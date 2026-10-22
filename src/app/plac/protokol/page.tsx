@@ -88,6 +88,26 @@ export default function PlacProtokolPage() {
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Photos state
+  const [selectedPhotos, setSelectedPhotos] = useState<File[]>([]);
+  const [photoPreviews, setPhotoPreviews] = useState<string[]>([]);
+
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files);
+    setSelectedPhotos(prev => [...prev, ...files]);
+    const newPreviews = files.map(f => URL.createObjectURL(f));
+    setPhotoPreviews(prev => [...prev, ...newPreviews]);
+  };
+
+  const handleRemovePhoto = (index: number) => {
+    if (photoPreviews[index]) {
+      URL.revokeObjectURL(photoPreviews[index]);
+    }
+    setSelectedPhotos(prev => prev.filter((_, i) => i !== index));
+    setPhotoPreviews(prev => prev.filter((_, i) => i !== index));
+  };
+
   // Submission flow states
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState<string>("");
@@ -170,16 +190,17 @@ export default function PlacProtokolPage() {
     setSelectedAccessories({});
   }, [selectedSiteId]);
 
-  // Clean up audio blob URL on unmount
+  // Clean up audio and photo preview URLs on unmount
   useEffect(() => {
     return () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
+      photoPreviews.forEach(p => URL.revokeObjectURL(p));
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
       }
     };
-  }, [audioUrl]);
+  }, [audioUrl, photoPreviews]);
 
   // Filter inventory for the selected site
   const siteEquipment = useMemo(() => {
@@ -312,10 +333,10 @@ export default function PlacProtokolPage() {
   }, [selectedBulkQty]);
 
   const totalItemsCount = totalUniqueChecked + totalBulkChecked;
-  const canSubmit = Boolean(selectedSiteId) && selectedManagerUids.length > 0 && (totalItemsCount > 0 || audioBlob !== null);
+  const canSubmit = Boolean(selectedSiteId) && selectedManagerUids.length > 0 && (totalItemsCount > 0 || audioBlob !== null || selectedPhotos.length > 0);
 
   // SUBMIT FLOW:
-  // 1. Upload audio to Firebase Storage
+  // 1. Upload audio & photos to Firebase Storage
   // 2. Transcribe residuals via AI (/api/parse-audio-residuals)
   // 3. Save protocol document to Firestore with status: "SZKIC_KIEROWCY"
   const handleSubmitProtocol = async () => {
@@ -331,8 +352,8 @@ export default function PlacProtokolPage() {
       return;
     }
 
-    if (totalItemsCount === 0 && !audioBlob) {
-      alert("Wybierz przynajmniej jedno urządzenie do zwrotu lub nagraj notatkę głosową!");
+    if (totalItemsCount === 0 && !audioBlob && selectedPhotos.length === 0) {
+      alert("Wybierz sprzęt do zwrotu, nagraj notatkę głosową lub załącz przynajmniej jedno zdjęcie!");
       return;
     }
 
@@ -379,6 +400,21 @@ export default function PlacProtokolPage() {
         } catch (aiErr) {
           console.error("Błąd podczas wywołania AI parse-audio-residuals:", aiErr);
           // Nie blokujemy wysyłki protokołu, kierownik otrzyma szkic bez wstępnego parsowania
+        }
+      }
+
+      // Obsługa wysyłania zdjęć do Firebase Storage
+      let uploadedPhotoUrls: string[] = [];
+      if (selectedPhotos.length > 0) {
+        setSubmitStep(`Wysyłanie zdjęć (${selectedPhotos.length})...`);
+        for (let i = 0; i < selectedPhotos.length; i++) {
+          const photoFile = selectedPhotos[i];
+          const timestamp = Date.now();
+          const photoPath = `protocol_photos/${selectedSiteId}_${user?.uid || "driver"}_${timestamp}_${i}.jpg`;
+          const photoRef = ref(storage, photoPath);
+          await uploadBytes(photoRef, photoFile);
+          const pUrl = await getDownloadURL(photoRef);
+          uploadedPhotoUrls.push(pUrl);
         }
       }
 
@@ -455,6 +491,7 @@ export default function PlacProtokolPage() {
         documentDate: new Date().toISOString().split("T")[0],
         audioNoteUrl: uploadedAudioUrl,
         residuals: parsedResiduals,
+        photos: uploadedPhotoUrls.length > 0 ? uploadedPhotoUrls : [],
         items: finalItems
       };
 
@@ -1166,6 +1203,58 @@ export default function PlacProtokolPage() {
                 )}
               </div>
             </section>
+
+            {/* SEKCJA ZDJĘĆ Z BUDOWY */}
+            <section className="rounded-3xl border border-emerald-500/30 bg-gradient-to-br from-emerald-950/20 via-slate-900 to-slate-950 p-4 shadow-lg space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-black tracking-wider text-emerald-400 uppercase flex items-center gap-1.5">
+                  <span>📸</span>
+                  <span>Zdjęcia z budowy (Opcjonalnie)</span>
+                </label>
+                {selectedPhotos.length > 0 && (
+                  <span className="text-[10px] bg-emerald-900/80 text-emerald-300 px-2.5 py-0.5 rounded-full font-bold border border-emerald-700/60">
+                    Załączono: {selectedPhotos.length}
+                  </span>
+                )}
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Zrób aparatem lub załącz z galerii zdjęcia pakunku, palet z chemią, resztek lub stanu zwracanego sprzętu.
+              </p>
+
+              {/* Przycisk dodawania zdjęć */}
+              <label className="flex items-center justify-center gap-2 p-3.5 rounded-2xl border-2 border-dashed border-emerald-500/40 bg-emerald-950/20 hover:bg-emerald-950/40 text-emerald-300 font-bold text-xs cursor-pointer active:scale-95 transition">
+                <span className="text-lg">📷</span>
+                <span>Zrób zdjęcie lub wybierz z galerii</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  multiple
+                  onChange={handlePhotoSelect}
+                  className="hidden"
+                />
+              </label>
+
+              {/* Miniatury wybranych zdjęć */}
+              {photoPreviews.length > 0 && (
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                  {photoPreviews.map((previewUrl, pIdx) => (
+                    <div key={pIdx} className="relative rounded-xl overflow-hidden border border-slate-700 aspect-square group bg-black shadow-sm">
+                      <img src={previewUrl} alt={`Foto ${pIdx + 1}`} className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePhoto(pIdx)}
+                        className="absolute top-1 right-1 w-6 h-6 rounded-full bg-red-600/90 text-white font-black text-xs flex items-center justify-center shadow-lg active:scale-90 transition"
+                        title="Usuń zdjęcie"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
         )}
       </main>
@@ -1202,7 +1291,8 @@ export default function PlacProtokolPage() {
                 </div>
                 <div className="text-xs font-black text-white truncate">
                   <span className="text-amber-400 font-bold">{totalItemsCount}</span> poz. sprzętu
-                  {audioBlob ? " · 🎙️ Resztki (AI)" : ""}
+                  {audioBlob ? " · 🎙️ Audio" : ""}
+                  {selectedPhotos.length > 0 ? ` · 📸 Foto (${selectedPhotos.length})` : ""}
                 </div>
               </div>
 
