@@ -43,6 +43,14 @@ interface ReturnedAccessoryState {
   isReturning: boolean;
 }
 
+interface ManagerUser {
+  uid: string;
+  name: string;
+  email?: string;
+  assignedSites?: string[];
+  canReturn: boolean;
+}
+
 export default function PlacProtokolPage() {
   const { user } = useAuth();
   const router = useRouter();
@@ -50,14 +58,14 @@ export default function PlacProtokolPage() {
   // Data fetching states
   const [sites, setSites] = useState<Site[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [availableManagers, setAvailableManagers] = useState<ManagerUser[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Form selections
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
   const [filterTab, setFilterTab] = useState<"ALL" | "UNIQUE" | "BULK">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
-  const [managerName, setManagerName] = useState("");
-  const [driverNotes, setDriverNotes] = useState("");
+  const [selectedManagerUids, setSelectedManagerUids] = useState<string[]>([]);
 
   // Checkbox selections for equipment on site
   // For UNIQUE: boolean (checked/unchecked)
@@ -85,14 +93,16 @@ export default function PlacProtokolPage() {
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [transcribedResiduals, setTranscribedResiduals] = useState<any[]>([]);
 
-  // 1. Fetch sites & inventory
+  // 1. Fetch sites, inventory & managers based on protocolsReturnApp permission
   useEffect(() => {
     async function loadData() {
       try {
         setLoading(true);
-        const [sitesSnap, invSnap] = await Promise.all([
+        const [sitesSnap, invSnap, rolesSnap, usersSnap] = await Promise.all([
           getDocs(collection(db, "sites")),
-          getDocs(collection(db, "inventory"))
+          getDocs(collection(db, "inventory")),
+          getDocs(collection(db, "roles")),
+          getDocs(collection(db, "users"))
         ]);
 
         const loadedSites: Site[] = sitesSnap.docs
@@ -105,8 +115,43 @@ export default function PlacProtokolPage() {
           ...(d.data() as any)
         }));
 
+        // Słownik uprawnień ról
+        const rolesMap: Record<string, Record<string, boolean>> = {};
+        rolesSnap.docs.forEach(d => {
+          rolesMap[d.id] = d.data().permissions || {};
+        });
+
+        // Użytkownicy z uprawnieniem 'protocolsReturnApp' (Protokoły: Zwrot elektroniczny)
+        const loadedManagers: ManagerUser[] = usersSnap.docs
+          .map(d => {
+            const data = d.data();
+            const overrides = data.permissionOverrides || {};
+            const rolePerms = (data.roleId && rolesMap[data.roleId]) || {};
+
+            let canReturn = false;
+            if ("protocolsReturnApp" in overrides) {
+              canReturn = !!overrides.protocolsReturnApp;
+            } else if (data.roleId && rolesMap[data.roleId]) {
+              canReturn = !!rolePerms.protocolsReturnApp;
+            } else if (data.roleName?.toLowerCase().includes("kierownik") || data.role?.toLowerCase().includes("kierownik")) {
+              canReturn = true;
+            }
+
+            const name = `${data.firstName || ""} ${data.lastName || ""}`.trim() || data.email || "Kierownik";
+            return {
+              uid: d.id,
+              name,
+              email: data.email,
+              assignedSites: data.assignedSites || [],
+              canReturn
+            };
+          })
+          .filter(u => u.canReturn)
+          .sort((a, b) => a.name.localeCompare(b.name, "pl"));
+
         setSites(loadedSites);
         setInventory(loadedInventory);
+        setAvailableManagers(loadedManagers);
       } catch (err: any) {
         console.error("Błąd ładowania danych dla protokołu:", err);
       } finally {
@@ -116,21 +161,25 @@ export default function PlacProtokolPage() {
     loadData();
   }, []);
 
-  // Set default manager name when site is chosen
+  // Update selected managers and reset items when site is chosen
   useEffect(() => {
     if (!selectedSiteId) {
-      setManagerName("");
+      setSelectedManagerUids([]);
       return;
     }
-    const chosenSite = sites.find(s => s.id === selectedSiteId);
-    if (chosenSite?.managerName) {
-      setManagerName(chosenSite.managerName);
-    }
+
+    // Auto-zaznacz kierowników przypisanych do tej budowy (jeśli są tacy)
+    const siteManagers = availableManagers
+      .filter(m => m.assignedSites && (m.assignedSites.includes("ALL") || m.assignedSites.includes(selectedSiteId)))
+      .map(m => m.uid);
+
+    setSelectedManagerUids(siteManagers);
+
     // Reset selections on site change
     setSelectedUnique({});
     setSelectedBulkQty({});
     setSelectedAccessories({});
-  }, [selectedSiteId, sites]);
+  }, [selectedSiteId, availableManagers]);
 
   // Clean up audio blob URL on unmount
   useEffect(() => {
@@ -380,6 +429,10 @@ export default function PlacProtokolPage() {
         }
       });
 
+      const selectedManagerNames = availableManagers
+        .filter(m => selectedManagerUids.includes(m.uid))
+        .map(m => m.name);
+
       // KROK 4: Zapis do Firestore w kolekcji protocols
       const protocolDocData = {
         type: "ZWROT",
@@ -391,8 +444,9 @@ export default function PlacProtokolPage() {
         destinationName: "MAGAZYN GŁÓWNY",
         driverUid: user?.uid || "",
         driverName: driverFullName,
-        targetManagerName: managerName.trim() || null,
-        driverNotes: driverNotes.trim() || null,
+        targetManagerUids: selectedManagerUids,
+        targetManagerNames: selectedManagerNames,
+        targetManagerName: selectedManagerNames.join(", ") || null,
         createdAt: new Date().toISOString(),
         documentDate: new Date().toISOString().split("T")[0],
         audioNoteUrl: uploadedAudioUrl,
@@ -531,31 +585,51 @@ export default function PlacProtokolPage() {
           )}
 
           {selectedSiteId && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-xs">
-              <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">
-                  Kierownik na budowie (opcjonalnie):
+            <div className="pt-2 space-y-2 border-t border-purple-500/20">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-bold text-slate-300 uppercase flex items-center gap-1.5">
+                  <span>👤</span>
+                  <span>Kierownik na budowie (możesz wybrać kilku):</span>
                 </label>
-                <input
-                  type="text"
-                  placeholder="Imię i nazwisko kierownika"
-                  value={managerName}
-                  onChange={(e) => setManagerName(e.target.value)}
-                  className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-950 text-slate-200 outline-none focus:border-purple-400 text-xs"
-                />
+                {selectedManagerUids.length > 0 && (
+                  <span className="text-[10px] font-black text-purple-300 bg-purple-900/80 px-2 py-0.5 rounded-full border border-purple-700">
+                    Wybrano: {selectedManagerUids.length}
+                  </span>
+                )}
               </div>
-              <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">
-                  Krótka notatka dla magazynu:
-                </label>
-                <input
-                  type="text"
-                  placeholder="np. auto pełne, rozładunek jutro 7:00"
-                  value={driverNotes}
-                  onChange={(e) => setDriverNotes(e.target.value)}
-                  className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-950 text-slate-200 outline-none focus:border-purple-400 text-xs"
-                />
-              </div>
+
+              {availableManagers.length === 0 ? (
+                <p className="text-xs text-slate-400 italic p-2 bg-slate-900 rounded-xl">
+                  Brak w systemie osób z uprawnieniem do wystawiania zwrotów elektronicznych.
+                </p>
+              ) : (
+                <div className="grid grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-1">
+                  {availableManagers.map(m => {
+                    const isSelected = selectedManagerUids.includes(m.uid);
+                    return (
+                      <button
+                        key={m.uid}
+                        type="button"
+                        onClick={() => {
+                          setSelectedManagerUids(prev =>
+                            prev.includes(m.uid) ? prev.filter(id => id !== m.uid) : [...prev, m.uid]
+                          );
+                        }}
+                        className={`p-2.5 rounded-xl border text-left text-xs font-bold transition flex items-center justify-between gap-1.5 active:scale-95 ${
+                          isSelected
+                            ? "bg-purple-600 text-white border-purple-400 shadow-md"
+                            : "bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500"
+                        }`}
+                      >
+                        <span className="truncate">{m.name}</span>
+                        <span className={`text-xs shrink-0 ${isSelected ? "text-white font-black" : "text-slate-500"}`}>
+                          {isSelected ? "✓" : "+"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </section>

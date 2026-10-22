@@ -919,6 +919,7 @@ export default function ProtocolsHub() {
         if (userSites.length === 1) setReturnSiteId(userSites[0].id);
         setReturnActiveTab("UNIQUE");
         setIsReturnModalOpen(true);
+        fetchDriverDrafts(userSites.length === 1 ? userSites[0].id : undefined);
     };
 
     const fetchItemAccessoriesFromLastIssue = async (itemId: string, siteId: string) => {
@@ -1198,6 +1199,22 @@ export default function ProtocolsHub() {
             };
 
             await setDoc(protocolRef, cleanFirestorePayload(rawData));
+
+            // Jeśli zatwierdzono na bazie szkicu kierowcy, oznacz szkic jako WCZYTANY
+            if (loadedDraftId) {
+                try {
+                    await setDoc(doc(db, "protocols", loadedDraftId), {
+                        status: "WCZYTANY",
+                        loadedAt: new Date().toISOString(),
+                        loadedBy: user?.uid || "",
+                        loadedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || "Kierownik"
+                    }, { merge: true });
+                    setLoadedDraftId(null);
+                } catch (draftErr) {
+                    console.error("Błąd aktualizacji statusu szkicu kierowcy:", draftErr);
+                }
+            }
+
             setReturnResidualNotes("");
             alert("Zgłoszenie zwrotu wysłane! Oczekuje na weryfikację przez magazyniera.");
             closeModal();
@@ -1238,7 +1255,6 @@ export default function ProtocolsHub() {
         setPaperReturnActiveTab("UNIQUE");
         setReturnPhotos([]);
         setIsPaperReturnModalOpen(true);
-        fetchDriverDrafts();
     };
 
     const fetchDriverDrafts = async (siteId?: string) => {
@@ -1260,7 +1276,28 @@ export default function ProtocolsHub() {
                 );
             }
             const snap = await getDocs(q);
-            const drafts = snap.docs.map(d => ({ docId: d.id, ...d.data() }));
+            let drafts = snap.docs.map(d => ({ docId: d.id, ...d.data() }));
+
+            // Izolacja widoczności protokołów między kierownikami:
+            // Jeśli użytkownik nie jest głównym administratorem / szefem, widzi TYLKO te szkice,
+            // w których został wskazany jako odbiorca (targetManagerUids zawiera jego uid).
+            const currentUid = user?.uid;
+            const isFullAdmin = user && (
+                hasPermission("manageRoles", user.rolePermissions, user.permissionOverrides) ||
+                user.roleName?.toLowerCase().includes("szef") ||
+                user.roleName?.toLowerCase().includes("admin")
+            );
+
+            if (!isFullAdmin && currentUid) {
+                drafts = drafts.filter((draft: any) => {
+                    if (draft.targetManagerUids && Array.isArray(draft.targetManagerUids) && draft.targetManagerUids.length > 0) {
+                        return draft.targetManagerUids.includes(currentUid);
+                    }
+                    // Starsze szkice bez określonego kierownika pozostają widoczne
+                    return true;
+                });
+            }
+
             setDriverDrafts(drafts);
         } catch (err) {
             console.error("Błąd pobierania szkiców kierowców:", err);
@@ -1271,60 +1308,52 @@ export default function ProtocolsHub() {
 
     const loadDriverDraft = (draft: any) => {
         if (draft.sourceId) {
-            setPaperReturnSiteId(draft.sourceId);
-        }
-        setPaperDocSource("KIEROWCA");
-        if (draft.driverName) {
-            setPaperDocReference(`Szkic kierowcy: ${draft.driverName}`);
+            setReturnSiteId(draft.sourceId);
         }
 
-        const mappedItems: PaperReturnCartItem[] = (draft.items || []).map((it: any, idx: number) => {
+        const mappedItems: ReturnCartItem[] = (draft.items || []).map((it: any) => {
             const inventoryMatch = inventory.find(inv => inv.id === it.inventoryId);
-            const maxQty = inventoryMatch?.allocations?.[draft.sourceId] || it.returnQty || 1;
+            const siteQty = inventoryMatch?.allocations?.[draft.sourceId] || 0;
+            const lockedQty = lockedInPending[it.inventoryId] || 0;
+            const availableToReturn = Math.max(1, siteQty - lockedQty);
+
             return {
-                cartItemId: `driver-item-${idx}-${Date.now()}`,
                 dbId: it.inventoryId,
                 isManual: false,
                 name: it.name,
                 type: it.type || "UNIQUE",
                 inventoryNumber: it.inventoryNumber || "",
                 unit: it.unit || "szt.",
-                maxQty: maxQty,
-                declaredQty: it.returnQty || it.declaredQty || 1,
-                receivedQty: it.returnQty || it.declaredQty || 1,
-                finalStatus: it.declaredStatus || "sprawne",
-                notes: it.warehouseNotes || "",
+                maxQty: availableToReturn,
+                returnQty: it.returnQty || it.declaredQty || 1,
+                declaredStatus: it.declaredStatus || "sprawne",
                 accessories: it.accessories ? it.accessories.map((acc: any) => ({
                     name: acc.name,
                     mustReturn: !!acc.mustReturn,
                     isReturning: acc.isReturning !== false,
                     quantity: acc.quantity || 1
-                })) : []
+                })) : [],
+                isReturningMainItem: true
             };
         });
 
-        const mappedResiduals: PaperReturnCartItem[] = (draft.residuals || []).map((res: any, idx: number) => {
-            return {
-                cartItemId: `driver-residual-${idx}-${Date.now()}`,
-                isManual: true,
-                isResidual: true,
-                isWaste: !!res.isWaste,
-                name: res.name || "Resztka budowlana",
-                type: "BULK",
-                inventoryNumber: res.isWaste ? "ODPAD" : "RESZTKI",
-                unit: res.unit || "szt.",
-                maxQty: 9999,
-                declaredQty: res.quantity || 1,
-                receivedQty: res.quantity || 1,
-                finalStatus: res.isWaste ? "odpad_utylizacja" : "sprawne",
-                notes: res.isWaste ? "[Szkic kierowcy: Odpad do utylizacji]" : "[Szkic kierowcy: Resztka budowlana]"
-            };
-        });
+        // Pozostałości budowlane do notatki
+        const residualLines = (draft.residuals || []).map((r: any) =>
+            `${r.name} (${r.quantity} ${r.unit || 'szt.'}${r.isWaste ? ' - odpad' : ''})`
+        );
+        let newResidualNotes = returnResidualNotes.trim();
+        if (residualLines.length > 0) {
+            const joinedResiduals = residualLines.join(", ");
+            newResidualNotes = newResidualNotes
+                ? `${newResidualNotes}\n[Ze szkicu kierowcy]: ${joinedResiduals}`
+                : joinedResiduals;
+        }
 
-        setPaperReturnCart([...mappedItems, ...mappedResiduals]);
+        setReturnCart(mappedItems);
+        setReturnResidualNotes(newResidualNotes);
         setLoadedDraftId(draft.docId);
         setIsDriverDraftsModalOpen(false);
-        alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${mappedResiduals.length} pozycji resztek.`);
+        alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${residualLines.length} pozycji resztek.`);
     };
 
     const filteredPaperInventory = inventory.filter(item => {
@@ -3941,8 +3970,35 @@ export default function ProtocolsHub() {
                         <div className="flex-1 flex overflow-hidden">
                             <div className="w-[50%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-blue-50">
-                                    <label className="block text-[11px] font-black text-blue-800 uppercase tracking-widest mb-2">1. Z jakiej budowy zwracasz?</label>
-                                    <select value={returnSiteId} onChange={(e) => { setReturnSiteId(e.target.value); setReturnCart([]); }} className="w-full p-4 border-2 border-blue-200 rounded-xl outline-none focus:border-blue-500 font-bold bg-white">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="block text-[11px] font-black text-blue-800 uppercase tracking-widest">1. Z jakiej budowy zwracasz?</label>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                fetchDriverDrafts(returnSiteId || undefined);
+                                                setIsDriverDraftsModalOpen(true);
+                                            }}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-sm transition active:scale-95"
+                                        >
+                                            <span>📲</span>
+                                            <span>Wczytaj protokół kierowcy</span>
+                                            {driverDrafts.length > 0 && (
+                                                <span className="bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-full text-[10px] font-black">
+                                                    {driverDrafts.length}
+                                                </span>
+                                            )}
+                                        </button>
+                                    </div>
+                                    <select
+                                        value={returnSiteId}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            setReturnSiteId(val);
+                                            setReturnCart([]);
+                                            fetchDriverDrafts(val);
+                                        }}
+                                        className="w-full p-4 border-2 border-blue-200 rounded-xl outline-none focus:border-blue-500 font-bold bg-white"
+                                    >
                                         <option value="" disabled>-- Wybierz budowę --</option>
                                         {userSites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                     </select>
@@ -4251,32 +4307,13 @@ export default function ProtocolsHub() {
                             {/* LEWA STRONA */}
                             <div className="w-[45%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-orange-50/50">
-                                    <div className="flex items-center justify-between mb-2">
-                                        <label className="block text-[11px] font-black text-orange-800 uppercase tracking-widest">1. Wybierz Budowę</label>
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                fetchDriverDrafts(paperReturnSiteId || undefined);
-                                                setIsDriverDraftsModalOpen(true);
-                                            }}
-                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-sm transition active:scale-95"
-                                        >
-                                            <span>📲</span>
-                                            <span>Wczytaj protokół kierowcy</span>
-                                            {driverDrafts.length > 0 && (
-                                                <span className="bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-full text-[10px] font-black">
-                                                    {driverDrafts.length}
-                                                </span>
-                                            )}
-                                        </button>
-                                    </div>
+                                    <label className="block text-[11px] font-black text-orange-800 uppercase tracking-widest mb-2">1. Wybierz Budowę</label>
                                     <select
                                         value={paperReturnSiteId}
                                         onChange={(e) => {
                                             const val = e.target.value;
                                             setPaperReturnSiteId(val);
                                             setPaperReturnCart([]);
-                                            fetchDriverDrafts(val);
                                         }}
                                         className="w-full p-4 border-2 border-orange-200 rounded-xl outline-none focus:border-orange-500 font-bold bg-white mb-4"
                                     >
@@ -4746,14 +4783,14 @@ export default function ProtocolsHub() {
                             {/* Filtrowanie / Odświeżanie */}
                             <div className="flex flex-wrap items-center justify-between gap-2 bg-white p-3 rounded-2xl border border-slate-200 text-xs">
                                 <div className="text-slate-600">
-                                    {paperReturnSiteId ? (
-                                        <span>Pokazuję szkice dla: <strong className="text-purple-800">{sites.find(s => s.id === paperReturnSiteId)?.name || "wybranej budowy"}</strong></span>
+                                    {returnSiteId ? (
+                                        <span>Pokazuję szkice dla: <strong className="text-purple-800">{sites.find(s => s.id === returnSiteId)?.name || "wybranej budowy"}</strong></span>
                                     ) : (
                                         <span>Pokazuję <strong className="text-purple-800">wszystkie oczekujące szkice</strong></span>
                                     )}
                                 </div>
                                 <div className="flex gap-2">
-                                    {paperReturnSiteId && (
+                                    {returnSiteId && (
                                         <button
                                             type="button"
                                             onClick={() => fetchDriverDrafts()}
@@ -4764,7 +4801,7 @@ export default function ProtocolsHub() {
                                     )}
                                     <button
                                         type="button"
-                                        onClick={() => fetchDriverDrafts(paperReturnSiteId || undefined)}
+                                        onClick={() => fetchDriverDrafts(returnSiteId || undefined)}
                                         className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-700 bg-slate-100 hover:bg-slate-200 font-bold flex items-center gap-1"
                                     >
                                         <span>🔄</span>
@@ -4809,8 +4846,8 @@ export default function ProtocolsHub() {
                                                     <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
                                                         <span>🚚 Kierowca: <strong className="text-slate-700">{draft.driverName || "Kierowca"}</strong></span>
                                                         <span>🕒 {createdFormatted}</span>
-                                                        {draft.targetManagerName && (
-                                                            <span>👤 Kierownik: <strong>{draft.targetManagerName}</strong></span>
+                                                        {(draft.targetManagerNames?.length > 0 || draft.targetManagerName) && (
+                                                            <span>👤 Dla kierownika: <strong className="text-purple-800">{draft.targetManagerNames?.join(", ") || draft.targetManagerName}</strong></span>
                                                         )}
                                                     </div>
                                                     {draft.driverNotes && (
