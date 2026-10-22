@@ -173,6 +173,12 @@ export default function ProtocolsHub() {
     const [isPaperManualModalOpen, setIsPaperManualModalOpen] = useState(false);
     const [paperBulkPickModal, setPaperBulkPickModal] = useState<{ item: InventoryItem & { availableToReturn: number }; qty: number } | null>(null);
 
+    // Stany dla Szkiców Protokołów od Kierowców
+    const [driverDrafts, setDriverDrafts] = useState<any[]>([]);
+    const [isLoadingDriverDrafts, setIsLoadingDriverDrafts] = useState(false);
+    const [isDriverDraftsModalOpen, setIsDriverDraftsModalOpen] = useState(false);
+    const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
+
     // Stany dla Pozostałości budowlanych (Zwrot papierowy)
     const [isPaperResidualModalOpen, setIsPaperResidualModalOpen] = useState(false);
     const [paperResidualNotes, setPaperResidualNotes] = useState("");
@@ -494,6 +500,8 @@ export default function ProtocolsHub() {
         setPaperBulkPickModal(null);
         setIsHardDeleteModalOpen(false);
         setHardDeleteProtocol(null);
+        setIsDriverDraftsModalOpen(false);
+        setLoadedDraftId(null);
 
         // --- NOWE: Czyszczenie autocomplete'a wpisu ręcznego ---
         setManualSuggestions([]);
@@ -1230,6 +1238,93 @@ export default function ProtocolsHub() {
         setPaperReturnActiveTab("UNIQUE");
         setReturnPhotos([]);
         setIsPaperReturnModalOpen(true);
+        fetchDriverDrafts();
+    };
+
+    const fetchDriverDrafts = async (siteId?: string) => {
+        setIsLoadingDriverDrafts(true);
+        try {
+            let q;
+            if (siteId) {
+                q = query(
+                    collection(db, "protocols"),
+                    where("type", "==", "ZWROT"),
+                    where("status", "==", "SZKIC_KIEROWCY"),
+                    where("sourceId", "==", siteId)
+                );
+            } else {
+                q = query(
+                    collection(db, "protocols"),
+                    where("type", "==", "ZWROT"),
+                    where("status", "==", "SZKIC_KIEROWCY")
+                );
+            }
+            const snap = await getDocs(q);
+            const drafts = snap.docs.map(d => ({ docId: d.id, ...d.data() }));
+            setDriverDrafts(drafts);
+        } catch (err) {
+            console.error("Błąd pobierania szkiców kierowców:", err);
+        } finally {
+            setIsLoadingDriverDrafts(false);
+        }
+    };
+
+    const loadDriverDraft = (draft: any) => {
+        if (draft.sourceId) {
+            setPaperReturnSiteId(draft.sourceId);
+        }
+        setPaperDocSource("KIEROWCA");
+        if (draft.driverName) {
+            setPaperDocReference(`Szkic kierowcy: ${draft.driverName}`);
+        }
+
+        const mappedItems: PaperReturnCartItem[] = (draft.items || []).map((it: any, idx: number) => {
+            const inventoryMatch = inventory.find(inv => inv.id === it.inventoryId);
+            const maxQty = inventoryMatch?.allocations?.[draft.sourceId] || it.returnQty || 1;
+            return {
+                cartItemId: `driver-item-${idx}-${Date.now()}`,
+                dbId: it.inventoryId,
+                isManual: false,
+                name: it.name,
+                type: it.type || "UNIQUE",
+                inventoryNumber: it.inventoryNumber || "",
+                unit: it.unit || "szt.",
+                maxQty: maxQty,
+                declaredQty: it.returnQty || it.declaredQty || 1,
+                receivedQty: it.returnQty || it.declaredQty || 1,
+                finalStatus: it.declaredStatus || "sprawne",
+                notes: it.warehouseNotes || "",
+                accessories: it.accessories ? it.accessories.map((acc: any) => ({
+                    name: acc.name,
+                    mustReturn: !!acc.mustReturn,
+                    isReturning: acc.isReturning !== false,
+                    quantity: acc.quantity || 1
+                })) : []
+            };
+        });
+
+        const mappedResiduals: PaperReturnCartItem[] = (draft.residuals || []).map((res: any, idx: number) => {
+            return {
+                cartItemId: `driver-residual-${idx}-${Date.now()}`,
+                isManual: true,
+                isResidual: true,
+                isWaste: !!res.isWaste,
+                name: res.name || "Resztka budowlana",
+                type: "BULK",
+                inventoryNumber: res.isWaste ? "ODPAD" : "RESZTKI",
+                unit: res.unit || "szt.",
+                maxQty: 9999,
+                declaredQty: res.quantity || 1,
+                receivedQty: res.quantity || 1,
+                finalStatus: res.isWaste ? "odpad_utylizacja" : "sprawne",
+                notes: res.isWaste ? "[Szkic kierowcy: Odpad do utylizacji]" : "[Szkic kierowcy: Resztka budowlana]"
+            };
+        });
+
+        setPaperReturnCart([...mappedItems, ...mappedResiduals]);
+        setLoadedDraftId(draft.docId);
+        setIsDriverDraftsModalOpen(false);
+        alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${mappedResiduals.length} pozycji resztek.`);
     };
 
     const filteredPaperInventory = inventory.filter(item => {
@@ -1846,6 +1941,20 @@ export default function ProtocolsHub() {
             }
             await clearReturnedAccessoriesAndDebts(paperReturnSiteId, processedCart);
             await clearReturnedWorkerPpe(processedCart);
+
+            if (loadedDraftId) {
+                try {
+                    await setDoc(doc(db, "protocols", loadedDraftId), {
+                        status: "WCZYTANY",
+                        loadedAt: new Date().toISOString(),
+                        loadedBy: user?.uid || "",
+                        loadedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim()
+                    }, { merge: true });
+                    setLoadedDraftId(null);
+                } catch (draftErr) {
+                    console.error("Błąd aktualizacji statusu szkicu kierowcy:", draftErr);
+                }
+            }
 
             alert("Papierowy protokół zwrotu został wprowadzony i zaakceptowany!");
             closeModal();
@@ -3125,6 +3234,9 @@ export default function ProtocolsHub() {
 
     // --- FILTROWANIE DLA HISTORII PROTOKOŁÓW ---
     const filteredHistoryProtocols = historyProtocols.filter(p => {
+        // Szkice kierowców czekają na wczytanie w oknie Wprowadź Zwrot, nie pokazujemy ich w historii zatwierdzonej
+        if (p.status === "SZKIC_KIEROWCY") return false;
+
         // Filtrowanie po budowie
         if (histFilterSite) {
             const isMatch = p.destinationId === histFilterSite || p.sourceId === histFilterSite;
@@ -4139,8 +4251,35 @@ export default function ProtocolsHub() {
                             {/* LEWA STRONA */}
                             <div className="w-[45%] border-r flex flex-col bg-white">
                                 <div className="p-6 border-b bg-orange-50/50">
-                                    <label className="block text-[11px] font-black text-orange-800 uppercase tracking-widest mb-2">1. Wybierz Budowę</label>
-                                    <select value={paperReturnSiteId} onChange={(e) => { setPaperReturnSiteId(e.target.value); setPaperReturnCart([]); }} className="w-full p-4 border-2 border-orange-200 rounded-xl outline-none focus:border-orange-500 font-bold bg-white mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="block text-[11px] font-black text-orange-800 uppercase tracking-widest">1. Wybierz Budowę</label>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                fetchDriverDrafts(paperReturnSiteId || undefined);
+                                                setIsDriverDraftsModalOpen(true);
+                                            }}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-sm transition active:scale-95"
+                                        >
+                                            <span>📲</span>
+                                            <span>Wczytaj protokół kierowcy</span>
+                                            {driverDrafts.length > 0 && (
+                                                <span className="bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-full text-[10px] font-black">
+                                                    {driverDrafts.length}
+                                                </span>
+                                            )}
+                                        </button>
+                                    </div>
+                                    <select
+                                        value={paperReturnSiteId}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            setPaperReturnSiteId(val);
+                                            setPaperReturnCart([]);
+                                            fetchDriverDrafts(val);
+                                        }}
+                                        className="w-full p-4 border-2 border-orange-200 rounded-xl outline-none focus:border-orange-500 font-bold bg-white mb-4"
+                                    >
                                         <option value="" disabled>-- Wybierz budowę / Cel --</option>
                                         {sites.map(s => (
                                             <option key={s.id} value={s.id}>
@@ -4578,6 +4717,185 @@ export default function ProtocolsHub() {
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: WYBÓR SZKICU PROTOKOŁU OD KIEROWCY */}
+            {isDriverDraftsModalOpen && (
+                <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden animate-fade-in border border-purple-300">
+                        <div className="p-5 bg-purple-50 border-b border-purple-200 flex justify-between items-center">
+                            <div className="flex items-center gap-3">
+                                <span className="text-3xl" aria-hidden="true">📲</span>
+                                <div>
+                                    <h2 className="text-xl font-black text-purple-900">Protokoły od Kierowców (Szkice)</h2>
+                                    <p className="text-xs text-purple-700">Wybierz protokół nadesłany z terenu, aby automatycznie zaczytać sprzęt i resztki</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setIsDriverDraftsModalOpen(false)}
+                                className="text-3xl text-purple-400 hover:text-purple-800 leading-none"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50">
+                            {/* Filtrowanie / Odświeżanie */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 bg-white p-3 rounded-2xl border border-slate-200 text-xs">
+                                <div className="text-slate-600">
+                                    {paperReturnSiteId ? (
+                                        <span>Pokazuję szkice dla: <strong className="text-purple-800">{sites.find(s => s.id === paperReturnSiteId)?.name || "wybranej budowy"}</strong></span>
+                                    ) : (
+                                        <span>Pokazuję <strong className="text-purple-800">wszystkie oczekujące szkice</strong></span>
+                                    )}
+                                </div>
+                                <div className="flex gap-2">
+                                    {paperReturnSiteId && (
+                                        <button
+                                            type="button"
+                                            onClick={() => fetchDriverDrafts()}
+                                            className="px-2.5 py-1 rounded-lg border border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 font-bold"
+                                        >
+                                            Pokaż ze wszystkich budów
+                                        </button>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => fetchDriverDrafts(paperReturnSiteId || undefined)}
+                                        className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-700 bg-slate-100 hover:bg-slate-200 font-bold flex items-center gap-1"
+                                    >
+                                        <span>🔄</span>
+                                        <span>Odśwież</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {isLoadingDriverDrafts ? (
+                                <div className="p-10 text-center text-slate-400 text-sm animate-pulse">
+                                    Ładowanie nadesłanych protokołów...
+                                </div>
+                            ) : driverDrafts.length === 0 ? (
+                                <div className="p-12 text-center text-slate-400 space-y-2">
+                                    <div className="text-4xl">📭</div>
+                                    <p className="font-bold text-slate-600">Brak oczekujących szkiców od kierowców</p>
+                                    <p className="text-xs">Gdy kierowca wyśle protokół z telefonu ze statusem zwrotu, pojawi się on na tej liście.</p>
+                                </div>
+                            ) : (
+                                driverDrafts.map((draft) => {
+                                    const createdFormatted = draft.createdAt 
+                                        ? new Date(draft.createdAt).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })
+                                        : "Brak daty";
+                                    const itemsCount = draft.items?.length || 0;
+                                    const residualsCount = draft.residuals?.length || 0;
+
+                                    return (
+                                        <div
+                                            key={draft.docId}
+                                            className="bg-white rounded-2xl border-2 border-purple-200 p-4 shadow-sm hover:border-purple-400 transition space-y-3"
+                                        >
+                                            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                                                <div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="font-black text-base text-slate-800">
+                                                            {draft.sourceName || "Nieznana budowa"}
+                                                        </span>
+                                                        <span className="bg-purple-100 text-purple-800 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-purple-200">
+                                                            Szkic Kierowcy
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
+                                                        <span>🚚 Kierowca: <strong className="text-slate-700">{draft.driverName || "Kierowca"}</strong></span>
+                                                        <span>🕒 {createdFormatted}</span>
+                                                        {draft.targetManagerName && (
+                                                            <span>👤 Kierownik: <strong>{draft.targetManagerName}</strong></span>
+                                                        )}
+                                                    </div>
+                                                    {draft.driverNotes && (
+                                                        <div className="mt-1.5 text-xs text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
+                                                            💬 Notatka: {draft.driverNotes}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <button
+                                                    type="button"
+                                                    onClick={() => loadDriverDraft(draft)}
+                                                    className="px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-md transition active:scale-95 flex items-center gap-1.5 shrink-0"
+                                                >
+                                                    <span>📥</span>
+                                                    <span>Załaduj ten protokół</span>
+                                                </button>
+                                            </div>
+
+                                            {/* Sekcja sprzętu */}
+                                            {itemsCount > 0 && (
+                                                <div className="space-y-1.5">
+                                                    <div className="text-[11px] font-black text-slate-700 uppercase tracking-wide flex items-center gap-1">
+                                                        <span>🛠️</span>
+                                                        <span>Zwracany sprzęt ({itemsCount}):</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                                        {draft.items.map((it: any, iIdx: number) => (
+                                                            <div key={iIdx} className="text-xs p-2 bg-slate-50 rounded-lg border border-slate-200 flex justify-between items-center">
+                                                                <span className="font-semibold text-slate-800 truncate mr-2">
+                                                                    {it.name}
+                                                                    {it.inventoryNumber && <span className="font-mono text-purple-700 ml-1">#{it.inventoryNumber}</span>}
+                                                                </span>
+                                                                <span className="font-bold text-slate-600 shrink-0">
+                                                                    {it.returnQty || it.declaredQty || 1} {it.unit || "szt."}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Sekcja resztek rozpoznanych przez AI */}
+                                            {residualsCount > 0 && (
+                                                <div className="space-y-1.5 bg-amber-50/70 p-3 rounded-xl border border-amber-200">
+                                                    <div className="text-[11px] font-black text-amber-900 uppercase tracking-wide flex items-center gap-1.5">
+                                                        <span>🤖</span>
+                                                        <span>Rozpoznane resztki budowlane przez AI ({residualsCount}):</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                                        {draft.residuals.map((res: any, rIdx: number) => (
+                                                            <div key={rIdx} className="text-xs p-1.5 bg-white rounded border border-amber-200 flex items-center justify-between">
+                                                                <span className="font-medium text-slate-800 truncate mr-2">
+                                                                    • {res.name}
+                                                                </span>
+                                                                <span className="font-bold text-amber-800 shrink-0">
+                                                                    {res.quantity} {res.unit} {res.isWaste ? "🗑️ Odpad" : ""}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Opcjonalny odsłuch nagrania */}
+                                            {draft.audioNoteUrl && (
+                                                <div className="flex items-center gap-2 pt-1 text-xs text-slate-500">
+                                                    <span>🎙️ Nagranie kierowcy:</span>
+                                                    <audio src={draft.audioNoteUrl} controls className="h-8 flex-1 max-w-sm" />
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </div>
+
+                        <div className="p-4 bg-white border-t border-slate-200 flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setIsDriverDraftsModalOpen(false)}
+                                className="px-5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
+                            >
+                                Zamknij
+                            </button>
                         </div>
                     </div>
                 </div>

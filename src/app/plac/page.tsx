@@ -163,34 +163,24 @@ export default function PlacPage() {
           </Link>
 
           {/* Kafelek 3: Wypisz Protokół */}
-          <button
-            type="button"
-            onClick={() =>
-              setModalInfo({
-                title: "Wypisz Protokół",
-                icon: "📋",
-                desc: "Moduł mobilnych protokołów zdawczo-odbiorczych (wydania na budowę i zwroty materiałów) jest w trakcie przygotowywania procedury. Wkrótce będzie dostępny.",
-              })
-            }
-            className="relative block w-full text-left rounded-3xl border border-purple-500/30 bg-gradient-to-br from-purple-500/10 via-slate-900 to-slate-950 p-5 min-h-[170px] shadow-lg hover:border-purple-400/60 active:scale-[0.98] transition flex flex-col justify-between"
+          <Link
+            href="/plac/protokol"
+            className="group relative block rounded-3xl border border-purple-500/40 bg-gradient-to-br from-purple-500/15 via-slate-900 to-slate-950 p-5 min-h-[170px] shadow-lg hover:border-purple-400 active:scale-[0.98] transition flex flex-col justify-between"
           >
-            <span className="absolute top-4 right-4 rounded-full border border-purple-500/40 bg-purple-950/80 px-2.5 py-0.5 text-[10px] font-black tracking-wider text-purple-300 uppercase">
-              Wkrótce
-            </span>
             <div>
               <div className="text-4xl mb-2" aria-hidden="true">📋</div>
-              <h3 className="text-lg font-black text-purple-300">
+              <h3 className="text-lg font-black text-purple-400 group-hover:text-purple-300 transition">
                 Wypisz Protokół
               </h3>
-              <p className="mt-1 text-xs text-slate-400 leading-relaxed">
-                Mobilne protokoły zdawczo-odbiorcze: wydania i zwroty z budów z podpisem
+              <p className="mt-1 text-xs text-slate-300 leading-relaxed">
+                Mobilny szkic zwrotu sprzętu z budowy, osprzęt oraz nagranie głosowe AI dla resztek
               </p>
             </div>
-            <div className="mt-4 inline-flex items-center gap-1 self-start rounded-xl border border-purple-500/40 px-3 py-1.5 text-xs font-bold text-purple-300 bg-purple-950/40">
-              <span>Informacja</span>
+            <div className="mt-4 inline-flex items-center gap-1.5 self-start rounded-xl bg-purple-600 hover:bg-purple-500 px-3.5 py-2 text-xs font-black text-white shadow">
+              <span>Wypisz protokół</span>
               <span>→</span>
             </div>
-          </button>
+          </Link>
 
           {/* Kafelek 4: Inwentaryzacja */}
           <Link
