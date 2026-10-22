@@ -63,6 +63,7 @@ export default function PlacProtokolPage() {
 
   // Form selections
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
+  const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   const [filterTab, setFilterTab] = useState<"ALL" | "UNIQUE" | "BULK">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedManagerUids, setSelectedManagerUids] = useState<string[]>([]);
@@ -161,25 +162,13 @@ export default function PlacProtokolPage() {
     loadData();
   }, []);
 
-  // Update selected managers and reset items when site is chosen
+  // Reset selections when site is chosen (kierowca sam zaznacza kierowników)
   useEffect(() => {
-    if (!selectedSiteId) {
-      setSelectedManagerUids([]);
-      return;
-    }
-
-    // Auto-zaznacz kierowników przypisanych do tej budowy (jeśli są tacy)
-    const siteManagers = availableManagers
-      .filter(m => m.assignedSites && (m.assignedSites.includes("ALL") || m.assignedSites.includes(selectedSiteId)))
-      .map(m => m.uid);
-
-    setSelectedManagerUids(siteManagers);
-
-    // Reset selections on site change
+    setSelectedManagerUids([]);
     setSelectedUnique({});
     setSelectedBulkQty({});
     setSelectedAccessories({});
-  }, [selectedSiteId, availableManagers]);
+  }, [selectedSiteId]);
 
   // Clean up audio blob URL on unmount
   useEffect(() => {
@@ -200,6 +189,14 @@ export default function PlacProtokolPage() {
       return qtyOnSite > 0;
     });
   }, [inventory, selectedSiteId]);
+
+  const selectedSite = useMemo(() => {
+    return sites.find(s => s.id === selectedSiteId);
+  }, [sites, selectedSiteId]);
+
+  const selectedManagers = useMemo(() => {
+    return availableManagers.filter(m => selectedManagerUids.includes(m.uid));
+  }, [availableManagers, selectedManagerUids]);
 
   // Filter by tab and search
   const displayedEquipment = useMemo(() => {
@@ -315,7 +312,7 @@ export default function PlacProtokolPage() {
   }, [selectedBulkQty]);
 
   const totalItemsCount = totalUniqueChecked + totalBulkChecked;
-  const canSubmit = selectedSiteId && (totalItemsCount > 0 || audioBlob !== null);
+  const canSubmit = Boolean(selectedSiteId) && selectedManagerUids.length > 0 && (totalItemsCount > 0 || audioBlob !== null);
 
   // SUBMIT FLOW:
   // 1. Upload audio to Firebase Storage
@@ -324,6 +321,13 @@ export default function PlacProtokolPage() {
   const handleSubmitProtocol = async () => {
     if (!selectedSiteId) {
       alert("Proszę wybrać budowę!");
+      setCurrentStep(1);
+      return;
+    }
+
+    if (selectedManagerUids.length === 0) {
+      alert("Proszę wybrać przynajmniej jednego kierownika budowy!");
+      setCurrentStep(2);
       return;
     }
 
@@ -518,7 +522,7 @@ export default function PlacProtokolPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none pb-28">
+    <div className={`min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none ${currentStep === 3 ? "pb-28" : "pb-8"}`}>
       {/* Sticky Header */}
       <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-900/95 backdrop-blur shadow-xl">
         <div className="max-w-xl mx-auto w-full px-4 py-3 flex items-center justify-between gap-3">
@@ -536,7 +540,7 @@ export default function PlacProtokolPage() {
               <span>Wypisz Protokół</span>
             </h1>
             <p className="text-[10px] font-bold text-slate-400 tracking-wide leading-tight truncate">
-              Mobilny szkic zwrotu sprzętu i materiałów
+              Krok {currentStep} z 3 · Kreator zwrotu sprzętu
             </p>
           </div>
 
@@ -551,59 +555,211 @@ export default function PlacProtokolPage() {
 
       {/* Main Container */}
       <main className="max-w-xl mx-auto w-full p-4 flex-1 space-y-4">
-        {/* KROK 1: Wybór Budowy */}
-        <section className="rounded-3xl border border-purple-500/30 bg-gradient-to-br from-purple-950/20 via-slate-900 to-slate-950 p-4 shadow-lg space-y-3">
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-black tracking-wider text-purple-400 uppercase flex items-center gap-1.5">
-              <span>1️⃣</span>
-              <span>Wybierz Budowę (Skąd zabierasz)</span>
-            </label>
-            {selectedSiteId && (
-              <span className="text-[10px] bg-purple-900/60 text-purple-300 px-2 py-0.5 rounded-full font-bold">
-                Sprzęt na budowie: {siteEquipment.length}
-              </span>
-            )}
-          </div>
+        {/* WIZARD STEPPER */}
+        <div className="flex items-center justify-between gap-1 p-1.5 rounded-2xl bg-slate-900 border border-slate-800 shadow-md">
+          <button
+            type="button"
+            onClick={() => setCurrentStep(1)}
+            className={`flex-1 py-2 px-1.5 rounded-xl text-center text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+              currentStep === 1
+                ? "bg-purple-600 text-white shadow font-black"
+                : selectedSiteId
+                ? "bg-purple-950/40 text-purple-300 hover:bg-purple-900/50"
+                : "text-slate-500 hover:text-slate-300"
+            }`}
+          >
+            <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black ${
+              currentStep === 1 ? "bg-white text-purple-900" : "bg-slate-800 text-slate-300"
+            }`}>
+              1
+            </span>
+            <span className="truncate">1. Budowa</span>
+          </button>
 
-          {loading ? (
-            <div className="p-4 text-center text-xs text-slate-400 animate-pulse">
-              Ładowanie listy budów...
+          <span className="text-slate-600 text-xs px-0.5">➔</span>
+
+          <button
+            type="button"
+            disabled={!selectedSiteId}
+            onClick={() => selectedSiteId && setCurrentStep(2)}
+            className={`flex-1 py-2 px-1.5 rounded-xl text-center text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+              currentStep === 2
+                ? "bg-purple-600 text-white shadow font-black"
+                : selectedManagerUids.length > 0
+                ? "bg-purple-950/40 text-purple-300 hover:bg-purple-900/50"
+                : !selectedSiteId
+                ? "text-slate-600 opacity-40 cursor-not-allowed"
+                : "text-slate-400 hover:bg-slate-800"
+            }`}
+          >
+            <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black ${
+              currentStep === 2 ? "bg-white text-purple-900" : "bg-slate-800 text-slate-300"
+            }`}>
+              2
+            </span>
+            <span className="truncate">2. Kierownik</span>
+          </button>
+
+          <span className="text-slate-600 text-xs px-0.5">➔</span>
+
+          <button
+            type="button"
+            disabled={!selectedSiteId || selectedManagerUids.length === 0}
+            onClick={() => selectedSiteId && selectedManagerUids.length > 0 && setCurrentStep(3)}
+            className={`flex-1 py-2 px-1.5 rounded-xl text-center text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+              currentStep === 3
+                ? "bg-purple-600 text-white shadow font-black"
+                : !selectedSiteId || selectedManagerUids.length === 0
+                ? "text-slate-600 opacity-40 cursor-not-allowed"
+                : "text-slate-400 hover:bg-slate-800"
+            }`}
+          >
+            <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black ${
+              currentStep === 3 ? "bg-white text-purple-900" : "bg-slate-800 text-slate-300"
+            }`}>
+              3
+            </span>
+            <span className="truncate">3. Sprzęt</span>
+          </button>
+        </div>
+
+        {/* ========================================================================= */}
+        {/* KROK 1: WYBÓR BUDOWY */}
+        {/* ========================================================================= */}
+        {currentStep === 1 && (
+          <section className="rounded-3xl border border-purple-500/30 bg-gradient-to-br from-purple-950/20 via-slate-900 to-slate-950 p-5 shadow-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-purple-600/30 border border-purple-500/50 flex items-center justify-center text-sm font-black text-purple-300">
+                  1
+                </span>
+                <div>
+                  <h2 className="text-sm font-black text-white tracking-wide uppercase">
+                    Wybierz budowę
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Skąd zabierasz sprzęt lub resztki?
+                  </p>
+                </div>
+              </div>
+              {selectedSiteId && (
+                <span className="text-[10px] bg-purple-900/80 text-purple-300 px-2.5 py-1 rounded-full font-bold border border-purple-700/60">
+                  Sprzęt: {siteEquipment.length} poz.
+                </span>
+              )}
             </div>
-          ) : (
-            <select
-              value={selectedSiteId}
-              onChange={(e) => setSelectedSiteId(e.target.value)}
-              className="w-full p-3.5 rounded-2xl border-2 border-purple-500/40 bg-slate-900 text-white font-bold text-sm outline-none focus:border-purple-400 transition cursor-pointer shadow-inner"
-            >
-              <option value="" disabled>-- Wybierz budowę / cel zwrotu --</option>
-              {sites.map(s => (
-                <option key={s.id} value={s.id}>
-                  {s.name} {s.managerName ? `(Kierownik: ${s.managerName})` : ""}
-                </option>
-              ))}
-            </select>
-          )}
 
-          {selectedSiteId && (
-            <div className="pt-2 space-y-2 border-t border-purple-500/20">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] font-bold text-slate-300 uppercase flex items-center gap-1.5">
-                  <span>👤</span>
-                  <span>Kierownik na budowie (możesz wybrać kilku):</span>
+            {loading ? (
+              <div className="p-8 text-center text-xs text-slate-400 animate-pulse bg-slate-950/50 rounded-2xl border border-slate-800">
+                Ładowanie listy budów...
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <label className="text-[11px] font-bold text-slate-300 block uppercase">
+                  Wybierz budowę z listy:
                 </label>
-                {selectedManagerUids.length > 0 && (
-                  <span className="text-[10px] font-black text-purple-300 bg-purple-900/80 px-2 py-0.5 rounded-full border border-purple-700">
-                    Wybrano: {selectedManagerUids.length}
-                  </span>
+                <select
+                  value={selectedSiteId}
+                  onChange={(e) => setSelectedSiteId(e.target.value)}
+                  className="w-full p-4 rounded-2xl border-2 border-purple-500/40 bg-slate-900 text-white font-bold text-sm outline-none focus:border-purple-400 transition cursor-pointer shadow-inner"
+                >
+                  <option value="" disabled>-- Kliknij, aby wybrać budowę --</option>
+                  {sites.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} {s.managerName ? `(Kierownik: ${s.managerName})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {selectedSite && (
+              <div className="p-4 rounded-2xl bg-purple-950/30 border border-purple-500/30 space-y-2">
+                <div className="text-xs font-black text-purple-300 flex items-center gap-2">
+                  <span>📍</span>
+                  <span>{selectedSite.name}</span>
+                </div>
+                <div className="text-[11px] text-slate-300 flex items-center justify-between">
+                  <span>Sprzęt zarejestrowany na budowie:</span>
+                  <strong className="text-amber-400 font-mono text-xs">{siteEquipment.length} pozycji</strong>
+                </div>
+                {selectedSite.managerName && (
+                  <div className="text-[11px] text-slate-400 flex items-center justify-between">
+                    <span>Domyślny kierownik budowy:</span>
+                    <span className="text-slate-200 font-medium">{selectedSite.managerName}</span>
+                  </div>
                 )}
               </div>
+            )}
+
+            <div className="pt-2">
+              <button
+                type="button"
+                disabled={!selectedSiteId}
+                onClick={() => setCurrentStep(2)}
+                className="w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 text-white font-black text-sm shadow-xl flex items-center justify-center gap-2 active:scale-95 transition min-h-[52px]"
+              >
+                <span>DALEJ: WYBIERZ KIEROWNIKA</span>
+                <span className="text-base">➔</span>
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* ========================================================================= */}
+        {/* KROK 2: WYBÓR KIEROWNIKÓW */}
+        {/* ========================================================================= */}
+        {currentStep === 2 && (
+          <section className="rounded-3xl border border-purple-500/30 bg-gradient-to-br from-purple-950/20 via-slate-900 to-slate-950 p-5 shadow-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-purple-600/30 border border-purple-500/50 flex items-center justify-center text-sm font-black text-purple-300">
+                  2
+                </span>
+                <div>
+                  <h2 className="text-sm font-black text-white tracking-wide uppercase">
+                    Wybierz Kierowników
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Dla kogo wystawiasz ten protokół zwrotu?
+                  </p>
+                </div>
+              </div>
+              {selectedManagerUids.length > 0 && (
+                <span className="text-[10px] bg-purple-900/80 text-purple-300 px-2.5 py-1 rounded-full font-black border border-purple-700/60">
+                  Wybrano: {selectedManagerUids.length}
+                </span>
+              )}
+            </div>
+
+            {/* Wybrana budowa kontekst */}
+            <div className="p-3 rounded-2xl bg-slate-950/70 border border-slate-800 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <span className="text-[10px] font-mono text-slate-400 block uppercase">Budowa:</span>
+                <span className="text-xs font-black text-white truncate block">
+                  📍 {selectedSite?.name || "Brak"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCurrentStep(1)}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-slate-300 active:scale-95 transition shrink-0"
+              >
+                ✏️ Zmień
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-300 block uppercase">
+                Zaznacz kierownika lub kierowników (możesz wybrać kilku):
+              </label>
 
               {availableManagers.length === 0 ? (
-                <p className="text-xs text-slate-400 italic p-2 bg-slate-900 rounded-xl">
+                <p className="text-xs text-slate-400 italic p-3 bg-slate-950 rounded-xl border border-slate-800">
                   Brak w systemie osób z uprawnieniem do wystawiania zwrotów elektronicznych.
                 </p>
               ) : (
-                <div className="grid grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[380px] overflow-y-auto pr-1">
                   {availableManagers.map(m => {
                     const isSelected = selectedManagerUids.includes(m.uid);
                     return (
@@ -615,15 +771,24 @@ export default function PlacProtokolPage() {
                             prev.includes(m.uid) ? prev.filter(id => id !== m.uid) : [...prev, m.uid]
                           );
                         }}
-                        className={`p-2.5 rounded-xl border text-left text-xs font-bold transition flex items-center justify-between gap-1.5 active:scale-95 ${
+                        className={`p-3.5 rounded-2xl border text-left text-xs font-bold transition flex items-center justify-between gap-2 active:scale-95 ${
                           isSelected
-                            ? "bg-purple-600 text-white border-purple-400 shadow-md"
-                            : "bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500"
+                            ? "bg-purple-600 text-white border-purple-400 shadow-md ring-2 ring-purple-400/40"
+                            : "bg-slate-950/70 text-slate-300 border-slate-800 hover:border-slate-600"
                         }`}
                       >
-                        <span className="truncate">{m.name}</span>
-                        <span className={`text-xs shrink-0 ${isSelected ? "text-white font-black" : "text-slate-500"}`}>
-                          {isSelected ? "✓" : "+"}
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center font-black text-xs shrink-0 ${
+                            isSelected ? "bg-white text-purple-700" : "bg-slate-800 text-slate-400"
+                          }`}>
+                            {isSelected ? "✓" : "👤"}
+                          </div>
+                          <span className="truncate text-xs font-bold leading-tight">{m.name}</span>
+                        </div>
+                        <span className={`text-[11px] font-black shrink-0 px-2 py-0.5 rounded-full ${
+                          isSelected ? "bg-white/20 text-white" : "text-slate-500"
+                        }`}>
+                          {isSelected ? "Wybrano" : "+ Dodaj"}
                         </span>
                       </button>
                     );
@@ -631,368 +796,429 @@ export default function PlacProtokolPage() {
                 </div>
               )}
             </div>
-          )}
-        </section>
 
-        {/* KROK 2: Lista Sprzętu na Wybranej Budowie */}
-        {selectedSiteId && (
-          <section className="rounded-3xl border border-slate-800 bg-slate-900/90 p-4 shadow-lg space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-black tracking-wider text-amber-400 uppercase flex items-center gap-1.5">
-                <span>2️⃣</span>
-                <span>Sprzęt na budowie (Zaznacz co zabierasz)</span>
-              </label>
-              <span className="text-[11px] font-black text-emerald-400">
-                Wybrano: {totalItemsCount}
-              </span>
+            {/* Przyciski nawigacji kroku 2 */}
+            <div className="flex gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setCurrentStep(1)}
+                className="py-3.5 px-4 rounded-2xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs flex items-center gap-1.5 active:scale-95 transition"
+              >
+                <span>←</span>
+                <span>Wstecz</span>
+              </button>
+              <button
+                type="button"
+                disabled={selectedManagerUids.length === 0}
+                onClick={() => setCurrentStep(3)}
+                className="flex-1 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 text-white font-black text-xs shadow-xl flex items-center justify-center gap-2 active:scale-95 transition min-h-[50px]"
+              >
+                <span>DALEJ: SPRZĘT I NOTATKA</span>
+                <span className="text-sm">➔</span>
+              </button>
             </div>
+          </section>
+        )}
 
-            {/* Zakładki filtrów & Wyszukiwarka */}
-            <div className="space-y-2">
-              <div className="flex gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+        {/* ========================================================================= */}
+        {/* KROK 3: SPRZĘT I NOTATKA GŁOSOWA (RESZTKI BUDOWLANE) */}
+        {/* ========================================================================= */}
+        {currentStep === 3 && (
+          <div className="space-y-4">
+            {/* Podsumowanie wybranej budowy i kierowników */}
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2 shadow-md">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs text-white font-black flex items-center gap-1.5 truncate">
+                  <span>📍</span>
+                  <span className="truncate">{selectedSite?.name}</span>
+                </div>
+                <div className="text-[11px] text-purple-400 font-bold flex items-center gap-1.5 truncate mt-0.5">
+                  <span>👤</span>
+                  <span className="truncate">
+                    {selectedManagers.length > 0 ? selectedManagers.map(m => m.name).join(", ") : "Brak"}
+                  </span>
+                </div>
+              </div>
+              <div className="flex gap-1.5 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setFilterTab("ALL")}
-                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition ${
-                    filterTab === "ALL"
-                      ? "bg-amber-500 text-slate-950 shadow"
-                      : "text-slate-400 hover:text-white"
-                  }`}
+                  onClick={() => setCurrentStep(1)}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-slate-300 active:scale-95 transition"
                 >
-                  Wszystko ({siteEquipment.length})
+                  📍 Budowa
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFilterTab("UNIQUE")}
-                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition ${
-                    filterTab === "UNIQUE"
-                      ? "bg-amber-500 text-slate-950 shadow"
-                      : "text-slate-400 hover:text-white"
-                  }`}
+                  onClick={() => setCurrentStep(2)}
+                  className="px-2.5 py-1.5 rounded-lg border border-purple-700/60 bg-purple-950/60 hover:bg-purple-900/60 text-[10px] font-bold text-purple-300 active:scale-95 transition"
                 >
-                  Narzędzia ({siteEquipment.filter(i => i.type === "UNIQUE").length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFilterTab("BULK")}
-                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition ${
-                    filterTab === "BULK"
-                      ? "bg-amber-500 text-slate-950 shadow"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  Masowe ({siteEquipment.filter(i => i.type === "BULK").length})
+                  👤 Kierownik ({selectedManagerUids.length})
                 </button>
               </div>
-
-              <input
-                type="text"
-                placeholder="🔍 Szukaj sprzętu po nazwie lub nr inwentarzowym..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-950 text-xs text-slate-200 outline-none focus:border-amber-400"
-              />
             </div>
 
-            {/* Lista elementów */}
-            {displayedEquipment.length === 0 ? (
-              <div className="text-center p-8 text-slate-500 text-xs">
-                {searchQuery ? "Brak wyników dla podanej frazy." : "Brak zarejestrowanego sprzętu na tej budowie."}
+            {/* SEKCJA SPRZĘTU NA BUDOWIE */}
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/90 p-4 shadow-lg space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-black tracking-wider text-amber-400 uppercase flex items-center gap-1.5">
+                  <span>📦</span>
+                  <span>Sprzęt na budowie (Zaznacz co zabierasz)</span>
+                </label>
+                <span className="text-[11px] font-black text-emerald-400">
+                  Wybrano: {totalItemsCount}
+                </span>
               </div>
-            ) : (
-              <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
-                {displayedEquipment.map((item) => {
-                  const qtyOnSite = item.allocations?.[selectedSiteId] || 0;
-                  const isUnique = item.type === "UNIQUE";
-                  const isCheckedUnique = selectedUnique[item.id] || false;
-                  const currentBulkQty = selectedBulkQty[item.id] || 0;
-                  const isItemChosen = isUnique ? isCheckedUnique : currentBulkQty > 0;
 
-                  return (
-                    <div
-                      key={item.id}
-                      className={`p-3.5 rounded-2xl border transition ${
-                        isItemChosen
-                          ? "border-amber-400/80 bg-amber-950/20 shadow-md"
-                          : "border-slate-800 bg-slate-950/60 hover:border-slate-700"
-                      }`}
-                    >
-                      {/* Nagłówek elementu */}
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-bold text-sm text-slate-100">
-                              {item.name}
-                            </span>
-                            {item.inventoryNumber && (
-                              <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-300 font-bold">
-                                #{item.inventoryNumber}
+              {/* Zakładki filtrów & Wyszukiwarka */}
+              <div className="space-y-2">
+                <div className="flex gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setFilterTab("ALL")}
+                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition ${
+                      filterTab === "ALL"
+                        ? "bg-amber-500 text-slate-950 shadow"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Wszystko ({siteEquipment.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFilterTab("UNIQUE")}
+                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition ${
+                      filterTab === "UNIQUE"
+                        ? "bg-amber-500 text-slate-950 shadow"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Narzędzia ({siteEquipment.filter(i => i.type === "UNIQUE").length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFilterTab("BULK")}
+                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition ${
+                      filterTab === "BULK"
+                        ? "bg-amber-500 text-slate-950 shadow"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Masowe ({siteEquipment.filter(i => i.type === "BULK").length})
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  placeholder="🔍 Szukaj sprzętu po nazwie lub nr inwentarzowym..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-950 text-xs text-slate-200 outline-none focus:border-amber-400"
+                />
+              </div>
+
+              {/* Lista elementów */}
+              {displayedEquipment.length === 0 ? (
+                <div className="text-center p-8 text-slate-500 text-xs">
+                  {searchQuery ? "Brak wyników dla podanej frazy." : "Brak zarejestrowanego sprzętu na tej budowie."}
+                </div>
+              ) : (
+                <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
+                  {displayedEquipment.map((item) => {
+                    const qtyOnSite = item.allocations?.[selectedSiteId] || 0;
+                    const isUnique = item.type === "UNIQUE";
+                    const isCheckedUnique = selectedUnique[item.id] || false;
+                    const currentBulkQty = selectedBulkQty[item.id] || 0;
+                    const isItemChosen = isUnique ? isCheckedUnique : currentBulkQty > 0;
+
+                    return (
+                      <div
+                        key={item.id}
+                        className={`p-3.5 rounded-2xl border transition ${
+                          isItemChosen
+                            ? "border-amber-400/80 bg-amber-950/20 shadow-md"
+                            : "border-slate-800 bg-slate-950/60 hover:border-slate-700"
+                        }`}
+                      >
+                        {/* Nagłówek elementu */}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-sm text-slate-100">
+                                {item.name}
                               </span>
-                            )}
+                              {item.inventoryNumber && (
+                                <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-300 font-bold">
+                                  #{item.inventoryNumber}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-slate-400 mt-0.5">
+                              Na budowie: <strong className="text-slate-200">{qtyOnSite} {item.unit || "szt."}</strong>
+                            </p>
                           </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5">
-                            Na budowie: <strong className="text-slate-200">{qtyOnSite} {item.unit || "szt."}</strong>
-                          </p>
+
+                          {/* Akcja wyboru: Checkbox dla UNIQUE, Stepper dla BULK */}
+                          {isUnique ? (
+                            <label className="flex items-center gap-2 cursor-pointer shrink-0 select-none bg-slate-900 border border-slate-700 px-3 py-2 rounded-xl active:scale-95 transition">
+                              <input
+                                type="checkbox"
+                                checked={isCheckedUnique}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setSelectedUnique(prev => ({ ...prev, [item.id]: checked }));
+                                  // Inicjalizacja domyślnego zaznaczenia osprzętu
+                                  if (checked && item.accessories && item.accessories.length > 0) {
+                                    const accState: Record<number, boolean> = {};
+                                    item.accessories.forEach((a, idx) => {
+                                      accState[idx] = a.mustReturn; // mustReturn domyślnie zaznaczony
+                                    });
+                                    setSelectedAccessories(prev => ({ ...prev, [item.id]: accState }));
+                                  }
+                                }}
+                                className="w-5 h-5 rounded text-amber-500 focus:ring-amber-400 border-slate-600 bg-slate-800 cursor-pointer"
+                              />
+                              <span className={`text-xs font-black ${isCheckedUnique ? "text-amber-400" : "text-slate-400"}`}>
+                                {isCheckedUnique ? "Zabrane" : "Zabieram"}
+                              </span>
+                            </label>
+                          ) : (
+                            <div className="flex items-center gap-1.5 shrink-0 bg-slate-900 border border-slate-700 p-1 rounded-xl">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedBulkQty(prev => ({
+                                    ...prev,
+                                    [item.id]: Math.max(0, (prev[item.id] || 0) - 1)
+                                  }));
+                                }}
+                                className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-sm flex items-center justify-center active:scale-90 transition"
+                              >
+                                -
+                              </button>
+                              <input
+                                type="number"
+                                min={0}
+                                max={qtyOnSite}
+                                value={currentBulkQty || ""}
+                                placeholder="0"
+                                onChange={(e) => {
+                                  const val = Math.min(qtyOnSite, Math.max(0, Number(e.target.value) || 0));
+                                  setSelectedBulkQty(prev => ({ ...prev, [item.id]: val }));
+                                }}
+                                className="w-12 text-center bg-transparent text-sm font-black text-amber-400 outline-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedBulkQty(prev => ({
+                                    ...prev,
+                                    [item.id]: Math.min(qtyOnSite, (prev[item.id] || 0) + 1)
+                                  }));
+                                }}
+                                className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-sm flex items-center justify-center active:scale-90 transition"
+                              >
+                                +
+                              </button>
+                            </div>
+                          )}
                         </div>
 
-                        {/* Akcja wyboru: Checkbox dla UNIQUE, Stepper dla BULK */}
-                        {isUnique ? (
-                          <label className="flex items-center gap-2 cursor-pointer shrink-0 select-none bg-slate-900 border border-slate-700 px-3 py-2 rounded-xl active:scale-95 transition">
-                            <input
-                              type="checkbox"
-                              checked={isCheckedUnique}
-                              onChange={(e) => {
-                                const checked = e.target.checked;
-                                setSelectedUnique(prev => ({ ...prev, [item.id]: checked }));
-                                // Inicjalizacja domyślnego zaznaczenia osprzętu
-                                if (checked && item.accessories && item.accessories.length > 0) {
-                                  const accState: Record<number, boolean> = {};
-                                  item.accessories.forEach((a, idx) => {
-                                    accState[idx] = a.mustReturn; // mustReturn domyślnie zaznaczony
-                                  });
-                                  setSelectedAccessories(prev => ({ ...prev, [item.id]: accState }));
-                                }
-                              }}
-                              className="w-5 h-5 rounded text-amber-500 focus:ring-amber-400 border-slate-600 bg-slate-800 cursor-pointer"
-                            />
-                            <span className={`text-xs font-black ${isCheckedUnique ? "text-amber-400" : "text-slate-400"}`}>
-                              {isCheckedUnique ? "Zabrane" : "Zabieram"}
-                            </span>
-                          </label>
-                        ) : (
-                          <div className="flex items-center gap-1.5 shrink-0 bg-slate-900 border border-slate-700 p-1 rounded-xl">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedBulkQty(prev => ({
-                                  ...prev,
-                                  [item.id]: Math.max(0, (prev[item.id] || 0) - 1)
-                                }));
-                              }}
-                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-sm flex items-center justify-center active:scale-90 transition"
-                            >
-                              -
-                            </button>
-                            <input
-                              type="number"
-                              min={0}
-                              max={qtyOnSite}
-                              value={currentBulkQty || ""}
-                              placeholder="0"
-                              onChange={(e) => {
-                                const val = Math.min(qtyOnSite, Math.max(0, Number(e.target.value) || 0));
-                                setSelectedBulkQty(prev => ({ ...prev, [item.id]: val }));
-                              }}
-                              className="w-12 text-center bg-transparent text-sm font-black text-amber-400 outline-none"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedBulkQty(prev => ({
-                                  ...prev,
-                                  [item.id]: Math.min(qtyOnSite, (prev[item.id] || 0) + 1)
-                                }));
-                              }}
-                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-sm flex items-center justify-center active:scale-90 transition"
-                            >
-                              +
-                            </button>
+                        {/* SEKCJA OSPRZĘTU DLA WYBRANEJ MASZYNY */}
+                        {isUnique && isCheckedUnique && item.accessories && item.accessories.length > 0 && (
+                          <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2">
+                            <p className="text-[10px] font-black uppercase tracking-wider text-purple-400 flex items-center gap-1">
+                              <span>📦</span>
+                              <span>Osprzęt do tego urządzenia (odhacz co wraca):</span>
+                            </p>
+                            <div className="space-y-1.5">
+                              {item.accessories.map((acc, accIdx) => {
+                                const isAccChecked = selectedAccessories[item.id]?.[accIdx] ?? acc.mustReturn;
+                                return (
+                                  <label
+                                    key={accIdx}
+                                    className={`flex items-center justify-between p-2 rounded-xl border text-xs cursor-pointer transition ${
+                                      isAccChecked
+                                        ? "bg-purple-950/30 border-purple-500/40 text-slate-200"
+                                        : "bg-slate-900/60 border-slate-800 text-slate-500 line-through"
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={isAccChecked}
+                                        onChange={() => handleToggleAccessory(item.id, accIdx, isAccChecked)}
+                                        className="w-4 h-4 rounded text-purple-500 focus:ring-purple-400 border-slate-600 bg-slate-800 cursor-pointer"
+                                      />
+                                      <span className="font-semibold">{acc.name}</span>
+                                      {acc.quantity && acc.quantity > 1 && (
+                                        <span className="text-[10px] text-slate-400 font-mono">({acc.quantity} szt.)</span>
+                                      )}
+                                    </div>
+                                    {acc.mustReturn && (
+                                      <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-950/80 text-red-400 border border-red-800/60">
+                                        ⚠️ Musi wrócić
+                                      </span>
+                                    )}
+                                  </label>
+                                );
+                              })}
+                            </div>
                           </div>
                         )}
                       </div>
-
-                      {/* SEKCJA OSPRZĘTU DLA WYBRANEJ MASZYNY */}
-                      {isUnique && isCheckedUnique && item.accessories && item.accessories.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2">
-                          <p className="text-[10px] font-black uppercase tracking-wider text-purple-400 flex items-center gap-1">
-                            <span>📦</span>
-                            <span>Osprzęt do tego urządzenia (odhacz co wraca):</span>
-                          </p>
-                          <div className="space-y-1.5">
-                            {item.accessories.map((acc, accIdx) => {
-                              const isAccChecked = selectedAccessories[item.id]?.[accIdx] ?? acc.mustReturn;
-                              return (
-                                <label
-                                  key={accIdx}
-                                  className={`flex items-center justify-between p-2 rounded-xl border text-xs cursor-pointer transition ${
-                                    isAccChecked
-                                      ? "bg-purple-950/30 border-purple-500/40 text-slate-200"
-                                      : "bg-slate-900/60 border-slate-800 text-slate-500 line-through"
-                                  }`}
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <input
-                                      type="checkbox"
-                                      checked={isAccChecked}
-                                      onChange={() => handleToggleAccessory(item.id, accIdx, isAccChecked)}
-                                      className="w-4 h-4 rounded text-purple-500 focus:ring-purple-400 border-slate-600 bg-slate-800 cursor-pointer"
-                                    />
-                                    <span className="font-semibold">{acc.name}</span>
-                                    {acc.quantity && acc.quantity > 1 && (
-                                      <span className="text-[10px] text-slate-400 font-mono">({acc.quantity} szt.)</span>
-                                    )}
-                                  </div>
-                                  {acc.mustReturn && (
-                                    <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-950/80 text-red-400 border border-red-800/60">
-                                      ⚠️ Musi wrócić
-                                    </span>
-                                  )}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* KROK 3: Resztki Budowlane - Notatka Głosowa (AI) */}
-        {selectedSiteId && (
-          <section className="rounded-3xl border border-blue-500/30 bg-gradient-to-br from-blue-950/20 via-slate-900 to-slate-950 p-4 shadow-lg space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-black tracking-wider text-blue-400 uppercase flex items-center gap-1.5">
-                <span>3️⃣</span>
-                <span>Resztki Budowlane i Odpady (Nagranie AI)</span>
-              </label>
-              <span className="text-[10px] bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded-full font-bold">
-                Auto-transkrypcja AI
-              </span>
-            </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Nie musisz nic pisać! Wciśnij mikrofon i powiedz co zabierasz (np. <em>&quot;dwa worki kleju do siatki, 5 profili 3m, wiaderko gruntu, ścinki kabli&quot;</em>).
-              Kierownik otrzyma od razu gotową, wyczyszczoną listę pozycji.
-            </p>
-
-            {recordingError && (
-              <div className="p-3 rounded-xl bg-red-950/80 border border-red-800 text-red-300 text-xs">
-                ⚠️ {recordingError}
-              </div>
-            )}
-
-            {/* Stan nagrywania */}
-            <div className="flex flex-col items-center justify-center p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
-              {isRecording ? (
-                // Trwa nagrywanie
-                <div className="w-full text-center space-y-3">
-                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-950/80 border border-red-700 text-red-400 animate-pulse">
-                    <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
-                    <span className="text-xs font-black uppercase tracking-wider">Nagrywanie w toku...</span>
-                  </div>
-
-                  <div className="text-3xl font-mono font-black text-white">
-                    {formatSeconds(recordingSeconds)}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={stopRecording}
-                    className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-sm shadow-lg active:scale-95 transition flex items-center justify-center gap-2"
-                  >
-                    <span>⏹️</span>
-                    <span>Zatrzymaj nagrywanie</span>
-                  </button>
+                    );
+                  })}
                 </div>
-              ) : audioUrl ? (
-                // Nagranie gotowe
-                <div className="w-full space-y-3">
-                  <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span className="font-bold text-emerald-400 flex items-center gap-1">
-                      <span>✓</span>
-                      <span>Nagranie gotowe do wysłania</span>
-                    </span>
-                    <span className="font-mono">{formatSeconds(recordingSeconds)}</span>
+              )}
+            </section>
+
+            {/* SEKCJA RESZTEK BUDOWLANYCH - NAGRANIE AUDIO AI */}
+            <section className="rounded-3xl border border-blue-500/30 bg-gradient-to-br from-blue-950/20 via-slate-900 to-slate-950 p-4 shadow-lg space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-black tracking-wider text-blue-400 uppercase flex items-center gap-1.5">
+                  <span>🎙️</span>
+                  <span>Resztki Budowlane i Odpady (Nagranie AI)</span>
+                </label>
+                <span className="text-[10px] bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded-full font-bold">
+                  Auto-transkrypcja AI
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Nie musisz nic pisać! Wciśnij mikrofon i powiedz co zabierasz (np. <em>&quot;2 worki kleju, 3 worki po pół kleju do płytek&quot;</em>).
+                Kierownik otrzyma gotowe pozycje prosto do edytowalnego koszyka zwrotu.
+              </p>
+
+              {recordingError && (
+                <div className="p-3 rounded-xl bg-red-950/80 border border-red-800 text-red-300 text-xs">
+                  ⚠️ {recordingError}
+                </div>
+              )}
+
+              {/* Stan nagrywania */}
+              <div className="flex flex-col items-center justify-center p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
+                {isRecording ? (
+                  // Trwa nagrywanie
+                  <div className="w-full text-center space-y-3">
+                    <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-950/80 border border-red-700 text-red-400 animate-pulse">
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
+                      <span className="text-xs font-black uppercase tracking-wider">Nagrywanie w toku...</span>
+                    </div>
+
+                    <div className="text-3xl font-mono font-black text-white">
+                      {formatSeconds(recordingSeconds)}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={stopRecording}
+                      className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-sm shadow-lg active:scale-95 transition flex items-center justify-center gap-2"
+                    >
+                      <span>⏹️</span>
+                      <span>Zatrzymaj nagrywanie</span>
+                    </button>
                   </div>
+                ) : audioUrl ? (
+                  // Nagranie gotowe
+                  <div className="w-full space-y-3">
+                    <div className="flex items-center justify-between text-xs text-slate-400">
+                      <span className="font-bold text-emerald-400 flex items-center gap-1">
+                        <span>✓</span>
+                        <span>Nagranie gotowe do wysłania</span>
+                      </span>
+                      <span className="font-mono">{formatSeconds(recordingSeconds)}</span>
+                    </div>
 
-                  <audio src={audioUrl} controls className="w-full rounded-lg" />
+                    <audio src={audioUrl} controls className="w-full rounded-lg" />
 
-                  <div className="flex gap-2">
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={startRecording}
+                        className="flex-1 py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 transition"
+                      >
+                        🔄 Nagraj ponownie
+                      </button>
+                      <button
+                        type="button"
+                        onClick={resetRecording}
+                        className="py-2.5 px-4 rounded-xl border border-red-900/60 bg-red-950/40 hover:bg-red-900/60 text-xs font-bold text-red-400 transition"
+                      >
+                        🗑️ Usuń
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  // Czeka na nagranie
+                  <div className="w-full text-center space-y-2">
                     <button
                       type="button"
                       onClick={startRecording}
-                      className="flex-1 py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 transition"
+                      className="w-full py-4 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black text-sm shadow-xl active:scale-95 transition flex items-center justify-center gap-2 min-h-[56px]"
                     >
-                      🔄 Nagraj ponownie
+                      <span className="text-xl">🎙️</span>
+                      <span>NAGRAJ RESZTKI BUDOWLANE</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={resetRecording}
-                      className="py-2.5 px-4 rounded-xl border border-red-900/60 bg-red-950/40 hover:bg-red-900/60 text-xs font-bold text-red-400 transition"
-                    >
-                      🗑️ Usuń
-                    </button>
+                    <p className="text-[11px] text-slate-500">
+                      Kliknij i wymień pozostałości materiałowe
+                    </p>
                   </div>
-                </div>
-              ) : (
-                // Czeka na nagranie
-                <div className="w-full text-center space-y-2">
-                  <button
-                    type="button"
-                    onClick={startRecording}
-                    className="w-full py-4 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black text-sm shadow-xl active:scale-95 transition flex items-center justify-center gap-2 min-h-[56px]"
-                  >
-                    <span className="text-xl">🎙️</span>
-                    <span>NAGRAJ RESZTKI BUDOWLANE</span>
-                  </button>
-                  <p className="text-[11px] text-slate-500">
-                    Kliknij i wymień pozostałości materiałowe
-                  </p>
-                </div>
-              )}
-            </div>
-          </section>
+                )}
+              </div>
+            </section>
+          </div>
         )}
       </main>
 
-      {/* Floating Bottom Bar: Podsumowanie & Wysyłka */}
-      <footer className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800 bg-slate-900/95 backdrop-blur shadow-2xl p-3">
-        <div className="max-w-xl mx-auto w-full space-y-2">
-          {/* Submitting progress status */}
-          {isSubmitting && (
-            <div className="p-3 rounded-2xl bg-purple-950/90 border border-purple-600 text-center space-y-1 animate-pulse">
-              <div className="text-xs font-black text-purple-300">
-                ⏳ {submitStep}
+      {/* Floating Bottom Bar: Podsumowanie & Wysyłka (Widoczne w Kroku 3) */}
+      {currentStep === 3 && (
+        <footer className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800 bg-slate-900/95 backdrop-blur shadow-2xl p-3">
+          <div className="max-w-xl mx-auto w-full space-y-2">
+            {/* Submitting progress status */}
+            {isSubmitting && (
+              <div className="p-3 rounded-2xl bg-purple-950/90 border border-purple-600 text-center space-y-1 animate-pulse">
+                <div className="text-xs font-black text-purple-300">
+                  ⏳ {submitStep}
+                </div>
+                <p className="text-[10px] text-slate-400">
+                  Proszę nie zamykać aplikacji, trwa wysyłanie...
+                </p>
               </div>
-              <p className="text-[10px] text-slate-400">
-                Proszę nie zamykać aplikacji, trwa wysyłanie...
-              </p>
-            </div>
-          )}
+            )}
 
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold text-slate-400 uppercase">
-                Podsumowanie:
-              </div>
-              <div className="text-xs font-black text-white truncate">
-                {selectedSiteId ? (
-                  <>
-                    <span className="text-amber-400">{totalItemsCount}</span> poz. sprzętu
-                    {audioBlob ? " · 🎙️ Notatka audio" : ""}
-                  </>
-                ) : (
-                  <span className="text-slate-500">Wybierz budowę powyżej</span>
-                )}
-              </div>
-            </div>
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => setCurrentStep(2)}
+                className="py-3 px-3.5 rounded-2xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs flex items-center gap-1 shrink-0 active:scale-95 transition"
+              >
+                <span>←</span>
+                <span>Wróć</span>
+              </button>
 
-            <button
-              type="button"
-              disabled={!canSubmit || isSubmitting}
-              onClick={handleSubmitProtocol}
-              className="py-3.5 px-6 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 font-black text-sm text-white shadow-xl active:scale-95 transition flex items-center gap-2 min-h-[50px] shrink-0"
-            >
-              <span>🚀</span>
-              <span>{isSubmitting ? "WYSYŁANIE..." : "WYŚLIJ PROTOKÓŁ"}</span>
-            </button>
+              <div className="min-w-0 flex-1">
+                <div className="text-[10px] font-bold text-slate-400 uppercase">
+                  Wybrano do zwrotu:
+                </div>
+                <div className="text-xs font-black text-white truncate">
+                  <span className="text-amber-400 font-bold">{totalItemsCount}</span> poz. sprzętu
+                  {audioBlob ? " · 🎙️ Resztki (AI)" : ""}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={!canSubmit || isSubmitting}
+                onClick={handleSubmitProtocol}
+                className="py-3.5 px-5 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 font-black text-xs text-white shadow-xl active:scale-95 transition flex items-center gap-2 min-h-[50px] shrink-0"
+              >
+                <span>🚀</span>
+                <span>{isSubmitting ? "WYSYŁANIE..." : "WYŚLIJ PROTOKÓŁ"}</span>
+              </button>
+            </div>
           </div>
-        </div>
-      </footer>
+        </footer>
+      )}
     </div>
   );
 }

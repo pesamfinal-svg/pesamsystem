@@ -45,6 +45,8 @@ interface ReturnCartItem {
     returnedAccessoryName?: string;
     returnedAccessoryQty?: number;
     isPermanent?: boolean;
+    isResidual?: boolean;
+    isWaste?: boolean;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -155,6 +157,7 @@ export default function ProtocolsHub() {
     const [isResidualModalOpen, setIsResidualModalOpen] = useState(false);
     const [returnResidualNotes, setReturnResidualNotes] = useState("");
     const [isParsingResiduals, setIsParsingResiduals] = useState(false);
+    const [isParsingReturnResiduals, setIsParsingReturnResiduals] = useState(false);
     const [isVerifyingPhoto, setIsVerifyingPhoto] = useState(false);
     const [aiPhotoReport, setAiPhotoReport] = useState<{
         verdict: string;
@@ -1160,12 +1163,14 @@ export default function ProtocolsHub() {
                     inventoryId: i.dbId || "",
                     isNewManual: Boolean(i.isManual),
                     isPermanent: Boolean(i.isPermanent),
+                    isResidual: Boolean(i.isResidual),
+                    isWaste: Boolean(i.isWaste),
                     name: i.name || "",
                     type: i.type || "UNIQUE",
                     inventoryNumber: i.inventoryNumber || "",
                     unit: i.unit || "szt.",
                     declaredQty: Number(i.returnQty) || 1,
-                    declaredStatus: i.type === "UNIQUE" ? (i.declaredStatus || "sprawne") : null,
+                    declaredStatus: i.type === "UNIQUE" ? (i.declaredStatus || "sprawne") : (i.declaredStatus || null),
                     accessories: (i.accessories || []).map((acc: any) => ({
                         name: acc.name || "",
                         mustReturn: Boolean(acc.mustReturn),
@@ -1337,7 +1342,25 @@ export default function ProtocolsHub() {
             };
         });
 
-        // Pozostałości budowlane do notatki
+        // Mapujemy rozpoznane resztki bezpośrednio do koszyka zwrotu jako pozycje:
+        const mappedResiduals: ReturnCartItem[] = (draft.residuals || []).map((res: any, idx: number) => ({
+            dbId: `temp-driver-res-${Date.now()}-${idx}`,
+            isManual: true,
+            isResidual: true,
+            isPermanent: true,
+            isWaste: Boolean(res.isWaste),
+            name: res.name || "Resztka budowlana",
+            type: "BULK",
+            inventoryNumber: res.isWaste ? "ODPAD" : "RESZTKI",
+            unit: res.unit || "szt.",
+            maxQty: 999999,
+            returnQty: Number(res.quantity) || 1,
+            declaredStatus: res.isWaste ? "odpad_utylizacja" : "sprawne",
+            accessories: [],
+            isReturningMainItem: true
+        }));
+
+        // Zostawiamy również notatkę tekstową dla archiwum i weryfikacji
         const residualLines = (draft.residuals || []).map((r: any) =>
             `${r.name} (${r.quantity} ${r.unit || 'szt.'}${r.isWaste ? ' - odpad' : ''})`
         );
@@ -1349,11 +1372,11 @@ export default function ProtocolsHub() {
                 : joinedResiduals;
         }
 
-        setReturnCart(mappedItems);
+        setReturnCart([...mappedItems, ...mappedResiduals]);
         setReturnResidualNotes(newResidualNotes);
         setLoadedDraftId(draft.docId);
         setIsDriverDraftsModalOpen(false);
-        alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${residualLines.length} pozycji resztek.`);
+        alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${mappedResiduals.length} pozycji resztek jako pozycje zwrotu.`);
     };
 
     const filteredPaperInventory = inventory.filter(item => {
@@ -2143,6 +2166,51 @@ export default function ProtocolsHub() {
             alert("Błąd analizy zdjęcia: " + err.message);
         } finally {
             setIsVerifyingPhoto(false);
+        }
+    };
+
+    // --- NOWOŚĆ: Parsowanie zadeklarowanych pozostałości w Zwrocie Elektronicznym przez Gemini Flash ---
+    const handleParseReturnResiduals = async () => {
+        if (!returnResidualNotes.trim()) return;
+        setIsParsingReturnResiduals(true);
+        try {
+            const res = await fetch("/api/protocols/parse-residuals", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: returnResidualNotes })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Błąd parsowania pozostałości");
+
+            if (!data.items || data.items.length === 0) {
+                alert("AI nie rozpoznało żadnych konkretnych pozycji w notatce.");
+                return;
+            }
+
+            const newCartItems: ReturnCartItem[] = data.items.map((item: any, idx: number) => ({
+                dbId: `temp-residual-${Date.now()}-${idx}`,
+                isManual: true,
+                isResidual: true,
+                isPermanent: true,
+                isWaste: Boolean(item.isWaste),
+                name: item.name || "Pozostałość budowlana",
+                type: "BULK",
+                inventoryNumber: item.isWaste ? "ODPAD" : "RESZTKI",
+                unit: item.unit || "szt.",
+                maxQty: 999999,
+                returnQty: Number(item.quantity) || 1,
+                declaredStatus: item.isWaste ? "odpad_utylizacja" : "sprawne",
+                accessories: [],
+                isReturningMainItem: true
+            }));
+
+            setReturnCart(prev => [...prev, ...newCartItems]);
+            alert(`AI pomyślnie rozpoznało i dodało ${newCartItems.length} pozycji pozostałości do koszyka zwrotu!`);
+        } catch (err: any) {
+            console.error("Błąd parsowania pozostałości zwrotu elektronicznego:", err);
+            alert("Błąd analizy AI: " + err.message);
+        } finally {
+            setIsParsingReturnResiduals(false);
         }
     };
 
@@ -4055,11 +4123,19 @@ export default function ProtocolsHub() {
                                     {/* KROK 1: KARTA ZADEKLAROWANYCH POZOSTAŁOŚCI BUDOWLANYCH */}
                                     {returnResidualNotes.trim() && (
                                         <div className="p-4 border-2 border-amber-300 bg-amber-50/90 rounded-2xl shadow-sm mb-4">
-                                            <div className="flex justify-between items-start gap-2 mb-1.5">
+                                            <div className="flex justify-between items-center mb-1.5 flex-wrap gap-2">
                                                 <span className="text-xs font-black text-amber-950 uppercase tracking-wider flex items-center gap-1.5">
                                                     <span>🧱</span> Zadeklarowane pozostałości budowlane:
                                                 </span>
-                                                <div className="flex gap-1">
+                                                <div className="flex items-center gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        disabled={isParsingReturnResiduals}
+                                                        onClick={handleParseReturnResiduals}
+                                                        className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-black shadow transition flex items-center gap-1"
+                                                    >
+                                                        {isParsingReturnResiduals ? "⏳ AI analizuje..." : "✨ Rozpoznaj pozycje (AI)"}
+                                                    </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => setIsResidualModalOpen(true)}
@@ -4080,7 +4156,7 @@ export default function ProtocolsHub() {
                                                 "{returnResidualNotes}"
                                             </p>
                                             <p className="text-[10px] text-amber-800 mt-1.5 font-semibold flex items-center gap-1">
-                                                <span>ℹ️</span> Notatka zostanie zapisana w protokole i zweryfikowana przez magazyniera przy odbiorze (AI).
+                                                <span>ℹ️</span> Notatka zostanie zapisana w protokole. Kliknij "Rozpoznaj pozycje (AI)", aby utworzyć z niej edytowalne pozycje w koszyku.
                                             </p>
                                         </div>
                                     )}
@@ -4090,7 +4166,7 @@ export default function ProtocolsHub() {
                                     ) : (
                                         <div className="space-y-3">
                                             {returnCart.map(cItem => (
-                                                <div key={cItem.dbId} className={`p-4 border rounded-xl shadow-sm ${cItem.isManual ? 'bg-blue-50 border-blue-200' : 'bg-slate-50'}`}>
+                                                <div key={cItem.dbId} className={`p-4 border rounded-xl shadow-sm ${cItem.isResidual ? 'bg-amber-50/80 border-amber-300' : cItem.isManual ? 'bg-blue-50 border-blue-200' : 'bg-slate-50'}`}>
                                                     <div className="flex items-start justify-between gap-4 mb-2">
                                                         <div className="flex-1">
                                                             {cItem.type === "UNIQUE" && cItem.accessories && cItem.accessories.length > 0 && (
@@ -4108,7 +4184,8 @@ export default function ProtocolsHub() {
                                                             )}
                                                             <p className={`font-bold text-sm text-slate-800 ${cItem.isReturningMainItem === false ? 'opacity-40 line-through' : ''}`}>
                                                                 {cItem.name}
-                                                                {cItem.isManual && <span className="ml-2 text-[9px] bg-blue-200 text-blue-800 px-2 rounded uppercase border border-blue-300">Ręczny</span>}
+                                                                {cItem.isResidual && <span className="ml-2 text-[9px] bg-amber-200 text-amber-950 px-2 py-0.5 rounded font-black uppercase border border-amber-400">🧱 Resztki (AI)</span>}
+                                                                {cItem.isManual && !cItem.isResidual && <span className="ml-2 text-[9px] bg-blue-200 text-blue-800 px-2 rounded uppercase border border-blue-300">Ręczny</span>}
                                                                 {!cItem.isManual && cItem.inventoryNumber && <span className={`text-slate-500 font-mono ml-2 font-bold ${cItem.isReturningMainItem === false ? 'opacity-40' : ''}`}>Nr Mag: {cItem.inventoryNumber}</span>}
                                                             </p>
                                                             {cItem.type === "UNIQUE" && cItem.isReturningMainItem !== false && (
