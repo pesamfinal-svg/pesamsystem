@@ -44,44 +44,68 @@ const WEEKDAYS = [
 
 const pad = (n: number) => n.toString().padStart(2, "0");
 
-const parseDate = (value: string): Date | null => {
+const parseDate = (value: any): Date | null => {
   if (!value) return null;
-  const d = new Date(value);
-  return isNaN(d.getTime()) ? null : d;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if (typeof value === "string") {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof value?.toDate === "function") {
+    try {
+      return value.toDate();
+    } catch (_) {
+      return null;
+    }
+  }
+  if (typeof value?.seconds === "number") {
+    return new Date(value.seconds * 1000);
+  }
+  return null;
 };
 
-const formatTime = (value: string) => {
+const formatTime = (value: any) => {
   const d = parseDate(value);
   return d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : "--:--";
 };
 
-const formatDateShort = (value: string) => {
+const formatDateShort = (value: any) => {
   const d = parseDate(value);
   if (!d) return "";
   return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}`;
 };
 
 /**
- * Sprawdza, czy zamówienie należy do bieżącej tury dostawczej:
- * - złożone w dniu dzisiejszym (o dowolnej porze)
- * - LUB złożone w dniu poprzednim PO godzinie 15:00
+ * Sprawdza dzień złożenia zamówienia względem daty dzisiejszej:
+ * - "TODAY": Dzień dzisiejszy (np. 22.10)
+ * - "YESTERDAY": Dzień poprzedni (np. 21.10)
+ * - "OLDER": Starsze niż 2 dni
  */
-const isCurrentDeliveryWindow = (createdAtValue: string, nowDate: Date = new Date()): boolean => {
-  const orderDate = parseDate(createdAtValue);
-  if (!orderDate) return false;
+export const getOrderDayType = (
+  createdAtValue: any,
+  nowDate: Date = new Date()
+): "TODAY" | "YESTERDAY" | "OLDER" => {
+  const d = parseDate(createdAtValue);
+  if (!d) return "OLDER";
 
-  // Próg odcięcia: Wczoraj o 15:00:00.000
-  const yesterday15 = new Date(
-    nowDate.getFullYear(),
-    nowDate.getMonth(),
-    nowDate.getDate() - 1,
-    15,
-    0,
-    0,
-    0
-  );
+  const orderYear = d.getFullYear();
+  const orderMonth = d.getMonth();
+  const orderDay = d.getDate();
 
-  return orderDate.getTime() >= yesterday15.getTime();
+  const nowYear = nowDate.getFullYear();
+  const nowMonth = nowDate.getMonth();
+  const nowDay = nowDate.getDate();
+
+  const todayKey = `${nowYear}-${pad(nowMonth + 1)}-${pad(nowDay)}`;
+  const orderDateKey = `${orderYear}-${pad(orderMonth + 1)}-${pad(orderDay)}`;
+
+  const yesterday = new Date(nowYear, nowMonth, nowDay - 1);
+  const yesterdayKey = `${yesterday.getFullYear()}-${pad(yesterday.getMonth() + 1)}-${pad(yesterday.getDate())}`;
+
+  if (orderDateKey === todayKey) return "TODAY";
+  if (orderDateKey === yesterdayKey) return "YESTERDAY";
+  if (orderDateKey > todayKey) return "TODAY"; // margines bezpieczeństwa dla zegara
+  return "OLDER";
 };
 
 const pluralizeItems = (count: number) => {
@@ -198,10 +222,22 @@ export default function PlacZamowieniaPage() {
         limit(60)
       );
       const snapshot = await getDocs(q);
-      const fresh: Order[] = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as Omit<Order, "id">),
-      }));
+      const fresh: Order[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        let createdAtStr = "";
+        const parsedD = parseDate(data.createdAt);
+        if (parsedD) {
+          createdAtStr = parsedD.toISOString();
+        } else if (typeof data.createdAt === "string") {
+          createdAtStr = data.createdAt;
+        }
+
+        return {
+          id: d.id,
+          ...(data as Omit<Order, "id">),
+          createdAt: createdAtStr,
+        };
+      });
       setOrders(fresh);
       setIsOnline(true);
 
@@ -240,33 +276,66 @@ export default function PlacZamowieniaPage() {
     });
   };
 
-  // Filtrowanie
+  // Filtrowanie i sortowanie (Dziś na początku, potem Wczoraj)
   const filteredOrders = useMemo(() => {
     const q = search.trim().toLowerCase();
 
-    return orders.filter((o) => {
-      // Filtr okna czasowego (Dziś lub wczoraj po 15:00)
-      if (filter === "aktualne" && !isCurrentDeliveryWindow(o.createdAt, now)) {
-        return false;
-      }
-
+    const matchesSearch = (o: Order) => {
       if (!q) return true;
       const inSite = o.siteName?.toLowerCase().includes(q);
       const inOrderer = o.orderedByName?.toLowerCase().includes(q);
       const inItems = o.items?.some((i) => i.name?.toLowerCase().includes(q));
       const inOrderId = o.orderId?.toLowerCase().includes(q);
       return Boolean(inSite || inOrderer || inItems || inOrderId);
-    });
+    };
+
+    if (filter === "aktualne") {
+      const active = orders.filter((o) => {
+        const dayType = getOrderDayType(o.createdAt, now);
+        return (dayType === "TODAY" || dayType === "YESTERDAY") && matchesSearch(o);
+      });
+
+      // Sortowanie: DZISIEJSZE na początku (od najnowszego), potem WCZORAJSZE (od najnowszego)
+      return active.sort((a, b) => {
+        const typeA = getOrderDayType(a.createdAt, now);
+        const typeB = getOrderDayType(b.createdAt, now);
+
+        if (typeA === "TODAY" && typeB !== "TODAY") return -1;
+        if (typeB === "TODAY" && typeA !== "TODAY") return 1;
+
+        const timeA = parseDate(a.createdAt)?.getTime() || 0;
+        const timeB = parseDate(b.createdAt)?.getTime() || 0;
+        return timeB - timeA;
+      });
+    }
+
+    // Zakładka "wszystkie": sortowanie chronologicznie od najnowszego
+    return orders
+      .filter(matchesSearch)
+      .sort((a, b) => {
+        const timeA = parseDate(a.createdAt)?.getTime() || 0;
+        const timeB = parseDate(b.createdAt)?.getTime() || 0;
+        return timeB - timeA;
+      });
   }, [orders, filter, search, now]);
 
-  // Licznik aktualnych zamówień
-  const currentWindowCount = useMemo(() => {
-    return orders.filter((o) => isCurrentDeliveryWindow(o.createdAt, now)).length;
+  // Licznik dzisiejszych i wczorajszych
+  const currentCounts = useMemo(() => {
+    let today = 0;
+    let yesterday = 0;
+    for (const o of orders) {
+      const type = getOrderDayType(o.createdAt, now);
+      if (type === "TODAY") today++;
+      else if (type === "YESTERDAY") yesterday++;
+    }
+    return { today, yesterday, total: today + yesterday };
   }, [orders, now]);
 
   const dateLabel = `${WEEKDAYS[now.getDay()]}, ${pad(now.getDate())}.${pad(
     now.getMonth() + 1
   )}.${now.getFullYear()}`;
+
+  const yesterdayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
 
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans pb-20 select-none">
@@ -331,7 +400,7 @@ export default function PlacZamowieniaPage() {
             )}
           </div>
 
-          {/* Przełącznik: Aktualne vs Wszystkie */}
+          {/* Przełącznik: Aktualne (Dziś + Wczoraj) vs Wszystkie */}
           <div className="flex gap-1.5 bg-slate-950/60 p-1 rounded-2xl border border-slate-800">
             <button
               type="button"
@@ -342,11 +411,15 @@ export default function PlacZamowieniaPage() {
                   : "text-slate-300 hover:text-white"
               }`}
             >
-              <span>🚚 Na dziś (od 15:00)</span>
-              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                filter === "aktualne" ? "bg-slate-950/20 text-slate-950 font-black" : "bg-slate-800 text-slate-300"
-              }`}>
-                {currentWindowCount}
+              <span>🚚 Dziś + Wczoraj</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                  filter === "aktualne"
+                    ? "bg-slate-950/20 text-slate-950"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                {currentCounts.total}
               </span>
             </button>
             <button
@@ -359,9 +432,13 @@ export default function PlacZamowieniaPage() {
               }`}
             >
               <span>📁 Archiwalne / Wszystkie</span>
-              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                filter === "wszystkie" ? "bg-white/20 text-white font-black" : "bg-slate-800 text-slate-300"
-              }`}>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                  filter === "wszystkie"
+                    ? "bg-white/20 text-white"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
                 {orders.length}
               </span>
             </button>
@@ -389,45 +466,108 @@ export default function PlacZamowieniaPage() {
             <p className="text-4xl mb-3">📭</p>
             <h3 className="text-base font-black text-slate-200">
               {filter === "aktualne"
-                ? "Brak zamówień z dzisiaj ani po godz. 15:00 z wczoraj"
+                ? "Brak zamówień z dzisiaj ani z wczoraj"
                 : "Brak zamówień w systemie"}
             </h3>
             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
               {filter === "aktualne"
-                ? "Wszystkie wcześniejsze zlecenia znajdziesz w zakładce „Archiwalne / Wszystkie” powyżej."
+                ? "Brak zleceń z ostatnich 2 dni. Wszystkie wcześniejsze zamówienia znajdziesz w zakładce „Archiwalne / Wszystkie” powyżej."
                 : "Nowe zamówienia złożone przez kierowników pojawią się automatycznie."}
             </p>
           </div>
         ) : (
-          filteredOrders.map((order) => {
+          filteredOrders.map((order, idx) => {
             const items = order.items ?? [];
             const isExpanded = expanded.has(order.id);
             const displayNumber = order.orderId ?? order.id.slice(0, 8).toUpperCase();
+            const dayType = getOrderDayType(order.createdAt, now);
 
             // Oblicz ile pozycji jest już odhaczonych przez kierowcę
-            const checkedCount = items.filter((item, idx) =>
-              isItemChecked(order.id, idx, item.name)
+            const checkedCount = items.filter((item, i) =>
+              isItemChecked(order.id, i, item.name)
             ).length;
             const isAllChecked = items.length > 0 && checkedCount === items.length;
 
+            // Sprawdzamy czy pokazać nagłówek sekcji
+            const prevOrder = idx > 0 ? filteredOrders[idx - 1] : null;
+            const prevDayType = prevOrder ? getOrderDayType(prevOrder.createdAt, now) : null;
+            const isFirstToday = idx === 0 && dayType === "TODAY";
+            const isFirstYesterday = dayType === "YESTERDAY" && (!prevOrder || prevDayType === "TODAY");
+            const isFirstOlder = dayType === "OLDER" && (!prevOrder || prevDayType !== "OLDER");
+
             return (
-              <article
-                key={order.id}
-                className={`rounded-3xl border p-4 shadow-lg flex flex-col justify-between relative overflow-hidden transition ${
-                  isAllChecked
-                    ? "border-emerald-600/60 bg-gradient-to-br from-emerald-950/20 via-slate-900 to-slate-900"
-                    : "border-slate-800/90 bg-slate-900 hover:border-slate-700"
-                }`}
-              >
-                {/* Górny wiersz */}
-                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-1">
-                  <span className="font-mono font-bold text-amber-400">#{displayNumber}</span>
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-bold text-slate-300 bg-slate-800/90 px-2 py-0.5 rounded-lg border border-slate-700/60">
-                      📅 {formatDateShort(order.createdAt)} 🕒 {formatTime(order.createdAt)}
+              <React.Fragment key={order.id}>
+                {/* Nagłówek sekcji DZISIAJ */}
+                {isFirstToday && (
+                  <div className="flex items-center gap-2 pt-1 pb-0.5">
+                    <span className="text-[11px] font-black uppercase tracking-wider text-emerald-400 bg-emerald-950/80 px-3 py-1 rounded-full border border-emerald-800/60 flex items-center gap-1.5 shadow-sm">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                      ⚡ Zamówienia z dzisiaj ({formatDateShort(order.createdAt)})
                     </span>
+                    <div className="h-[1px] flex-1 bg-slate-800"></div>
                   </div>
-                </div>
+                )}
+
+                {/* Nagłówek sekcji WCZORAJ */}
+                {isFirstYesterday && (
+                  <div className="flex items-center gap-2 pt-3 pb-0.5">
+                    <span className="text-[11px] font-black uppercase tracking-wider text-sky-400 bg-sky-950/80 px-3 py-1 rounded-full border border-sky-800/60 flex items-center gap-1.5 shadow-sm">
+                      <span>⏮️</span>
+                      Zamówienia z wczoraj ({pad(yesterdayDate.getDate())}.{pad(yesterdayDate.getMonth() + 1)})
+                    </span>
+                    <div className="h-[1px] flex-1 bg-slate-800"></div>
+                  </div>
+                )}
+
+                {/* Nagłówek sekcji STARSZE (dla widoku Wszystkie) */}
+                {isFirstOlder && filter === "wszystkie" && (
+                  <div className="flex items-center gap-2 pt-3 pb-0.5">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 bg-slate-900 px-3 py-1 rounded-full border border-slate-800 flex items-center gap-1.5">
+                      <span>📁</span>
+                      Starsze zamówienia
+                    </span>
+                    <div className="h-[1px] flex-1 bg-slate-800"></div>
+                  </div>
+                )}
+
+                <article
+                  className={`rounded-3xl border p-4 shadow-lg flex flex-col justify-between relative overflow-hidden transition ${
+                    isAllChecked
+                      ? "border-emerald-600/70 bg-gradient-to-br from-emerald-950/25 via-slate-900 to-slate-900"
+                      : dayType === "TODAY"
+                      ? "border-emerald-500/50 bg-gradient-to-br from-emerald-950/20 via-slate-900 to-slate-900 shadow-emerald-950/30"
+                      : dayType === "YESTERDAY"
+                      ? "border-sky-500/40 bg-gradient-to-br from-sky-950/20 via-slate-900 to-slate-900"
+                      : "border-slate-800/90 bg-slate-900 hover:border-slate-700"
+                  }`}
+                >
+                  {/* Górny wiersz z numerem i etykietą dnia */}
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-black text-amber-400 text-xs">#{displayNumber}</span>
+                      {dayType === "TODAY" && (
+                        <span className="inline-flex items-center gap-1 font-black text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/25 text-emerald-300 border border-emerald-500/60 uppercase tracking-wider">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                          ⚡ DZISIAJ
+                        </span>
+                      )}
+                      {dayType === "YESTERDAY" && (
+                        <span className="inline-flex items-center gap-1 font-black text-[10px] px-2.5 py-0.5 rounded-full bg-sky-500/25 text-sky-300 border border-sky-500/60 uppercase tracking-wider">
+                          ⏮️ WCZORAJ
+                        </span>
+                      )}
+                      {dayType === "OLDER" && (
+                        <span className="inline-flex items-center gap-1 font-bold text-[9px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 uppercase tracking-wider">
+                          📁 STARSZE
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-slate-300 bg-slate-800/90 px-2 py-0.5 rounded-lg border border-slate-700/60">
+                        📅 {formatDateShort(order.createdAt)} 🕒 {formatTime(order.createdAt)}
+                      </span>
+                    </div>
+                  </div>
 
                 {/* Budowa */}
                 <h2 className="text-lg font-black text-white leading-snug">
@@ -543,8 +683,9 @@ export default function PlacZamowieniaPage() {
                   </div>
                 )}
               </article>
-            );
-          })
+            </React.Fragment>
+          );
+        })
         )}
       </main>
     </div>
