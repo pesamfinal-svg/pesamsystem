@@ -64,6 +64,7 @@ export default function PlacProtokolPage() {
   // Form selections
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+  const [step3Tab, setStep3Tab] = useState<"SPRZET" | "RESZTKI">("SPRZET");
   const [filterTab, setFilterTab] = useState<"ALL" | "UNIQUE" | "BULK">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedManagerUids, setSelectedManagerUids] = useState<string[]>([]);
@@ -919,6 +920,45 @@ export default function PlacProtokolPage() {
         {/* ========================================================================= */}
         {currentStep === 3 && (
           <div className="space-y-4">
+            {/* SUB-NAWIGACJA KROKU 3 */}
+            <div className="flex gap-1.5 p-1 rounded-2xl bg-slate-900 border border-slate-800 shadow-md">
+              <button
+                type="button"
+                onClick={() => setStep3Tab("SPRZET")}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-black transition flex items-center justify-center gap-2 ${
+                  step3Tab === "SPRZET"
+                    ? "bg-amber-500 text-slate-950 shadow-md"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800"
+                }`}
+              >
+                <span>📦</span>
+                <span>Sprzęt</span>
+                {totalItemsCount > 0 && (
+                  <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
+                    step3Tab === "SPRZET" ? "bg-slate-950/40 text-slate-900" : "bg-amber-500/20 text-amber-400"
+                  }`}>{totalItemsCount}</span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setStep3Tab("RESZTKI")}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-black transition flex items-center justify-center gap-2 ${
+                  step3Tab === "RESZTKI"
+                    ? "bg-blue-600 text-white shadow-md"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800"
+                }`}
+              >
+                <span>🎙️</span>
+                <span>Resztki & Zdjęcia</span>
+                {(audioBlob || selectedPhotos.length > 0) && (
+                  <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
+                    step3Tab === "RESZTKI" ? "bg-white/20 text-white" : "bg-blue-500/20 text-blue-400"
+                  }`}>
+                    {(audioBlob ? 1 : 0) + selectedPhotos.length}
+                  </span>
+                )}
+              </button>
+            </div>
             {/* Podsumowanie wybranej budowy i kierowników */}
             <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2 shadow-md">
               <div className="min-w-0 flex-1">
@@ -952,7 +992,7 @@ export default function PlacProtokolPage() {
             </div>
 
             {/* SEKCJA SPRZĘTU NA BUDOWIE */}
-            <section className="rounded-3xl border border-slate-800 bg-slate-900/90 p-4 shadow-lg space-y-3">
+            {step3Tab === "SPRZET" && <section className="rounded-3xl border border-slate-800 bg-slate-900/90 p-4 shadow-lg space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-black tracking-wider text-amber-400 uppercase flex items-center gap-1.5">
                   <span>📦</span>
@@ -1165,9 +1205,10 @@ export default function PlacProtokolPage() {
                   })}
                 </div>
               )}
-            </section>
+            </section>}
 
             {/* SEKCJA RESZTEK BUDOWLANYCH - NAGRANIE AUDIO AI */}
+            {step3Tab === "RESZTKI" && <>
             <section className="rounded-3xl border border-blue-500/30 bg-gradient-to-br from-blue-950/20 via-slate-900 to-slate-950 p-4 shadow-lg space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-black tracking-wider text-blue-400 uppercase flex items-center gap-1.5">
@@ -1313,6 +1354,7 @@ export default function PlacProtokolPage() {
                 </div>
               )}
             </section>
+            </>}
           </div>
         )}
       </main>
