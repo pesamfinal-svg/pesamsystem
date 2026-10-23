@@ -1228,19 +1228,19 @@ export default function ProtocolsHub() {
                         }
                     }
 
-                    await setDoc(doc(db, "protocols", loadedDraftId), {
-                        status: "WCZYTANY",
-                        audioNoteUrl: null,
-                        audioDeleted: true,
-                        loadedAt: new Date().toISOString(),
-                        loadedBy: user?.uid || "",
-                        loadedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || "Kierownik"
-                    }, { merge: true });
+                    // Całkowite usunięcie roboczego szkicu kierowcy z bazy
+                    try {
+                        await deleteDoc(doc(db, "driver_drafts", loadedDraftId));
+                    } catch (_) {}
+                    try {
+                        await deleteDoc(doc(db, "protocols", loadedDraftId));
+                    } catch (_) {}
+
                     setLoadedDraftId(null);
                     setLoadedDraftAudioUrl(null);
                     setLoadedDraftPhotos([]);
                 } catch (draftErr) {
-                    console.error("Błąd aktualizacji statusu szkicu kierowcy:", draftErr);
+                    console.error("Błąd usuwania szkicu kierowcy:", draftErr);
                 }
             }
 
@@ -1296,23 +1296,46 @@ export default function ProtocolsHub() {
     const fetchDriverDrafts = async (siteId?: string) => {
         setIsLoadingDriverDrafts(true);
         try {
-            let q;
-            if (siteId) {
-                q = query(
-                    collection(db, "protocols"),
-                    where("type", "==", "ZWROT"),
-                    where("status", "==", "SZKIC_KIEROWCY"),
-                    where("sourceId", "==", siteId)
-                );
-            } else {
-                q = query(
-                    collection(db, "protocols"),
-                    where("type", "==", "ZWROT"),
-                    where("status", "==", "SZKIC_KIEROWCY")
-                );
+            let drafts: any[] = [];
+
+            // 1. Dedykowana kolekcja driver_drafts
+            try {
+                const qNew = siteId
+                    ? query(collection(db, "driver_drafts"), where("sourceId", "==", siteId))
+                    : query(collection(db, "driver_drafts"));
+                const snapNew = await getDocs(qNew);
+                drafts = snapNew.docs.map(d => ({ docId: d.id, ...d.data() }));
+            } catch (errNew) {
+                console.warn("Błąd odczytu z driver_drafts:", errNew);
             }
-            const snap = await getDocs(q);
-            let drafts = snap.docs.map(d => ({ docId: d.id, ...d.data() }));
+
+            // 2. Wsteczna kompatybilność ze starymi szkicami w protocols
+            try {
+                const qOld = siteId
+                    ? query(
+                        collection(db, "protocols"),
+                        where("type", "==", "ZWROT"),
+                        where("status", "==", "SZKIC_KIEROWCY"),
+                        where("sourceId", "==", siteId)
+                    )
+                    : query(
+                        collection(db, "protocols"),
+                        where("type", "==", "ZWROT"),
+                        where("status", "==", "SZKIC_KIEROWCY")
+                    );
+                const snapOld = await getDocs(qOld);
+                const oldDrafts = snapOld.docs.map(d => ({ docId: d.id, ...d.data() }));
+                // Unikamy ew. duplikatów po docId
+                const existingIds = new Set(drafts.map(d => d.docId));
+                oldDrafts.forEach(od => {
+                    if (!existingIds.has(od.docId)) {
+                        drafts.push(od);
+                    }
+                });
+            } catch (_) {}
+
+            // Sortowanie od najnowszych
+            drafts.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
 
             // Izolacja widoczności protokołów między kierownikami:
             // Jeśli użytkownik nie jest głównym administratorem / szefem, widzi TYLKO te szkice,
@@ -1391,15 +1414,20 @@ export default function ProtocolsHub() {
             isReturningMainItem: true
         }));
 
-        // Zostawiamy również notatkę tekstową dla archiwum i weryfikacji
+        // Zostawiamy również pełną notatkę tekstową dla archiwum i weryfikacji
+        let newResidualNotes = returnResidualNotes.trim();
+        if (draft.voiceTranscription) {
+            newResidualNotes = newResidualNotes
+                ? `${newResidualNotes}\n[Notatka głosowa kierowcy]: ${draft.voiceTranscription}`
+                : `[Notatka głosowa kierowcy]: ${draft.voiceTranscription}`;
+        }
         const residualLines = (draft.residuals || []).map((r: any) =>
             `${r.name} (${r.quantity} ${r.unit || 'szt.'}${r.isWaste ? ' - odpad' : ''})`
         );
-        let newResidualNotes = returnResidualNotes.trim();
         if (residualLines.length > 0) {
             const joinedResiduals = residualLines.join(", ");
             newResidualNotes = newResidualNotes
-                ? `${newResidualNotes}\n[Ze szkicu kierowcy]: ${joinedResiduals}`
+                ? `${newResidualNotes}\n[Rozpoznane pozycje resztek]: ${joinedResiduals}`
                 : joinedResiduals;
         }
 
@@ -1434,7 +1462,12 @@ export default function ProtocolsHub() {
                     }
                 }
             }
-            await deleteDoc(doc(db, "protocols", draft.docId));
+            try {
+                await deleteDoc(doc(db, "driver_drafts", draft.docId));
+            } catch (_) {}
+            try {
+                await deleteDoc(doc(db, "protocols", draft.docId));
+            } catch (_) {}
             setDriverDrafts(prev => prev.filter(d => d.docId !== draft.docId));
             alert("Szkic oraz powiązane pliki zostały trwale usunięte.");
         } catch (err: any) {
@@ -1454,10 +1487,18 @@ export default function ProtocolsHub() {
                 } catch (audErr) {
                     console.warn("Błąd usuwania ze storage:", audErr);
                 }
-                await setDoc(doc(db, "protocols", draft.docId), {
-                    audioNoteUrl: null,
-                    audioDeleted: true
-                }, { merge: true });
+                try {
+                    await setDoc(doc(db, "driver_drafts", draft.docId), {
+                        audioNoteUrl: null,
+                        audioDeleted: true
+                    }, { merge: true });
+                } catch (_) {}
+                try {
+                    await setDoc(doc(db, "protocols", draft.docId), {
+                        audioNoteUrl: null,
+                        audioDeleted: true
+                    }, { merge: true });
+                } catch (_) {}
                 setDriverDrafts(prev => prev.map(d => d.docId === draft.docId ? { ...d, audioNoteUrl: null } : d));
                 alert("Plik nagrania audio został trwale usunięty.");
             }
@@ -2093,19 +2134,19 @@ export default function ProtocolsHub() {
                         }
                     }
 
-                    await setDoc(doc(db, "protocols", loadedDraftId), {
-                        status: "WCZYTANY",
-                        audioNoteUrl: null,
-                        audioDeleted: true,
-                        loadedAt: new Date().toISOString(),
-                        loadedBy: user?.uid || "",
-                        loadedByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim()
-                    }, { merge: true });
+                    // Całkowite usunięcie roboczego szkicu kierowcy z bazy
+                    try {
+                        await deleteDoc(doc(db, "driver_drafts", loadedDraftId));
+                    } catch (_) {}
+                    try {
+                        await deleteDoc(doc(db, "protocols", loadedDraftId));
+                    } catch (_) {}
+
                     setLoadedDraftId(null);
                     setLoadedDraftAudioUrl(null);
                     setLoadedDraftPhotos([]);
                 } catch (draftErr) {
-                    console.error("Błąd aktualizacji statusu szkicu kierowcy:", draftErr);
+                    console.error("Błąd usuwania szkicu kierowcy:", draftErr);
                 }
             }
 
@@ -3432,8 +3473,8 @@ export default function ProtocolsHub() {
 
     // --- FILTROWANIE DLA HISTORII PROTOKOŁÓW ---
     const filteredHistoryProtocols = historyProtocols.filter(p => {
-        // Szkice kierowców czekają na wczytanie w oknie Wprowadź Zwrot, nie pokazujemy ich w historii zatwierdzonej
-        if (p.status === "SZKIC_KIEROWCY") return false;
+        // Szkice robocze kierowców nie są oficjalnymi protokołami magazynu - wykluczamy je z historii
+        if (p.status === "SZKIC_KIEROWCY" || p.status === "WCZYTANY" || p.documentSource === "KIEROWCA") return false;
 
         // Filtrowanie po budowie
         if (histFilterSite) {
@@ -5036,6 +5077,11 @@ export default function ProtocolsHub() {
                                                             <span>👤 Dla kierownika: <strong className="text-purple-800">{draft.targetManagerNames?.join(", ") || draft.targetManagerName}</strong></span>
                                                         )}
                                                     </div>
+                                                    {draft.voiceTranscription && (
+                                                        <div className="mt-1.5 text-xs text-blue-900 bg-blue-50 p-2.5 rounded-xl border border-blue-200">
+                                                            🎙️ <strong>Notatka głosowa kierowcy (transkrypcja AI):</strong> &quot;{draft.voiceTranscription}&quot;
+                                                        </div>
+                                                    )}
                                                     {draft.driverNotes && (
                                                         <div className="mt-1.5 text-xs text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
                                                             💬 Notatka: {draft.driverNotes}

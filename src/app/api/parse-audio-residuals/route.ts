@@ -32,7 +32,8 @@ export async function POST(req: Request) {
             Kierowca wymienia resztki budowlane, pozostałości materiałów, chemię budowlaną, profile, worki z klejem/gipsem, końcówki kabli itp., które zabiera z budowy do magazynu lub do utylizacji.
 
             Zadanie:
-            Wyodrębnij z nagrania wszystkie wymienione pozycje materiałowe.
+            1. Zapisz dokładną, pełną transkrypcję mowy na tekst ('transcription') - dokładnie to, co kierowca powiedział w notatce.
+            2. Wyodrębnij z nagrania wszystkie wymienione pozycje materiałowe ('residuals').
             Dla każdej pozycji ustal:
             1. 'name' - czytelna, standardowa polska nazwa materiału (np. 'Worek kleju do siatki', 'Profile sufitowe CD60 3m', 'Resztka farby białej gruntującej')
             2. 'quantity' - liczba sztuk, opakowań, worków, metrów (jeśli nie podano precyzyjnie liczby, przyjmij 1)
@@ -46,7 +47,7 @@ export async function POST(req: Request) {
                 {
                     role: 'user',
                     parts: [
-                        { text: "Przeanalizuj nagranie audio kierowcy z budowy i wyodrębnij listę resztek i pozostałości materiałowych." },
+                        { text: "Przeanalizuj nagranie audio kierowcy z budowy, sporządź pełną transkrypcję oraz wyodrębnij listę resztek i pozostałości materiałowych." },
                         {
                             inlineData: {
                                 mimeType: "audio/webm",
@@ -63,6 +64,10 @@ export async function POST(req: Request) {
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
+                        transcription: {
+                            type: Type.STRING,
+                            description: "Dokładny, pełny zapis słowo w słowo całej wypowiedzi kierowcy z nagrania."
+                        },
                         residuals: {
                             type: Type.ARRAY,
                             description: "Lista rozpoznanych resztek budowlanych z nagrania.",
@@ -90,7 +95,7 @@ export async function POST(req: Request) {
                             }
                         }
                     },
-                    required: ["residuals"]
+                    required: ["transcription", "residuals"]
                 }
             }
         });
@@ -101,7 +106,7 @@ export async function POST(req: Request) {
             const parsedJson = JSON.parse(aiText);
             return NextResponse.json(parsedJson, { status: 200 });
         } else {
-            return NextResponse.json({ residuals: [] }, { status: 200 });
+            return NextResponse.json({ transcription: "", residuals: [] }, { status: 200 });
         }
 
     } catch (err: any) {

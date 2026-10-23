@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { collection, getDocs, addDoc } from "firebase/firestore";
+import { collection, getDocs, addDoc, query, where } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -182,13 +182,63 @@ export default function PlacProtokolPage() {
     loadData();
   }, []);
 
-  // Reset selections when site is chosen (kierowca sam zaznacza kierowników)
+  const [siteIssueProtocols, setSiteIssueProtocols] = useState<any[]>([]);
+
+  // Reset selections when site is chosen i pobierz historię wydań na tę budowę, aby wyciągnąć przypisany osprzęt
   useEffect(() => {
     setSelectedManagerUids([]);
     setSelectedUnique({});
     setSelectedBulkQty({});
     setSelectedAccessories({});
+
+    if (!selectedSiteId) {
+      setSiteIssueProtocols([]);
+      return;
+    }
+
+    const fetchIssueProtocols = async () => {
+      try {
+        const q = query(
+          collection(db, "protocols"),
+          where("destinationId", "==", selectedSiteId),
+          where("type", "==", "WYDANIE")
+        );
+        const snap = await getDocs(q);
+        const sortedDocs = snap.docs
+          .map(d => ({ id: d.id, ...(d.data() as any) }))
+          .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+        setSiteIssueProtocols(sortedDocs);
+      } catch (err) {
+        console.error("Błąd pobierania protokołów wydania dla osprzętu:", err);
+      }
+    };
+
+    fetchIssueProtocols();
   }, [selectedSiteId]);
+
+  // Dynamiczne pobieranie osprzętu przypisanego do narzędzia z ostatniego wydania na tę budowę
+  const getAccessoriesForItem = (itemId: string, itemBaseAccessories?: Accessory[]): Accessory[] => {
+    const lastIssueProto = siteIssueProtocols.find(p =>
+      p.type === "WYDANIE" &&
+      p.destinationId === selectedSiteId &&
+      p.items?.some((i: any) => i.inventoryId === itemId)
+    );
+    if (lastIssueProto) {
+      const foundItem = lastIssueProto.items?.find((i: any) => i.inventoryId === itemId);
+      if (foundItem?.accessories && foundItem.accessories.length > 0) {
+        return foundItem.accessories.map((acc: any) => ({
+          name: acc.name,
+          quantity: acc.quantity || 1,
+          mustReturn: acc.mustReturn !== false
+        }));
+      }
+    }
+    return (itemBaseAccessories || []).map(acc => ({
+      name: acc.name,
+      quantity: acc.quantity || 1,
+      mustReturn: acc.mustReturn !== false
+    }));
+  };
 
   // Clean up audio and photo preview URLs on unmount
   useEffect(() => {
@@ -369,6 +419,7 @@ export default function PlacProtokolPage() {
 
       let uploadedAudioUrl: string | null = null;
       let parsedResiduals: any[] = [];
+      let parsedTranscription: string = "";
 
       // KROK 1 & 2: Obsługa nagrania audio i transkrypcji AI
       if (audioBlob) {
@@ -380,7 +431,7 @@ export default function PlacProtokolPage() {
         await uploadBytes(storageRef, audioBlob);
         uploadedAudioUrl = await getDownloadURL(storageRef);
 
-        setSubmitStep("🤖 AI analizuje nagranie (wyciąganie resztek budowlanych)...");
+        setSubmitStep("🤖 AI analizuje nagranie (wyciąganie resztek budowlanych i mowa na tekst)...");
         try {
           const aiResponse = await fetch("/api/parse-audio-residuals", {
             method: "POST",
@@ -393,6 +444,9 @@ export default function PlacProtokolPage() {
             if (aiData.residuals && Array.isArray(aiData.residuals)) {
               parsedResiduals = aiData.residuals;
               setTranscribedResiduals(aiData.residuals);
+            }
+            if (aiData.transcription) {
+              parsedTranscription = aiData.transcription;
             }
           } else {
             console.warn("AI parse residuals returned non-200 status");
@@ -422,15 +476,16 @@ export default function PlacProtokolPage() {
       setSubmitStep("Zapisywanie protokołu w systemie...");
       const finalItems: any[] = [];
 
-      // Pozycje UNIQUE
+      // Pozycje UNIQUE - pobieramy osprzęt przypisany do tej maszyny na tej budowie
       siteEquipment.forEach(item => {
         if (item.type === "UNIQUE" && selectedUnique[item.id]) {
-          const itemAccessories: ReturnedAccessoryState[] = (item.accessories || []).map((acc, idx) => {
-            const isChecked = selectedAccessories[item.id]?.[idx] ?? acc.mustReturn; // domyślnie zaznaczony jeśli mustReturn
+          const itemAccs = getAccessoriesForItem(item.id, item.accessories);
+          const itemAccessories: ReturnedAccessoryState[] = itemAccs.map((acc, idx) => {
+            const isChecked = selectedAccessories[item.id]?.[idx] ?? (acc.mustReturn !== false);
             return {
               name: acc.name,
               quantity: acc.quantity || 1,
-              mustReturn: acc.mustReturn,
+              mustReturn: acc.mustReturn !== false,
               isReturning: isChecked
             };
           });
@@ -473,7 +528,8 @@ export default function PlacProtokolPage() {
         .filter(m => selectedManagerUids.includes(m.uid))
         .map(m => m.name);
 
-      // KROK 4: Zapis do Firestore w kolekcji protocols
+      // KROK 4: Zapis do DEDYKOWANEJ kolekcji driver_drafts (szkice kierowców)
+      // NIE zapisujemy do protocols, aby nie śmiecić w oficjalnych protokołach magazynu!
       const protocolDocData = {
         type: "ZWROT",
         status: "SZKIC_KIEROWCY",
@@ -490,12 +546,13 @@ export default function PlacProtokolPage() {
         createdAt: new Date().toISOString(),
         documentDate: new Date().toISOString().split("T")[0],
         audioNoteUrl: uploadedAudioUrl,
+        voiceTranscription: parsedTranscription || null,
         residuals: parsedResiduals,
         photos: uploadedPhotoUrls.length > 0 ? uploadedPhotoUrls : [],
         items: finalItems
       };
 
-      await addDoc(collection(db, "protocols"), protocolDocData);
+      await addDoc(collection(db, "driver_drafts"), protocolDocData);
 
       setSubmitSuccess(true);
     } catch (err: any) {
@@ -966,6 +1023,7 @@ export default function PlacProtokolPage() {
                     const isCheckedUnique = selectedUnique[item.id] || false;
                     const currentBulkQty = selectedBulkQty[item.id] || 0;
                     const isItemChosen = isUnique ? isCheckedUnique : currentBulkQty > 0;
+                    const itemAccs = isUnique ? getAccessoriesForItem(item.id, item.accessories) : [];
 
                     return (
                       <div
@@ -1004,10 +1062,10 @@ export default function PlacProtokolPage() {
                                   const checked = e.target.checked;
                                   setSelectedUnique(prev => ({ ...prev, [item.id]: checked }));
                                   // Inicjalizacja domyślnego zaznaczenia osprzętu
-                                  if (checked && item.accessories && item.accessories.length > 0) {
+                                  if (checked && itemAccs.length > 0) {
                                     const accState: Record<number, boolean> = {};
-                                    item.accessories.forEach((a, idx) => {
-                                      accState[idx] = a.mustReturn; // mustReturn domyślnie zaznaczony
+                                    itemAccs.forEach((a, idx) => {
+                                      accState[idx] = a.mustReturn !== false; // mustReturn domyślnie zaznaczony
                                     });
                                     setSelectedAccessories(prev => ({ ...prev, [item.id]: accState }));
                                   }
@@ -1061,15 +1119,15 @@ export default function PlacProtokolPage() {
                         </div>
 
                         {/* SEKCJA OSPRZĘTU DLA WYBRANEJ MASZYNY */}
-                        {isUnique && isCheckedUnique && item.accessories && item.accessories.length > 0 && (
+                        {isUnique && isCheckedUnique && itemAccs.length > 0 && (
                           <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2">
                             <p className="text-[10px] font-black uppercase tracking-wider text-purple-400 flex items-center gap-1">
                               <span>📦</span>
                               <span>Osprzęt do tego urządzenia (odhacz co wraca):</span>
                             </p>
                             <div className="space-y-1.5">
-                              {item.accessories.map((acc, accIdx) => {
-                                const isAccChecked = selectedAccessories[item.id]?.[accIdx] ?? acc.mustReturn;
+                              {itemAccs.map((acc, accIdx) => {
+                                const isAccChecked = selectedAccessories[item.id]?.[accIdx] ?? (acc.mustReturn !== false);
                                 return (
                                   <label
                                     key={accIdx}
