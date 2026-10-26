@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState, useEffect, Fragment, useMemo } from "react";
-import { collection, getDocs, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction, where, limit } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, orderBy, addDoc, writeBatch, runTransaction, where, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
+import { hasPermission } from "@/lib/auth/permissions";
 import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal";
 
 // --- INTERFEJSY ---
@@ -232,6 +233,106 @@ export default function InventoryPage() {
     const [cmNewCatInput, setCmNewCatInput] = useState("");
     const [cmNewSubInput, setCmNewSubInput] = useState("");
     const [cmImageUrlInput, setCmImageUrlInput] = useState("");
+
+    // PANEL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU)
+    const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
+    const [rulesTab, setRulesTab] = useState<"BOSS" | "WAREHOUSE">("BOSS");
+    const [bossRulesText, setBossRulesText] = useState("");
+    const [bossRulesMeta, setBossRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
+    const [warehouseRulesText, setWarehouseRulesText] = useState("");
+    const [warehouseRulesMeta, setWarehouseRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
+    const [isLoadingRules, setIsLoadingRules] = useState(false);
+    const [isSavingRules, setIsSavingRules] = useState(false);
+
+    const canManageBossRules = Boolean(user && (
+        hasPermission("manageRulesBoss", user.rolePermissions, user.permissionOverrides) ||
+        user.role?.toLowerCase() === "admin" ||
+        user.roleName?.toLowerCase().includes("szef") ||
+        user.roleName?.toLowerCase().includes("dyrektor")
+    ));
+
+    const canManageWarehouseRules = Boolean(user && (
+        hasPermission("manageRulesWarehouse", user.rolePermissions, user.permissionOverrides) ||
+        user.role?.toLowerCase() === "admin" ||
+        user.roleName?.toLowerCase().includes("magazyn")
+    ));
+
+    const canAccessRules = canManageBossRules || canManageWarehouseRules || user?.role === "admin";
+
+    const fetchRules = async () => {
+        setIsLoadingRules(true);
+        try {
+            const rulesSnap = await getDoc(doc(db, "settings", "residual_rules"));
+            if (rulesSnap.exists()) {
+                const data = rulesSnap.data();
+                setBossRulesText(data.bossRules || "");
+                setBossRulesMeta({
+                    updatedAt: data.bossUpdatedAt || "",
+                    updatedBy: data.bossUpdatedBy || ""
+                });
+                setWarehouseRulesText(data.warehouseRules || "");
+                setWarehouseRulesMeta({
+                    updatedAt: data.warehouseUpdatedAt || "",
+                    updatedBy: data.warehouseUpdatedBy || ""
+                });
+            }
+        } catch (err) {
+            console.error("Błąd pobierania reguł residual_rules:", err);
+        } finally {
+            setIsLoadingRules(false);
+        }
+    };
+
+    const handleOpenRulesModal = () => {
+        setIsRulesModalOpen(true);
+        if (canManageBossRules) {
+            setRulesTab("BOSS");
+        } else if (canManageWarehouseRules) {
+            setRulesTab("WAREHOUSE");
+        }
+        fetchRules();
+    };
+
+    const handleSaveRules = async () => {
+        setIsSavingRules(true);
+        try {
+            const now = new Date().toLocaleString("pl-PL");
+            const updaterName = user?.firstName && user?.lastName
+                ? `${user.firstName} ${user.lastName}`
+                : (user?.name || user?.email || "Użytkownik");
+
+            const updatePayload: Record<string, any> = {};
+
+            if (canManageBossRules) {
+                updatePayload.bossRules = bossRulesText.trim();
+                updatePayload.bossUpdatedAt = now;
+                updatePayload.bossUpdatedBy = updaterName;
+            }
+
+            if (canManageWarehouseRules) {
+                updatePayload.warehouseRules = warehouseRulesText.trim();
+                updatePayload.warehouseUpdatedAt = now;
+                updatePayload.warehouseUpdatedBy = updaterName;
+            }
+
+            await setDoc(doc(db, "settings", "residual_rules"), updatePayload, { merge: true });
+
+            if (canManageBossRules) {
+                setBossRulesMeta({ updatedAt: now, updatedBy: updaterName });
+            }
+            if (canManageWarehouseRules) {
+                setWarehouseRulesMeta({ updatedAt: now, updatedBy: updaterName });
+            }
+
+            alert("Reguły zostały pomyślnie zapisane!");
+            setIsRulesModalOpen(false);
+        } catch (err) {
+            console.error("Błąd zapisu reguł:", err);
+            alert("Nie udało się zapisać reguł.");
+        } finally {
+            setIsSavingRules(false);
+        }
+    };
 
     // STANY PRZEGLĄDÓW BHP
     const [isInspectionModalOpen, setIsInspectionModalOpen] = useState(false);
@@ -1553,6 +1654,15 @@ export default function InventoryPage() {
             <div className="flex justify-between items-center mb-8 gap-3 flex-wrap">
                 <h1 className="text-3xl font-bold text-slate-800 tracking-tighter">Katalog Sprzętu PESAM</h1>
                 <div className="flex gap-2 flex-wrap">
+                    {canAccessRules && (
+                        <button
+                            onClick={handleOpenRulesModal}
+                            className="px-4 py-2 bg-gradient-to-r from-amber-600 to-orange-600 text-white rounded-lg font-bold text-sm shadow hover:from-amber-700 hover:to-orange-700 flex items-center gap-2 transition"
+                            title="Zarządzaj wytycznymi Szefa i Magazynu dla resztek i zwrotów"
+                        >
+                            📜 Reguły AI (Rules)
+                        </button>
+                    )}
                     {/* Przycisk zarządzania kategoriami tylko dla uprawnionych */}
                     <button
                         onClick={() => { setIsCategoryManagerOpen(true); setCmSelectedCat(null); }}
@@ -3199,6 +3309,166 @@ export default function InventoryPage() {
                             >
                                 Gotowe
                             </button>
+                        </div>
+                    </div>
+                </div>
+            {/* MODAL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU) */}
+            {isRulesModalOpen && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
+                        {/* Nagłówek modalu */}
+                        <div className="px-6 py-5 bg-gradient-to-r from-slate-900 via-slate-800 to-amber-950 text-white flex justify-between items-center">
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-2xl">📜</span>
+                                    <h2 className="text-xl font-black tracking-tight">Reguły AI: Resztki Budowlane i Zwroty</h2>
+                                </div>
+                                <p className="text-xs text-amber-200/80 mt-1">
+                                    Wytyczne dla sztucznej inteligencji analizującej nagrania kierowców przy zwrocie resztek
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setIsRulesModalOpen(false)}
+                                className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-lg font-bold transition"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* Zakładki: Szef vs Magazyn */}
+                        <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2">
+                            <button
+                                onClick={() => setRulesTab("BOSS")}
+                                className={`px-5 py-3 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
+                                    rulesTab === "BOSS"
+                                        ? "bg-white text-amber-700 border-amber-600 shadow-sm"
+                                        : "text-slate-500 hover:text-slate-800 border-transparent"
+                                }`}
+                            >
+                                <span>👔</span>
+                                <span>Reguły Szefa (Dyrekcja)</span>
+                                {canManageBossRules ? (
+                                    <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
+                                ) : (
+                                    <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
+                                )}
+                            </button>
+
+                            <button
+                                onClick={() => setRulesTab("WAREHOUSE")}
+                                className={`px-5 py-3 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
+                                    rulesTab === "WAREHOUSE"
+                                        ? "bg-white text-blue-700 border-blue-600 shadow-sm"
+                                        : "text-slate-500 hover:text-slate-800 border-transparent"
+                                }`}
+                            >
+                                <span>📦</span>
+                                <span>Reguły Magazynu</span>
+                                {canManageWarehouseRules ? (
+                                    <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
+                                ) : (
+                                    <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
+                                )}
+                            </button>
+                        </div>
+
+                        {/* Treść modalu */}
+                        <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                            {isLoadingRules ? (
+                                <div className="py-12 text-center text-slate-400 font-bold animate-pulse">
+                                    Wczytywanie reguł z bazy PESAM...
+                                </div>
+                            ) : rulesTab === "BOSS" ? (
+                                <div className="space-y-3">
+                                    <div className="flex items-center justify-between text-xs">
+                                        <label className="font-bold text-slate-700">
+                                            Zasady i kryteria Dyrekcji (Szefa):
+                                        </label>
+                                        {bossRulesMeta.updatedAt && (
+                                            <span className="text-[11px] text-slate-400">
+                                                Ostatnia zmiana: <strong>{bossRulesMeta.updatedBy || "—"}</strong> ({bossRulesMeta.updatedAt})
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    <textarea
+                                        value={bossRulesText}
+                                        onChange={(e) => setBossRulesText(e.target.value)}
+                                        disabled={!canManageBossRules}
+                                        rows={10}
+                                        placeholder={`Wpisz zasady Szefa/Dyrekcji, np.:\n- Nie przyjmujemy worków gipsu/kleju otwartych powyżej 30 dni lub zbrylonych.\n- Resztki profili i rur poniżej 1 metra traktować jako odpad/złom bez odzysku.\n- Chemia budowlana musi mieć czytelną etykietę i datę ważności.\n- Wszystkie odpady niebezpieczne (farby, rozpuszczalniki) zgłaszać z oznaczeniem utylizacji.`}
+                                        className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
+                                            canManageBossRules
+                                                ? "border-slate-300 focus:ring-2 focus:ring-amber-500 bg-white"
+                                                : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
+                                        }`}
+                                    />
+
+                                    {!canManageBossRules && (
+                                        <p className="text-xs text-amber-700 bg-amber-50 p-3 rounded-xl border border-amber-200">
+                                            🔒 Nie posiadasz uprawnienia <strong>Reguły AI: Zarządzanie wytycznymi Szefa</strong>. Widzisz te reguły w trybie podglądu.
+                                        </p>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    <div className="flex items-center justify-between text-xs">
+                                        <label className="font-bold text-slate-700">
+                                            Zasady techniczne Magazynu Głównego:
+                                        </label>
+                                        {warehouseRulesMeta.updatedAt && (
+                                            <span className="text-[11px] text-slate-400">
+                                                Ostatnia zmiana: <strong>{warehouseRulesMeta.updatedBy || "—"}</strong> ({warehouseRulesMeta.updatedAt})
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    <textarea
+                                        value={warehouseRulesText}
+                                        onChange={(e) => setWarehouseRulesText(e.target.value)}
+                                        disabled={!canManageWarehouseRules}
+                                        rows={10}
+                                        placeholder={`Wpisz zasady Magazynu, np.:\n- Kable elektryczne muszą być zwinięte w krążki i mieć min. 15m długości.\n- Płyty GK przyjmujemy wyłącznie na paletach w nienaruszonych paczkach min. 5 szt.\n- Puste europalety układać w stosy po 15 sztuk.\n- Chemia budowlana płynna w wiaderkach musi być szczelnie zamknięta.`}
+                                        className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
+                                            canManageWarehouseRules
+                                                ? "border-slate-300 focus:ring-2 focus:ring-blue-500 bg-white"
+                                                : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
+                                        }`}
+                                    />
+
+                                    {!canManageWarehouseRules && (
+                                        <p className="text-xs text-blue-700 bg-blue-50 p-3 rounded-xl border border-blue-200">
+                                            🔒 Nie posiadasz uprawnienia <strong>Reguły AI: Zarządzanie wytycznymi Magazynu</strong>. Widzisz te reguły w trybie podglądu.
+                                        </p>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Stopka modalu */}
+                        <div className="px-6 py-4 border-t bg-slate-50 flex justify-between items-center">
+                            <p className="text-xs text-slate-500">
+                                Zapisane wytyczne są automatycznie uwzględniane przez AI podczas weryfikacji resztek.
+                            </p>
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsRulesModalOpen(false)}
+                                    className="px-5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-sm transition"
+                                >
+                                    Zamknij
+                                </button>
+                                {(canManageBossRules || canManageWarehouseRules) && (
+                                    <button
+                                        type="button"
+                                        onClick={handleSaveRules}
+                                        disabled={isSavingRules}
+                                        className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white font-black text-sm shadow-md active:scale-95 transition disabled:opacity-50"
+                                    >
+                                        {isSavingRules ? "Zapisywanie..." : "💾 Zapisz Reguły"}
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -44,7 +44,11 @@ export const ALL_PERMISSIONS = {
     useAiOrderVoice: "Sklep AI: Kosztorysant - dyktowanie głosem (Rozpoznawanie mowy do wyliczeń)",
 
     // --- PROFESJONALNY PANEL KOSZTORYSOWANIA ---
-    useEstimatingPanel: "Kalkulator AI: Dostęp do profesjonalnego panelu kosztorysowania (RMS)"
+    useEstimatingPanel: "Kalkulator AI: Dostęp do profesjonalnego panelu kosztorysowania (RMS)",
+
+    // --- REGUŁY AI DLA RESZTEK BUDOWLANYCH I ZWROTÓW ---
+    manageRulesBoss: "Reguły AI: Zarządzanie wytycznymi Szefa / Dyrekcji (Zwroty resztek)",
+    manageRulesWarehouse: "Reguły AI: Zarządzanie wytycznymi Magazynu (Przyjmowanie resztek)"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

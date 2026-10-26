@@ -12,7 +12,7 @@ export const maxDuration = 60;
 
 export async function POST(req: Request) {
     try {
-        const { audioUrl } = await req.json();
+        const { audioUrl, bossRules, warehouseRules } = await req.json();
 
         if (!audioUrl) {
             return NextResponse.json({ error: "Brak linku do pliku audio" }, { status: 400 });
@@ -31,6 +31,9 @@ export async function POST(req: Request) {
             Twoim zadaniem jest odsłuchanie notatki głosowej nagranej przez kierowcę na budowie.
             Kierowca wymienia resztki budowlane, pozostałości materiałów, chemię budowlaną, profile, worki z klejem/gipsem, końcówki kabli itp., które zabiera z budowy do magazynu lub do utylizacji.
 
+            ${bossRules ? `REGUŁY I WYTYCZNE SZEFA / DYREKCJI FIRMY PESAM:\n"""${bossRules}"""\n` : ''}
+            ${warehouseRules ? `REGUŁY I WYTYCZNE MAGAZYNU GŁÓWNEGO PESAM:\n"""${warehouseRules}"""\n` : ''}
+
             Zadanie:
             1. Zapisz dokładną, pełną transkrypcję mowy na tekst ('transcription') - dokładnie to, co kierowca powiedział w notatce.
             2. Wyodrębnij z nagrania wszystkie wymienione pozycje materiałowe ('residuals').
@@ -39,6 +42,8 @@ export async function POST(req: Request) {
             2. 'quantity' - liczba sztuk, opakowań, worków, metrów (jeśli nie podano precyzyjnie liczby, przyjmij 1)
             3. 'unit' - jednostka miary: 'szt.', 'worek', 'opak.', 'mb', 'kg', 'm²', 'litr', 'wiaderko'
             4. 'isWaste' - wartość boolean: true jeśli kierowca mówi o śmieciach, zniszczonych odpadach, resztkach nienadających się do użycia; false jeśli materiał jest pełnowartościowy / użyteczny do ponownego wykorzystania.
+            5. 'rulesCompliant' - wartość boolean: true jeśli materiał spełnia reguły Szefa i Magazynu (lub gdy nie ma żadnych przeciwwskazań/zastrzeżeń); false jeśli narusza jakąkolwiek regułę Szefa lub Magazynu (np. zniszczony, za krótki, otwarty, zakazany).
+            6. 'ruleNotes' - zwięzły komentarz oceny reguł (np. "Zgodne z regułami", "Niezgodne z regułą szefa: chemia bez daty", "Niezgodne z regułą magazynu: kabel poniżej minimalnej długości").
         `;
 
         const response = await ai.models.generateContent({
@@ -47,7 +52,7 @@ export async function POST(req: Request) {
                 {
                     role: 'user',
                     parts: [
-                        { text: "Przeanalizuj nagranie audio kierowcy z budowy, sporządź pełną transkrypcję oraz wyodrębnij listę resztek i pozostałości materiałowych." },
+                        { text: "Przeanalizuj nagranie audio kierowcy z budowy, sporządź pełną transkrypcję, wyodrębnij listę resztek i zweryfikuj zgodność z regułami Szefa oraz Magazynu." },
                         {
                             inlineData: {
                                 mimeType: "audio/webm",
@@ -70,7 +75,7 @@ export async function POST(req: Request) {
                         },
                         residuals: {
                             type: Type.ARRAY,
-                            description: "Lista rozpoznanych resztek budowlanych z nagrania.",
+                            description: "Lista rozpoznanych resztek budowlanych z nagrania wraz z weryfikacją reguł.",
                             items: {
                                 type: Type.OBJECT,
                                 properties: {
@@ -89,9 +94,17 @@ export async function POST(req: Request) {
                                     isWaste: {
                                         type: Type.BOOLEAN,
                                         description: "Czy jest to odpad do utylizacji."
+                                    },
+                                    rulesCompliant: {
+                                        type: Type.BOOLEAN,
+                                        description: "Czy pozycja spełnia reguły Szefa i Magazynu."
+                                    },
+                                    ruleNotes: {
+                                        type: Type.STRING,
+                                        description: "Ocena lub uwagi na podstawie reguł Szefa i Magazynu."
                                     }
                                 },
-                                required: ["name", "quantity", "unit", "isWaste"]
+                                required: ["name", "quantity", "unit", "isWaste", "rulesCompliant", "ruleNotes"]
                             }
                         }
                     },
