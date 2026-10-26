@@ -77,11 +77,13 @@ export default function PlacProtokolPage() {
   // For accessories: itemId -> accessoryIndex -> isReturning
   const [selectedAccessories, setSelectedAccessories] = useState<Record<string, Record<number, boolean>>>({});
 
-  // Audio recording states
+  // Multi-item audio recording states (resztki budowlane)
+  const [residualRecordings, setResidualRecordings] = useState<Array<{blob: Blob; url: string; durationSec: number}>>([]);
+  const [currentRecBlob, setCurrentRecBlob] = useState<Blob | null>(null);
+  const [currentRecUrl, setCurrentRecUrl] = useState<string | null>(null);
+  const [currentRecSeconds, setCurrentRecSeconds] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [recordingError, setRecordingError] = useState<string | null>(null);
 
   // MediaRecorder refs
@@ -244,14 +246,16 @@ export default function PlacProtokolPage() {
   // Clean up audio and photo preview URLs on unmount
   useEffect(() => {
     return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      if (currentRecUrl) URL.revokeObjectURL(currentRecUrl);
+      residualRecordings.forEach(r => URL.revokeObjectURL(r.url));
       photoPreviews.forEach(p => URL.revokeObjectURL(p));
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
       }
     };
-  }, [audioUrl, photoPreviews]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRecUrl, photoPreviews]);
 
   // Filter inventory for the selected site
   const siteEquipment = useMemo(() => {
@@ -315,9 +319,9 @@ export default function PlacProtokolPage() {
 
       recorder.onstop = () => {
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
-        setAudioBlob(blob);
+        setCurrentRecBlob(blob);
         const newUrl = URL.createObjectURL(blob);
-        setAudioUrl(newUrl);
+        setCurrentRecUrl(newUrl);
 
         // Stop all audio tracks to release microphone
         stream.getTracks().forEach(track => track.stop());
@@ -339,6 +343,7 @@ export default function PlacProtokolPage() {
   };
 
   const stopRecording = () => {
+    setCurrentRecSeconds(recordingSeconds);
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
@@ -349,12 +354,33 @@ export default function PlacProtokolPage() {
     }
   };
 
-  const resetRecording = () => {
-    if (audioUrl) URL.revokeObjectURL(audioUrl);
-    setAudioBlob(null);
-    setAudioUrl(null);
+  const confirmCurrentRecording = () => {
+    if (!currentRecBlob || !currentRecUrl) return;
+    setResidualRecordings(prev => [
+      ...prev,
+      { blob: currentRecBlob!, url: currentRecUrl!, durationSec: currentRecSeconds }
+    ]);
+    setCurrentRecBlob(null);
+    setCurrentRecUrl(null);
+    setCurrentRecSeconds(0);
+    setRecordingSeconds(0);
+  };
+
+  const discardCurrentRecording = () => {
+    if (currentRecUrl) URL.revokeObjectURL(currentRecUrl);
+    setCurrentRecBlob(null);
+    setCurrentRecUrl(null);
+    setCurrentRecSeconds(0);
     setRecordingSeconds(0);
     setRecordingError(null);
+  };
+
+  const deleteResidualRecording = (index: number) => {
+    setResidualRecordings(prev => {
+      const item = prev[index];
+      if (item?.url) URL.revokeObjectURL(item.url);
+      return prev.filter((_, i) => i !== index);
+    });
   };
 
   const formatSeconds = (sec: number) => {
@@ -384,7 +410,8 @@ export default function PlacProtokolPage() {
   }, [selectedBulkQty]);
 
   const totalItemsCount = totalUniqueChecked + totalBulkChecked;
-  const canSubmit = Boolean(selectedSiteId) && selectedManagerUids.length > 0 && (totalItemsCount > 0 || audioBlob !== null || selectedPhotos.length > 0);
+  const hasAnyRecording = residualRecordings.length > 0 || currentRecBlob !== null;
+  const canSubmit = Boolean(selectedSiteId) && selectedManagerUids.length > 0 && (totalItemsCount > 0 || hasAnyRecording || selectedPhotos.length > 0);
 
   // SUBMIT FLOW:
   // 1. Upload audio & photos to Firebase Storage
@@ -403,8 +430,8 @@ export default function PlacProtokolPage() {
       return;
     }
 
-    if (totalItemsCount === 0 && !audioBlob && selectedPhotos.length === 0) {
-      alert("Wybierz sprzęt do zwrotu, nagraj notatkę głosową lub załącz przynajmniej jedno zdjęcie!");
+    if (totalItemsCount === 0 && !hasAnyRecording && selectedPhotos.length === 0) {
+      alert("Wybierz sprzęt do zwrotu, nagraj resztki budowlane lub załącz przynajmniej jedno zdjęcie!");
       return;
     }
 
@@ -418,44 +445,59 @@ export default function PlacProtokolPage() {
         ? `${user.firstName} ${user.lastName}` 
         : (user?.firstName || "Kierowca");
 
-      let uploadedAudioUrl: string | null = null;
+      const uploadedAudioUrls: string[] = [];
       let parsedResiduals: any[] = [];
       let parsedTranscription: string = "";
 
-      // KROK 1 & 2: Obsługa nagrania audio i transkrypcji AI
-      if (audioBlob) {
-        setSubmitStep("Wysyłanie nagrania audio do serwera...");
-        const timestamp = Date.now();
-        const storagePath = `protocol_audio_drafts/${selectedSiteId}_${user?.uid || "driver"}_${timestamp}.webm`;
-        const storageRef = ref(storage, storagePath);
+      // Zbierz wszystkie nagrania: potwierdzone + bieżące (jeśli nie zdążył potwierdzić)
+      const allRecordingsToProcess = [
+        ...residualRecordings,
+        ...(currentRecBlob && currentRecUrl
+          ? [{ blob: currentRecBlob, url: currentRecUrl, durationSec: currentRecSeconds }]
+          : [])
+      ];
 
-        await uploadBytes(storageRef, audioBlob);
-        uploadedAudioUrl = await getDownloadURL(storageRef);
+      // KROK 1 & 2: Upload i transkrypcja AI każdego nagrania osobno
+      if (allRecordingsToProcess.length > 0) {
+        const allResiduals: any[] = [];
+        const allTranscriptions: string[] = [];
 
-        setSubmitStep("🤖 AI analizuje nagranie (wyciąganie resztek budowlanych i mowa na tekst)...");
-        try {
-          const aiResponse = await fetch("/api/parse-audio-residuals", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ audioUrl: uploadedAudioUrl })
-          });
+        for (let i = 0; i < allRecordingsToProcess.length; i++) {
+          const rec = allRecordingsToProcess[i];
+          setSubmitStep(`Wysyłanie nagrania ${i + 1} z ${allRecordingsToProcess.length}...`);
+          const timestamp = Date.now();
+          const storagePath = `protocol_audio_drafts/${selectedSiteId}_${user?.uid || "driver"}_${timestamp}_${i}.webm`;
+          const storageRef = ref(storage, storagePath);
+          await uploadBytes(storageRef, rec.blob);
+          const uploadedUrl = await getDownloadURL(storageRef);
+          uploadedAudioUrls.push(uploadedUrl);
 
-          if (aiResponse.ok) {
-            const aiData = await aiResponse.json();
-            if (aiData.residuals && Array.isArray(aiData.residuals)) {
-              parsedResiduals = aiData.residuals;
-              setTranscribedResiduals(aiData.residuals);
+          setSubmitStep(`🤖 AI analizuje nagranie ${i + 1} z ${allRecordingsToProcess.length}...`);
+          try {
+            const aiResponse = await fetch("/api/parse-audio-residuals", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ audioUrl: uploadedUrl })
+            });
+            if (aiResponse.ok) {
+              const aiData = await aiResponse.json();
+              if (aiData.residuals && Array.isArray(aiData.residuals)) {
+                allResiduals.push(...aiData.residuals);
+              }
+              if (aiData.transcription) {
+                allTranscriptions.push(`[Poz. ${i + 1}]: ${aiData.transcription}`);
+              }
+            } else {
+              console.warn(`AI parse residuals dla nagrania ${i + 1} zwrocilo blad`);
             }
-            if (aiData.transcription) {
-              parsedTranscription = aiData.transcription;
-            }
-          } else {
-            console.warn("AI parse residuals returned non-200 status");
+          } catch (aiErr) {
+            console.error(`Blad AI dla nagrania ${i + 1}:`, aiErr);
           }
-        } catch (aiErr) {
-          console.error("Błąd podczas wywołania AI parse-audio-residuals:", aiErr);
-          // Nie blokujemy wysyłki protokołu, kierownik otrzyma szkic bez wstępnego parsowania
         }
+
+        parsedResiduals = allResiduals;
+        parsedTranscription = allTranscriptions.join(" | ");
+        setTranscribedResiduals(allResiduals);
       }
 
       // Obsługa wysyłania zdjęć do Firebase Storage
@@ -546,7 +588,8 @@ export default function PlacProtokolPage() {
         targetManagerName: selectedManagerNames.join(", ") || null,
         createdAt: new Date().toISOString(),
         documentDate: new Date().toISOString().split("T")[0],
-        audioNoteUrl: uploadedAudioUrl,
+        audioNoteUrl: uploadedAudioUrls[0] || null,
+        audioNoteUrls: uploadedAudioUrls,
         voiceTranscription: parsedTranscription || null,
         residuals: parsedResiduals,
         photos: uploadedPhotoUrls.length > 0 ? uploadedPhotoUrls : [],
@@ -950,11 +993,11 @@ export default function PlacProtokolPage() {
               >
                 <span>🎙️</span>
                 <span>Resztki & Zdjęcia</span>
-                {(audioBlob || selectedPhotos.length > 0) && (
+                {(hasAnyRecording || selectedPhotos.length > 0) && (
                   <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
                     step3Tab === "RESZTKI" ? "bg-white/20 text-white" : "bg-blue-500/20 text-blue-400"
                   }`}>
-                    {(audioBlob ? 1 : 0) + selectedPhotos.length}
+                    {residualRecordings.length + (currentRecBlob ? 1 : 0) + selectedPhotos.length}
                   </span>
                 )}
               </button>
@@ -1213,16 +1256,17 @@ export default function PlacProtokolPage() {
               <div className="flex items-center justify-between">
                 <label className="text-xs font-black tracking-wider text-blue-400 uppercase flex items-center gap-1.5">
                   <span>🎙️</span>
-                  <span>Resztki Budowlane i Odpady (Nagranie AI)</span>
+                  <span>Resztki Budowlane i Odpady</span>
                 </label>
                 <span className="text-[10px] bg-blue-900/60 text-blue-300 px-2 py-0.5 rounded-full font-bold">
-                  Auto-transkrypcja AI
+                  {residualRecordings.length > 0 ? `Nagrano: ${residualRecordings.length} poz.` : "Multi-nagranie AI"}
                 </span>
               </div>
 
               <p className="text-xs text-slate-300 leading-relaxed">
-                Nie musisz nic pisać! Wciśnij mikrofon i powiedz co zabierasz (np. <em>&quot;2 worki kleju, 3 worki po pół kleju do płytek&quot;</em>).
-                Kierownik otrzyma gotowe pozycje prosto do edytowalnego koszyka zwrotu.
+                Nagraj każdą resztkę <strong>osobno</strong>. Po nagraniu kliknij{" "}
+                <em>„Nagraj poz. X"</em> aby dodać kolejną lub <em>„Gotowe"</em> gdy skończysz.
+                AI przetworzy każde nagranie i przekaże gotowe pozycje kierownikowi.
               </p>
 
               {recordingError && (
@@ -1231,20 +1275,43 @@ export default function PlacProtokolPage() {
                 </div>
               )}
 
-              {/* Stan nagrywania */}
-              <div className="flex flex-col items-center justify-center p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
+              {/* Lista potwierdzonych nagrań */}
+              {residualRecordings.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Nagrane pozycje:</p>
+                  {residualRecordings.map((rec, idx) => (
+                    <div key={idx} className="flex items-center gap-2 p-2.5 rounded-xl bg-blue-950/30 border border-blue-800/40">
+                      <span className="text-[10px] font-black text-blue-300 bg-blue-950/60 px-2 py-1 rounded-lg shrink-0 min-w-[40px] text-center">
+                        Poz. {idx + 1}
+                      </span>
+                      <audio src={rec.url} controls className="flex-1 min-w-0" style={{height: "32px"}} />
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">{formatSeconds(rec.durationSec)}</span>
+                      <button
+                        type="button"
+                        onClick={() => deleteResidualRecording(idx)}
+                        className="w-7 h-7 rounded-lg bg-red-950/60 border border-red-800/40 text-red-400 text-xs flex items-center justify-center active:scale-90 transition shrink-0"
+                        title="Usuń nagranie"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Stan: nagrywanie / podgląd / gotowość */}
+              <div className="rounded-2xl bg-slate-950/80 border border-slate-800 p-4">
                 {isRecording ? (
-                  // Trwa nagrywanie
                   <div className="w-full text-center space-y-3">
                     <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-950/80 border border-red-700 text-red-400 animate-pulse">
                       <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
-                      <span className="text-xs font-black uppercase tracking-wider">Nagrywanie w toku...</span>
+                      <span className="text-xs font-black uppercase tracking-wider">
+                        Nagrywanie poz. {residualRecordings.length + 1}...
+                      </span>
                     </div>
-
                     <div className="text-3xl font-mono font-black text-white">
                       {formatSeconds(recordingSeconds)}
                     </div>
-
                     <button
                       type="button"
                       onClick={stopRecording}
@@ -1254,38 +1321,46 @@ export default function PlacProtokolPage() {
                       <span>Zatrzymaj nagrywanie</span>
                     </button>
                   </div>
-                ) : audioUrl ? (
-                  // Nagranie gotowe
+                ) : currentRecBlob ? (
+                  // Podgląd właśnie nagranej pozycji — zatwierdź lub odrzuć
                   <div className="w-full space-y-3">
-                    <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span className="font-bold text-emerald-400 flex items-center gap-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-emerald-400 flex items-center gap-1.5">
                         <span>✓</span>
-                        <span>Nagranie gotowe do wysłania</span>
+                        <span>Pozycja {residualRecordings.length + 1} nagrana</span>
                       </span>
-                      <span className="font-mono">{formatSeconds(recordingSeconds)}</span>
+                      <span className="font-mono text-slate-400">{formatSeconds(currentRecSeconds)}</span>
                     </div>
-
-                    <audio src={audioUrl} controls className="w-full rounded-lg" />
-
+                    <audio src={currentRecUrl!} controls className="w-full rounded-lg" />
                     <div className="flex gap-2">
                       <button
                         type="button"
-                        onClick={startRecording}
-                        className="flex-1 py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 transition"
+                        onClick={discardCurrentRecording}
+                        className="py-2.5 px-3 rounded-xl border border-red-900/60 bg-red-950/40 hover:bg-red-900/50 text-xs font-bold text-red-400 transition flex items-center gap-1 shrink-0"
                       >
-                        🔄 Nagraj ponownie
+                        <span>🗑️</span>
+                        <span>Odrzuć</span>
                       </button>
                       <button
                         type="button"
-                        onClick={resetRecording}
-                        className="py-2.5 px-4 rounded-xl border border-red-900/60 bg-red-950/40 hover:bg-red-900/60 text-xs font-bold text-red-400 transition"
+                        onClick={() => { confirmCurrentRecording(); startRecording(); }}
+                        className="flex-1 py-2.5 rounded-xl border border-blue-700/60 bg-blue-950/40 hover:bg-blue-900/50 text-xs font-bold text-blue-300 transition flex items-center justify-center gap-1.5"
                       >
-                        🗑️ Usuń
+                        <span>➕</span>
+                        <span>Nagraj poz. {residualRecordings.length + 2}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={confirmCurrentRecording}
+                        className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-black text-white transition flex items-center gap-1 shrink-0"
+                      >
+                        <span>✅</span>
+                        <span>Gotowe</span>
                       </button>
                     </div>
                   </div>
                 ) : (
-                  // Czeka na nagranie
+                  // Gotowość do nagrania następnej pozycji
                   <div className="w-full text-center space-y-2">
                     <button
                       type="button"
@@ -1293,10 +1368,13 @@ export default function PlacProtokolPage() {
                       className="w-full py-4 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black text-sm shadow-xl active:scale-95 transition flex items-center justify-center gap-2 min-h-[56px]"
                     >
                       <span className="text-xl">🎙️</span>
-                      <span>NAGRAJ RESZTKI BUDOWLANE</span>
+                      <span>NAGRAJ POZYCJĘ {residualRecordings.length + 1}</span>
                     </button>
                     <p className="text-[11px] text-slate-500">
-                      Kliknij i wymień pozostałości materiałowe
+                      {residualRecordings.length === 0
+                        ? "Nagraj każdą resztkę osobno – np. \"2 worki kleju\""
+                        : `Dodaj kolejną pozycję lub wróć do protokołu (masz już ${residualRecordings.length})`
+                      }
                     </p>
                   </div>
                 )}
@@ -1391,7 +1469,7 @@ export default function PlacProtokolPage() {
                 </div>
                 <div className="text-xs font-black text-white truncate">
                   <span className="text-amber-400 font-bold">{totalItemsCount}</span> poz. sprzętu
-                  {audioBlob ? " · 🎙️ Audio" : ""}
+                  {hasAnyRecording ? (residualRecordings.length > 0 ? ` · 🎙️ Resztki (${residualRecordings.length})` : " · 🎙️ Resztka (1)") : ""}
                   {selectedPhotos.length > 0 ? ` · 📸 Foto (${selectedPhotos.length})` : ""}
                 </div>
               </div>
