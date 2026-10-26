@@ -5098,21 +5098,29 @@ export default function ProtocolsHub() {
                                         : "Brak daty";
                                     const itemsCount = draft.items?.length || 0;
                                     const residualsCount = draft.residuals?.length || 0;
+                                    const violationsCount = (draft.residuals || []).filter((r: any) => r.rulesCompliant === false || r.isWaste === true).length;
+                                    const hasViolations = violationsCount > 0;
 
                                     return (
                                         <div
                                             key={draft.docId}
-                                            className="bg-white rounded-2xl border-2 border-purple-200 p-4 shadow-sm hover:border-purple-400 transition space-y-3"
+                                            className={`bg-white rounded-2xl border-2 p-4 shadow-sm transition space-y-3 ${hasViolations ? 'border-red-400 shadow-red-100' : 'border-purple-200 hover:border-purple-400'}`}
                                         >
                                             <div className="flex flex-wrap items-start justify-between gap-2 border-b border-slate-100 pb-3">
                                                 <div>
-                                                    <div className="flex items-center gap-2">
+                                                    <div className="flex items-center gap-2 flex-wrap">
                                                         <span className="font-black text-base text-slate-800">
                                                             {draft.sourceName || "Nieznana budowa"}
                                                         </span>
                                                         <span className="bg-purple-100 text-purple-800 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-purple-200">
                                                             Szkic Kierowcy
                                                         </span>
+                                                        {hasViolations && (
+                                                            <span className="bg-red-100 text-red-700 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-red-300 flex items-center gap-1 animate-pulse">
+                                                                <span>🚨</span>
+                                                                <span>{violationsCount} NARUSZE{violationsCount === 1 ? 'NIE' : 'NIA'} REGUŁ</span>
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
                                                         <span>🚚 Kierowca: <strong className="text-slate-700">{draft.driverName || "Kierowca"}</strong></span>
@@ -5129,6 +5137,15 @@ export default function ProtocolsHub() {
                                                     {draft.driverNotes && (
                                                         <div className="mt-1.5 text-xs text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
                                                             💬 Notatka: {draft.driverNotes}
+                                                        </div>
+                                                    )}
+                                                    {hasViolations && (
+                                                        <div className="mt-2 text-xs text-red-800 bg-red-50 p-2.5 rounded-xl border border-red-300 font-semibold flex items-start gap-2">
+                                                            <span className="text-base shrink-0">🚨</span>
+                                                            <span>
+                                                                <strong>UWAGA – Naruszenia reguł AI ({violationsCount}):</strong>{' '}
+                                                                {(draft.residuals || []).filter((r: any) => r.rulesCompliant === false || r.isWaste).map((r: any) => r.name).join(', ')}
+                                                            </span>
                                                         </div>
                                                     )}
                                                 </div>
@@ -5180,22 +5197,41 @@ export default function ProtocolsHub() {
 
                                             {/* Sekcja resztek rozpoznanych przez AI */}
                                             {residualsCount > 0 && (
-                                                <div className="space-y-1.5 bg-amber-50/70 p-3 rounded-xl border border-amber-200">
-                                                    <div className="text-[11px] font-black text-amber-900 uppercase tracking-wide flex items-center gap-1.5">
-                                                        <span>🤖</span>
-                                                        <span>Rozpoznane resztki budowlane przez AI ({residualsCount}):</span>
+                                                <div className={`space-y-1.5 p-3 rounded-xl border ${hasViolations ? 'bg-red-50/60 border-red-300' : 'bg-amber-50/70 border-amber-200'}`}>
+                                                    <div className={`text-[11px] font-black uppercase tracking-wide flex items-center gap-1.5 ${hasViolations ? 'text-red-900' : 'text-amber-900'}`}>
+                                                        <span>{hasViolations ? '🚨' : '🤖'}</span>
+                                                        <span>Rozpoznane resztki budowlane przez AI ({residualsCount}){hasViolations ? ` – ${violationsCount} naruszeń reguł!` : ''}:</span>
                                                     </div>
-                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                                                        {draft.residuals.map((res: any, rIdx: number) => (
-                                                            <div key={rIdx} className="text-xs p-1.5 bg-white rounded border border-amber-200 flex items-center justify-between">
-                                                                <span className="font-medium text-slate-800 truncate mr-2">
-                                                                    • {res.name}
-                                                                </span>
-                                                                <span className="font-bold text-amber-800 shrink-0">
-                                                                    {res.quantity} {res.unit} {res.isWaste ? "🗑️ Odpad" : ""}
-                                                                </span>
-                                                            </div>
-                                                        ))}
+                                                    <div className="grid grid-cols-1 gap-1.5">
+                                                        {draft.residuals.map((res: any, rIdx: number) => {
+                                                            const isViolation = res.rulesCompliant === false;
+                                                            const isWaste = res.isWaste === true;
+                                                            return (
+                                                                <div
+                                                                    key={rIdx}
+                                                                    className={`text-xs p-2 rounded-lg border flex flex-col gap-1 ${isViolation ? 'bg-red-50 border-red-300' : isWaste ? 'bg-orange-50 border-orange-300' : 'bg-white border-amber-200'}`}
+                                                                >
+                                                                    <div className="flex items-center justify-between gap-2">
+                                                                        <span className="font-semibold text-slate-800 truncate">
+                                                                            {isViolation ? '❌' : isWaste ? '🗑️' : '✅'} {res.name}
+                                                                        </span>
+                                                                        <span className={`font-bold shrink-0 ${isViolation ? 'text-red-700' : isWaste ? 'text-orange-700' : 'text-amber-800'}`}>
+                                                                            {res.quantity} {res.unit}
+                                                                        </span>
+                                                                    </div>
+                                                                    {(isViolation || isWaste) && res.ruleNotes && (
+                                                                        <div className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${isViolation ? 'text-red-700 bg-red-100' : 'text-orange-700 bg-orange-100'}`}>
+                                                                            ⚠️ {res.ruleNotes}
+                                                                        </div>
+                                                                    )}
+                                                                    {res.category && (
+                                                                        <div className="text-[10px] text-slate-500">
+                                                                            {res.category}{res.subcategory ? ` › ${res.subcategory}` : ''}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
                                                     </div>
                                                 </div>
                                             )}
