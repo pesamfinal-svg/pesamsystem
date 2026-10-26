@@ -244,20 +244,28 @@ export default function InventoryPage() {
     const [isLoadingRules, setIsLoadingRules] = useState(false);
     const [isSavingRules, setIsSavingRules] = useState(false);
 
+    const isUserAdmin = Boolean(
+        user && (
+            user.roleName?.toLowerCase() === "admin" ||
+            user.roleName?.toLowerCase().includes("administrator") ||
+            user.email?.toLowerCase().includes("admin")
+        )
+    );
+
     const canManageBossRules = Boolean(user && (
+        isUserAdmin ||
         hasPermission("manageRulesBoss", user.rolePermissions, user.permissionOverrides) ||
-        user.role?.toLowerCase() === "admin" ||
         user.roleName?.toLowerCase().includes("szef") ||
         user.roleName?.toLowerCase().includes("dyrektor")
     ));
 
     const canManageWarehouseRules = Boolean(user && (
+        isUserAdmin ||
         hasPermission("manageRulesWarehouse", user.rolePermissions, user.permissionOverrides) ||
-        user.role?.toLowerCase() === "admin" ||
         user.roleName?.toLowerCase().includes("magazyn")
     ));
 
-    const canAccessRules = canManageBossRules || canManageWarehouseRules || user?.role === "admin";
+    const canAccessRules = canManageBossRules || canManageWarehouseRules || isUserAdmin;
 
     const fetchRules = async () => {
         setIsLoadingRules(true);
@@ -299,7 +307,7 @@ export default function InventoryPage() {
             const now = new Date().toLocaleString("pl-PL");
             const updaterName = user?.firstName && user?.lastName
                 ? `${user.firstName} ${user.lastName}`
-                : (user?.name || user?.email || "Użytkownik");
+                : (user?.email || "Użytkownik");
 
             const updatePayload: Record<string, any> = {};
 
@@ -3312,6 +3320,8 @@ export default function InventoryPage() {
                         </div>
                     </div>
                 </div>
+            )}
+
             {/* MODAL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU) */}
             {isRulesModalOpen && (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
