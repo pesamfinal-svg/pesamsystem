@@ -17,6 +17,7 @@ export async function POST(req: Request) {
     try {
         const {
             audioUrl,
+            mimeType = 'audio/webm',
             bossRules,
             warehouseRules,
             bossCategoryRules = {},
@@ -87,6 +88,8 @@ ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
             8. 'ruleNotes' - zwięzły komentarz oceny reguł (np. "Zgodne z regułami", "Niezgodne z regułą dla Kleje i Zaprawy: otwarty powyżej miesiąca", "Niezgodne z regułą magazynu: kabel poniżej 15m").
         `;
 
+        const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: [
@@ -96,7 +99,7 @@ ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
                         { text: "Przeanalizuj nagranie audio kierowcy z budowy, sporządź pełną transkrypcję, przypisz każdą pozycję do jednej z 12 głównych kategorii PESAM i zweryfikuj zgodność z regułami Szefa oraz Magazynu." },
                         {
                             inlineData: {
-                                mimeType: "audio/webm",
+                                mimeType: cleanMime,
                                 data: base64Audio
                             }
                         }

@@ -79,6 +79,7 @@ export default function PlacProtokolPage() {
 
   // Multi-item audio recording states (resztki budowlane)
   const [residualRecordings, setResidualRecordings] = useState<Array<{blob: Blob; url: string; durationSec: number}>>([]);
+  const residualRecordingsRef = useRef<Array<{blob: Blob; url: string; durationSec: number}>>([]);
   const [currentRecBlob, setCurrentRecBlob] = useState<Blob | null>(null);
   const [currentRecUrl, setCurrentRecUrl] = useState<string | null>(null);
   const [currentRecSeconds, setCurrentRecSeconds] = useState(0);
@@ -95,6 +96,8 @@ export default function PlacProtokolPage() {
 
   // MediaRecorder refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const isTransitioningRef = useRef<boolean>(false);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -306,7 +309,71 @@ export default function PlacProtokolPage() {
     });
   }, [siteEquipment, filterTab, searchQuery]);
 
-  // Audio recording handlers (Kreator dla kierowcy w rękawicach)
+  // Audio recording handlers (Kreator dla kierowcy w rękawicach - niezależne, w 100% poprawne pliki audio dla każdej pozycji)
+  const startRecordingSegment = (stream: MediaStream) => {
+    let mimeType = "audio/webm";
+    if (!MediaRecorder.isTypeSupported("audio/webm")) {
+      if (MediaRecorder.isTypeSupported("audio/mp4")) mimeType = "audio/mp4";
+      else if (MediaRecorder.isTypeSupported("audio/ogg")) mimeType = "audio/ogg";
+    }
+
+    audioChunksRef.current = [];
+    const recorder = new MediaRecorder(stream, { mimeType });
+    mediaRecorderRef.current = recorder;
+
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        audioChunksRef.current.push(event.data);
+      }
+    };
+
+    recorder.onstop = () => {
+      const dur = Math.max(1, recordingSecondsRef.current);
+      if (audioChunksRef.current.length > 0) {
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        if (blob.size > 0) {
+          const newUrl = URL.createObjectURL(blob);
+          const newItem = { blob, url: newUrl, durationSec: dur };
+          residualRecordingsRef.current.push(newItem);
+          setResidualRecordings(prev => [
+            ...prev,
+            newItem
+          ]);
+        }
+      }
+      audioChunksRef.current = [];
+
+      if (isTransitioningRef.current) {
+        // Natychmiastowe przejście do kolejnego nagrania w locie z zachowaniem otwartego mikrofonu
+        isTransitioningRef.current = false;
+        if (mediaStreamRef.current && mediaStreamRef.current.active) {
+          startRecordingSegment(mediaStreamRef.current);
+        }
+      } else {
+        // Zakończenie całej sesji nagrywania
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach(track => track.stop());
+          mediaStreamRef.current = null;
+        }
+        setIsRecording(false);
+      }
+    };
+
+    recorder.start(500);
+    setIsRecording(true);
+    setRecordingSeconds(0);
+    recordingSecondsRef.current = 0;
+
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    timerIntervalRef.current = setInterval(() => {
+      setRecordingSeconds(prev => {
+        const next = prev + 1;
+        recordingSecondsRef.current = next;
+        return next;
+      });
+    }, 1000);
+  };
+
   const startRecording = async () => {
     setRecordingError(null);
     try {
@@ -314,54 +381,14 @@ export default function PlacProtokolPage() {
         throw new Error("Twoja przeglądarka nie obsługuje nagrywania dźwięku.");
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioChunksRef.current = [];
-
-      // Detect supported mimeType
-      let mimeType = "audio/webm";
-      if (!MediaRecorder.isTypeSupported("audio/webm")) {
-        if (MediaRecorder.isTypeSupported("audio/mp4")) mimeType = "audio/mp4";
-        else if (MediaRecorder.isTypeSupported("audio/ogg")) mimeType = "audio/ogg";
+      let stream = mediaStreamRef.current;
+      if (!stream || !stream.active) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
       }
 
-      const recorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        if (audioChunksRef.current.length > 0) {
-          const blob = new Blob(audioChunksRef.current, { type: mimeType });
-          if (blob.size > 0) {
-            const newUrl = URL.createObjectURL(blob);
-            setResidualRecordings(prev => [
-              ...prev,
-              { blob, url: newUrl, durationSec: Math.max(1, recordingSecondsRef.current) }
-            ]);
-          }
-        }
-        audioChunksRef.current = [];
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      recorder.start(500); // chunk every 500ms
-      setIsRecording(true);
-      setRecordingSeconds(0);
-      recordingSecondsRef.current = 0;
-
-      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-      timerIntervalRef.current = setInterval(() => {
-        setRecordingSeconds(prev => {
-          const next = prev + 1;
-          recordingSecondsRef.current = next;
-          return next;
-        });
-      }, 1000);
-
+      isTransitioningRef.current = false;
+      startRecordingSegment(stream);
     } catch (err: any) {
       console.error("Błąd dostępu do mikrofonu:", err);
       setRecordingError(err.message || "Brak dostępu do mikrofonu.");
@@ -376,26 +403,13 @@ export default function PlacProtokolPage() {
       try { navigator.vibrate(60); } catch (_) {}
     }
 
-    try {
-      mediaRecorderRef.current.requestData();
-      const currentChunks = [...audioChunksRef.current];
-      if (currentChunks.length > 0) {
-        const mimeType = mediaRecorderRef.current.mimeType || "audio/webm";
-        const blob = new Blob(currentChunks, { type: mimeType });
-        if (blob.size > 0) {
-          const newUrl = URL.createObjectURL(blob);
-          setResidualRecordings(prev => [
-            ...prev,
-            { blob, url: newUrl, durationSec: Math.max(1, recordingSecondsRef.current) }
-          ]);
-        }
-      }
-      audioChunksRef.current = [];
-      setRecordingSeconds(0);
-      recordingSecondsRef.current = 0;
-    } catch (err) {
-      console.error("Błąd podczas next recording:", err);
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
     }
+
+    isTransitioningRef.current = true;
+    mediaRecorderRef.current.stop();
   };
 
   // Kierowca klika ZAKOŃCZ: ostatnia pozycja jest zapisywana, mikrofon wyłączony
@@ -411,15 +425,20 @@ export default function PlacProtokolPage() {
       timerIntervalRef.current = null;
     }
 
+    isTransitioningRef.current = false;
     mediaRecorderRef.current.stop();
-    setIsRecording(false);
   };
 
   // Anulowanie bieżącej (niezapisanej jeszcze) pozycji
   const cancelCurrentRecording = () => {
+    isTransitioningRef.current = false;
+    audioChunksRef.current = [];
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      audioChunksRef.current = []; // Czyścimy, żeby onstop nic nie dodał
       mediaRecorderRef.current.stop();
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
     }
     setIsRecording(false);
     if (timerIntervalRef.current) {
@@ -431,6 +450,7 @@ export default function PlacProtokolPage() {
   };
 
   const deleteResidualRecording = (index: number) => {
+    residualRecordingsRef.current = residualRecordingsRef.current.filter((_, i) => i !== index);
     setResidualRecordings(prev => {
       const item = prev[index];
       if (item?.url) URL.revokeObjectURL(item.url);
@@ -439,9 +459,10 @@ export default function PlacProtokolPage() {
   };
 
   const clearAllRecordings = () => {
-    residualRecordings.forEach(r => {
+    residualRecordingsRef.current.forEach(r => {
       if (r.url) URL.revokeObjectURL(r.url);
     });
+    residualRecordingsRef.current = [];
     setResidualRecordings([]);
   };
 
@@ -500,6 +521,26 @@ export default function PlacProtokolPage() {
     setIsSubmitting(true);
     setSubmitStep("Inicjalizacja wysyłania protokołu...");
 
+    // Jeśli kierowca wciąż nagrywa w momencie kliknięcia Wyślij, zakończ nagranie
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      setSubmitStep("Zapisywanie trwającego nagrania...");
+      await new Promise<void>((resolve) => {
+        isTransitioningRef.current = false;
+        const rec = mediaRecorderRef.current;
+        if (rec) {
+          const oldOnStop = rec.onstop;
+          rec.onstop = (ev) => {
+            if (oldOnStop) (oldOnStop as any)(ev);
+            resolve();
+          };
+          rec.stop();
+        } else {
+          resolve();
+        }
+      });
+      await new Promise(r => setTimeout(r, 80));
+    }
+
     try {
       const selectedSite = sites.find(s => s.id === selectedSiteId);
       const siteName = selectedSite?.name || "Nieznana budowa";
@@ -512,7 +553,7 @@ export default function PlacProtokolPage() {
       let parsedTranscription: string = "";
 
       // Zbierz wszystkie nagrania z kreatora
-      const allRecordingsToProcess = [...residualRecordings];
+      const allRecordingsToProcess = [...residualRecordingsRef.current];
 
       // KROK 1 & 2: Upload i transkrypcja AI każdego nagrania osobno z uwzględnieniem reguł
       if (allRecordingsToProcess.length > 0) {
@@ -521,11 +562,14 @@ export default function PlacProtokolPage() {
 
         for (let i = 0; i < allRecordingsToProcess.length; i++) {
           const rec = allRecordingsToProcess[i];
+          const recMime = rec.blob.type || "audio/webm";
+          const ext = recMime.includes("mp4") ? "mp4" : recMime.includes("ogg") ? "ogg" : "webm";
+
           setSubmitStep(`Wysyłanie nagrania ${i + 1} z ${allRecordingsToProcess.length}...`);
           const timestamp = Date.now();
-          const storagePath = `protocol_audio_drafts/${selectedSiteId}_${user?.uid || "driver"}_${timestamp}_${i}.webm`;
+          const storagePath = `protocol_audio_drafts/${selectedSiteId}_${user?.uid || "driver"}_${timestamp}_${i}.${ext}`;
           const storageRef = ref(storage, storagePath);
-          await uploadBytes(storageRef, rec.blob);
+          await uploadBytes(storageRef, rec.blob, { contentType: recMime });
           const uploadedUrl = await getDownloadURL(storageRef);
           uploadedAudioUrls.push(uploadedUrl);
 
@@ -536,6 +580,7 @@ export default function PlacProtokolPage() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 audioUrl: uploadedUrl,
+                mimeType: recMime,
                 bossRules,
                 warehouseRules,
                 bossCategoryRules,

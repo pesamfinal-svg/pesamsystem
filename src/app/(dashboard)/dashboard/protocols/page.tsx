@@ -186,6 +186,7 @@ export default function ProtocolsHub() {
     const [isDriverDraftsModalOpen, setIsDriverDraftsModalOpen] = useState(false);
     const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
     const [loadedDraftAudioUrl, setLoadedDraftAudioUrl] = useState<string | null>(null);
+    const [loadedDraftAudioUrls, setLoadedDraftAudioUrls] = useState<string[]>([]);
     const [loadedDraftPhotos, setLoadedDraftPhotos] = useState<string[]>([]);
     const [isDeletingDraft, setIsDeletingDraft] = useState<string | null>(null);
 
@@ -1222,11 +1223,14 @@ export default function ProtocolsHub() {
             // 2. Oznaczamy szkic jako WCZYTANY
             if (loadedDraftId) {
                 try {
-                    if (loadedDraftAudioUrl) {
+                    const audiosToClean = loadedDraftAudioUrls.length > 0
+                        ? loadedDraftAudioUrls
+                        : (loadedDraftAudioUrl ? [loadedDraftAudioUrl] : []);
+                    for (const aUrl of audiosToClean) {
                         try {
-                            const audioRef = ref(storage, loadedDraftAudioUrl);
+                            const audioRef = ref(storage, aUrl);
                             await deleteObject(audioRef);
-                            console.log("Nagranie audio trwale usunięte z Firebase Storage.");
+                            console.log("Nagranie audio trwale usunięte z Firebase Storage:", aUrl);
                         } catch (audDelErr) {
                             console.warn("Błąd usuwania nagrania ze Storage:", audDelErr);
                         }
@@ -1242,6 +1246,7 @@ export default function ProtocolsHub() {
 
                     setLoadedDraftId(null);
                     setLoadedDraftAudioUrl(null);
+                    setLoadedDraftAudioUrls([]);
                     setLoadedDraftPhotos([]);
                 } catch (draftErr) {
                     console.error("Błąd usuwania szkicu kierowcy:", draftErr);
@@ -1441,6 +1446,7 @@ export default function ProtocolsHub() {
         setReturnResidualNotes(newResidualNotes);
         setLoadedDraftId(draft.docId);
         setLoadedDraftAudioUrl(draft.audioNoteUrl || null);
+        setLoadedDraftAudioUrls(draft.audioNoteUrls || (draft.audioNoteUrl ? [draft.audioNoteUrl] : []));
         setLoadedDraftPhotos(draft.photos || []);
         setIsDriverDraftsModalOpen(false);
         alert(`✅ Załadowano szkic kierowcy (${draft.driverName || 'Kierowca'})!\nWczytano ${mappedItems.length} pozycji sprzętu oraz ${mappedResiduals.length} pozycji resztek jako pozycje zwrotu.`);
@@ -1450,9 +1456,12 @@ export default function ProtocolsHub() {
         if (!confirm(`Czy na pewno chcesz bezpowrotnie usunąć ten szkic protokołu (budowa: ${draft.sourceName})? Pliki nagrań audio i zdjęcia zostaną trwale skasowane z serwera.`)) return;
         setIsDeletingDraft(draft.docId);
         try {
-            if (draft.audioNoteUrl) {
+            const audiosToDelete = draft.audioNoteUrls?.length > 0 
+                ? draft.audioNoteUrls 
+                : (draft.audioNoteUrl ? [draft.audioNoteUrl] : []);
+            for (const aUrl of audiosToDelete) {
                 try {
-                    const audioRef = ref(storage, draft.audioNoteUrl);
+                    const audioRef = ref(storage, aUrl);
                     await deleteObject(audioRef);
                 } catch (audErr) {
                     console.warn("Błąd usuwania pliku audio:", audErr);
@@ -1484,30 +1493,35 @@ export default function ProtocolsHub() {
     };
 
     const handleDeleteDraftAudioOnly = async (draft: any) => {
-        if (!confirm("Czy na pewno chcesz trwale usunąć plik nagrania audio z tego szkicu? Zwolnisz miejsce na serwerze.")) return;
+        if (!confirm("Czy na pewno chcesz trwale usunąć pliki nagrań audio z tego szkicu? Zwolnisz miejsce na serwerze.")) return;
         try {
-            if (draft.audioNoteUrl) {
+            const audiosToDelete = draft.audioNoteUrls?.length > 0 
+                ? draft.audioNoteUrls 
+                : (draft.audioNoteUrl ? [draft.audioNoteUrl] : []);
+            for (const aUrl of audiosToDelete) {
                 try {
-                    const audioRef = ref(storage, draft.audioNoteUrl);
+                    const audioRef = ref(storage, aUrl);
                     await deleteObject(audioRef);
                 } catch (audErr) {
                     console.warn("Błąd usuwania ze storage:", audErr);
                 }
-                try {
-                    await setDoc(doc(db, "driver_drafts", draft.docId), {
-                        audioNoteUrl: null,
-                        audioDeleted: true
-                    }, { merge: true });
-                } catch (_) {}
-                try {
-                    await setDoc(doc(db, "protocols", draft.docId), {
-                        audioNoteUrl: null,
-                        audioDeleted: true
-                    }, { merge: true });
-                } catch (_) {}
-                setDriverDrafts(prev => prev.map(d => d.docId === draft.docId ? { ...d, audioNoteUrl: null } : d));
-                alert("Plik nagrania audio został trwale usunięty.");
             }
+            try {
+                await setDoc(doc(db, "driver_drafts", draft.docId), {
+                    audioNoteUrl: null,
+                    audioNoteUrls: [],
+                    audioDeleted: true
+                }, { merge: true });
+            } catch (_) {}
+            try {
+                await setDoc(doc(db, "protocols", draft.docId), {
+                    audioNoteUrl: null,
+                    audioNoteUrls: [],
+                    audioDeleted: true
+                }, { merge: true });
+            } catch (_) {}
+            setDriverDrafts(prev => prev.map(d => d.docId === draft.docId ? { ...d, audioNoteUrl: null, audioNoteUrls: [] } : d));
+            alert("Pliki nagrań audio zostały trwale usunięte.");
         } catch (err: any) {
             alert("Błąd podczas usuwania nagrania: " + (err.message || err));
         }
@@ -2140,11 +2154,14 @@ export default function ProtocolsHub() {
 
             if (loadedDraftId) {
                 try {
-                    if (loadedDraftAudioUrl) {
+                    const audiosToClean = loadedDraftAudioUrls.length > 0
+                        ? loadedDraftAudioUrls
+                        : (loadedDraftAudioUrl ? [loadedDraftAudioUrl] : []);
+                    for (const aUrl of audiosToClean) {
                         try {
-                            const audioRef = ref(storage, loadedDraftAudioUrl);
+                            const audioRef = ref(storage, aUrl);
                             await deleteObject(audioRef);
-                            console.log("Nagranie audio trwale usunięte z Firebase Storage.");
+                            console.log("Nagranie audio trwale usunięte z Firebase Storage:", aUrl);
                         } catch (audDelErr) {
                             console.warn("Błąd usuwania nagrania ze Storage:", audDelErr);
                         }
@@ -2160,6 +2177,7 @@ export default function ProtocolsHub() {
 
                     setLoadedDraftId(null);
                     setLoadedDraftAudioUrl(null);
+                    setLoadedDraftAudioUrls([]);
                     setLoadedDraftPhotos([]);
                 } catch (draftErr) {
                     console.error("Błąd usuwania szkicu kierowcy:", draftErr);
@@ -5206,20 +5224,36 @@ export default function ProtocolsHub() {
                                             )}
 
                                             {/* Opcjonalny odsłuch nagrania z opcją usunięcia audio */}
-                                            {draft.audioNoteUrl && (
-                                                <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs text-slate-500 bg-slate-50/70 p-2.5 rounded-xl">
-                                                    <div className="flex items-center gap-2 flex-1 min-w-0">
-                                                        <span className="shrink-0 font-bold text-slate-600">🎙️ Nagranie:</span>
-                                                        <audio src={draft.audioNoteUrl} controls className="h-8 flex-1 max-w-sm" />
+                                            {(draft.audioNoteUrls?.length > 0 || draft.audioNoteUrl) && (
+                                                <div className="pt-2 border-t border-slate-100 text-xs text-slate-500 bg-slate-50/70 p-2.5 rounded-xl space-y-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <span className="font-bold text-slate-700 flex items-center gap-1.5">
+                                                            <span>🎙️</span>
+                                                            <span>
+                                                                {(draft.audioNoteUrls?.length || 0) > 1 
+                                                                    ? `Nagrania głosowe kierowcy (${draft.audioNoteUrls.length}):` 
+                                                                    : "Nagranie głosowe kierowcy:"}
+                                                            </span>
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleDeleteDraftAudioOnly(draft)}
+                                                            className="px-2.5 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-[11px] font-bold transition shrink-0"
+                                                            title="Usuń nagrania ze Storage"
+                                                        >
+                                                            🗑️ Usuń nagrania
+                                                        </button>
                                                     </div>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleDeleteDraftAudioOnly(draft)}
-                                                        className="px-2.5 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-[11px] font-bold transition shrink-0"
-                                                        title="Usuń samo nagranie ze Storage"
-                                                    >
-                                                        🗑️ Usuń nagranie
-                                                    </button>
+                                                    <div className="space-y-1.5">
+                                                        {(draft.audioNoteUrls?.length > 0 ? draft.audioNoteUrls : [draft.audioNoteUrl]).map((aUrl: string, aIdx: number) => (
+                                                            <div key={aIdx} className="flex items-center gap-2 bg-white p-1.5 rounded-lg border border-slate-200">
+                                                                <span className="text-[11px] font-mono font-bold text-purple-700 shrink-0 w-12">
+                                                                    Poz. #{aIdx + 1}:
+                                                                </span>
+                                                                <audio src={aUrl} controls className="h-7 flex-1 max-w-sm" />
+                                                            </div>
+                                                        ))}
+                                                    </div>
                                                 </div>
                                             )}
                                         </div>
