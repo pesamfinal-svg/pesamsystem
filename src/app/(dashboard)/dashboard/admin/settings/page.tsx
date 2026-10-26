@@ -13,6 +13,7 @@ interface SystemSettings {
     clsBossEmail: string; // Mail Szefa do powiadomień CLS
     closeoutEmailRecipients: string[]; // Lista maili do raportów zamknięcia budów
     isCloseoutSandboxMode: boolean; // NOWOŚĆ: Przełącznik trybu testowego
+    residualAlertRecipients: string[]; // Lista maili do alertów o naruszeniu reguł zwrotu AI
 }
 
 export default function SettingsPage() {
@@ -24,10 +25,12 @@ export default function SettingsPage() {
         clsDirectorEmail: "",
         clsBossEmail: "",
         closeoutEmailRecipients: [],
-        isCloseoutSandboxMode: true // Domyślnie włączony dla bezpieczeństwa testów
+        isCloseoutSandboxMode: true, // Domyślnie włączony dla bezpieczeństwa testów
+        residualAlertRecipients: []
     });
     const [newEmail, setNewEmail] = useState("");
     const [newCloseoutEmail, setNewCloseoutEmail] = useState("");
+    const [newResidualAlertEmail, setNewResidualAlertEmail] = useState("");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
 
@@ -52,7 +55,8 @@ export default function SettingsPage() {
                         clsDirectorEmail: data.clsDirectorEmail || "",
                         clsBossEmail: data.clsBossEmail || "",
                         closeoutEmailRecipients: data.closeoutEmailRecipients || [],
-                        isCloseoutSandboxMode: data.isCloseoutSandboxMode !== undefined ? data.isCloseoutSandboxMode : true
+                        isCloseoutSandboxMode: data.isCloseoutSandboxMode !== undefined ? data.isCloseoutSandboxMode : true,
+                        residualAlertRecipients: data.residualAlertRecipients || []
                     });
                 }
             } catch (e) {
@@ -97,6 +101,23 @@ export default function SettingsPage() {
 
     const handleRemoveCloseoutEmail = (emailToRemove: string) => {
         setSettings(prev => ({ ...prev, closeoutEmailRecipients: prev.closeoutEmailRecipients.filter(email => email !== emailToRemove) }));
+    };
+
+    const handleAddResidualAlertEmail = (e: React.FormEvent) => {
+        e.preventDefault();
+        const email = newResidualAlertEmail.trim().toLowerCase();
+        if (!email) return;
+
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) return alert("Wprowadź poprawny adres e-mail!");
+        if (settings.residualAlertRecipients?.includes(email)) return alert("Ten e-mail jest już na liście!");
+
+        setSettings(prev => ({ ...prev, residualAlertRecipients: [...(prev.residualAlertRecipients || []), email] }));
+        setNewResidualAlertEmail("");
+    };
+
+    const handleRemoveResidualAlertEmail = (emailToRemove: string) => {
+        setSettings(prev => ({ ...prev, residualAlertRecipients: (prev.residualAlertRecipients || []).filter(email => email !== emailToRemove) }));
     };
 
     const handleSaveSettings = async () => {
@@ -177,6 +198,56 @@ export default function SettingsPage() {
                                     <button type="button" onClick={() => handleRemoveCloseoutEmail(email)} className="text-red-500 hover:text-red-700 text-sm font-black">&times;</button>
                                 </span>
                             ))}
+                        </div>
+                    </div>
+
+                    {/* NOWOŚĆ: SEKCJA POWIADOMIEŃ O NARUSZENIACH REGUŁ ZWROTÓW (AI RESZTKI) */}
+                    <div className="space-y-4 pt-6 border-t">
+                        <div className="border-b pb-2 flex items-center justify-between">
+                            <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                                <span>🚨</span> Powiadomienia o naruszeniach reguł zwrotu (AI Resztki)
+                            </h3>
+                            <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full">
+                                Alert e-mail
+                            </span>
+                        </div>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            Adresy e-mail, na które system wyśle natychmiastowe powiadomienie, gdy kierowca w nagraniu lub zwrocie przekaże pozycje <b>łamiące reguły Szefa/Dyrekcji lub Magazynu</b> (np. otwarte worki powyżej 30 dni, odrzucone odpady, brak etykiet).
+                        </p>
+                        <form onSubmit={handleAddResidualAlertEmail} className="flex gap-3">
+                            <input
+                                type="text"
+                                placeholder="np. szef@pesam.pl lub magazyn@pesam.pl"
+                                value={newResidualAlertEmail}
+                                onChange={e => setNewResidualAlertEmail(e.target.value)}
+                                className="flex-1 p-3 border-2 rounded-xl text-sm outline-none focus:border-red-500 font-bold bg-slate-50"
+                            />
+                            <button
+                                type="submit"
+                                className="bg-red-600 hover:bg-red-700 text-white font-black text-xs px-6 rounded-xl shadow-md transition"
+                            >
+                                + Dodaj do listy
+                            </button>
+                        </form>
+                        <div className="flex flex-wrap gap-2 pt-2">
+                            {(settings.residualAlertRecipients || []).map(email => (
+                                <span
+                                    key={email}
+                                    className="bg-red-50 text-red-800 border border-red-200 text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-2 shadow-sm"
+                                >
+                                    {email}
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRemoveResidualAlertEmail(email)}
+                                        className="text-red-500 hover:text-red-700 text-sm font-black"
+                                    >
+                                        &times;
+                                    </button>
+                                </span>
+                            ))}
+                            {(!settings.residualAlertRecipients || settings.residualAlertRecipients.length === 0) && (
+                                <p className="text-xs text-slate-400 italic">Brak zdefiniowanych odbiorców alertów o naruszeniach reguł.</p>
+                            )}
                         </div>
                     </div>
 

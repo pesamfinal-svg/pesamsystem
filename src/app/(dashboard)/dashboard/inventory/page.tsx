@@ -242,6 +242,14 @@ export default function InventoryPage() {
     const [isLoadingRules, setIsLoadingRules] = useState(false);
     const [isSavingRules, setIsSavingRules] = useState(false);
 
+    // DYNAMICZNE KATEGORIE I PODKATEGORIE DLA RESZTEK BUDOWLANYCH
+    const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
+    const [newSubcategoryText, setNewSubcategoryText] = useState("");
+    const [isAddingCategory, setIsAddingCategory] = useState(false);
+    const [newCatName, setNewCatName] = useState("");
+    const [newCatIcon, setNewCatIcon] = useState("📦");
+    const [newCatDesc, setNewCatDesc] = useState("");
+
     const isUserAdmin = Boolean(
         user && (
             user.roleName?.toLowerCase() === "admin" ||
@@ -268,7 +276,11 @@ export default function InventoryPage() {
     const fetchRules = async () => {
         setIsLoadingRules(true);
         try {
-            const rulesSnap = await getDoc(doc(db, "settings", "residual_rules"));
+            const [rulesSnap, catSnap] = await Promise.all([
+                getDoc(doc(db, "settings", "residual_rules")),
+                getDoc(doc(db, "settings", "residual_categories"))
+            ]);
+
             if (rulesSnap.exists()) {
                 const data = rulesSnap.data();
                 setBossRulesText(data.bossRules || "");
@@ -284,6 +296,12 @@ export default function InventoryPage() {
                     updatedBy: data.warehouseUpdatedBy || ""
                 });
             }
+
+            if (catSnap.exists() && Array.isArray(catSnap.data().categories) && catSnap.data().categories.length > 0) {
+                setCategoriesList(catSnap.data().categories);
+            } else {
+                setCategoriesList(RESIDUAL_MAIN_CATEGORIES);
+            }
         } catch (err) {
             console.error("Błąd pobierania reguł residual_rules:", err);
         } finally {
@@ -295,6 +313,8 @@ export default function InventoryPage() {
         setIsRulesModalOpen(true);
         setSelectedRulesDepartment("RESIDUALS");
         setSelectedCategoryId("ALL");
+        setIsAddingCategory(false);
+        setNewSubcategoryText("");
         if (canManageBossRules) {
             setRulesTab("BOSS");
         } else if (canManageWarehouseRules) {
@@ -324,6 +344,74 @@ export default function InventoryPage() {
         }
     };
 
+    const handleAddSubcategory = (categoryId: string) => {
+        const text = newSubcategoryText.trim();
+        if (!text) return;
+        setCategoriesList(prev => prev.map(cat => {
+            if (cat.id !== categoryId) return cat;
+            if (cat.subcategories.includes(text)) {
+                alert("Ta podkategoria już istnieje w tej grupie!");
+                return cat;
+            }
+            return {
+                ...cat,
+                subcategories: [...cat.subcategories, text]
+            };
+        }));
+        setNewSubcategoryText("");
+    };
+
+    const handleRemoveSubcategory = (categoryId: string, subcategoryToRemove: string) => {
+        if (!confirm(`Czy na pewno chcesz usunąć podkategorię "${subcategoryToRemove}"?`)) return;
+        setCategoriesList(prev => prev.map(cat => {
+            if (cat.id !== categoryId) return cat;
+            return {
+                ...cat,
+                subcategories: cat.subcategories.filter(s => s !== subcategoryToRemove)
+            };
+        }));
+    };
+
+    const handleCreateCategory = () => {
+        const name = newCatName.trim();
+        if (!name) return alert("Podaj nazwę nowej kategorii!");
+        const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `kat-${Date.now()}`;
+        if (categoriesList.some(c => c.id === id || c.name.toLowerCase() === name.toLowerCase())) {
+            return alert("Kategoria o takiej nazwie już istnieje!");
+        }
+        const newCat: ResidualCategoryDef = {
+            id,
+            name,
+            icon: newCatIcon.trim() || "📦",
+            description: newCatDesc.trim() || `Kategoria materiałów: ${name}`,
+            subcategories: []
+        };
+        setCategoriesList(prev => [...prev, newCat]);
+        setSelectedCategoryId(id);
+        setIsAddingCategory(false);
+        setNewCatName("");
+        setNewCatDesc("");
+        setNewCatIcon("📦");
+    };
+
+    const handleDeleteCategory = (categoryId: string, categoryName: string) => {
+        if (!confirm(`Czy na pewno chcesz usunąć całą kategorię "${categoryName}" wraz ze wszystkimi jej podpozycjami i regułami?`)) return;
+        setCategoriesList(prev => prev.filter(c => c.id !== categoryId));
+        setBossCategoryRules(prev => {
+            const next = { ...prev };
+            delete next[categoryId];
+            return next;
+        });
+        setWarehouseCategoryRules(prev => {
+            const next = { ...prev };
+            delete next[categoryId];
+            return next;
+        });
+        if (selectedCategoryId === categoryId) {
+            setSelectedCategoryId("ALL");
+        }
+    };
+
     const handleSaveRules = async () => {
         setIsSavingRules(true);
         try {
@@ -349,7 +437,10 @@ export default function InventoryPage() {
                 updatePayload.warehouseUpdatedBy = updaterName;
             }
 
-            await setDoc(doc(db, "settings", "residual_rules"), updatePayload, { merge: true });
+            await Promise.all([
+                setDoc(doc(db, "settings", "residual_rules"), updatePayload, { merge: true }),
+                setDoc(doc(db, "settings", "residual_categories"), { categories: categoriesList }, { merge: true })
+            ]);
 
             if (canManageBossRules) {
                 setBossRulesMeta({ updatedAt: now, updatedBy: updaterName });
@@ -358,7 +449,7 @@ export default function InventoryPage() {
                 setWarehouseRulesMeta({ updatedAt: now, updatedBy: updaterName });
             }
 
-            alert("Wszystkie reguły (ogólne oraz dla poszczególnych kategorii) zostały pomyślnie zapisane!");
+            alert("Wszystkie reguły oraz kategorie i podkategorie zostały pomyślnie zapisane!");
             setIsRulesModalOpen(false);
         } catch (err) {
             console.error("Błąd zapisu reguł:", err);
@@ -3350,7 +3441,7 @@ export default function InventoryPage() {
 
             {/* MODAL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU - MODUŁOWY Z 12 KATEGORIAMI) */}
             {isRulesModalOpen && (() => {
-                const selectedCategoryObj = RESIDUAL_MAIN_CATEGORIES.find(c => c.id === selectedCategoryId);
+                const selectedCategoryObj = categoriesList.find(c => c.id === selectedCategoryId);
 
                 return (
                     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4 animate-fade-in">
@@ -3462,9 +3553,70 @@ export default function InventoryPage() {
                                 <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
                                     {/* Lewa kolumna: Lista 12 kategorii + Ogólne */}
                                     <div className="w-full md:w-80 border-r border-slate-200 bg-slate-50 overflow-y-auto p-3 space-y-1.5 shrink-0 max-h-[35vh] md:max-h-none">
-                                        <p className="text-[10px] font-black uppercase text-slate-400 px-2 py-1 tracking-wider">
-                                            Kategorie materiałów ({RESIDUAL_MAIN_CATEGORIES.length}):
-                                        </p>
+                                        <div className="flex items-center justify-between px-2 py-1">
+                                            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">
+                                                Kategorie materiałów ({categoriesList.length}):
+                                            </p>
+                                            {(canManageBossRules || canManageWarehouseRules) && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setIsAddingCategory(prev => !prev)}
+                                                    className="text-[10px] text-amber-700 hover:text-amber-900 font-bold bg-amber-100 hover:bg-amber-200 px-2 py-0.5 rounded transition flex items-center gap-1"
+                                                >
+                                                    <span>+</span> Dodaj
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {/* Formularz dodawania nowej kategorii głównej */}
+                                        {isAddingCategory && (
+                                            <div className="p-3 bg-white rounded-xl border-2 border-amber-400 shadow-md space-y-2 mb-2 animate-fade-in">
+                                                <p className="text-[11px] font-black text-slate-800 uppercase tracking-wide">
+                                                    ➕ Nowa Kategoria Główna
+                                                </p>
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="text"
+                                                        value={newCatIcon}
+                                                        onChange={e => setNewCatIcon(e.target.value)}
+                                                        placeholder="📦"
+                                                        maxLength={3}
+                                                        className="w-10 text-center p-1.5 border rounded-lg text-sm bg-slate-50 font-bold"
+                                                        title="Ikonka / Emoji kategorii"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={newCatName}
+                                                        onChange={e => setNewCatName(e.target.value)}
+                                                        placeholder="Nazwa kategorii (np. Dachówki)"
+                                                        className="flex-1 p-1.5 border rounded-lg text-xs bg-slate-50 font-bold text-slate-800 outline-none focus:border-amber-500"
+                                                    />
+                                                </div>
+                                                <input
+                                                    type="text"
+                                                    value={newCatDesc}
+                                                    onChange={e => setNewCatDesc(e.target.value)}
+                                                    placeholder="Krótki opis materiałów..."
+                                                    className="w-full p-1.5 border rounded-lg text-xs bg-slate-50 text-slate-600 outline-none focus:border-amber-500"
+                                                />
+                                                <div className="flex justify-end gap-1.5 pt-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setIsAddingCategory(false)}
+                                                        className="text-[11px] px-2.5 py-1 text-slate-500 hover:text-slate-800 font-bold rounded"
+                                                    >
+                                                        Anuluj
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleCreateCategory}
+                                                        className="text-[11px] px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-black rounded-lg shadow-sm transition"
+                                                    >
+                                                        Utwórz
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
 
                                         {/* Karta: Ogólne wytyczne działu */}
                                         <button
@@ -3485,8 +3637,8 @@ export default function InventoryPage() {
                                             )}
                                         </button>
 
-                                        {/* 12 Głównych Kategorii */}
-                                        {RESIDUAL_MAIN_CATEGORIES.map(cat => {
+                                        {/* Lista Kategorii (dynamiczna) */}
+                                        {categoriesList.map(cat => {
                                             const hasRule = Boolean(
                                                 rulesTab === "BOSS"
                                                     ? bossCategoryRules[cat.id]?.trim()
@@ -3510,7 +3662,9 @@ export default function InventoryPage() {
                                                         <div className="truncate text-xs">
                                                             <p className="font-bold truncate">{cat.name}</p>
                                                             <p className={`text-[10px] truncate ${isSelected ? "text-slate-300" : "text-slate-400"}`}>
-                                                                {cat.subcategories.slice(0, 2).join(", ")}...
+                                                                {cat.subcategories && cat.subcategories.length > 0
+                                                                    ? `${cat.subcategories.slice(0, 2).join(", ")}...`
+                                                                    : "Brak podpozycji"}
                                                             </p>
                                                         </div>
                                                     </div>
@@ -3527,13 +3681,25 @@ export default function InventoryPage() {
                                     {/* Prawa kolumna: Edytor wybranej reguły */}
                                     <div className="flex-1 p-5 sm:p-6 overflow-y-auto space-y-4 bg-white">
                                         {selectedCategoryObj ? (
-                                            /* Widok konkretnej kategorii z 12 */
+                                            /* Widok konkretnej kategorii */
                                             <div className="space-y-4">
                                                 <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-slate-100">
                                                     <div className="flex items-center gap-3">
                                                         <span className="text-3xl p-2 rounded-2xl bg-slate-100">{selectedCategoryObj.icon}</span>
                                                         <div>
-                                                            <h3 className="text-base sm:text-lg font-black text-slate-900">{selectedCategoryObj.name}</h3>
+                                                            <div className="flex items-center gap-2">
+                                                                <h3 className="text-base sm:text-lg font-black text-slate-900">{selectedCategoryObj.name}</h3>
+                                                                {(canManageBossRules || canManageWarehouseRules) && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleDeleteCategory(selectedCategoryObj.id, selectedCategoryObj.name)}
+                                                                        className="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded transition"
+                                                                        title="Usuń tę kategorię"
+                                                                    >
+                                                                        🗑️ Usuń kategorię
+                                                                    </button>
+                                                                )}
+                                                            </div>
                                                             <p className="text-xs text-slate-500">{selectedCategoryObj.description}</p>
                                                         </div>
                                                     </div>
@@ -3546,18 +3712,59 @@ export default function InventoryPage() {
                                                     </span>
                                                 </div>
 
-                                                {/* Podpozycje (subcategories) objęte tą grupą */}
-                                                <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5 space-y-2">
-                                                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block">
-                                                        Podpozycje przypisywane do tej kategorii ({selectedCategoryObj.subcategories.length}):
-                                                    </label>
-                                                    <div className="flex flex-wrap gap-1.5">
+                                                {/* Podpozycje (subcategories) objęte tą grupą z możliwością dodawania i usuwania */}
+                                                <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5 space-y-2.5">
+                                                    <div className="flex items-center justify-between flex-wrap gap-1">
+                                                        <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block">
+                                                            Podpozycje przypisywane do tej kategorii ({selectedCategoryObj.subcategories.length}):
+                                                        </label>
+                                                        <span className="text-[11px] text-slate-400 font-medium">Kliknij × aby usunąć lub wpisz nową poniżej</span>
+                                                    </div>
+
+                                                    <div className="flex flex-wrap gap-1.5 items-center">
                                                         {selectedCategoryObj.subcategories.map(sub => (
-                                                            <span key={sub} className="text-xs bg-white text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 font-medium shadow-2xs">
-                                                                • {sub}
+                                                            <span key={sub} className="text-xs bg-white text-slate-800 pl-2.5 pr-1.5 py-1 rounded-lg border border-slate-200 font-medium shadow-2xs flex items-center gap-1.5 group hover:border-red-300 transition">
+                                                                <span>• {sub}</span>
+                                                                {(canManageBossRules || canManageWarehouseRules) && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleRemoveSubcategory(selectedCategoryObj.id, sub)}
+                                                                        className="text-slate-400 hover:text-red-600 font-black rounded-full hover:bg-red-50 w-4 h-4 flex items-center justify-center transition text-xs"
+                                                                        title={`Usuń podkategorię "${sub}"`}
+                                                                    >
+                                                                        &times;
+                                                                    </button>
+                                                                )}
                                                             </span>
                                                         ))}
+
+                                                        {/* Input dodawania nowej podkategorii */}
+                                                        {(canManageBossRules || canManageWarehouseRules) && (
+                                                            <div className="flex items-center gap-1">
+                                                                <input
+                                                                    type="text"
+                                                                    placeholder="+ Nowa podkategoria..."
+                                                                    value={newSubcategoryText}
+                                                                    onChange={e => setNewSubcategoryText(e.target.value)}
+                                                                    onKeyDown={e => {
+                                                                        if (e.key === 'Enter') {
+                                                                            e.preventDefault();
+                                                                            handleAddSubcategory(selectedCategoryObj.id);
+                                                                        }
+                                                                    }}
+                                                                    className="text-xs px-2.5 py-1 rounded-lg border border-dashed border-slate-300 bg-white placeholder-slate-400 text-slate-800 outline-none focus:border-amber-500 font-medium w-44"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleAddSubcategory(selectedCategoryObj.id)}
+                                                                    className="text-xs bg-slate-900 hover:bg-slate-800 text-white font-bold px-2.5 py-1 rounded-lg transition"
+                                                                >
+                                                                    + Dodaj
+                                                                </button>
+                                                            </div>
+                                                        )}
                                                     </div>
+
                                                     <p className="text-[11px] text-slate-400 italic">
                                                         Gdy kierowca wymieni w nagraniu którąś z powyższych rzeczy, AI dopasuje ją do tej kategorii i zastosuje poniższą regułę.
                                                     </p>

@@ -3,6 +3,8 @@ import { NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
 import { RESIDUAL_MAIN_CATEGORIES } from '@/lib/constants/residualCategories';
 
+import { adminDb } from '@/lib/firebase/admin';
+
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GCP_PROJECT_ID || 'pesam-system-81165',
@@ -33,8 +35,19 @@ export async function POST(req: Request) {
         const arrayBuffer = await audioResponse.arrayBuffer();
         const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
+        // Pobierz aktualne kategorie (jeśli były zmodyfikowane w Ustawieniach / Kreatorze)
+        let activeCategories = RESIDUAL_MAIN_CATEGORIES;
+        try {
+            const catDoc = await adminDb.doc("settings/residual_categories").get();
+            if (catDoc.exists && Array.isArray(catDoc.data()?.categories) && catDoc.data()!.categories.length > 0) {
+                activeCategories = catDoc.data()!.categories;
+            }
+        } catch (e) {
+            console.warn("Błąd pobierania residual_categories w API, używam domyślnych:", e);
+        }
+
         // Sformatuj reguły per kategoria
-        const categoryRulesFormatted = RESIDUAL_MAIN_CATEGORIES.map(cat => {
+        const categoryRulesFormatted = activeCategories.map(cat => {
             const bRule = bossCategoryRules[cat.id]?.trim();
             const wRule = warehouseCategoryRules[cat.id]?.trim();
             if (!bRule && !wRule) return null;
@@ -43,7 +56,7 @@ ${bRule ? `Wytyczne Szefa: ${bRule}` : ''}
 ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
         }).filter(Boolean).join('\n\n');
 
-        const categoriesList = RESIDUAL_MAIN_CATEGORIES.map(c => 
+        const categoriesList = activeCategories.map(c => 
             `- "${c.name}" (przykłady podkategorii: ${c.subcategories.slice(0, 5).join(', ')})`
         ).join('\n');
 

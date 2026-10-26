@@ -661,6 +661,32 @@ export default function PlacProtokolPage() {
 
       await addDoc(collection(db, "driver_drafts"), protocolDocData);
 
+      // Sprawdzamy czy AI wykryło naruszenie reguł lub odpady i wysyłamy alert e-mail
+      const violations = parsedResiduals.filter((r: any) => r.rulesCompliant === false || r.isWaste);
+      if (violations.length > 0) {
+        fetch("/api/residual-violation-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            siteName: siteName,
+            driverName: driverFullName,
+            documentDate: new Date().toISOString().split("T")[0],
+            voiceTranscription: parsedTranscription || undefined,
+            violations: violations.map((v: any) => ({
+              name: v.name,
+              category: v.category,
+              subcategory: v.subcategory,
+              quantity: v.quantity,
+              unit: v.unit,
+              ruleNotes: v.ruleNotes || "Pozycja oznaczona jako niezgodna z regułami",
+              isWaste: v.isWaste
+            }))
+          })
+        }).catch(emailErr => {
+          console.warn("Błąd wysyłki e-maila o naruszeniu reguł w tle:", emailErr);
+        });
+      }
+
       setSubmitSuccess(true);
     } catch (err: any) {
       console.error("Błąd podczas zapisywania protokołu:", err);
