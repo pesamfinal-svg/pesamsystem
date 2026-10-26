@@ -18,7 +18,7 @@ interface Site {
 }
 interface InventoryItem {
     id: string; name: string; type: "UNIQUE" | "BULK"; subType?: "MAIN_CAT" | "SUB_ITEM" | "MANUAL"; inventoryNumber: string;
-    category: string; availableQuantity: number; totalQuantity: number; unit?: string;
+    category: string; subcategory?: string; availableQuantity: number; totalQuantity: number; unit?: string;
     currentLocation: string; status: string; allocations: Record<string, number>;
     lastOperationDate?: string; // <-- Ochrona chronologiczna
     isPermanent?: boolean;
@@ -47,6 +47,8 @@ interface ReturnCartItem {
     isPermanent?: boolean;
     isResidual?: boolean;
     isWaste?: boolean;
+    category?: string;
+    subcategory?: string;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -67,6 +69,8 @@ interface PaperReturnCartItem {
     isTemporary?: boolean;
     isResidual?: boolean;
     isWaste?: boolean;
+    category?: string;
+    subcategory?: string;
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -1404,6 +1408,8 @@ export default function ProtocolsHub() {
             isPermanent: true,
             isWaste: Boolean(res.isWaste),
             name: res.name || "Resztka budowlana",
+            category: res.category || "Pozostałości budowlane",
+            subcategory: res.subcategory || "",
             type: "BULK",
             inventoryNumber: res.isWaste ? "ODPAD" : "RESZTKI",
             unit: res.unit || "szt.",
@@ -1662,11 +1668,21 @@ export default function ProtocolsHub() {
             const suggestions: ResidualDuplicateSuggestion[] = [];
             for (const ri of residualsToCheck) {
                 const cleanNew = normalizeString(ri.name);
+                const newWords = cleanNew.split(/\s+/).filter(w => w.length >= 3);
                 const matches = existingResiduals.filter(ex => {
                     const cleanEx = normalizeString(ex.name);
-                    return cleanEx === cleanNew ||
-                        (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) ||
-                        (cleanEx.length >= 4 && cleanNew.includes(cleanEx));
+                    if (cleanEx === cleanNew) return true;
+                    if (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) return true;
+                    if (cleanEx.length >= 4 && cleanNew.includes(cleanEx)) return true;
+                    if (newWords.length >= 2) {
+                        const matchingWords = newWords.filter(w => cleanEx.includes(w));
+                        if (matchingWords.length >= 2 && matchingWords.length >= newWords.length * 0.6) return true;
+                    }
+                    if (ri.subcategory && normalizeString(ri.subcategory).length >= 4) {
+                        const cleanSub = normalizeString(ri.subcategory);
+                        if (cleanEx.includes(cleanSub) || (ex.subcategory && normalizeString(ex.subcategory) === cleanSub)) return true;
+                    }
+                    return false;
                 });
                 if (matches.length > 0) {
                     suggestions.push({ cartId: ri.cartItemId, name: ri.name, receivedQty: ri.receivedQty, unit: ri.unit || 'szt.', matches });
@@ -1831,8 +1847,8 @@ export default function ProtocolsHub() {
                                 type: "BULK",
                                 subType: "MANUAL",
                                 inventoryNumber: "RESZTKI",
-                                category: "Pozostałości budowlane",
-                                subcategory: "Materiały otwarte / Resztki",
+                                category: cartItem.category || "Pozostałości budowlane",
+                                subcategory: cartItem.subcategory || "Materiały otwarte / Resztki",
                                 unit: cartItem.unit || "szt.",
                                 availableQuantity: cartItem.receivedQty,
                                 totalQuantity: cartItem.receivedQty,
@@ -2535,11 +2551,21 @@ export default function ProtocolsHub() {
                 const input = acceptInputs[ri.inventoryId];
                 if (!input || input.finalStatus === 'odpad_utylizacja') continue;
                 const cleanNew = normalizeString(ri.name);
+                const newWords = cleanNew.split(/\s+/).filter(w => w.length >= 3);
                 const matches = existingResiduals.filter((ex: InventoryItem) => {
                     const cleanEx = normalizeString(ex.name);
-                    return cleanEx === cleanNew ||
-                        (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) ||
-                        (cleanEx.length >= 4 && cleanNew.includes(cleanEx));
+                    if (cleanEx === cleanNew) return true;
+                    if (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) return true;
+                    if (cleanEx.length >= 4 && cleanNew.includes(cleanEx)) return true;
+                    if (newWords.length >= 2) {
+                        const matchingWords = newWords.filter(w => cleanEx.includes(w));
+                        if (matchingWords.length >= 2 && matchingWords.length >= newWords.length * 0.6) return true;
+                    }
+                    if ((ri as any).subcategory && normalizeString((ri as any).subcategory).length >= 4) {
+                        const cleanSub = normalizeString((ri as any).subcategory);
+                        if (cleanEx.includes(cleanSub) || (ex.subcategory && normalizeString(ex.subcategory) === cleanSub)) return true;
+                    }
+                    return false;
                 });
                 if (matches.length > 0) {
                     suggestions.push({ cartId: ri.inventoryId, name: ri.name, receivedQty: input.receivedQty, unit: ri.unit || 'szt.', matches });
@@ -2694,8 +2720,8 @@ export default function ProtocolsHub() {
                                 type: "BULK",
                                 subType: "MANUAL",
                                 inventoryNumber: "RESZTKI",
-                                category: "Pozostałości budowlane",
-                                subcategory: "Materiały otwarte / Resztki",
+                                category: item.category || "Pozostałości budowlane",
+                                subcategory: item.subcategory || "Materiały otwarte / Resztki",
                                 unit: item.unit || "szt.",
                                 availableQuantity: workerInput.receivedQty,
                                 totalQuantity: workerInput.receivedQty,
