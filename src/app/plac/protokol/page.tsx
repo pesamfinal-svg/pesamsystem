@@ -87,9 +87,11 @@ export default function PlacProtokolPage() {
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const recordingSecondsRef = useRef(0);
 
-  // Reguły AI dla resztek (Szefa i Magazynu)
+  // Reguły AI dla resztek (Szefa i Magazynu - ogólne i per kategoria)
   const [bossRules, setBossRules] = useState<string>("");
   const [warehouseRules, setWarehouseRules] = useState<string>("");
+  const [bossCategoryRules, setBossCategoryRules] = useState<Record<string, string>>({});
+  const [warehouseCategoryRules, setWarehouseCategoryRules] = useState<Record<string, string>>({});
 
   // MediaRecorder refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -139,6 +141,8 @@ export default function PlacProtokolPage() {
           const rData = rulesSnap.data();
           if (rData.bossRules) setBossRules(rData.bossRules);
           if (rData.warehouseRules) setWarehouseRules(rData.warehouseRules);
+          if (rData.bossCategoryRules) setBossCategoryRules(rData.bossCategoryRules);
+          if (rData.warehouseCategoryRules) setWarehouseCategoryRules(rData.warehouseCategoryRules);
         }
 
         const loadedSites: Site[] = sitesSnap.docs
@@ -533,7 +537,9 @@ export default function PlacProtokolPage() {
               body: JSON.stringify({
                 audioUrl: uploadedUrl,
                 bossRules,
-                warehouseRules
+                warehouseRules,
+                bossCategoryRules,
+                warehouseCategoryRules
               })
             });
             if (aiResponse.ok) {

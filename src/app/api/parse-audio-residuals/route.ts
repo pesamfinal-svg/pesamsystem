@@ -1,6 +1,7 @@
 // src/app/api/parse-audio-residuals/route.ts
 import { NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
+import { RESIDUAL_MAIN_CATEGORIES } from '@/lib/constants/residualCategories';
 
 const ai = new GoogleGenAI({
     vertexai: true,
@@ -12,7 +13,13 @@ export const maxDuration = 60;
 
 export async function POST(req: Request) {
     try {
-        const { audioUrl, bossRules, warehouseRules } = await req.json();
+        const {
+            audioUrl,
+            bossRules,
+            warehouseRules,
+            bossCategoryRules = {},
+            warehouseCategoryRules = {}
+        } = await req.json();
 
         if (!audioUrl) {
             return NextResponse.json({ error: "Brak linku do pliku audio" }, { status: 400 });
@@ -26,24 +33,45 @@ export async function POST(req: Request) {
         const arrayBuffer = await audioResponse.arrayBuffer();
         const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
+        // Sformatuj reguły per kategoria
+        const categoryRulesFormatted = RESIDUAL_MAIN_CATEGORIES.map(cat => {
+            const bRule = bossCategoryRules[cat.id]?.trim();
+            const wRule = warehouseCategoryRules[cat.id]?.trim();
+            if (!bRule && !wRule) return null;
+            return `--- Kategoria: ${cat.name} (${cat.id}) ---
+${bRule ? `Wytyczne Szefa: ${bRule}` : ''}
+${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
+        }).filter(Boolean).join('\n\n');
+
+        const categoriesList = RESIDUAL_MAIN_CATEGORIES.map(c => 
+            `- "${c.name}" (przykłady podkategorii: ${c.subcategories.slice(0, 5).join(', ')})`
+        ).join('\n');
+
         const systemInstruction = `
             Jesteś inżynierem budowlanym i pracownikiem magazynu firmy PESAM.
             Twoim zadaniem jest odsłuchanie notatki głosowej nagranej przez kierowcę na budowie.
             Kierowca wymienia resztki budowlane, pozostałości materiałów, chemię budowlaną, profile, worki z klejem/gipsem, końcówki kabli itp., które zabiera z budowy do magazynu lub do utylizacji.
 
-            ${bossRules ? `REGUŁY I WYTYCZNE SZEFA / DYREKCJI FIRMY PESAM:\n"""${bossRules}"""\n` : ''}
-            ${warehouseRules ? `REGUŁY I WYTYCZNE MAGAZYNU GŁÓWNEGO PESAM:\n"""${warehouseRules}"""\n` : ''}
+            OFICJALNYCH 12 GŁÓWNYCH KATEGORII W SYSTEMIE PESAM (MUSISZ DOKŁADNIE DOPASOWAĆ DO JEDNEJ Z NICH):
+            ${categoriesList}
+
+            ${bossRules ? `OGÓLNE REGUŁY I WYTYCZNE SZEFA / DYREKCJI FIRMY PESAM:\n"""${bossRules}"""\n` : ''}
+            ${warehouseRules ? `OGÓLNE REGUŁY I WYTYCZNE MAGAZYNU GŁÓWNEGO PESAM:\n"""${warehouseRules}"""\n` : ''}
+
+            ${categoryRulesFormatted ? `SZCZEGÓŁOWE REGUŁY DLA POSZCZEGÓLNYCH KATEGORII:\n${categoryRulesFormatted}\n` : ''}
 
             Zadanie:
             1. Zapisz dokładną, pełną transkrypcję mowy na tekst ('transcription') - dokładnie to, co kierowca powiedział w notatce.
             2. Wyodrębnij z nagrania wszystkie wymienione pozycje materiałowe ('residuals').
             Dla każdej pozycji ustal:
             1. 'name' - czytelna, standardowa polska nazwa materiału (np. 'Worek kleju do siatki', 'Profile sufitowe CD60 3m', 'Resztka farby białej gruntującej')
-            2. 'quantity' - liczba sztuk, opakowań, worków, metrów (jeśli nie podano precyzyjnie liczby, przyjmij 1)
-            3. 'unit' - jednostka miary: 'szt.', 'worek', 'opak.', 'mb', 'kg', 'm²', 'litr', 'wiaderko'
-            4. 'isWaste' - wartość boolean: true jeśli kierowca mówi o śmieciach, zniszczonych odpadach, resztkach nienadających się do użycia; false jeśli materiał jest pełnowartościowy / użyteczny do ponownego wykorzystania.
-            5. 'rulesCompliant' - wartość boolean: true jeśli materiał spełnia reguły Szefa i Magazynu (lub gdy nie ma żadnych przeciwwskazań/zastrzeżeń); false jeśli narusza jakąkolwiek regułę Szefa lub Magazynu (np. zniszczony, za krótki, otwarty, zakazany).
-            6. 'ruleNotes' - zwięzły komentarz oceny reguł (np. "Zgodne z regułami", "Niezgodne z regułą szefa: chemia bez daty", "Niezgodne z regułą magazynu: kabel poniżej minimalnej długości").
+            2. 'category' - nazwa dokładnie jednej z 12 powyższych głównych kategorii (np. 'Kleje i Zaprawy', 'Pustaki, Bloczki i Cegły', 'Płyty GK i Profile' itd.)
+            3. 'subcategory' - najbardziej pasująca podkategoria (np. 'Klej do siatki i styropianu', 'Bloczek gazobeton / termobet', 'Profile sufitowe CD60')
+            4. 'quantity' - liczba sztuk, opakowań, worków, metrów (jeśli nie podano precyzyjnie liczby, przyjmij 1)
+            5. 'unit' - jednostka miary: 'szt.', 'worek', 'opak.', 'mb', 'kg', 'm²', 'litr', 'wiaderko', 'paleta', 'krąg'
+            6. 'isWaste' - wartość boolean: true jeśli kierowca mówi o śmieciach, zniszczonych odpadach, resztkach nienadających się do użycia; false jeśli materiał jest pełnowartościowy / użyteczny do ponownego wykorzystania.
+            7. 'rulesCompliant' - wartość boolean: true jeśli materiał spełnia reguły ogólne oraz reguły swojej kategorii; false jeśli narusza jakąkolwiek regułę Szefa lub Magazynu.
+            8. 'ruleNotes' - zwięzły komentarz oceny reguł (np. "Zgodne z regułami", "Niezgodne z regułą dla Kleje i Zaprawy: otwarty powyżej miesiąca", "Niezgodne z regułą magazynu: kabel poniżej 15m").
         `;
 
         const response = await ai.models.generateContent({
@@ -52,7 +80,7 @@ export async function POST(req: Request) {
                 {
                     role: 'user',
                     parts: [
-                        { text: "Przeanalizuj nagranie audio kierowcy z budowy, sporządź pełną transkrypcję, wyodrębnij listę resztek i zweryfikuj zgodność z regułami Szefa oraz Magazynu." },
+                        { text: "Przeanalizuj nagranie audio kierowcy z budowy, sporządź pełną transkrypcję, przypisz każdą pozycję do jednej z 12 głównych kategorii PESAM i zweryfikuj zgodność z regułami Szefa oraz Magazynu." },
                         {
                             inlineData: {
                                 mimeType: "audio/webm",
@@ -75,13 +103,21 @@ export async function POST(req: Request) {
                         },
                         residuals: {
                             type: Type.ARRAY,
-                            description: "Lista rozpoznanych resztek budowlanych z nagrania wraz z weryfikacją reguł.",
+                            description: "Lista rozpoznanych resztek budowlanych z nagrania skategoryzowana do 12 głównych grup wraz z weryfikacją reguł.",
                             items: {
                                 type: Type.OBJECT,
                                 properties: {
                                     name: {
                                         type: Type.STRING,
                                         description: "Nazwa materiału lub resztki budowlanej."
+                                    },
+                                    category: {
+                                        type: Type.STRING,
+                                        description: "Dokładna nazwa jednej z 12 głównych kategorii PESAM."
+                                    },
+                                    subcategory: {
+                                        type: Type.STRING,
+                                        description: "Konkretna podkategoria materiału."
                                     },
                                     quantity: {
                                         type: Type.NUMBER,
@@ -104,7 +140,7 @@ export async function POST(req: Request) {
                                         description: "Ocena lub uwagi na podstawie reguł Szefa i Magazynu."
                                     }
                                 },
-                                required: ["name", "quantity", "unit", "isWaste", "rulesCompliant", "ruleNotes"]
+                                required: ["name", "category", "subcategory", "quantity", "unit", "isWaste", "rulesCompliant", "ruleNotes"]
                             }
                         }
                     },

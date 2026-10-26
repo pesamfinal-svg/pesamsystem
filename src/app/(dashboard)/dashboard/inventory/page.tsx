@@ -6,6 +6,7 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
+import { RESIDUAL_MAIN_CATEGORIES, ResidualCategoryDef } from "@/lib/constants/residualCategories";
 import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal";
 
 // --- INTERFEJSY ---
@@ -115,14 +116,7 @@ const DEFAULT_CATEGORY_TREE: Record<string, string[]> = {
         "Niwelator laserowy obrotowy",
         "Dalmierz laserowy"
     ],
-    "Pozostałości budowlane": [
-        "Worki z zaprawą / klejem",
-        "Płyty GK / Regipsy",
-        "Profile i listwy",
-        "Pianki, silikony i uszczelniacze",
-        "Farby i grunty",
-        "Inne pozostałości"
-    ]
+    "Pozostałości budowlane": RESIDUAL_MAIN_CATEGORIES.map(c => c.name)
 };
 
 const INITIAL_FORM_STATE: Partial<InventoryItem> = {
@@ -237,9 +231,13 @@ export default function InventoryPage() {
     // PANEL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU)
     const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
     const [rulesTab, setRulesTab] = useState<"BOSS" | "WAREHOUSE">("BOSS");
+    const [selectedRulesDepartment, setSelectedRulesDepartment] = useState<"RESIDUALS" | "EQUIPMENT" | "SCAFFOLDING" | "FLEET">("RESIDUALS");
+    const [selectedCategoryId, setSelectedCategoryId] = useState<string>("ALL"); // "ALL" = ogólne wytyczne działu, lub np. "kleje"
     const [bossRulesText, setBossRulesText] = useState("");
+    const [bossCategoryRules, setBossCategoryRules] = useState<Record<string, string>>({});
     const [bossRulesMeta, setBossRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
     const [warehouseRulesText, setWarehouseRulesText] = useState("");
+    const [warehouseCategoryRules, setWarehouseCategoryRules] = useState<Record<string, string>>({});
     const [warehouseRulesMeta, setWarehouseRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
     const [isLoadingRules, setIsLoadingRules] = useState(false);
     const [isSavingRules, setIsSavingRules] = useState(false);
@@ -274,11 +272,13 @@ export default function InventoryPage() {
             if (rulesSnap.exists()) {
                 const data = rulesSnap.data();
                 setBossRulesText(data.bossRules || "");
+                setWarehouseRulesText(data.warehouseRules || "");
+                setBossCategoryRules(data.bossCategoryRules || {});
+                setWarehouseCategoryRules(data.warehouseCategoryRules || {});
                 setBossRulesMeta({
                     updatedAt: data.bossUpdatedAt || "",
                     updatedBy: data.bossUpdatedBy || ""
                 });
-                setWarehouseRulesText(data.warehouseRules || "");
                 setWarehouseRulesMeta({
                     updatedAt: data.warehouseUpdatedAt || "",
                     updatedBy: data.warehouseUpdatedBy || ""
@@ -293,12 +293,35 @@ export default function InventoryPage() {
 
     const handleOpenRulesModal = () => {
         setIsRulesModalOpen(true);
+        setSelectedRulesDepartment("RESIDUALS");
+        setSelectedCategoryId("ALL");
         if (canManageBossRules) {
             setRulesTab("BOSS");
         } else if (canManageWarehouseRules) {
             setRulesTab("WAREHOUSE");
         }
         fetchRules();
+    };
+
+    const updateCurrentCategoryRule = (text: string) => {
+        if (selectedCategoryId === "ALL") {
+            if (rulesTab === "BOSS") setBossRulesText(text);
+            else setWarehouseRulesText(text);
+        } else {
+            if (rulesTab === "BOSS") {
+                setBossCategoryRules(prev => ({ ...prev, [selectedCategoryId]: text }));
+            } else {
+                setWarehouseCategoryRules(prev => ({ ...prev, [selectedCategoryId]: text }));
+            }
+        }
+    };
+
+    const getCurrentRuleValue = () => {
+        if (selectedCategoryId === "ALL") {
+            return rulesTab === "BOSS" ? bossRulesText : warehouseRulesText;
+        } else {
+            return (rulesTab === "BOSS" ? bossCategoryRules[selectedCategoryId] : warehouseCategoryRules[selectedCategoryId]) || "";
+        }
     };
 
     const handleSaveRules = async () => {
@@ -309,16 +332,19 @@ export default function InventoryPage() {
                 ? `${user.firstName} ${user.lastName}`
                 : (user?.email || "Użytkownik");
 
-            const updatePayload: Record<string, any> = {};
+            const updatePayload: Record<string, any> = {
+                bossRules: bossRulesText.trim(),
+                warehouseRules: warehouseRulesText.trim(),
+                bossCategoryRules,
+                warehouseCategoryRules
+            };
 
             if (canManageBossRules) {
-                updatePayload.bossRules = bossRulesText.trim();
                 updatePayload.bossUpdatedAt = now;
                 updatePayload.bossUpdatedBy = updaterName;
             }
 
             if (canManageWarehouseRules) {
-                updatePayload.warehouseRules = warehouseRulesText.trim();
                 updatePayload.warehouseUpdatedAt = now;
                 updatePayload.warehouseUpdatedBy = updaterName;
             }
@@ -332,7 +358,7 @@ export default function InventoryPage() {
                 setWarehouseRulesMeta({ updatedAt: now, updatedBy: updaterName });
             }
 
-            alert("Reguły zostały pomyślnie zapisane!");
+            alert("Wszystkie reguły (ogólne oraz dla poszczególnych kategorii) zostały pomyślnie zapisane!");
             setIsRulesModalOpen(false);
         } catch (err) {
             console.error("Błąd zapisu reguł:", err);
@@ -3322,167 +3348,322 @@ export default function InventoryPage() {
                 </div>
             )}
 
-            {/* MODAL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU) */}
-            {isRulesModalOpen && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
-                        {/* Nagłówek modalu */}
-                        <div className="px-6 py-5 bg-gradient-to-r from-slate-900 via-slate-800 to-amber-950 text-white flex justify-between items-center">
-                            <div>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-2xl">📜</span>
-                                    <h2 className="text-xl font-black tracking-tight">Reguły AI: Resztki Budowlane i Zwroty</h2>
+            {/* MODAL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU - MODUŁOWY Z 12 KATEGORIAMI) */}
+            {isRulesModalOpen && (() => {
+                const selectedCategoryObj = RESIDUAL_MAIN_CATEGORIES.find(c => c.id === selectedCategoryId);
+
+                return (
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4 animate-fade-in">
+                        <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[94vh] flex flex-col overflow-hidden border border-slate-200">
+                            {/* Nagłówek modalu */}
+                            <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-slate-800 to-amber-950 text-white flex justify-between items-center">
+                                <div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-2xl">📜</span>
+                                        <h2 className="text-lg sm:text-xl font-black tracking-tight">Kreator Reguł AI dla Zwrotów i Resztek</h2>
+                                    </div>
+                                    <p className="text-xs text-amber-200/80 mt-0.5">
+                                        Wybierz dział i kategorię materiału, aby zdefiniować wytyczne weryfikacji dla AI
+                                    </p>
                                 </div>
-                                <p className="text-xs text-amber-200/80 mt-1">
-                                    Wytyczne dla sztucznej inteligencji analizującej nagrania kierowców przy zwrocie resztek
-                                </p>
+                                <button
+                                    onClick={() => setIsRulesModalOpen(false)}
+                                    className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-lg font-bold transition"
+                                >
+                                    ✕
+                                </button>
                             </div>
-                            <button
-                                onClick={() => setIsRulesModalOpen(false)}
-                                className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-lg font-bold transition"
-                            >
-                                ✕
-                            </button>
-                        </div>
 
-                        {/* Zakładki: Szef vs Magazyn */}
-                        <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2">
-                            <button
-                                onClick={() => setRulesTab("BOSS")}
-                                className={`px-5 py-3 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
-                                    rulesTab === "BOSS"
-                                        ? "bg-white text-amber-700 border-amber-600 shadow-sm"
-                                        : "text-slate-500 hover:text-slate-800 border-transparent"
-                                }`}
-                            >
-                                <span>👔</span>
-                                <span>Reguły Szefa (Dyrekcja)</span>
-                                {canManageBossRules ? (
-                                    <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
-                                ) : (
-                                    <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
-                                )}
-                            </button>
-
-                            <button
-                                onClick={() => setRulesTab("WAREHOUSE")}
-                                className={`px-5 py-3 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
-                                    rulesTab === "WAREHOUSE"
-                                        ? "bg-white text-blue-700 border-blue-600 shadow-sm"
-                                        : "text-slate-500 hover:text-slate-800 border-transparent"
-                                }`}
-                            >
-                                <span>📦</span>
-                                <span>Reguły Magazynu</span>
-                                {canManageWarehouseRules ? (
-                                    <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
-                                ) : (
-                                    <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
-                                )}
-                            </button>
-                        </div>
-
-                        {/* Treść modalu */}
-                        <div className="p-6 overflow-y-auto flex-1 space-y-4">
-                            {isLoadingRules ? (
-                                <div className="py-12 text-center text-slate-400 font-bold animate-pulse">
-                                    Wczytywanie reguł z bazy PESAM...
-                                </div>
-                            ) : rulesTab === "BOSS" ? (
-                                <div className="space-y-3">
-                                    <div className="flex items-center justify-between text-xs">
-                                        <label className="font-bold text-slate-700">
-                                            Zasady i kryteria Dyrekcji (Szefa):
-                                        </label>
-                                        {bossRulesMeta.updatedAt && (
-                                            <span className="text-[11px] text-slate-400">
-                                                Ostatnia zmiana: <strong>{bossRulesMeta.updatedBy || "—"}</strong> ({bossRulesMeta.updatedAt})
-                                            </span>
-                                        )}
-                                    </div>
-
-                                    <textarea
-                                        value={bossRulesText}
-                                        onChange={(e) => setBossRulesText(e.target.value)}
-                                        disabled={!canManageBossRules}
-                                        rows={10}
-                                        placeholder={`Wpisz zasady Szefa/Dyrekcji, np.:\n- Nie przyjmujemy worków gipsu/kleju otwartych powyżej 30 dni lub zbrylonych.\n- Resztki profili i rur poniżej 1 metra traktować jako odpad/złom bez odzysku.\n- Chemia budowlana musi mieć czytelną etykietę i datę ważności.\n- Wszystkie odpady niebezpieczne (farby, rozpuszczalniki) zgłaszać z oznaczeniem utylizacji.`}
-                                        className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
-                                            canManageBossRules
-                                                ? "border-slate-300 focus:ring-2 focus:ring-amber-500 bg-white"
-                                                : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
-                                        }`}
-                                    />
-
-                                    {!canManageBossRules && (
-                                        <p className="text-xs text-amber-700 bg-amber-50 p-3 rounded-xl border border-amber-200">
-                                            🔒 Nie posiadasz uprawnienia <strong>Reguły AI: Zarządzanie wytycznymi Szefa</strong>. Widzisz te reguły w trybie podglądu.
-                                        </p>
-                                    )}
-                                </div>
-                            ) : (
-                                <div className="space-y-3">
-                                    <div className="flex items-center justify-between text-xs">
-                                        <label className="font-bold text-slate-700">
-                                            Zasady techniczne Magazynu Głównego:
-                                        </label>
-                                        {warehouseRulesMeta.updatedAt && (
-                                            <span className="text-[11px] text-slate-400">
-                                                Ostatnia zmiana: <strong>{warehouseRulesMeta.updatedBy || "—"}</strong> ({warehouseRulesMeta.updatedAt})
-                                            </span>
-                                        )}
-                                    </div>
-
-                                    <textarea
-                                        value={warehouseRulesText}
-                                        onChange={(e) => setWarehouseRulesText(e.target.value)}
-                                        disabled={!canManageWarehouseRules}
-                                        rows={10}
-                                        placeholder={`Wpisz zasady Magazynu, np.:\n- Kable elektryczne muszą być zwinięte w krążki i mieć min. 15m długości.\n- Płyty GK przyjmujemy wyłącznie na paletach w nienaruszonych paczkach min. 5 szt.\n- Puste europalety układać w stosy po 15 sztuk.\n- Chemia budowlana płynna w wiaderkach musi być szczelnie zamknięta.`}
-                                        className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
-                                            canManageWarehouseRules
-                                                ? "border-slate-300 focus:ring-2 focus:ring-blue-500 bg-white"
-                                                : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
-                                        }`}
-                                    />
-
-                                    {!canManageWarehouseRules && (
-                                        <p className="text-xs text-blue-700 bg-blue-50 p-3 rounded-xl border border-blue-200">
-                                            🔒 Nie posiadasz uprawnienia <strong>Reguły AI: Zarządzanie wytycznymi Magazynu</strong>. Widzisz te reguły w trybie podglądu.
-                                        </p>
-                                    )}
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Stopka modalu */}
-                        <div className="px-6 py-4 border-t bg-slate-50 flex justify-between items-center">
-                            <p className="text-xs text-slate-500">
-                                Zapisane wytyczne są automatycznie uwzględniane przez AI podczas weryfikacji resztek.
-                            </p>
-                            <div className="flex gap-2">
+                            {/* 1. PASEK WYBORU DZIAŁU / OBSZARU SYSTEMU (MODUŁOWOŚĆ) */}
+                            <div className="bg-slate-950 px-6 py-2.5 flex items-center gap-2 overflow-x-auto border-b border-slate-800 text-xs font-bold scrollbar-thin">
+                                <span className="text-slate-400 text-[10px] uppercase tracking-wider mr-1 shrink-0">Dział:</span>
                                 <button
                                     type="button"
-                                    onClick={() => setIsRulesModalOpen(false)}
-                                    className="px-5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-sm transition"
+                                    onClick={() => setSelectedRulesDepartment("RESIDUALS")}
+                                    className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 shrink-0 transition ${
+                                        selectedRulesDepartment === "RESIDUALS"
+                                            ? "bg-amber-500 text-slate-950 font-black shadow-md"
+                                            : "text-slate-300 hover:bg-slate-800"
+                                    }`}
                                 >
-                                    Zamknij
+                                    <span>🧱</span> Pozostałości budowlane
                                 </button>
-                                {(canManageBossRules || canManageWarehouseRules) && (
+                                <button
+                                    type="button"
+                                    disabled
+                                    className="px-3 py-1.5 rounded-xl flex items-center gap-1.5 text-slate-500 bg-slate-900/40 opacity-60 cursor-not-allowed shrink-0"
+                                    title="Moduł w przygotowaniu"
+                                >
+                                    <span>🔧</span> Narzędzia (Wkrótce)
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled
+                                    className="px-3 py-1.5 rounded-xl flex items-center gap-1.5 text-slate-500 bg-slate-900/40 opacity-60 cursor-not-allowed shrink-0"
+                                    title="Moduł w przygotowaniu"
+                                >
+                                    <span>🏗️</span> Rusztowania (Wkrótce)
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled
+                                    className="px-3 py-1.5 rounded-xl flex items-center gap-1.5 text-slate-500 bg-slate-900/40 opacity-60 cursor-not-allowed shrink-0"
+                                    title="Moduł w przygotowaniu"
+                                >
+                                    <span>🚗</span> Flota (Wkrótce)
+                                </button>
+                            </div>
+
+                            {/* 2. ZAKŁADKI RÓL: SZEF VS MAGAZYN */}
+                            <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-2.5 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setRulesTab("BOSS")}
+                                    className={`px-5 py-2.5 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
+                                        rulesTab === "BOSS"
+                                            ? "bg-white text-amber-700 border-amber-600 shadow-sm"
+                                            : "text-slate-500 hover:text-slate-800 border-transparent"
+                                    }`}
+                                >
+                                    <span>👔</span>
+                                    <span>Reguły Szefa (Dyrekcja)</span>
+                                    {canManageBossRules ? (
+                                        <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
+                                    ) : (
+                                        <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
+                                    )}
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setRulesTab("WAREHOUSE")}
+                                    className={`px-5 py-2.5 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
+                                        rulesTab === "WAREHOUSE"
+                                            ? "bg-white text-blue-700 border-blue-600 shadow-sm"
+                                            : "text-slate-500 hover:text-slate-800 border-transparent"
+                                    }`}
+                                >
+                                    <span>📦</span>
+                                    <span>Reguły Magazynu</span>
+                                    {canManageWarehouseRules ? (
+                                        <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
+                                    ) : (
+                                        <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
+                                    )}
+                                </button>
+                            </div>
+
+                            {/* 3. CIAŁO MODALU: DWUKOLUMNOWY UKŁAD (KATEGORIE + EDYTOR) */}
+                            {isLoadingRules ? (
+                                <div className="py-20 text-center text-slate-400 font-bold animate-pulse flex-1 flex items-center justify-center">
+                                    Wczytywanie reguł z bazy PESAM...
+                                </div>
+                            ) : (
+                                <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+                                    {/* Lewa kolumna: Lista 12 kategorii + Ogólne */}
+                                    <div className="w-full md:w-80 border-r border-slate-200 bg-slate-50 overflow-y-auto p-3 space-y-1.5 shrink-0 max-h-[35vh] md:max-h-none">
+                                        <p className="text-[10px] font-black uppercase text-slate-400 px-2 py-1 tracking-wider">
+                                            Kategorie materiałów ({RESIDUAL_MAIN_CATEGORIES.length}):
+                                        </p>
+
+                                        {/* Karta: Ogólne wytyczne działu */}
+                                        <button
+                                            type="button"
+                                            onClick={() => setSelectedCategoryId("ALL")}
+                                            className={`w-full text-left p-3 rounded-xl transition flex items-center justify-between border ${
+                                                selectedCategoryId === "ALL"
+                                                    ? "bg-gradient-to-r from-amber-500 to-orange-500 text-white border-amber-600 shadow-md font-bold"
+                                                    : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                                            }`}
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-base">📋</span>
+                                                <span className="text-xs">Ogólne zasady działu</span>
+                                            </div>
+                                            {(rulesTab === "BOSS" ? bossRulesText : warehouseRulesText)?.trim() && (
+                                                <span className={`w-2.5 h-2.5 rounded-full ${selectedCategoryId === "ALL" ? "bg-white" : "bg-emerald-500"}`} title="Zdefiniowano regułę ogólną" />
+                                            )}
+                                        </button>
+
+                                        {/* 12 Głównych Kategorii */}
+                                        {RESIDUAL_MAIN_CATEGORIES.map(cat => {
+                                            const hasRule = Boolean(
+                                                rulesTab === "BOSS"
+                                                    ? bossCategoryRules[cat.id]?.trim()
+                                                    : warehouseCategoryRules[cat.id]?.trim()
+                                            );
+                                            const isSelected = selectedCategoryId === cat.id;
+
+                                            return (
+                                                <button
+                                                    key={cat.id}
+                                                    type="button"
+                                                    onClick={() => setSelectedCategoryId(cat.id)}
+                                                    className={`w-full text-left p-2.5 rounded-xl transition flex items-center justify-between border ${
+                                                        isSelected
+                                                            ? "bg-slate-900 text-white border-slate-950 shadow-md font-bold"
+                                                            : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2.5 min-w-0">
+                                                        <span className="text-lg">{cat.icon}</span>
+                                                        <div className="truncate text-xs">
+                                                            <p className="font-bold truncate">{cat.name}</p>
+                                                            <p className={`text-[10px] truncate ${isSelected ? "text-slate-300" : "text-slate-400"}`}>
+                                                                {cat.subcategories.slice(0, 2).join(", ")}...
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    {hasRule && (
+                                                        <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-300 px-1.5 py-0.5 rounded font-black shrink-0">
+                                                            ✓ Reguła
+                                                        </span>
+                                                    )}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Prawa kolumna: Edytor wybranej reguły */}
+                                    <div className="flex-1 p-5 sm:p-6 overflow-y-auto space-y-4 bg-white">
+                                        {selectedCategoryObj ? (
+                                            /* Widok konkretnej kategorii z 12 */
+                                            <div className="space-y-4">
+                                                <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-slate-100">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="text-3xl p-2 rounded-2xl bg-slate-100">{selectedCategoryObj.icon}</span>
+                                                        <div>
+                                                            <h3 className="text-base sm:text-lg font-black text-slate-900">{selectedCategoryObj.name}</h3>
+                                                            <p className="text-xs text-slate-500">{selectedCategoryObj.description}</p>
+                                                        </div>
+                                                    </div>
+                                                    <span className={`text-xs px-3 py-1 rounded-xl font-bold border ${
+                                                        rulesTab === "BOSS"
+                                                            ? "bg-amber-50 text-amber-800 border-amber-200"
+                                                            : "bg-blue-50 text-blue-800 border-blue-200"
+                                                    }`}>
+                                                        {rulesTab === "BOSS" ? "👔 Wytyczna Szefa / Dyrekcji" : "📦 Wytyczna Magazynu"}
+                                                    </span>
+                                                </div>
+
+                                                {/* Podpozycje (subcategories) objęte tą grupą */}
+                                                <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5 space-y-2">
+                                                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block">
+                                                        Podpozycje przypisywane do tej kategorii ({selectedCategoryObj.subcategories.length}):
+                                                    </label>
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {selectedCategoryObj.subcategories.map(sub => (
+                                                            <span key={sub} className="text-xs bg-white text-slate-700 px-2.5 py-1 rounded-lg border border-slate-200 font-medium shadow-2xs">
+                                                                • {sub}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                    <p className="text-[11px] text-slate-400 italic">
+                                                        Gdy kierowca wymieni w nagraniu którąś z powyższych rzeczy, AI dopasuje ją do tej kategorii i zastosuje poniższą regułę.
+                                                    </p>
+                                                </div>
+
+                                                {/* Textarea reguły */}
+                                                <div className="space-y-1.5">
+                                                    <div className="flex items-center justify-between text-xs">
+                                                        <label className="font-bold text-slate-800">
+                                                            Treść reguły {rulesTab === "BOSS" ? "Szefa" : "Magazynu"} dla: <span className="text-amber-700">{selectedCategoryObj.name}</span>
+                                                        </label>
+                                                    </div>
+
+                                                    <textarea
+                                                        value={getCurrentRuleValue()}
+                                                        onChange={(e) => updateCurrentCategoryRule(e.target.value)}
+                                                        disabled={rulesTab === "BOSS" ? !canManageBossRules : !canManageWarehouseRules}
+                                                        rows={6}
+                                                        placeholder={`Wpisz szczegółowe wytyczne dla kategorii ${selectedCategoryObj.name}, np.:\n- Warunki przyjęcia na magazyn (np. tylko pełne lub szczelnie zabezpieczone worki)...\n- Dopuszczalny stan (np. max 1 miesiąc od otwarcia, brak zbryleń)...\n- Kiedy traktować jako odpad/złom do utylizacji...`}
+                                                        className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
+                                                            (rulesTab === "BOSS" ? canManageBossRules : canManageWarehouseRules)
+                                                                ? "border-slate-300 focus:ring-2 focus:ring-amber-500 bg-white"
+                                                                : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
+                                                        }`}
+                                                    />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            /* Widok ogólnych wytycznych dla całego działu */
+                                            <div className="space-y-4">
+                                                <div className="pb-3 border-b border-slate-100">
+                                                    <h3 className="text-base sm:text-lg font-black text-slate-900 flex items-center gap-2">
+                                                        <span>📋</span> Ogólne Zasady Działu: Pozostałości Budowlane
+                                                    </h3>
+                                                    <p className="text-xs text-slate-500 mt-0.5">
+                                                        Te zasady są nadrzędne i obowiązują dla wszystkich zwracanych z budowy materiałów i odpadów.
+                                                    </p>
+                                                </div>
+
+                                                <div className="space-y-1.5">
+                                                    <div className="flex items-center justify-between text-xs">
+                                                        <label className="font-bold text-slate-800">
+                                                            Ogólna wytyczna {rulesTab === "BOSS" ? "Dyrekcji (Szefa)" : "Magazynu"}:
+                                                        </label>
+                                                        {(rulesTab === "BOSS" ? bossRulesMeta.updatedAt : warehouseRulesMeta.updatedAt) && (
+                                                            <span className="text-[11px] text-slate-400">
+                                                                Ostatnia zmiana: <strong>{rulesTab === "BOSS" ? bossRulesMeta.updatedBy : warehouseRulesMeta.updatedBy}</strong> ({rulesTab === "BOSS" ? bossRulesMeta.updatedAt : warehouseRulesMeta.updatedAt})
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    <textarea
+                                                        value={getCurrentRuleValue()}
+                                                        onChange={(e) => updateCurrentCategoryRule(e.target.value)}
+                                                        disabled={rulesTab === "BOSS" ? !canManageBossRules : !canManageWarehouseRules}
+                                                        rows={7}
+                                                        placeholder={`Wpisz ogólne zasady wspólne dla wszystkich resztek, np.:\n- Wszystkie materiały muszą być posegregowane i zabezpieczone przed deszczem.\n- Odpady niebezpieczne (farby, rozpuszczalniki) zgłaszać z oznaczeniem utylizacji.\n- Każda zwracana resztka ma być zważona lub policzona w miarę możliwości.`}
+                                                        className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
+                                                            (rulesTab === "BOSS" ? canManageBossRules : canManageWarehouseRules)
+                                                                ? "border-slate-300 focus:ring-2 focus:ring-amber-500 bg-white"
+                                                                : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
+                                                        }`}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Komunikat o braku uprawnień */}
+                                        {((rulesTab === "BOSS" && !canManageBossRules) || (rulesTab === "WAREHOUSE" && !canManageWarehouseRules)) && (
+                                            <p className="text-xs text-amber-800 bg-amber-50 p-3 rounded-xl border border-amber-200">
+                                                🔒 Tryb podglądu. Nie posiadasz uprawnienia do edycji wytycznych dla roli: <strong>{rulesTab === "BOSS" ? "Szef / Dyrekcja" : "Magazyn"}</strong>.
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Stopka modalu */}
+                            <div className="px-6 py-4 border-t bg-slate-50 flex justify-between items-center flex-wrap gap-2">
+                                <p className="text-xs text-slate-500">
+                                    Wytyczne są automatycznie przekazywane modelowi AI analizującemu nagrania kierowców.
+                                </p>
+                                <div className="flex gap-2">
                                     <button
                                         type="button"
-                                        onClick={handleSaveRules}
-                                        disabled={isSavingRules}
-                                        className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white font-black text-sm shadow-md active:scale-95 transition disabled:opacity-50"
+                                        onClick={() => setIsRulesModalOpen(false)}
+                                        className="px-5 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold text-sm transition"
                                     >
-                                        {isSavingRules ? "Zapisywanie..." : "💾 Zapisz Reguły"}
+                                        Zamknij
                                     </button>
-                                )}
+                                    {(canManageBossRules || canManageWarehouseRules) && (
+                                        <button
+                                            type="button"
+                                            onClick={handleSaveRules}
+                                            disabled={isSavingRules}
+                                            className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white font-black text-sm shadow-md active:scale-95 transition disabled:opacity-50"
+                                        >
+                                            {isSavingRules ? "Zapisywanie..." : "💾 Zapisz Wszystkie Reguły"}
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            )}
+                );
+            })()}
         </div>
     );
 }
