@@ -1430,11 +1430,11 @@ export default function ProtocolsHub() {
             rulesCompliant: res.rulesCompliant,
             ruleNotes: res.ruleNotes,
             type: "BULK",
-            inventoryNumber: res.isWaste ? "ODPAD" : "RESZTKI",
+            inventoryNumber: "RESZTKI",
             unit: res.unit || "szt.",
             maxQty: 999999,
             returnQty: Number(res.quantity) || 1,
-            declaredStatus: res.isWaste ? "odpad_utylizacja" : "sprawne",
+            declaredStatus: "sprawne",
             accessories: [],
             isReturningMainItem: true
         }));
@@ -2235,7 +2235,7 @@ export default function ProtocolsHub() {
 
             initialInputs[i.inventoryId] = {
                 receivedQty: i.declaredQty,
-                finalStatus: i.declaredStatus || "sprawne",
+                finalStatus: i.isResidual ? "sprawne" : (i.declaredStatus || "sprawne"),
                 notes: "",
                 createClaim: false,
                 verifiedAccessories: verAcc,
@@ -2589,8 +2589,19 @@ export default function ProtocolsHub() {
                 const cleanNewCat = normalizeString(ri.category || "");
                 const cleanNewSub = normalizeString((ri as any).subcategory || "");
 
+                const matchesStem = (w1: string, w2: string) => {
+                    if (w1 === w2) return true;
+                    if (w1.length >= 4 && w2.includes(w1)) return true;
+                    if (w2.length >= 4 && w1.includes(w2)) return true;
+                    if (w1.length >= 4 && w2.length >= 4) {
+                        return w1.slice(0, 4) === w2.slice(0, 4);
+                    }
+                    return false;
+                };
+
                 const matches = existingResiduals.filter((ex: InventoryItem) => {
                     const cleanEx = normalizeString(ex.name);
+                    const exWords = cleanEx.split(/\s+/).filter(w => w.length >= 3);
                     const cleanExCat = normalizeString(ex.category || "");
                     const cleanExSub = normalizeString(ex.subcategory || "");
 
@@ -2599,32 +2610,19 @@ export default function ProtocolsHub() {
                     if (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) return true;
                     if (cleanEx.length >= 4 && cleanNew.includes(cleanEx)) return true;
 
-                    // 2. Wspólne słowa w nazwie
-                    if (newWords.length >= 2) {
-                        const matchingWords = newWords.filter(w => cleanEx.includes(w));
-                        if (matchingWords.length >= 2 && matchingWords.length >= newWords.length * 0.5) return true;
-                    }
+                    // 2. Wspólne słowa lub rdzenie słów w języku polskim (np. "kleju" vs "klej", "bloczków" vs "bloczek")
+                    const hasCommonStem = newWords.some(nw => 
+                        exWords.some(ew => matchesStem(nw, ew))
+                    );
+                    if (hasCommonStem) return true;
 
                     // 3. Dopasowanie po podkategorii (np. "Klej do wełny" lub "Bloczek gazobeton")
                     if (cleanNewSub && cleanExSub && cleanNewSub.length >= 3 && cleanNewSub === cleanExSub) return true;
                     if (cleanNewSub && cleanNewSub.length >= 4 && (cleanEx.includes(cleanNewSub) || cleanExSub.includes(cleanNewSub))) return true;
                     if (cleanExSub && cleanExSub.length >= 4 && (cleanNew.includes(cleanExSub) || cleanNewSub.includes(cleanExSub))) return true;
 
-                    // 4. Ta sama kategoria główna + słowo kluczowe
+                    // 4. Ta sama kategoria główna (np. obie pozycje w "Kleje i Zaprawy" lub "Pustaki, Bloczki i Cegły")
                     if (cleanNewCat && cleanExCat && cleanNewCat === cleanExCat && cleanNewCat !== "pozostalosci budowlane") {
-                        const hasMatchingWord = newWords.some(w => w.length >= 4 && cleanEx.includes(w));
-                        if (hasMatchingWord) return true;
-                    }
-
-                    // 5. Główne rdzenie materiałów budowlanych (klej, bloczek, tynk, gładź, grunt, folia, pianka, siatka)
-                    const commonKeyWords = newWords.filter(w => w.length >= 4 && cleanEx.includes(w));
-                    if (commonKeyWords.length >= 1 && (
-                        commonKeyWords.includes("klej") || commonKeyWords.includes("bloczek") || 
-                        commonKeyWords.includes("grunt") || commonKeyWords.includes("folia") || 
-                        commonKeyWords.includes("siatka") || commonKeyWords.includes("gladź") || 
-                        commonKeyWords.includes("gladzi") || commonKeyWords.includes("tynk") || 
-                        commonKeyWords.includes("pianka")
-                    )) {
                         return true;
                     }
 
@@ -5604,7 +5602,16 @@ export default function ProtocolsHub() {
                                                                                     />
                                                                                     <span className="text-[10px] text-amber-700 font-bold whitespace-nowrap">✏️ Edytuj nazwę</span>
                                                                                 </div>
-                                                                                {item.isResidual && <span className="text-[9px] bg-amber-200 text-amber-950 px-2 py-0.5 rounded font-black uppercase border border-amber-400">🧱 Resztki (AI)</span>}
+                                                                                {item.isResidual && (
+                                                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                                                        <span className="text-[9px] bg-amber-200 text-amber-950 px-2 py-0.5 rounded font-black uppercase border border-amber-400">🧱 Resztki (AI)</span>
+                                                                                        {(item.rulesCompliant === false || item.isWaste) && (
+                                                                                            <span className="text-[9px] bg-red-100 text-red-800 px-2 py-0.5 rounded font-bold border border-red-300">
+                                                                                                ⚠️ {item.ruleNotes || "Niezgodne z regułami"}
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                )}
                                                                                 {item.isNewManual && !item.isResidual && <span className="text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Dopisany Ręczny</span>}
                                                                             </div>
                                                                         ) : (
@@ -5674,6 +5681,31 @@ export default function ProtocolsHub() {
                                                                         {!item.isNewManual && (
                                                                             <span className="text-[9px] text-slate-400 block ml-14">Max na budowie: {maxAllowed} {item.unit || "szt."}</span>
                                                                         )}
+                                                                    </div>
+                                                                )}
+
+                                                                {/* WYBÓR STATUSU / PRZEZNACZENIA DLA RESZTEK BUDOWLANYCH */}
+                                                                {item.isResidual && (
+                                                                    <div className="flex items-center gap-2">
+                                                                        <label className="text-xs font-bold text-slate-600">Przeznaczenie:</label>
+                                                                        <select
+                                                                            value={inputState.finalStatus || "sprawne"}
+                                                                            onChange={(e) => {
+                                                                                const val = e.target.value;
+                                                                                setAcceptInputs({
+                                                                                    ...acceptInputs,
+                                                                                    [item.inventoryId]: { ...inputState, finalStatus: val }
+                                                                                });
+                                                                            }}
+                                                                            className={`p-1.5 border rounded-lg text-xs font-black outline-none transition cursor-pointer shadow-xs ${
+                                                                                inputState.finalStatus === "odpad_utylizacja"
+                                                                                    ? "bg-red-50 text-red-800 border-red-300"
+                                                                                    : "bg-emerald-50 text-emerald-800 border-emerald-300"
+                                                                            }`}
+                                                                        >
+                                                                            <option value="sprawne">🧱 Przyjmij na stan (Resztka do użycia)</option>
+                                                                            <option value="odpad_utylizacja">🗑️ Odpad / Utylizacja (Wyrzuć)</option>
+                                                                        </select>
                                                                     </div>
                                                                 )}
 
