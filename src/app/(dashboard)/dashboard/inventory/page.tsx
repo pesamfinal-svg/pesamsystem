@@ -412,6 +412,60 @@ export default function InventoryPage() {
         }
     };
 
+    // SZYBKA ZMIANA KATEGORII I PODKATEGORII RESZTEK BEZPOŚREDNIO W TABELI
+    const [savingItemId, setSavingItemId] = useState<string | null>(null);
+
+    const handleQuickCategoryChange = async (itemId: string, newCategory: string) => {
+        try {
+            setSavingItemId(itemId);
+            const targetCatObj = categoriesList.find(c => c.name === newCategory);
+            const validSubs = targetCatObj?.subcategories || [];
+            const currentItem = items.find(i => i.id === itemId);
+            const newSub = validSubs.includes(currentItem?.subcategory || "") ? currentItem?.subcategory : "";
+
+            await updateDoc(doc(db, "inventory", itemId), {
+                category: newCategory,
+                subcategory: newSub || "",
+                isResidual: true,
+                updatedAt: new Date().toISOString()
+            });
+
+            setItems(prev => prev.map(i => i.id === itemId ? {
+                ...i,
+                category: newCategory,
+                subcategory: newSub || "",
+                isResidual: true
+            } : i));
+        } catch (err: any) {
+            console.error("Błąd aktualizacji kategorii:", err);
+            alert("Błąd zapisu kategorii: " + (err?.message || err));
+        } finally {
+            setSavingItemId(null);
+        }
+    };
+
+    const handleQuickSubcategoryChange = async (itemId: string, newSubcategory: string) => {
+        try {
+            setSavingItemId(itemId);
+            await updateDoc(doc(db, "inventory", itemId), {
+                subcategory: newSubcategory,
+                isResidual: true,
+                updatedAt: new Date().toISOString()
+            });
+
+            setItems(prev => prev.map(i => i.id === itemId ? {
+                ...i,
+                subcategory: newSubcategory,
+                isResidual: true
+            } : i));
+        } catch (err: any) {
+            console.error("Błąd aktualizacji podkategorii:", err);
+            alert("Błąd zapisu podkategorii: " + (err?.message || err));
+        } finally {
+            setSavingItemId(null);
+        }
+    };
+
     const handleSaveRules = async () => {
         setIsSavingRules(true);
         try {
@@ -1619,11 +1673,23 @@ export default function InventoryPage() {
                 </div>
                 <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
-                        <tr><th className="p-4 w-20">Zdjęcie</th><th className="p-4">Nazwa materiału</th><th className="p-4 text-center">Kod</th><th className="p-4 text-center">Magazyn / Razem</th><th className="p-4 text-right">Akcje</th></tr>
+                        <tr>
+                            <th className="p-4 w-20">Zdjęcie</th>
+                            <th className="p-4">Nazwa materiału</th>
+                            <th className="p-4 min-w-[200px]">Główna Kategoria</th>
+                            <th className="p-4 min-w-[200px]">Podkategoria</th>
+                            <th className="p-4 text-center">Kod</th>
+                            <th className="p-4 text-center">Magazyn / Razem</th>
+                            <th className="p-4 text-right">Akcje</th>
+                        </tr>
                     </thead>
                     <tbody className="text-sm">
                         {sortedFilteredItems.map(item => {
                             const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+                            const isSaving = savingItemId === item.id;
+                            const catObj = categoriesList.find(c => c.name === item.category);
+                            const subList = catObj?.subcategories || [];
+
                             return (
                                 <tr key={item.id} className={`border-b last:border-0 hover:bg-slate-50 transition ${isResidual ? 'bg-amber-50/20' : ''}`}>
                                     <td className="p-3">
@@ -1665,23 +1731,74 @@ export default function InventoryPage() {
                                         </div>
                                         <p className="text-[10px] text-slate-400">{item.category || "Wpis ręczny"}</p>
                                     </td>
-                                    <td className={`p-4 text-center font-mono text-xs font-bold ${isResidual ? 'text-amber-700' : 'text-orange-600'}`}>{item.inventoryNumber}</td>
+                                    <td className="p-3">
+                                        <div className="relative">
+                                            <select
+                                                value={item.category || ""}
+                                                disabled={isSaving}
+                                                onChange={(e) => handleQuickCategoryChange(item.id, e.target.value)}
+                                                className={`w-full text-xs font-bold p-2 bg-white border rounded-xl outline-none transition cursor-pointer shadow-sm ${
+                                                    item.category && item.category !== "Pozostałości budowlane" 
+                                                        ? "border-amber-400 text-amber-900 bg-amber-50/30" 
+                                                        : "border-slate-300 text-slate-600 hover:border-amber-300"
+                                                } ${isSaving ? "opacity-50" : ""}`}
+                                            >
+                                                <option value="">-- Wybierz kategorię --</option>
+                                                {categoriesList.map(cat => (
+                                                    <option key={cat.id || cat.name} value={cat.name}>
+                                                        {cat.icon || "📦"} {cat.name}
+                                                    </option>
+                                                ))}
+                                                {item.category && !categoriesList.some(c => c.name === item.category) && (
+                                                    <option value={item.category}>{item.category}</option>
+                                                )}
+                                            </select>
+                                        </div>
+                                    </td>
+                                    <td className="p-3">
+                                        <div className="relative">
+                                            <select
+                                                value={item.subcategory || ""}
+                                                disabled={isSaving || !item.category}
+                                                onChange={(e) => handleQuickSubcategoryChange(item.id, e.target.value)}
+                                                className={`w-full text-xs font-semibold p-2 bg-white border rounded-xl outline-none transition cursor-pointer shadow-sm ${
+                                                    item.subcategory 
+                                                        ? "border-emerald-400 text-emerald-900 bg-emerald-50/30" 
+                                                        : "border-slate-300 text-slate-500 hover:border-amber-300"
+                                                } disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 ${isSaving ? "opacity-50" : ""}`}
+                                            >
+                                                <option value="">-- Wybierz podkategorię --</option>
+                                                {subList.map(sub => (
+                                                    <option key={sub} value={sub}>{sub}</option>
+                                                ))}
+                                                {item.subcategory && !subList.includes(item.subcategory) && (
+                                                    <option value={item.subcategory}>{item.subcategory}</option>
+                                                )}
+                                            </select>
+                                        </div>
+                                    </td>
+                                    <td className={`p-4 text-center font-mono text-xs font-bold ${isResidual ? 'text-amber-700' : 'text-orange-600'}`}>
+                                        <div className="flex items-center justify-center gap-1">
+                                            <span>{item.inventoryNumber}</span>
+                                            {isSaving && <span className="animate-spin text-[10px]">⏳</span>}
+                                        </div>
+                                    </td>
                                     <td className="p-4 text-center font-black">{item.availableQuantity} / {item.totalQuantity} {item.unit || "szt."}</td>
-                                <td className="p-4 text-right space-x-3 whitespace-nowrap">
-                                    <button
-                                        onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
-                                        className="text-orange-600 hover:underline font-bold text-xs"
-                                    >
-                                        ⚙️ Korekta Stanu
-                                    </button>
-                                    <span className="text-slate-300">|</span>
-                                    <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
-                                    <span className="text-slate-300">|</span>
-                                    <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
-                                </td>
-                            </tr>
-                        );
-                    })}
+                                    <td className="p-4 text-right space-x-3 whitespace-nowrap">
+                                        <button
+                                            onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
+                                            className="text-orange-600 hover:underline font-bold text-xs"
+                                        >
+                                            ⚙️ Korekta Stanu
+                                        </button>
+                                        <span className="text-slate-300">|</span>
+                                        <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                        <span className="text-slate-300">|</span>
+                                        <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                    </td>
+                                </tr>
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>

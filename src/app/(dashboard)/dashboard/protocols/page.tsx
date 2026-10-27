@@ -49,6 +49,8 @@ interface ReturnCartItem {
     isWaste?: boolean;
     category?: string;
     subcategory?: string;
+    rulesCompliant?: boolean;
+    ruleNotes?: string;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -185,6 +187,8 @@ export default function ProtocolsHub() {
     const [isLoadingDriverDrafts, setIsLoadingDriverDrafts] = useState(false);
     const [isDriverDraftsModalOpen, setIsDriverDraftsModalOpen] = useState(false);
     const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
+    const [loadedDraftDriverName, setLoadedDraftDriverName] = useState<string | null>(null);
+    const [loadedDraftTranscription, setLoadedDraftTranscription] = useState<string | null>(null);
     const [loadedDraftAudioUrl, setLoadedDraftAudioUrl] = useState<string | null>(null);
     const [loadedDraftAudioUrls, setLoadedDraftAudioUrls] = useState<string[]>([]);
     const [loadedDraftPhotos, setLoadedDraftPhotos] = useState<string[]>([]);
@@ -1178,6 +1182,10 @@ export default function ProtocolsHub() {
                     isResidual: Boolean(i.isResidual),
                     isWaste: Boolean(i.isWaste),
                     name: i.name || "",
+                    category: i.category || "",
+                    subcategory: i.subcategory || "",
+                    rulesCompliant: (i as any).rulesCompliant !== undefined ? (i as any).rulesCompliant : null,
+                    ruleNotes: (i as any).ruleNotes || null,
                     type: i.type || "UNIQUE",
                     inventoryNumber: i.inventoryNumber || "",
                     unit: i.unit || "szt.",
@@ -1208,6 +1216,8 @@ export default function ProtocolsHub() {
                 destinationId: "MAGAZYN",
                 createdBy: user?.uid || "",
                 createdByName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || "Użytkownik",
+                driverName: loadedDraftDriverName || undefined,
+                voiceTranscription: loadedDraftTranscription || undefined,
                 status: "OCZEKUJACY",
                 createdAt: new Date().toISOString(),
                 documentDate: returnDocDate || new Date().toISOString().split("T")[0],
@@ -1245,6 +1255,8 @@ export default function ProtocolsHub() {
                     } catch (_) {}
 
                     setLoadedDraftId(null);
+                    setLoadedDraftDriverName(null);
+                    setLoadedDraftTranscription(null);
                     setLoadedDraftAudioUrl(null);
                     setLoadedDraftAudioUrls([]);
                     setLoadedDraftPhotos([]);
@@ -1415,6 +1427,8 @@ export default function ProtocolsHub() {
             name: res.name || "Resztka budowlana",
             category: res.category || "Pozostałości budowlane",
             subcategory: res.subcategory || "",
+            rulesCompliant: res.rulesCompliant,
+            ruleNotes: res.ruleNotes,
             type: "BULK",
             inventoryNumber: res.isWaste ? "ODPAD" : "RESZTKI",
             unit: res.unit || "szt.",
@@ -1445,6 +1459,8 @@ export default function ProtocolsHub() {
         setReturnCart([...mappedItems, ...mappedResiduals]);
         setReturnResidualNotes(newResidualNotes);
         setLoadedDraftId(draft.docId);
+        setLoadedDraftDriverName(draft.driverName || draft.driverFullName || null);
+        setLoadedDraftTranscription(draft.voiceTranscription || null);
         setLoadedDraftAudioUrl(draft.audioNoteUrl || null);
         setLoadedDraftAudioUrls(draft.audioNoteUrls || (draft.audioNoteUrl ? [draft.audioNoteUrl] : []));
         setLoadedDraftPhotos(draft.photos || []);
@@ -2570,19 +2586,48 @@ export default function ProtocolsHub() {
                 if (!input || input.finalStatus === 'odpad_utylizacja') continue;
                 const cleanNew = normalizeString(ri.name);
                 const newWords = cleanNew.split(/\s+/).filter(w => w.length >= 3);
+                const cleanNewCat = normalizeString(ri.category || "");
+                const cleanNewSub = normalizeString((ri as any).subcategory || "");
+
                 const matches = existingResiduals.filter((ex: InventoryItem) => {
                     const cleanEx = normalizeString(ex.name);
+                    const cleanExCat = normalizeString(ex.category || "");
+                    const cleanExSub = normalizeString(ex.subcategory || "");
+
+                    // 1. Dokładne lub zawierające dopasowanie nazwy
                     if (cleanEx === cleanNew) return true;
                     if (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) return true;
                     if (cleanEx.length >= 4 && cleanNew.includes(cleanEx)) return true;
+
+                    // 2. Wspólne słowa w nazwie
                     if (newWords.length >= 2) {
                         const matchingWords = newWords.filter(w => cleanEx.includes(w));
-                        if (matchingWords.length >= 2 && matchingWords.length >= newWords.length * 0.6) return true;
+                        if (matchingWords.length >= 2 && matchingWords.length >= newWords.length * 0.5) return true;
                     }
-                    if ((ri as any).subcategory && normalizeString((ri as any).subcategory).length >= 4) {
-                        const cleanSub = normalizeString((ri as any).subcategory);
-                        if (cleanEx.includes(cleanSub) || (ex.subcategory && normalizeString(ex.subcategory) === cleanSub)) return true;
+
+                    // 3. Dopasowanie po podkategorii (np. "Klej do wełny" lub "Bloczek gazobeton")
+                    if (cleanNewSub && cleanExSub && cleanNewSub.length >= 3 && cleanNewSub === cleanExSub) return true;
+                    if (cleanNewSub && cleanNewSub.length >= 4 && (cleanEx.includes(cleanNewSub) || cleanExSub.includes(cleanNewSub))) return true;
+                    if (cleanExSub && cleanExSub.length >= 4 && (cleanNew.includes(cleanExSub) || cleanNewSub.includes(cleanExSub))) return true;
+
+                    // 4. Ta sama kategoria główna + słowo kluczowe
+                    if (cleanNewCat && cleanExCat && cleanNewCat === cleanExCat && cleanNewCat !== "pozostalosci budowlane") {
+                        const hasMatchingWord = newWords.some(w => w.length >= 4 && cleanEx.includes(w));
+                        if (hasMatchingWord) return true;
                     }
+
+                    // 5. Główne rdzenie materiałów budowlanych (klej, bloczek, tynk, gładź, grunt, folia, pianka, siatka)
+                    const commonKeyWords = newWords.filter(w => w.length >= 4 && cleanEx.includes(w));
+                    if (commonKeyWords.length >= 1 && (
+                        commonKeyWords.includes("klej") || commonKeyWords.includes("bloczek") || 
+                        commonKeyWords.includes("grunt") || commonKeyWords.includes("folia") || 
+                        commonKeyWords.includes("siatka") || commonKeyWords.includes("gladź") || 
+                        commonKeyWords.includes("gladzi") || commonKeyWords.includes("tynk") || 
+                        commonKeyWords.includes("pianka")
+                    )) {
+                        return true;
+                    }
+
                     return false;
                 });
                 if (matches.length > 0) {
@@ -2667,6 +2712,8 @@ export default function ProtocolsHub() {
                     photoURLs.push(url);
                 }
             }
+
+            let finalAcceptedItems: any[] = [];
 
             await runTransaction(db, async (transaction) => {
                 const protocolRef = doc(db, "protocols", selectedProtocol.dbId);
@@ -2933,6 +2980,8 @@ export default function ProtocolsHub() {
                     });
                 }
 
+                finalAcceptedItems = updatedItemsForProtocol;
+
                 transaction.update(protocolRef, cleanFirestorePayload({
                     status: "ZAAKCEPTOWANY",
                     acceptedBy: user?.uid || null,
@@ -2953,6 +3002,38 @@ export default function ProtocolsHub() {
             }
             await clearReturnedAccessoriesAndDebts(selectedProtocol.sourceId, selectedProtocol.items);
             await clearReturnedWorkerPpe(selectedProtocol.items);
+
+            // Wysyłka powiadomienia e-mail o naruszeniach reguł / odpadach PO AKCEPTACJI PRZEZ MAGAZYNIERA
+            try {
+                const violations = finalAcceptedItems.filter((it: any) => 
+                    it.rulesCompliant === false || it.isWaste || it.finalStatus === 'odpad_utylizacja' || (it.ruleNotes && it.rulesCompliant !== true)
+                );
+                if (violations.length > 0) {
+                    fetch("/api/residual-violation-email", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            siteName: selectedProtocol.sourceName || "Budowa",
+                            driverName: selectedProtocol.driverName || selectedProtocol.createdByName || "Kierowca",
+                            documentDate: acceptReturnDocDate || new Date().toISOString().split("T")[0],
+                            voiceTranscription: selectedProtocol.voiceTranscription || undefined,
+                            violations: violations.map((v: any) => ({
+                                name: v.name,
+                                category: v.category,
+                                subcategory: v.subcategory,
+                                quantity: v.receivedQty ?? v.declaredQty ?? 1,
+                                unit: v.unit || "szt.",
+                                ruleNotes: v.ruleNotes || (v.finalStatus === 'odpad_utylizacja' ? "Oznaczono przez magazyniera jako odpad do utylizacji" : "Naruszenie reguł przyjęcia materiałów"),
+                                isWaste: Boolean(v.isWaste || v.finalStatus === 'odpad_utylizacja')
+                            }))
+                        })
+                    }).catch(emailErr => {
+                        console.warn("Błąd wysyłki e-maila o naruszeniu reguł przy akceptacji:", emailErr);
+                    });
+                }
+            } catch (vErr) {
+                console.warn("Błąd weryfikacji naruszeń reguł do alertu:", vErr);
+            }
 
             alert("Zwrot został pomyślnie przyjęty!");
             setSelectedProtocol(null);
