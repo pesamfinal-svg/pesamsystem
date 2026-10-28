@@ -432,6 +432,18 @@ export default function ProtocolsHub() {
                 for (const item of hardDeleteProtocol.items) {
                     if (item.isNewManual || !item.inventoryId) continue;
 
+                    // Resztki magazynowe i materiały budowlane / odpady:
+                    // Zgodnie z wytycznymi - nie korygujemy ich stanów magazynowych, protokół jest po prostu kasowany
+                    const isResidualOrWaste = item.isResidual || 
+                                              item.isWaste || 
+                                              item.inventoryNumber === "RESZTKI" || 
+                                              item.inventoryNumber === "ODPAD" || 
+                                              item.finalStatus === "odpad_utylizacja" ||
+                                              item.category === "Pozostałości budowlane";
+                    if (isResidualOrWaste) {
+                        continue;
+                    }
+
                     const { ref: itemRef, doc: itemDoc } = itemDocs[item.inventoryId];
                     if (!itemDoc.exists()) continue;
 
@@ -4031,42 +4043,86 @@ export default function ProtocolsHub() {
                                                                     </div>
 
                                                                     <div className="border-t pt-3 flex justify-end gap-3 flex-wrap">
-                                                                        <button
-                                                                            type="button"
-                                                                            disabled={isSubmitting}
-                                                                            onClick={(e) => { e.stopPropagation(); setProtocolToPrint(p); }}
-                                                                            className="bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
-                                                                        >
-                                                                            🖨️ Drukuj Protokół
-                                                                        </button>
+                                                                        {/* 1. Drukuj */}
+                                                                        <div className="relative group">
+                                                                            <button
+                                                                                type="button"
+                                                                                disabled={isSubmitting}
+                                                                                onClick={(e) => { e.stopPropagation(); setProtocolToPrint(p); }}
+                                                                                className="bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                            >
+                                                                                🖨️ Drukuj Protokół
+                                                                            </button>
+                                                                            <div className="pointer-events-none absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-center z-30 w-56">
+                                                                                <div className="bg-slate-900 text-white text-[11px] rounded-lg p-2 shadow-xl border border-slate-700 text-center leading-snug">
+                                                                                    Generuje wersję do druku / PDF bez ingerencji w stany magazynowe.
+                                                                                </div>
+                                                                                <div className="w-2 h-2 bg-slate-900 rotate-45 -mt-1"></div>
+                                                                            </div>
+                                                                        </div>
+
                                                                         {p.status !== "ANULOWANY" && p.type !== "KOREKTA" && (
                                                                             <>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    disabled={isSubmitting}
-                                                                                    onClick={(e) => { e.stopPropagation(); openCorrectionModal(p); }}
-                                                                                    className="bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
-                                                                                >
-                                                                                    ✏️ Wystaw Korektę (Popraw pozycje)
-                                                                                </button>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    disabled={isSubmitting}
-                                                                                    onClick={(e) => { e.stopPropagation(); handleCancelProtocol(p); }}
-                                                                                    className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
-                                                                                >
-                                                                                    🚫 Anuluj Protokół (Wycofaj stany)
-                                                                                </button>
+                                                                                {/* 2. Korekta */}
+                                                                                <div className="relative group">
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        disabled={isSubmitting}
+                                                                                        onClick={(e) => { e.stopPropagation(); openCorrectionModal(p); }}
+                                                                                        className="bg-orange-50 hover:bg-orange-100 border border-orange-200 text-orange-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                                    >
+                                                                                        ✏️ Wystaw Korektę (Popraw pozycje)
+                                                                                    </button>
+                                                                                    <div className="pointer-events-none absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-center z-30 w-64">
+                                                                                        <div className="bg-slate-900 text-white text-[11px] rounded-lg p-2 shadow-xl border border-slate-700 text-center leading-snug">
+                                                                                            <b className="text-orange-300">Poprawia ilości lub pozycje:</b> Tworzy oficjalny dokument korygujący (np. KOR) ze śladem audytowym.
+                                                                                        </div>
+                                                                                        <div className="w-2 h-2 bg-slate-900 rotate-45 -mt-1"></div>
+                                                                                    </div>
+                                                                                </div>
+
+                                                                                {/* 3. Anulowanie (ze statusem) */}
+                                                                                <div className="relative group">
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        disabled={isSubmitting}
+                                                                                        onClick={(e) => { e.stopPropagation(); handleCancelProtocol(p); }}
+                                                                                        className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                                                                                    >
+                                                                                        🚫 Anuluj Protokół (Wycofaj stany)
+                                                                                    </button>
+                                                                                    <div className="pointer-events-none absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-center z-30 w-64">
+                                                                                        <div className="bg-slate-900 text-white text-[11px] rounded-lg p-2 shadow-xl border border-slate-700 text-center leading-snug">
+                                                                                            <b className="text-red-300">Cofa stany i oznacza jako ANULOWANY:</b> Protokół pozostaje w historii jako przekreślony/anulowany.
+                                                                                        </div>
+                                                                                        <div className="w-2 h-2 bg-slate-900 rotate-45 -mt-1"></div>
+                                                                                    </div>
+                                                                                </div>
                                                                             </>
                                                                         )}
-                                                                        <button
-                                                                            type="button"
-                                                                            disabled={isSubmitting}
-                                                                            onClick={(e) => { e.stopPropagation(); initiateHardDelete(p); }}
-                                                                            className="bg-red-700 hover:bg-red-800 text-white px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50 border border-red-900"
-                                                                        >
-                                                                            🗑️ Usuń Protokół (Odzyskaj stany)
-                                                                        </button>
+
+                                                                        {/* 4. Trwałe usunięcie */}
+                                                                        <div className="relative group">
+                                                                            <button
+                                                                                type="button"
+                                                                                disabled={isSubmitting}
+                                                                                onClick={(e) => { e.stopPropagation(); initiateHardDelete(p); }}
+                                                                                className="bg-red-700 hover:bg-red-800 text-white px-3.5 py-2 rounded-xl text-xs font-black tracking-wide transition flex items-center gap-1.5 shadow-sm disabled:opacity-50 border border-red-900"
+                                                                            >
+                                                                                🗑️ Usuń z historii (Odzyskaj stany)
+                                                                            </button>
+                                                                            <div className="pointer-events-none absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-center z-30 w-72">
+                                                                                <div className="bg-slate-900 text-white text-[11px] rounded-lg p-2.5 shadow-xl border border-slate-700 text-center leading-snug">
+                                                                                    <b className="text-red-400">Całkowicie kasuje dokument z bazy:</b>
+                                                                                    <div className="text-[10px] text-slate-300 mt-1 text-left space-y-0.5">
+                                                                                        • <b>Narzędzia i rusztowania (Bulk/Unique):</b> Automatycznie cofa stany magazynowe sprzed dokumentu.<br/>
+                                                                                        • <b>Resztki / Odpady budowlane:</b> Kasuje wpis bez korygowania stanów.<br/>
+                                                                                        • <b>Historia:</b> Protokół znika bezpowrotnie.
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="w-2 h-2 bg-slate-900 rotate-45 -mt-1"></div>
+                                                                            </div>
+                                                                        </div>
                                                                     </div>
                                                                 </div>
                                                             </td>
@@ -6778,6 +6834,30 @@ export default function ProtocolsHub() {
                         <div className="space-y-6">
                             {hardDeleteProtocol.items.map((item: any, idx: number) => {
                                 if (item.isNewManual || item.isGhostItem) return null;
+
+                                const isResidualOrWaste = item.isResidual || 
+                                                          item.isWaste || 
+                                                          item.inventoryNumber === "RESZTKI" || 
+                                                          item.inventoryNumber === "ODPAD" || 
+                                                          item.finalStatus === "odpad_utylizacja" ||
+                                                          item.category === "Pozostałości budowlane";
+
+                                if (isResidualOrWaste) {
+                                    return (
+                                        <div key={idx} className="p-4 border-2 border-amber-200 rounded-2xl bg-amber-50/70 space-y-1">
+                                            <div className="flex justify-between items-center">
+                                                <p className="font-black text-sm text-amber-950">🧱 {item.name}</p>
+                                                <span className="text-[10px] font-black uppercase bg-amber-200 text-amber-900 px-2 py-0.5 rounded border border-amber-300">
+                                                    Resztki / Odpady
+                                                </span>
+                                            </div>
+                                            <p className="text-xs text-amber-900">
+                                                Ilość: <b>{item.receivedQty ?? item.declaredQty ?? item.quantity ?? 1} {item.unit || "szt."}</b>. 
+                                                Wpis zostanie całkowicie wykasowany z historii bez modyfikowania bieżących stanów magazynowych.
+                                            </p>
+                                        </div>
+                                    );
+                                }
 
                                 const localItem = inventory.find(i => i.id === item.inventoryId);
                                 if (!localItem) return (
