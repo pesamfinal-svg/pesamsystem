@@ -53,7 +53,67 @@ export default function DashboardPage() {
     // NOWE STANY DLA WIDŻETU MIEJSC SKŁADOWANIA (PLAC / HALE)
     const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
     const [isStorageWidgetVisible, setIsStorageWidgetVisible] = useState<boolean>(true);
-    const [selectedLocationDetailId, setSelectedLocationDetailId] = useState<string | null>(null);
+    const [activeLocationModal, setActiveLocationModal] = useState<StorageLocation | null>(null);
+    const [modalSearchTerm, setModalSearchTerm] = useState("");
+    const [modalCategoryFilter, setModalCategoryFilter] = useState("ALL");
+    const [sendingAlertLocationId, setSendingAlertLocationId] = useState<string | null>(null);
+
+    // Wysyłanie alertu e-mail o zapełnieniu (dla wybranej strefy lub dla wszystkich przepełnionych)
+    const handleSendCapacityAlert = async (targetLoc?: StorageLocation) => {
+        const updater = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email || 'Dyspozytor' : 'Dyspozytor';
+        const targetId = targetLoc ? targetLoc.id : "ALL";
+
+        const locsToSend = targetLoc
+            ? [targetLoc]
+            : storageLocations.filter(l => {
+                const fill = l.totalCapacity > 0 ? (l.currentOccupied / l.totalCapacity) * 100 : 0;
+                return fill >= (l.alertThreshold || 70);
+            });
+
+        if (locsToSend.length === 0) {
+            alert("Żadna ze stref nie przekracza progu ostrzegawczego (>= 70%). Możesz jednak wysłać alert bezpośrednio z poziomu konkretnej strefy.");
+            return;
+        }
+
+        const confirmText = targetLoc
+            ? `Czy na pewno chcesz wysłać powiadomienie e-mail o stanie strefy: "${targetLoc.name}"?`
+            : `Czy na pewno chcesz wysłać powiadomienie e-mail o zapełnieniu stref (${locsToSend.length} stref)?`;
+
+        if (!window.confirm(confirmText)) return;
+
+        setSendingAlertLocationId(targetId);
+        try {
+            const res = await fetch("/api/warehouse-capacity-alert", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    locations: locsToSend.map(l => ({
+                        name: l.name,
+                        totalCapacity: l.totalCapacity,
+                        currentOccupied: l.currentOccupied,
+                        fillPercentage: l.totalCapacity > 0 ? Math.round((l.currentOccupied / l.totalCapacity) * 100) : 0,
+                        alertThreshold: l.alertThreshold || 70,
+                        criticalThreshold: l.criticalThreshold || 85,
+                        categories: l.categories,
+                        thresholdType: (l.totalCapacity > 0 && (l.currentOccupied / l.totalCapacity) * 100 >= (l.criticalThreshold || 85)) ? "CRITICAL" : "ALERT"
+                    })),
+                    updaterName: updater
+                })
+            });
+
+            const data = await res.json();
+            if (data.success) {
+                alert(`✅ Alert e-mail został pomyślnie wysłany!\n${data.message || ''}`);
+            } else {
+                alert(`⚠️ Komunikat: ${data.message || data.error || 'Nie udało się wysłać powiadomienia.'}`);
+            }
+        } catch (err: any) {
+            console.error("Błąd wysyłania alertu:", err);
+            alert("Wystąpił błąd podczas próby wysłania powiadomienia e-mail.");
+        } finally {
+            setSendingAlertLocationId(null);
+        }
+    };
 
     // NOWE STANY SPECJALNE DLA KIEROWNIKA BUDOWY (OBSŁUGA WIELU BUDÓW)
     const [activeManagerSiteId, setActiveManagerSiteId] = useState("");
@@ -381,7 +441,16 @@ export default function DashboardPage() {
                                         Monitorowanie wolnych miejsc paletowych (JPP) na placu, halach oraz magazynie chemii.
                                     </p>
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => handleSendCapacityAlert()}
+                                        disabled={sendingAlertLocationId === "ALL"}
+                                        className="text-xs font-black text-white bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-700 hover:to-amber-700 disabled:opacity-50 px-3.5 py-1.5 rounded-xl transition shadow-xs flex items-center gap-1.5 cursor-pointer"
+                                        title="Wyślij powiadomienie e-mail o przepełnionych strefach"
+                                    >
+                                        <span>{sendingAlertLocationId === "ALL" ? "⏳ Wysyłanie..." : "🚨 Wyślij Alert E-mail"}</span>
+                                    </button>
                                     <button
                                         type="button"
                                         onClick={toggleStorageWidget}
@@ -408,13 +477,14 @@ export default function DashboardPage() {
                                     ) : (
                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                                             {storageLocations.map(loc => {
-                                                const totalCap = loc.totalCapacity || 0;
-                                                const occupied = loc.currentOccupied || 0;
+                                                const totalCap = Number((loc.totalCapacity || 0).toFixed(2));
+                                                const occupied = Number((loc.currentOccupied || 0).toFixed(2));
                                                 const fillPct = totalCap > 0 ? Math.min(100, Math.round((occupied / totalCap) * 100)) : 0;
-                                                const freeSlots = Math.max(0, totalCap - occupied);
+                                                const rawFreeSlots = Math.max(0, totalCap - occupied);
+                                                // Precyzyjne zaokrąglenie do maksymalnie 2 miejsc po przecinku (np. 0.3 zamiast 0.30000000000000004)
+                                                const freeSlots = Math.round(rawFreeSlots * 100) / 100;
                                                 const isCritical = fillPct >= (loc.criticalThreshold || 85);
                                                 const isAlert = !isCritical && fillPct >= (loc.alertThreshold || 70);
-                                                const isSelected = selectedLocationDetailId === loc.id;
 
                                                 let barColor = "bg-emerald-500";
                                                 let badgeColor = "bg-emerald-100 text-emerald-800 border-emerald-200";
@@ -433,7 +503,6 @@ export default function DashboardPage() {
                                                 const assignedItems = items.filter(it => {
                                                     const isResidual = it.category === "Pozostałości budowlane" || it.inventoryNumber === "RESZTKI" || it.subType === "SUB_ITEM";
                                                     if (!isResidual) return false;
-                                                    // Sprawdzamy czy kategoria lub podkategoria pasuje do przypisanych kategorii strefy
                                                     return loc.categories.some(catId => {
                                                         const catIdLower = catId.toLowerCase();
                                                         return (it.category && it.category.toLowerCase().includes(catIdLower)) ||
@@ -451,7 +520,7 @@ export default function DashboardPage() {
                                                                 : isAlert
                                                                 ? "bg-amber-50/40 border-amber-200 shadow-sm"
                                                                 : "bg-slate-50/60 border-slate-200 hover:border-slate-300 shadow-sm"
-                                                        } ${isSelected ? "ring-2 ring-blue-500 shadow-md" : ""}`}
+                                                        }`}
                                                     >
                                                         <div className="flex justify-between items-start gap-2">
                                                             <div>
@@ -483,7 +552,9 @@ export default function DashboardPage() {
                                                         <div className="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-slate-200/80 text-center">
                                                             <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-xs">
                                                                 <span className="text-[10px] text-slate-400 font-bold block uppercase">Zajęte</span>
-                                                                <span className="text-base font-black text-slate-800 font-mono">{occupied} <span className="text-[10px] font-medium text-slate-400">JPP</span></span>
+                                                                <span className="text-base font-black text-slate-800 font-mono">
+                                                                    {occupied} <span className="text-[10px] font-medium text-slate-400">JPP</span>
+                                                                </span>
                                                             </div>
                                                             <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-xs">
                                                                 <span className="text-[10px] text-slate-400 font-bold block uppercase">Wolne</span>
@@ -502,41 +573,34 @@ export default function DashboardPage() {
                                                             ))}
                                                         </div>
 
-                                                        {/* Przycisk rozwijania podglądu towarów */}
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setSelectedLocationDetailId(isSelected ? null : loc.id)}
-                                                            className={`w-full mt-4 text-xs font-black py-2 rounded-xl border transition flex items-center justify-center gap-1.5 ${
-                                                                isSelected
-                                                                    ? "bg-blue-600 text-white border-blue-600"
-                                                                    : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
-                                                            }`}
-                                                        >
-                                                            <span>{isSelected ? "Ukryj spis asortymentu ▲" : `Przeglądaj asortyment (${assignedItems.length}) ▼`}</span>
-                                                        </button>
+                                                        {/* Przyciski akcji dla strefy */}
+                                                        <div className="mt-4 flex gap-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setActiveLocationModal(loc);
+                                                                    setModalSearchTerm("");
+                                                                    setModalCategoryFilter("ALL");
+                                                                }}
+                                                                className="flex-1 text-xs font-black py-2.5 px-3 rounded-xl border transition flex items-center justify-center gap-1.5 bg-white hover:bg-blue-50 text-slate-700 hover:text-blue-700 border-slate-200 hover:border-blue-300 shadow-xs group"
+                                                            >
+                                                                <span>📦 Asortyment ({assignedItems.length})</span>
+                                                                <span className="text-slate-400 group-hover:text-blue-600 group-hover:translate-x-0.5 transition-transform">➡️</span>
+                                                            </button>
 
-                                                        {/* Rozwinięty panel ze spisem asortymentu */}
-                                                        {isSelected && (
-                                                            <div className="mt-3 pt-3 border-t border-slate-200 space-y-2 max-h-56 overflow-y-auto">
-                                                                {assignedItems.length === 0 ? (
-                                                                    <p className="text-[11px] text-slate-400 italic text-center py-2">
-                                                                        Brak zarejestrowanych resztek w kategoriach tej strefy.
-                                                                    </p>
-                                                                ) : (
-                                                                    assignedItems.map(item => (
-                                                                        <div key={item.id} className="bg-white p-2 rounded-lg border border-slate-100 flex items-center justify-between text-xs">
-                                                                            <div className="truncate pr-2">
-                                                                                <p className="font-bold text-slate-800 truncate">{item.name}</p>
-                                                                                <p className="text-[10px] text-slate-400 truncate">{item.subcategory || item.category}</p>
-                                                                            </div>
-                                                                            <span className="font-mono font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded text-[11px] whitespace-nowrap">
-                                                                                {item.availableQuantity} {item.unit || "szt."}
-                                                                            </span>
-                                                                        </div>
-                                                                    ))
-                                                                )}
-                                                            </div>
-                                                        )}
+                                                            {(isAlert || isCritical) && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleSendCapacityAlert(loc)}
+                                                                    disabled={sendingAlertLocationId === loc.id}
+                                                                    className="px-3 py-2.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-black transition flex items-center gap-1 shadow-xs disabled:opacity-50"
+                                                                    title="Wyślij natychmiastowe powiadomienie e-mail dla tej strefy"
+                                                                >
+                                                                    <span>{sendingAlertLocationId === loc.id ? "⏳" : "🚨"}</span>
+                                                                    <span className="hidden sm:inline">Alert</span>
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 );
                                             })}
@@ -759,6 +823,242 @@ export default function DashboardPage() {
                         </div>
                         <div className="mt-8 pt-4 border-t border-slate-200/60 text-[11px] text-slate-400 font-semibold">
                             System Zarządzania Magazynem PESAM
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ========================================================================= */}
+            {/* MODAL: PRZEGLĄDANIE ASORTYMENTU STREFY SKŁADOWANIA (PLAC / HALE)        */}
+            {/* ========================================================================= */}
+            {activeLocationModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden animate-scale-up">
+                        {/* Nagłówek modala */}
+                        <div className="p-6 bg-slate-900 text-white flex justify-between items-start gap-4">
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-2xl">📍</span>
+                                    <h3 className="text-xl font-black tracking-tight">{activeLocationModal.name}</h3>
+                                    <span className="bg-blue-600/80 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider">
+                                        Asortyment Strefy
+                                    </span>
+                                </div>
+                                {activeLocationModal.description && (
+                                    <p className="text-xs text-slate-300 mt-1 max-w-2xl">{activeLocationModal.description}</p>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setActiveLocationModal(null)}
+                                className="text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 w-9 h-9 rounded-full flex items-center justify-center font-bold text-lg transition"
+                                title="Zamknij"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {/* Pasek podsumowania strefy */}
+                        <div className="bg-slate-50 border-b border-slate-200 px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+                            <div className="flex items-center gap-4 text-xs">
+                                <div>
+                                    <span className="text-slate-500 font-bold block text-[10px] uppercase">Zajętość:</span>
+                                    <span className="font-mono font-black text-slate-800 text-sm">
+                                        {Number((activeLocationModal.currentOccupied || 0).toFixed(2))} / {Number((activeLocationModal.totalCapacity || 0).toFixed(2))} JPP
+                                    </span>
+                                </div>
+                                <div className="border-l pl-4 border-slate-300">
+                                    <span className="text-slate-500 font-bold block text-[10px] uppercase">Wolne sloty:</span>
+                                    <span className="font-mono font-black text-emerald-700 text-sm">
+                                        {Math.round(Math.max(0, (activeLocationModal.totalCapacity || 0) - (activeLocationModal.currentOccupied || 0)) * 100) / 100} JPP
+                                    </span>
+                                </div>
+                                <div className="border-l pl-4 border-slate-300">
+                                    <span className="text-slate-500 font-bold block text-[10px] uppercase">Kategorie strefy:</span>
+                                    <div className="flex flex-wrap gap-1 mt-0.5">
+                                        {activeLocationModal.categories.map(c => (
+                                            <span key={c} className="bg-white border text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded-md">
+                                                {c}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => handleSendCapacityAlert(activeLocationModal)}
+                                    disabled={sendingAlertLocationId === activeLocationModal.id}
+                                    className="text-xs font-black text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-xs disabled:opacity-50"
+                                    title="Wyślij powiadomienie e-mail o stanie tej strefy"
+                                >
+                                    <span>{sendingAlertLocationId === activeLocationModal.id ? "⏳ Wysyłanie..." : "🚨 Wyślij Alert E-mail"}</span>
+                                </button>
+                                <Link
+                                    href="/dashboard/inventory"
+                                    className="text-xs font-black text-blue-600 hover:text-blue-800 bg-white hover:bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-xl transition"
+                                >
+                                    📦 Katalog Sprzętu ➡️
+                                </Link>
+                            </div>
+                        </div>
+
+                        {/* Filtry wyszukiwania */}
+                        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row gap-3 bg-white">
+                            <div className="relative flex-1">
+                                <span className="absolute left-3 top-2.5 text-slate-400 text-xs">🔍</span>
+                                <input
+                                    type="text"
+                                    value={modalSearchTerm}
+                                    onChange={e => setModalSearchTerm(e.target.value)}
+                                    placeholder="Szukaj po nazwie materiału, numerze katalogowym..."
+                                    className="w-full pl-8 pr-3 py-2 text-xs border border-slate-300 rounded-xl focus:border-blue-500 outline-none"
+                                />
+                            </div>
+                            <div className="sm:w-56">
+                                <select
+                                    value={modalCategoryFilter}
+                                    onChange={e => setModalCategoryFilter(e.target.value)}
+                                    className="w-full py-2 px-3 text-xs border border-slate-300 rounded-xl focus:border-blue-500 outline-none font-bold text-slate-700 cursor-pointer"
+                                >
+                                    <option value="ALL">Wszystkie kategorie strefy</option>
+                                    {activeLocationModal.categories.map(cat => (
+                                        <option key={cat} value={cat}>{cat}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Spis asortymentu */}
+                        <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
+                            {(() => {
+                                // Filtrujemy przedmioty pasujące do strefy
+                                const allZoneItems = items.filter(it => {
+                                    const isResidual = it.category === "Pozostałości budowlane" || it.inventoryNumber === "RESZTKI" || it.subType === "SUB_ITEM";
+                                    if (!isResidual) return false;
+                                    return activeLocationModal.categories.some(catId => {
+                                        const catIdLower = catId.toLowerCase();
+                                        return (it.category && it.category.toLowerCase().includes(catIdLower)) ||
+                                               (it.subcategory && it.subcategory.toLowerCase().includes(catIdLower)) ||
+                                               (it.name && it.name.toLowerCase().includes(catIdLower));
+                                    });
+                                });
+
+                                const filteredItems = allZoneItems.filter(it => {
+                                    if (modalCategoryFilter !== "ALL") {
+                                        const catLower = modalCategoryFilter.toLowerCase();
+                                        const match = (it.category && it.category.toLowerCase().includes(catLower)) ||
+                                                      (it.subcategory && it.subcategory.toLowerCase().includes(catLower)) ||
+                                                      (it.name && it.name.toLowerCase().includes(catLower));
+                                        if (!match) return false;
+                                    }
+                                    if (modalSearchTerm.trim()) {
+                                        const q = modalSearchTerm.toLowerCase();
+                                        return (
+                                            it.name?.toLowerCase().includes(q) ||
+                                            it.inventoryNumber?.toLowerCase().includes(q) ||
+                                            it.subcategory?.toLowerCase().includes(q)
+                                        );
+                                    }
+                                    return true;
+                                });
+
+                                if (filteredItems.length === 0) {
+                                    return (
+                                        <div className="text-center py-16">
+                                            <span className="text-4xl block mb-2">📦</span>
+                                            <p className="text-sm font-bold text-slate-700">
+                                                {allZoneItems.length === 0
+                                                    ? "Brak zarejestrowanego asortymentu w tej strefie magazynu."
+                                                    : "Brak pozycji spełniających kryteria wyszukiwania."}
+                                            </p>
+                                            <p className="text-xs text-slate-400 mt-1">
+                                                Towary i resztki budowlane pojawią się tutaj po przyjęciu zwrotu lub wprowadzeniu pozycji w Katalogu Sprzętu.
+                                            </p>
+                                        </div>
+                                    );
+                                }
+
+                                return (
+                                    <div className="space-y-3">
+                                        <div className="flex justify-between items-center text-xs text-slate-500 font-bold px-1">
+                                            <span>Pozycje na stanie ({filteredItems.length}):</span>
+                                            <span>Stan dostępny / Jednostka</span>
+                                        </div>
+                                        <div className="grid grid-cols-1 gap-2.5">
+                                            {filteredItems.map(item => (
+                                                <div
+                                                    key={item.id}
+                                                    className="bg-white border border-slate-200 hover:border-blue-300 p-3.5 rounded-2xl shadow-xs transition flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        {item.imageUrl ? (
+                                                            <img
+                                                                src={item.imageUrl}
+                                                                alt={item.name}
+                                                                className="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0"
+                                                            />
+                                                        ) : (
+                                                            <div className="w-12 h-12 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-xl shrink-0">
+                                                                📦
+                                                            </div>
+                                                        )}
+                                                        <div>
+                                                            <div className="flex items-center gap-2">
+                                                                <h5 className="font-black text-slate-800 text-sm">{item.name}</h5>
+                                                                {item.inventoryNumber && (
+                                                                    <span className="bg-slate-100 text-slate-600 font-mono text-[10px] px-2 py-0.5 rounded font-bold">
+                                                                        #{item.inventoryNumber}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5">
+                                                                <span>{item.category}</span>
+                                                                {item.subcategory && (
+                                                                    <>
+                                                                        <span>•</span>
+                                                                        <span className="text-blue-700 font-semibold">{item.subcategory}</span>
+                                                                    </>
+                                                                )}
+                                                                <span>•</span>
+                                                                <span className="text-slate-400">{item.currentLocation || "MAGAZYN PESAM"}</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center justify-between sm:justify-end gap-4 border-t sm:border-t-0 pt-2 sm:pt-0">
+                                                        <div className="text-right">
+                                                            <span className="text-[10px] text-slate-400 uppercase font-bold block">Dostępne:</span>
+                                                            <span className="font-mono font-black text-slate-900 text-sm">
+                                                                {item.availableQuantity ?? item.totalQuantity ?? 0} {item.unit || "szt."}
+                                                            </span>
+                                                        </div>
+                                                        <Link
+                                                            href="/dashboard/inventory"
+                                                            className="text-xs font-bold text-slate-400 hover:text-blue-600 p-2 hover:bg-slate-100 rounded-xl transition"
+                                                            title="Otwórz w katalogu"
+                                                        >
+                                                            🔍
+                                                        </Link>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                        </div>
+
+                        {/* Stopka modala */}
+                        <div className="p-4 bg-white border-t border-slate-200 flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setActiveLocationModal(null)}
+                                className="bg-slate-800 hover:bg-slate-900 text-white font-black text-xs px-6 py-2.5 rounded-xl shadow-sm transition uppercase tracking-wider"
+                            >
+                                Zamknij okno
+                            </button>
                         </div>
                     </div>
                 </div>
