@@ -142,6 +142,16 @@ const INITIAL_FORM_STATE: Partial<InventoryItem> = {
     nextInspectionDate: ""
 };
 
+interface CategoryCapacity {
+    totalSlots: number;      // Łączna pojemność w JPP
+    currentSlots: number;    // Aktualnie zajęte JPP
+    notes: string;           // Uwagi
+    alertThreshold: number;  // Próg ostrzeżenia % (default 70)
+    criticalThreshold: number; // Próg krytyczny % (default 85)
+    updatedAt?: string;
+    updatedBy?: string;
+}
+
 export default function InventoryPage() {
     const { user } = useAuth();
     const [items, setItems] = useState<InventoryItem[]>([]);
@@ -230,7 +240,7 @@ export default function InventoryPage() {
 
     // PANEL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU)
     const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
-    const [rulesTab, setRulesTab] = useState<"BOSS" | "WAREHOUSE">("BOSS");
+    const [rulesTab, setRulesTab] = useState<"BOSS" | "WAREHOUSE" | "CAPACITY">("BOSS");
     const [selectedRulesDepartment, setSelectedRulesDepartment] = useState<"RESIDUALS" | "EQUIPMENT" | "SCAFFOLDING" | "FLEET">("RESIDUALS");
     const [selectedCategoryId, setSelectedCategoryId] = useState<string>("ALL"); // "ALL" = ogólne wytyczne działu, lub np. "kleje"
     const [bossRulesText, setBossRulesText] = useState("");
@@ -241,6 +251,7 @@ export default function InventoryPage() {
     const [warehouseRulesMeta, setWarehouseRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
     const [isLoadingRules, setIsLoadingRules] = useState(false);
     const [isSavingRules, setIsSavingRules] = useState(false);
+    const [categoryCapacities, setCategoryCapacities] = useState<Record<string, CategoryCapacity>>({});
 
     // DYNAMICZNE KATEGORIE I PODKATEGORIE DLA RESZTEK BUDOWLANYCH
     const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
@@ -276,9 +287,10 @@ export default function InventoryPage() {
     const fetchRules = async () => {
         setIsLoadingRules(true);
         try {
-            const [rulesSnap, catSnap] = await Promise.all([
+            const [rulesSnap, catSnap, capacitySnap] = await Promise.all([
                 getDoc(doc(db, "settings", "residual_rules")),
-                getDoc(doc(db, "settings", "residual_categories"))
+                getDoc(doc(db, "settings", "residual_categories")),
+                getDoc(doc(db, "settings", "warehouse_capacity"))
             ]);
 
             if (rulesSnap.exists()) {
@@ -301,6 +313,23 @@ export default function InventoryPage() {
                 setCategoriesList(catSnap.data().categories);
             } else {
                 setCategoriesList(RESIDUAL_MAIN_CATEGORIES);
+            }
+
+            if (capacitySnap.exists()) {
+                const capacityData = capacitySnap.data().capacities || {};
+                setCategoryCapacities(capacityData);
+            } else {
+                const defaultCapacities: Record<string, CategoryCapacity> = {};
+                RESIDUAL_MAIN_CATEGORIES.forEach(cat => {
+                    defaultCapacities[cat.id] = {
+                        totalSlots: 0,
+                        currentSlots: 0,
+                        notes: "",
+                        alertThreshold: 70,
+                        criticalThreshold: 85
+                    };
+                });
+                setCategoryCapacities(defaultCapacities);
             }
         } catch (err) {
             console.error("Błąd pobierania reguł residual_rules:", err);
@@ -491,9 +520,20 @@ export default function InventoryPage() {
                 updatePayload.warehouseUpdatedBy = updaterName;
             }
 
+            // Aktualizuj metadane dla każdej kategorii w capacities
+            const updatedCapacities: Record<string, CategoryCapacity> = {};
+            Object.keys(categoryCapacities).forEach(catId => {
+                updatedCapacities[catId] = {
+                    ...categoryCapacities[catId],
+                    updatedAt: now,
+                    updatedBy: updaterName
+                };
+            });
+
             await Promise.all([
                 setDoc(doc(db, "settings", "residual_rules"), updatePayload, { merge: true }),
-                setDoc(doc(db, "settings", "residual_categories"), { categories: categoriesList }, { merge: true })
+                setDoc(doc(db, "settings", "residual_categories"), { categories: categoriesList }, { merge: true }),
+                setDoc(doc(db, "settings", "warehouse_capacity"), { capacities: updatedCapacities }, { merge: true })
             ]);
 
             if (canManageBossRules) {
@@ -502,8 +542,9 @@ export default function InventoryPage() {
             if (canManageWarehouseRules) {
                 setWarehouseRulesMeta({ updatedAt: now, updatedBy: updaterName });
             }
+            setCategoryCapacities(updatedCapacities);
 
-            alert("Wszystkie reguły oraz kategorie i podkategorie zostały pomyślnie zapisane!");
+            alert("Wszystkie reguły, kategorie, podkategorie oraz pojemności zostały pomyślnie zapisane!");
             setIsRulesModalOpen(false);
         } catch (err) {
             console.error("Błąd zapisu reguł:", err);
@@ -3659,6 +3700,24 @@ export default function InventoryPage() {
                                         <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
                                     )}
                                 </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setRulesTab("CAPACITY")}
+                                    className={`px-5 py-2.5 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
+                                        rulesTab === "CAPACITY"
+                                            ? "bg-white text-emerald-700 border-emerald-600 shadow-sm"
+                                            : "text-slate-500 hover:text-slate-800 border-transparent"
+                                    }`}
+                                >
+                                    <span>📊</span>
+                                    <span>Pojemność Magazynu</span>
+                                    {canManageWarehouseRules ? (
+                                        <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
+                                    ) : (
+                                        <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
+                                    )}
+                                </button>
                             </div>
 
                             {/* 3. CIAŁO MODALU: DWUKOLUMNOWY UKŁAD (KATEGORIE + EDYTOR) */}
@@ -3956,6 +4015,204 @@ export default function InventoryPage() {
                                             </p>
                                         )}
                                     </div>
+                                </div>
+                            )}
+
+                            {/* ZAKŁADKA: CAPACITY - Pojemność Magazynu */}
+                            {rulesTab === "CAPACITY" && (
+                                <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                                    {/* Nagłówek sekcji */}
+                                    <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-5">
+                                        <div className="flex items-start gap-4">
+                                            <div className="text-4xl">📊</div>
+                                            <div className="flex-1">
+                                                <h3 className="text-base font-black text-emerald-900 mb-1">
+                                                    Pojemność Magazynu w Jednostkach Paletowych (JPP)
+                                                </h3>
+                                                <p className="text-xs text-emerald-700 leading-relaxed">
+                                                    Zdefiniuj łączną pojemność i aktualny stan każdej kategorii resztek budowlanych.
+                                                    System automatycznie obliczy % wypełnienia i wyświetli ostrzeżenia przy analizie zwrotów.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Tabela przeliczników JPP */}
+                                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5">
+                                        <h4 className="text-xs font-black text-slate-800 mb-3 flex items-center gap-2">
+                                            <span>📐</span>
+                                            <span>Przelicznik Jednostek Paletowych (JPP) – informacyjnie</span>
+                                        </h4>
+                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                            {[
+                                                { label: "Worek 25kg", jpp: "0.05" },
+                                                { label: "Worek 50kg", jpp: "0.08" },
+                                                { label: "Paleta pełna", jpp: "1.00" },
+                                                { label: "Karton", jpp: "0.03" },
+                                                { label: "Beczka 200L", jpp: "0.30" },
+                                                { label: "Rolka (membrana)", jpp: "0.10" },
+                                                { label: "Sztuka (płyta GK)", jpp: "0.02" },
+                                                { label: "Wiązka (profile)", jpp: "0.25" },
+                                            ].map(item => (
+                                                <div key={item.label} className="bg-white border border-slate-200 rounded-xl p-2.5">
+                                                    <div className="text-[10px] font-bold text-slate-600 mb-0.5">{item.label}</div>
+                                                    <div className="text-sm font-black text-emerald-600">{item.jpp} JPP</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Grid kart kategorii */}
+                                    {!canManageWarehouseRules ? (
+                                        <p className="text-xs text-amber-800 bg-amber-50 p-3 rounded-xl border border-amber-200">
+                                            🔒 Tryb podglądu. Nie posiadasz uprawnienia do edycji pojemności magazynu.
+                                        </p>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            <h4 className="text-xs font-black text-slate-800 flex items-center gap-2">
+                                                <span>📦</span>
+                                                <span>Pojemność według kategorii ({categoriesList.length})</span>
+                                            </h4>
+                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                                {categoriesList.map((category) => {
+                                                    const capacity = categoryCapacities[category.id] || {
+                                                        totalSlots: 0,
+                                                        currentSlots: 0,
+                                                        notes: "",
+                                                        alertThreshold: 70,
+                                                        criticalThreshold: 85
+                                                    };
+                                                    const fillPercentage = capacity.totalSlots > 0
+                                                        ? Math.round((capacity.currentSlots / capacity.totalSlots) * 100)
+                                                        : 0;
+                                                    const isAlertLevel = fillPercentage >= capacity.alertThreshold && fillPercentage < capacity.criticalThreshold;
+                                                    const isCriticalLevel = fillPercentage >= capacity.criticalThreshold;
+
+                                                    const handleCapacityChange = (field: keyof CategoryCapacity, value: any) => {
+                                                        setCategoryCapacities(prev => ({
+                                                            ...prev,
+                                                            [category.id]: {
+                                                                ...(prev[category.id] || { totalSlots: 0, currentSlots: 0, notes: "", alertThreshold: 70, criticalThreshold: 85 }),
+                                                                [field]: value
+                                                            }
+                                                        }));
+                                                    };
+
+                                                    return (
+                                                        <div key={category.id} className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+                                                            {/* Nagłówek kategorii */}
+                                                            <div className="flex items-center gap-3">
+                                                                <div className="text-2xl">{category.icon}</div>
+                                                                <div className="flex-1">
+                                                                    <h5 className="text-sm font-black text-slate-800">{category.name}</h5>
+                                                                    {capacity.totalSlots === 0 && (
+                                                                        <span className="text-[10px] text-slate-400 font-medium">Nie skonfigurowano pojemności</span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Inputy pojemności */}
+                                                            <div className="grid grid-cols-2 gap-2">
+                                                                <div>
+                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Łączna pojemność (JPP)</label>
+                                                                    <input
+                                                                        type="number" min="0" step="0.01"
+                                                                        value={capacity.totalSlots}
+                                                                        onChange={(e) => handleCapacityChange("totalSlots", parseFloat(e.target.value) || 0)}
+                                                                        className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                                                                        placeholder="0.00"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Aktualnie zajęte (JPP)</label>
+                                                                    <input
+                                                                        type="number" min="0" step="0.01"
+                                                                        value={capacity.currentSlots}
+                                                                        onChange={(e) => handleCapacityChange("currentSlots", parseFloat(e.target.value) || 0)}
+                                                                        className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                                                                        placeholder="0.00"
+                                                                    />
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Pasek postępu */}
+                                                            {capacity.totalSlots > 0 && (
+                                                                <div>
+                                                                    <div className="flex items-center justify-between mb-1.5">
+                                                                        <span className="text-[10px] font-bold text-slate-700">Wypełnienie</span>
+                                                                        <span className={`text-[10px] font-black ${
+                                                                            isCriticalLevel ? "text-red-600" : isAlertLevel ? "text-amber-600" : "text-emerald-600"
+                                                                        }`}>{fillPercentage}% ({capacity.currentSlots}/{capacity.totalSlots} JPP)</span>
+                                                                    </div>
+                                                                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+                                                                        <div
+                                                                            className={`h-full transition-all duration-500 ${
+                                                                                isCriticalLevel ? "bg-red-500 animate-pulse" : isAlertLevel ? "bg-amber-500" : "bg-emerald-500"
+                                                                            }`}
+                                                                            style={{ width: `${Math.min(fillPercentage, 100)}%` }}
+                                                                        />
+                                                                    </div>
+                                                                    {isCriticalLevel && (
+                                                                        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">
+                                                                            <span>🚨</span><span>Przekroczono próg krytyczny!</span>
+                                                                        </div>
+                                                                    )}
+                                                                    {isAlertLevel && !isCriticalLevel && (
+                                                                        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                                                            <span>⚠️</span><span>Zbliżasz się do progu krytycznego</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+
+                                                            {/* Progi ostrzeżeń */}
+                                                            <div className="grid grid-cols-2 gap-2">
+                                                                <div>
+                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Próg ostrzeżenia (%)</label>
+                                                                    <input
+                                                                        type="number" min="0" max="100"
+                                                                        value={capacity.alertThreshold}
+                                                                        onChange={(e) => handleCapacityChange("alertThreshold", parseInt(e.target.value) || 70)}
+                                                                        className="w-full px-2.5 py-1.5 text-xs border border-amber-300 rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Próg krytyczny (%)</label>
+                                                                    <input
+                                                                        type="number" min="0" max="100"
+                                                                        value={capacity.criticalThreshold}
+                                                                        onChange={(e) => handleCapacityChange("criticalThreshold", parseInt(e.target.value) || 85)}
+                                                                        className="w-full px-2.5 py-1.5 text-xs border border-red-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                                                                    />
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Uwagi */}
+                                                            <div>
+                                                                <label className="block text-[10px] font-bold text-slate-700 mb-1">Uwagi</label>
+                                                                <textarea
+                                                                    value={capacity.notes}
+                                                                    onChange={(e) => handleCapacityChange("notes", e.target.value)}
+                                                                    rows={2}
+                                                                    className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none"
+                                                                    placeholder="Dodatkowe informacje o tej kategorii..."
+                                                                />
+                                                            </div>
+
+                                                            {/* Metadane */}
+                                                            {capacity.updatedAt && capacity.updatedBy && (
+                                                                <div className="pt-2 border-t border-slate-100">
+                                                                    <p className="text-[10px] text-slate-400">
+                                                                        Ost. zmiana: <strong>{capacity.updatedAt}</strong> przez <strong>{capacity.updatedBy}</strong>
+                                                                    </p>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
