@@ -37,6 +37,7 @@ export async function POST(req: Request) {
         const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
         // Pobierz aktualne kategorie (jeśli były zmodyfikowane w Ustawieniach / Kreatorze)
+        // Pobierz aktualne kategorie (jeśli były zmodyfikowane w Ustawieniach / Kreatorze)
         let activeCategories = RESIDUAL_MAIN_CATEGORIES;
         try {
             const catDoc = await adminDb.doc("settings/residual_categories").get();
@@ -45,6 +46,17 @@ export async function POST(req: Request) {
             }
         } catch (e) {
             console.warn("Błąd pobierania residual_categories w API, używam domyślnych:", e);
+        }
+
+        // Pobierz aktualne miejsca składowania i ich zapełnienie
+        let storageLocations: any[] = [];
+        try {
+            const capDoc = await adminDb.doc("settings/warehouse_capacity").get();
+            if (capDoc.exists && Array.isArray(capDoc.data()?.locations) && capDoc.data()!.locations.length > 0) {
+                storageLocations = capDoc.data()!.locations;
+            }
+        } catch (e) {
+            console.warn("Błąd pobierania warehouse_capacity w API:", e);
         }
 
         // Sformatuj reguły per kategoria
@@ -56,6 +68,23 @@ export async function POST(req: Request) {
 ${bRule ? `Wytyczne Szefa: ${bRule}` : ''}
 ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
         }).filter(Boolean).join('\n\n');
+
+        // Sformatuj informacje o miejscach składowania i ich zapełnieniu
+        const storageLocationsFormatted = storageLocations.length > 0
+            ? storageLocations.map(loc => {
+                const fillPct = loc.totalCapacity > 0 ? Math.round(((loc.currentOccupied || 0) / loc.totalCapacity) * 100) : 0;
+                const catNames = (loc.categories || []).map((catId: string) => {
+                    const match = activeCategories.find(c => c.id === catId);
+                    return match ? match.name : catId;
+                }).join(', ');
+                const status = fillPct >= (loc.criticalThreshold || 85)
+                    ? '🚨 PRZEPEŁNIENIE KRYTYCZNE'
+                    : fillPct >= (loc.alertThreshold || 70)
+                        ? '⚠️ WYSOKIE ZAPEŁNIENIE (OSTRZEŻENIE)'
+                        : '🟢 MIEJSCE DOSTĘPNE';
+                return `- Miejsce: "${loc.name}" (Pojemność: ${loc.totalCapacity} JPP, Zajęte: ${loc.currentOccupied || 0} JPP, Zapełnienie: ${fillPct}% [${status}]) -> Składowane kategorie: [${catNames || 'brak'}]`;
+            }).join('\n')
+            : '';
 
         const categoriesList = activeCategories.map(c => 
             `- "${c.name}" (przykłady podkategorii: ${c.subcategories.slice(0, 5).join(', ')})`
@@ -74,6 +103,15 @@ ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
 
             ${categoryRulesFormatted ? `SZCZEGÓŁOWE REGUŁY DLA POSZCZEGÓLNYCH KATEGORII:\n${categoryRulesFormatted}\n` : ''}
 
+            ${storageLocationsFormatted ? `STAN I MIEJSCA SKŁADOWANIA W MAGAZYNIE:
+${storageLocationsFormatted}
+
+ZASADA MIEJSC SKŁADOWANIA:
+Dla każdego materiału sprawdź, do którego miejsca składowania należy jego kategoria.
+Ustal 'storageLocation' jako nazwę tego miejsca (lub puste jeśli brak).
+Jeśli to miejsce składowania ma wysokie zapełnienie (>= 70% lub krytyczne >= 85%), KONIECZNIE dopisz to w 'ruleNotes' (np. "Uwaga: Trafia na Plac Zewnętrzny, który jest zajęty w 70%!").
+` : ''}
+
             Zadanie:
             1. Zapisz dokładną, pełną transkrypcję mowy na tekst ('transcription') - dokładnie to, co kierowca powiedział w notatce.
             2. Wyodrębnij z nagrania wszystkie wymienione pozycje materiałowe ('residuals').
@@ -85,7 +123,9 @@ ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
             5. 'unit' - jednostka miary: 'szt.', 'worek', 'opak.', 'mb', 'kg', 'm²', 'litr', 'wiaderko', 'paleta', 'krąg'
             6. 'isWaste' - wartość boolean: true jeśli kierowca mówi o śmieciach, zniszczonych odpadach, resztkach nienadających się do użycia; false jeśli materiał jest pełnowartościowy / użyteczny do ponownego wykorzystania.
             7. 'rulesCompliant' - wartość boolean: true jeśli materiał spełnia reguły ogólne oraz reguły swojej kategorii; false jeśli narusza jakąkolwiek regułę Szefa lub Magazynu.
-            8. 'ruleNotes' - zwięzły komentarz oceny reguł (np. "Zgodne z regułami", "Niezgodne z regułą dla Kleje i Zaprawy: otwarty powyżej miesiąca", "Niezgodne z regułą magazynu: kabel poniżej 15m").
+            8. 'ruleNotes' - zwięzły komentarz oceny reguł oraz ew. ostrzeżenie o zapełnieniu miejsca składowania.
+            9. 'storageLocation' - nazwa miejsca składowania (np. 'Plac Zewnętrzny', 'Magazyn Farb i Chemii') lub null jeśli nieprzypisane.
+            10. 'storageFillPercentage' - aktualny procent zapełnienia tego miejsca składowania w magazynie (liczba np. 70) lub null.
         `;
 
         const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
@@ -154,6 +194,14 @@ ${wRule ? `Wytyczne Magazynu: ${wRule}` : ''}`;
                                     ruleNotes: {
                                         type: Type.STRING,
                                         description: "Ocena lub uwagi na podstawie reguł Szefa i Magazynu."
+                                    },
+                                    storageLocation: {
+                                        type: Type.STRING,
+                                        description: "Nazwa sugerowanego miejsca składowania (np. Plac Zewnętrzny, Magazyn Farb i Chemii) lub null."
+                                    },
+                                    storageFillPercentage: {
+                                        type: Type.NUMBER,
+                                        description: "Aktualny procent zapełnienia tego miejsca składowania (liczba od 0 do 100) lub null."
                                     }
                                 },
                                 required: ["name", "category", "subcategory", "quantity", "unit", "isWaste", "rulesCompliant", "ruleNotes"]

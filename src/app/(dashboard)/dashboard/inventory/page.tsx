@@ -152,6 +152,52 @@ interface CategoryCapacity {
     updatedBy?: string;
 }
 
+export interface StorageLocation {
+    id: string;
+    name: string;
+    description?: string;
+    totalCapacity: number;     // Łączna pojemność w JPP (miejsca paletowe)
+    currentOccupied: number;   // Aktualnie zajęte w JPP
+    categories: string[];      // ID kategorii przypisanych do tego miejsca
+    alertThreshold: number;    // np. 70 (%)
+    criticalThreshold: number; // np. 85 (%)
+    updatedAt?: string;
+    updatedBy?: string;
+}
+
+const DEFAULT_STORAGE_LOCATIONS: StorageLocation[] = [
+    {
+        id: "loc_plac",
+        name: "Plac Zewnętrzny",
+        description: "Utwardzony plac – pustaki, bloczki, kable w kręgach, stal, szalunki i elementy wielkogabarytowe",
+        totalCapacity: 30,
+        currentOccupied: 12,
+        categories: ["pustaki", "kable-elektryka", "szalunki", "stal-ogrodzenia", "kanalizacja-odwodnienia"],
+        alertThreshold: 70,
+        criticalThreshold: 85
+    },
+    {
+        id: "loc_chemia",
+        name: "Magazyn Farb i Chemii",
+        description: "Wydzielona strefa ogrzewana – farby, grunty, silikony, pianki montażowe i chemia budowlana",
+        totalCapacity: 10,
+        currentOccupied: 4,
+        categories: ["farby-chemia", "pianki-silikony"],
+        alertThreshold: 70,
+        criticalThreshold: 85
+    },
+    {
+        id: "loc_hala_sucha",
+        name: "Hala Główna - Regały Suche",
+        description: "Regały paletowe pod dachem – kleje workowane, płyty GK, gładzie, wełny i folie",
+        totalCapacity: 25,
+        currentOccupied: 16,
+        categories: ["kleje", "plyty-gk", "gipsy-gladzie", "izolacje-folie"],
+        alertThreshold: 70,
+        criticalThreshold: 85
+    }
+];
+
 export default function InventoryPage() {
     const { user } = useAuth();
     const [items, setItems] = useState<InventoryItem[]>([]);
@@ -252,6 +298,9 @@ export default function InventoryPage() {
     const [isLoadingRules, setIsLoadingRules] = useState(false);
     const [isSavingRules, setIsSavingRules] = useState(false);
     const [categoryCapacities, setCategoryCapacities] = useState<Record<string, CategoryCapacity>>({});
+    const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
+    const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+    const [editingLocation, setEditingLocation] = useState<StorageLocation | null>(null);
 
     // DYNAMICZNE KATEGORIE I PODKATEGORIE DLA RESZTEK BUDOWLANYCH
     const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
@@ -283,6 +332,68 @@ export default function InventoryPage() {
     ));
 
     const canAccessRules = canManageBossRules || canManageWarehouseRules || isUserAdmin;
+
+    const handleOpenAddLocation = () => {
+        setEditingLocation({
+            id: `loc_${Date.now()}`,
+            name: "",
+            description: "",
+            totalCapacity: 20,
+            currentOccupied: 0,
+            categories: [],
+            alertThreshold: 70,
+            criticalThreshold: 85
+        });
+        setIsLocationModalOpen(true);
+    };
+
+    const handleEditLocation = (loc: StorageLocation) => {
+        setEditingLocation({ ...loc });
+        setIsLocationModalOpen(true);
+    };
+
+    const handleSaveLocation = () => {
+        if (!editingLocation || !editingLocation.name.trim()) {
+            alert("Podaj nazwę miejsca składowania!");
+            return;
+        }
+        setStorageLocations(prev => {
+            const idx = prev.findIndex(l => l.id === editingLocation.id);
+            if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = editingLocation;
+                return next;
+            } else {
+                return [...prev, editingLocation];
+            }
+        });
+        setIsLocationModalOpen(false);
+        setEditingLocation(null);
+    };
+
+    const handleDeleteLocation = (id: string, name: string) => {
+        if (!window.confirm(`Czy na pewno chcesz usunąć miejsce składowania: "${name}"?`)) return;
+        setStorageLocations(prev => prev.filter(l => l.id !== id));
+    };
+
+    const handleQuickUpdateOccupied = (id: string, deltaOrVal: number, isDirect: boolean = false) => {
+        setStorageLocations(prev => prev.map(loc => {
+            if (loc.id !== id) return loc;
+            const newOcc = isDirect
+                ? Math.max(0, deltaOrVal)
+                : Math.max(0, parseFloat(((loc.currentOccupied || 0) + deltaOrVal).toFixed(2)));
+            return { ...loc, currentOccupied: newOcc };
+        }));
+    };
+
+    const handleToggleCategoryForLocation = (catId: string) => {
+        if (!editingLocation) return;
+        const exists = editingLocation.categories.includes(catId);
+        const updatedCategories = exists
+            ? editingLocation.categories.filter(c => c !== catId)
+            : [...editingLocation.categories, catId];
+        setEditingLocation({ ...editingLocation, categories: updatedCategories });
+    };
 
     const fetchRules = async () => {
         setIsLoadingRules(true);
@@ -316,9 +427,15 @@ export default function InventoryPage() {
             }
 
             if (capacitySnap.exists()) {
-                const capacityData = capacitySnap.data().capacities || {};
-                setCategoryCapacities(capacityData);
+                const capacityData = capacitySnap.data() || {};
+                if (Array.isArray(capacityData.locations) && capacityData.locations.length > 0) {
+                    setStorageLocations(capacityData.locations);
+                } else {
+                    setStorageLocations(DEFAULT_STORAGE_LOCATIONS);
+                }
+                setCategoryCapacities(capacityData.capacities || {});
             } else {
+                setStorageLocations(DEFAULT_STORAGE_LOCATIONS);
                 const defaultCapacities: Record<string, CategoryCapacity> = {};
                 RESIDUAL_MAIN_CATEGORIES.forEach(cat => {
                     defaultCapacities[cat.id] = {
@@ -530,10 +647,20 @@ export default function InventoryPage() {
                 };
             });
 
+            // Aktualizuj metadane dla miejsc składowania
+            const updatedLocations: StorageLocation[] = storageLocations.map(loc => ({
+                ...loc,
+                updatedAt: now,
+                updatedBy: updaterName
+            }));
+
             await Promise.all([
                 setDoc(doc(db, "settings", "residual_rules"), updatePayload, { merge: true }),
                 setDoc(doc(db, "settings", "residual_categories"), { categories: categoriesList }, { merge: true }),
-                setDoc(doc(db, "settings", "warehouse_capacity"), { capacities: updatedCapacities }, { merge: true })
+                setDoc(doc(db, "settings", "warehouse_capacity"), { 
+                    locations: updatedLocations,
+                    capacities: updatedCapacities 
+                }, { merge: true })
             ]);
 
             if (canManageBossRules) {
@@ -543,8 +670,9 @@ export default function InventoryPage() {
                 setWarehouseRulesMeta({ updatedAt: now, updatedBy: updaterName });
             }
             setCategoryCapacities(updatedCapacities);
+            setStorageLocations(updatedLocations);
 
-            alert("Wszystkie reguły, kategorie, podkategorie oraz pojemności zostały pomyślnie zapisane!");
+            alert("Wszystkie reguły, kategorie, podkategorie oraz miejsca składowania zostały pomyślnie zapisane!");
             setIsRulesModalOpen(false);
         } catch (err) {
             console.error("Błąd zapisu reguł:", err);
@@ -3602,7 +3730,8 @@ export default function InventoryPage() {
                 const selectedCategoryObj = categoriesList.find(c => c.id === selectedCategoryId);
 
                 return (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4 animate-fade-in">
+                    <>
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4 animate-fade-in">
                         <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[94vh] flex flex-col overflow-hidden border border-slate-200">
                             {/* Nagłówek modalu */}
                             <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-slate-800 to-amber-950 text-white flex justify-between items-center">
@@ -3720,10 +3849,342 @@ export default function InventoryPage() {
                                 </button>
                             </div>
 
-                            {/* 3. CIAŁO MODALU: DWUKOLUMNOWY UKŁAD (KATEGORIE + EDYTOR) */}
+                            {/* 3. CIAŁO MODALU: DWUKOLUMNOWY UKŁAD (KATEGORIE + EDYTOR) LUB WIDOK MIEJSC SKŁADOWANIA */}
                             {isLoadingRules ? (
                                 <div className="py-20 text-center text-slate-400 font-bold animate-pulse flex-1 flex items-center justify-center">
                                     Wczytywanie reguł z bazy PESAM...
+                                </div>
+                            ) : rulesTab === "CAPACITY" ? (
+                                <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50">
+                                    {/* Nagłówek sekcji */}
+                                    <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-cyan-50 border border-emerald-200 rounded-2xl p-5 shadow-xs">
+                                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                                            <div className="flex items-start gap-3.5">
+                                                <div className="text-3xl p-2.5 rounded-2xl bg-emerald-100/80 border border-emerald-300 shrink-0">📍</div>
+                                                <div>
+                                                    <h3 className="text-base font-black text-emerald-950 flex items-center gap-2">
+                                                        <span>Miejsca Składowania i Pojemność Magazynu</span>
+                                                        <span className="text-[10px] bg-emerald-200/80 text-emerald-900 px-2.5 py-0.5 rounded-full font-bold">Jednostki Paletowe (JPP)</span>
+                                                    </h3>
+                                                    <p className="text-xs text-emerald-800/90 mt-1 max-w-2xl leading-relaxed">
+                                                        Zdefiniuj fizyczne strefy magazynu (np. <strong>Plac Zewnętrzny</strong>, <strong>Magazyn Farb i Chemii</strong>, <strong>Hala Główna</strong>) i przypisz do nich kategorie materiałów. 
+                                                        Gdy kierowca zwróci pustaki czy farby, AI przypisze je do odpowiedniego miejsca i poinformuje o stanie zapełnienia.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            {canManageWarehouseRules && (
+                                                <button
+                                                    type="button"
+                                                    onClick={handleOpenAddLocation}
+                                                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shadow-md hover:shadow-lg transition flex items-center gap-2 shrink-0 active:scale-95"
+                                                >
+                                                    <span className="text-base leading-none">➕</span>
+                                                    <span>Dodaj Miejsce Składowania</span>
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Pasek KPI */}
+                                    {(() => {
+                                        const totalCapacity = storageLocations.reduce((s, l) => s + (l.totalCapacity || 0), 0);
+                                        const totalOccupied = storageLocations.reduce((s, l) => s + (l.currentOccupied || 0), 0);
+                                        const globalPct = totalCapacity > 0 ? Math.round((totalOccupied / totalCapacity) * 100) : 0;
+                                        const freeSlots = Math.max(0, parseFloat((totalCapacity - totalOccupied).toFixed(1)));
+                                        const assignedCatIds = new Set(storageLocations.flatMap(l => l.categories || []));
+                                        const unassignedCats = categoriesList.filter(c => !assignedCatIds.has(c.id));
+
+                                        return (
+                                            <>
+                                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                                    <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
+                                                        <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">Strefy Składowania</div>
+                                                        <div className="text-xl font-black text-slate-900">{storageLocations.length} <span className="text-xs font-normal text-slate-400">miejsc</span></div>
+                                                    </div>
+                                                    <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
+                                                        <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">Łączna Pojemność</div>
+                                                        <div className="text-xl font-black text-emerald-700">{totalCapacity} <span className="text-xs font-normal text-slate-400">JPP / palet</span></div>
+                                                    </div>
+                                                    <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
+                                                        <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">Aktualnie Zajęte</div>
+                                                        <div className="text-xl font-black text-slate-900">{totalOccupied} <span className="text-xs font-normal text-slate-400">JPP</span></div>
+                                                    </div>
+                                                    <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
+                                                        <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">Średnie Zapełnienie</div>
+                                                        <div className={`text-xl font-black ${
+                                                            globalPct >= 85 ? "text-red-600" : globalPct >= 70 ? "text-amber-600" : "text-emerald-600"
+                                                        }`}>
+                                                            {globalPct}% <span className="text-xs font-normal text-slate-400">({freeSlots} wolnych)</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Ostrzeżenie o nieprzypisanych kategoriach */}
+                                                {unassignedCats.length > 0 && (
+                                                    <div className="bg-amber-50/80 border border-amber-200 rounded-2xl p-3.5 flex items-start gap-3">
+                                                        <div className="text-lg">ℹ️</div>
+                                                        <div className="flex-1">
+                                                            <div className="text-xs font-black text-amber-900 mb-1">
+                                                                Kategorie resztek jeszcze nieprzypisane do żadnego miejsca ({unassignedCats.length}):
+                                                            </div>
+                                                            <div className="flex flex-wrap gap-1.5 mt-1">
+                                                                {unassignedCats.map(c => (
+                                                                    <span key={c.id} className="text-[11px] bg-white border border-amber-300 text-amber-900 px-2 py-0.5 rounded-lg font-bold flex items-center gap-1 shadow-2xs">
+                                                                        <span>{c.icon}</span>
+                                                                        <span>{c.name}</span>
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                            <p className="text-[11px] text-amber-700 mt-1.5">
+                                                                Kliknij „Edytuj” na odpowiednim miejscu lub stwórz nową strefę, aby AI wiedziało gdzie trafiają te materiały.
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Lista kart Miejsc Składowania */}
+                                                <div className="space-y-3">
+                                                    <div className="flex items-center justify-between">
+                                                        <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                                                            <span>📦</span>
+                                                            <span>Zdefiniowane Miejsca Składowania ({storageLocations.length})</span>
+                                                        </h4>
+                                                    </div>
+
+                                                    {storageLocations.length === 0 ? (
+                                                        <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center space-y-3">
+                                                            <div className="text-4xl">🏢</div>
+                                                            <div className="text-sm font-bold text-slate-700">Brak zdefiniowanych miejsc składowania</div>
+                                                            <p className="text-xs text-slate-500 max-w-md mx-auto">
+                                                                Dodaj pierwsze miejsce (np. Plac zewnętrzny na pustaki i kable lub regał na farby i chemię).
+                                                            </p>
+                                                            {canManageWarehouseRules && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleOpenAddLocation}
+                                                                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shadow-sm transition inline-flex items-center gap-1.5"
+                                                                >
+                                                                    <span>➕</span>
+                                                                    <span>Dodaj Pierwsze Miejsce</span>
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                                            {storageLocations.map((loc) => {
+                                                                const fillPct = loc.totalCapacity > 0
+                                                                    ? Math.round(((loc.currentOccupied || 0) / loc.totalCapacity) * 100)
+                                                                    : 0;
+                                                                const isCritical = fillPct >= (loc.criticalThreshold || 85);
+                                                                const isAlert = fillPct >= (loc.alertThreshold || 70) && !isCritical;
+                                                                const freeSlots = Math.max(0, parseFloat((loc.totalCapacity - (loc.currentOccupied || 0)).toFixed(2)));
+
+                                                                return (
+                                                                    <div key={loc.id} className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3.5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between">
+                                                                        <div className="space-y-3">
+                                                                            {/* Nagłówek miejsca */}
+                                                                            <div className="flex items-start justify-between gap-3">
+                                                                                <div className="flex items-start gap-2.5">
+                                                                                    <div className="text-2xl p-2 rounded-xl bg-slate-100 border border-slate-200 shrink-0">📍</div>
+                                                                                    <div>
+                                                                                        <h5 className="text-sm font-black text-slate-900 leading-tight">{loc.name}</h5>
+                                                                                        {loc.description && (
+                                                                                            <p className="text-xs text-slate-500 mt-0.5 leading-snug">{loc.description}</p>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="flex items-center gap-1.5 shrink-0">
+                                                                                    {canManageWarehouseRules && (
+                                                                                        <>
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                onClick={() => handleEditLocation(loc)}
+                                                                                                className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg text-xs font-bold transition flex items-center gap-1 border border-slate-200"
+                                                                                                title="Edytuj to miejsce"
+                                                                                            >
+                                                                                                <span>✏️</span>
+                                                                                                <span className="hidden sm:inline">Edytuj</span>
+                                                                                            </button>
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                onClick={() => handleDeleteLocation(loc.id, loc.name)}
+                                                                                                className="p-1.5 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg text-xs font-bold transition flex items-center gap-1 border border-red-200"
+                                                                                                title="Usuń to miejsce"
+                                                                                            >
+                                                                                                <span>🗑️</span>
+                                                                                            </button>
+                                                                                        </>
+                                                                                    )}
+                                                                                </div>
+                                                                            </div>
+
+                                                                            {/* Pasek postępu zapełnienia */}
+                                                                            <div className="space-y-1.5">
+                                                                                <div className="flex items-center justify-between text-xs font-bold">
+                                                                                    <div className="flex items-center gap-1.5">
+                                                                                        <span className="text-slate-600">Zapełnienie:</span>
+                                                                                        <span className={`px-2 py-0.5 rounded-md text-[11px] font-black ${
+                                                                                            isCritical
+                                                                                                ? "bg-red-100 text-red-700 border border-red-200"
+                                                                                                : isAlert
+                                                                                                    ? "bg-amber-100 text-amber-800 border border-amber-200"
+                                                                                                    : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                                                                        }`}>
+                                                                                            {fillPct}%
+                                                                                        </span>
+                                                                                    </div>
+                                                                                    <div className="text-slate-500 text-[11px]">
+                                                                                        <strong>{loc.currentOccupied}</strong> / {loc.totalCapacity} JPP
+                                                                                        <span className="text-slate-400 ml-1">({freeSlots} wolnych)</span>
+                                                                                    </div>
+                                                                                </div>
+
+                                                                                <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden border border-slate-200 p-0.5">
+                                                                                    <div
+                                                                                        className={`h-full rounded-full transition-all duration-500 ${
+                                                                                            isCritical
+                                                                                                ? "bg-gradient-to-r from-red-500 to-rose-600 animate-pulse"
+                                                                                                : isAlert
+                                                                                                    ? "bg-gradient-to-r from-amber-400 to-orange-500"
+                                                                                                    : "bg-gradient-to-r from-emerald-400 to-teal-500"
+                                                                                        }`}
+                                                                                        style={{ width: `${Math.min(fillPct, 100)}%` }}
+                                                                                    />
+                                                                                </div>
+
+                                                                                {isCritical && (
+                                                                                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1">
+                                                                                        <span>🚨</span>
+                                                                                        <span>Przekroczono próg krytyczny ({loc.criticalThreshold || 85}%)! Brak wolnego miejsca.</span>
+                                                                                    </div>
+                                                                                )}
+                                                                                {isAlert && !isCritical && (
+                                                                                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1">
+                                                                                        <span>⚠️</span>
+                                                                                        <span>Zbliża się do limitu (próg ostrzeżenia {loc.alertThreshold || 70}%).</span>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+
+                                                                            {/* Szybka zmiana zajęcia */}
+                                                                            <div className="flex items-center justify-between bg-slate-50 p-2 rounded-xl border border-slate-200 gap-2 flex-wrap">
+                                                                                <span className="text-[11px] font-bold text-slate-700">Aktualnie zajęte:</span>
+                                                                                <div className="flex items-center gap-1">
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => handleQuickUpdateOccupied(loc.id, -1)}
+                                                                                        disabled={!canManageWarehouseRules || (loc.currentOccupied || 0) <= 0}
+                                                                                        className="w-7 h-7 bg-white hover:bg-slate-200 text-slate-800 rounded-lg border border-slate-300 font-bold text-xs flex items-center justify-center transition disabled:opacity-30"
+                                                                                        title="-1 JPP"
+                                                                                    >
+                                                                                        -1
+                                                                                    </button>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => handleQuickUpdateOccupied(loc.id, -0.5)}
+                                                                                        disabled={!canManageWarehouseRules || (loc.currentOccupied || 0) <= 0}
+                                                                                        className="px-1.5 h-7 bg-white hover:bg-slate-200 text-slate-800 rounded-lg border border-slate-300 font-bold text-[10px] flex items-center justify-center transition disabled:opacity-30"
+                                                                                        title="-0.5 JPP"
+                                                                                    >
+                                                                                        -0.5
+                                                                                    </button>
+                                                                                    <input
+                                                                                        type="number"
+                                                                                        min="0"
+                                                                                        step="0.1"
+                                                                                        value={loc.currentOccupied}
+                                                                                        onChange={(e) => handleQuickUpdateOccupied(loc.id, parseFloat(e.target.value) || 0, true)}
+                                                                                        disabled={!canManageWarehouseRules}
+                                                                                        className="w-16 text-center py-1 text-xs font-black border border-slate-300 rounded-lg bg-white"
+                                                                                    />
+                                                                                    <span className="text-[10px] font-bold text-slate-500 mr-1">JPP</span>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => handleQuickUpdateOccupied(loc.id, 0.5)}
+                                                                                        disabled={!canManageWarehouseRules}
+                                                                                        className="px-1.5 h-7 bg-white hover:bg-slate-200 text-slate-800 rounded-lg border border-slate-300 font-bold text-[10px] flex items-center justify-center transition disabled:opacity-30"
+                                                                                        title="+0.5 JPP"
+                                                                                    >
+                                                                                        +0.5
+                                                                                    </button>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => handleQuickUpdateOccupied(loc.id, 1)}
+                                                                                        disabled={!canManageWarehouseRules}
+                                                                                        className="w-7 h-7 bg-white hover:bg-slate-200 text-slate-800 rounded-lg border border-slate-300 font-bold text-xs flex items-center justify-center transition disabled:opacity-30"
+                                                                                        title="+1 JPP"
+                                                                                    >
+                                                                                        +1
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            {/* Przypisane kategorie */}
+                                                                            <div className="space-y-1.5 pt-1">
+                                                                                <div className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                                                                                    Składowane kategorie ({(loc.categories || []).length}):
+                                                                                </div>
+                                                                                <div className="flex flex-wrap gap-1.5">
+                                                                                    {(!loc.categories || loc.categories.length === 0) ? (
+                                                                                        <span className="text-xs text-slate-400 italic">Brak przypisanych kategorii – kliknij Edytuj aby przypisać.</span>
+                                                                                    ) : (
+                                                                                        loc.categories.map(catId => {
+                                                                                            const cat = categoriesList.find(c => c.id === catId);
+                                                                                            return (
+                                                                                                <span key={catId} className="text-xs bg-emerald-50 text-emerald-900 border border-emerald-200 px-2 py-0.5 rounded-lg font-medium flex items-center gap-1 shadow-2xs">
+                                                                                                    <span>{cat?.icon || "📦"}</span>
+                                                                                                    <span>{cat?.name || catId}</span>
+                                                                                                </span>
+                                                                                            );
+                                                                                        })
+                                                                                    )}
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+
+                                                                        {/* Metadane */}
+                                                                        {loc.updatedAt && loc.updatedBy && (
+                                                                            <div className="pt-2 border-t border-slate-100 text-[10px] text-slate-400">
+                                                                                Ost. zmiana: <strong>{loc.updatedBy}</strong> ({loc.updatedAt})
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </>
+                                        );
+                                    })()}
+
+                                    {/* Tabela przeliczników JPP */}
+                                    <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
+                                        <h4 className="text-xs font-black text-slate-800 flex items-center gap-2">
+                                            <span>📐</span>
+                                            <span>Przelicznik Jednostek Paletowych (JPP) – ściąga informacyjna</span>
+                                        </h4>
+                                        <p className="text-xs text-slate-500">
+                                            Użyj poniższych orientacyjnych przeliczników do szacowania ile miejsca paletowego (JPP) zajmuje towar:
+                                        </p>
+                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                            {[
+                                                { label: "Worek 25kg", jpp: "0.05" },
+                                                { label: "Worek 50kg", jpp: "0.08" },
+                                                { label: "Paleta pełna", jpp: "1.00" },
+                                                { label: "Karton", jpp: "0.03" },
+                                                { label: "Beczka 200L", jpp: "0.30" },
+                                                { label: "Rolka (membrana)", jpp: "0.10" },
+                                                { label: "Sztuka (płyta GK)", jpp: "0.02" },
+                                                { label: "Wiązka (profile)", jpp: "0.25" },
+                                            ].map(item => (
+                                                <div key={item.label} className="bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+                                                    <div className="text-[10px] font-bold text-slate-600 mb-0.5">{item.label}</div>
+                                                    <div className="text-sm font-black text-emerald-600">{item.jpp} JPP</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
                                 </div>
                             ) : (
                                 <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
@@ -4018,204 +4479,6 @@ export default function InventoryPage() {
                                 </div>
                             )}
 
-                            {/* ZAKŁADKA: CAPACITY - Pojemność Magazynu */}
-                            {rulesTab === "CAPACITY" && (
-                                <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                                    {/* Nagłówek sekcji */}
-                                    <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-5">
-                                        <div className="flex items-start gap-4">
-                                            <div className="text-4xl">📊</div>
-                                            <div className="flex-1">
-                                                <h3 className="text-base font-black text-emerald-900 mb-1">
-                                                    Pojemność Magazynu w Jednostkach Paletowych (JPP)
-                                                </h3>
-                                                <p className="text-xs text-emerald-700 leading-relaxed">
-                                                    Zdefiniuj łączną pojemność i aktualny stan każdej kategorii resztek budowlanych.
-                                                    System automatycznie obliczy % wypełnienia i wyświetli ostrzeżenia przy analizie zwrotów.
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Tabela przeliczników JPP */}
-                                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5">
-                                        <h4 className="text-xs font-black text-slate-800 mb-3 flex items-center gap-2">
-                                            <span>📐</span>
-                                            <span>Przelicznik Jednostek Paletowych (JPP) – informacyjnie</span>
-                                        </h4>
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                            {[
-                                                { label: "Worek 25kg", jpp: "0.05" },
-                                                { label: "Worek 50kg", jpp: "0.08" },
-                                                { label: "Paleta pełna", jpp: "1.00" },
-                                                { label: "Karton", jpp: "0.03" },
-                                                { label: "Beczka 200L", jpp: "0.30" },
-                                                { label: "Rolka (membrana)", jpp: "0.10" },
-                                                { label: "Sztuka (płyta GK)", jpp: "0.02" },
-                                                { label: "Wiązka (profile)", jpp: "0.25" },
-                                            ].map(item => (
-                                                <div key={item.label} className="bg-white border border-slate-200 rounded-xl p-2.5">
-                                                    <div className="text-[10px] font-bold text-slate-600 mb-0.5">{item.label}</div>
-                                                    <div className="text-sm font-black text-emerald-600">{item.jpp} JPP</div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    {/* Grid kart kategorii */}
-                                    {!canManageWarehouseRules ? (
-                                        <p className="text-xs text-amber-800 bg-amber-50 p-3 rounded-xl border border-amber-200">
-                                            🔒 Tryb podglądu. Nie posiadasz uprawnienia do edycji pojemności magazynu.
-                                        </p>
-                                    ) : (
-                                        <div className="space-y-3">
-                                            <h4 className="text-xs font-black text-slate-800 flex items-center gap-2">
-                                                <span>📦</span>
-                                                <span>Pojemność według kategorii ({categoriesList.length})</span>
-                                            </h4>
-                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                                                {categoriesList.map((category) => {
-                                                    const capacity = categoryCapacities[category.id] || {
-                                                        totalSlots: 0,
-                                                        currentSlots: 0,
-                                                        notes: "",
-                                                        alertThreshold: 70,
-                                                        criticalThreshold: 85
-                                                    };
-                                                    const fillPercentage = capacity.totalSlots > 0
-                                                        ? Math.round((capacity.currentSlots / capacity.totalSlots) * 100)
-                                                        : 0;
-                                                    const isAlertLevel = fillPercentage >= capacity.alertThreshold && fillPercentage < capacity.criticalThreshold;
-                                                    const isCriticalLevel = fillPercentage >= capacity.criticalThreshold;
-
-                                                    const handleCapacityChange = (field: keyof CategoryCapacity, value: any) => {
-                                                        setCategoryCapacities(prev => ({
-                                                            ...prev,
-                                                            [category.id]: {
-                                                                ...(prev[category.id] || { totalSlots: 0, currentSlots: 0, notes: "", alertThreshold: 70, criticalThreshold: 85 }),
-                                                                [field]: value
-                                                            }
-                                                        }));
-                                                    };
-
-                                                    return (
-                                                        <div key={category.id} className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
-                                                            {/* Nagłówek kategorii */}
-                                                            <div className="flex items-center gap-3">
-                                                                <div className="text-2xl">{category.icon}</div>
-                                                                <div className="flex-1">
-                                                                    <h5 className="text-sm font-black text-slate-800">{category.name}</h5>
-                                                                    {capacity.totalSlots === 0 && (
-                                                                        <span className="text-[10px] text-slate-400 font-medium">Nie skonfigurowano pojemności</span>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-
-                                                            {/* Inputy pojemności */}
-                                                            <div className="grid grid-cols-2 gap-2">
-                                                                <div>
-                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Łączna pojemność (JPP)</label>
-                                                                    <input
-                                                                        type="number" min="0" step="0.01"
-                                                                        value={capacity.totalSlots}
-                                                                        onChange={(e) => handleCapacityChange("totalSlots", parseFloat(e.target.value) || 0)}
-                                                                        className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
-                                                                        placeholder="0.00"
-                                                                    />
-                                                                </div>
-                                                                <div>
-                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Aktualnie zajęte (JPP)</label>
-                                                                    <input
-                                                                        type="number" min="0" step="0.01"
-                                                                        value={capacity.currentSlots}
-                                                                        onChange={(e) => handleCapacityChange("currentSlots", parseFloat(e.target.value) || 0)}
-                                                                        className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
-                                                                        placeholder="0.00"
-                                                                    />
-                                                                </div>
-                                                            </div>
-
-                                                            {/* Pasek postępu */}
-                                                            {capacity.totalSlots > 0 && (
-                                                                <div>
-                                                                    <div className="flex items-center justify-between mb-1.5">
-                                                                        <span className="text-[10px] font-bold text-slate-700">Wypełnienie</span>
-                                                                        <span className={`text-[10px] font-black ${
-                                                                            isCriticalLevel ? "text-red-600" : isAlertLevel ? "text-amber-600" : "text-emerald-600"
-                                                                        }`}>{fillPercentage}% ({capacity.currentSlots}/{capacity.totalSlots} JPP)</span>
-                                                                    </div>
-                                                                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
-                                                                        <div
-                                                                            className={`h-full transition-all duration-500 ${
-                                                                                isCriticalLevel ? "bg-red-500 animate-pulse" : isAlertLevel ? "bg-amber-500" : "bg-emerald-500"
-                                                                            }`}
-                                                                            style={{ width: `${Math.min(fillPercentage, 100)}%` }}
-                                                                        />
-                                                                    </div>
-                                                                    {isCriticalLevel && (
-                                                                        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">
-                                                                            <span>🚨</span><span>Przekroczono próg krytyczny!</span>
-                                                                        </div>
-                                                                    )}
-                                                                    {isAlertLevel && !isCriticalLevel && (
-                                                                        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                                                                            <span>⚠️</span><span>Zbliżasz się do progu krytycznego</span>
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            )}
-
-                                                            {/* Progi ostrzeżeń */}
-                                                            <div className="grid grid-cols-2 gap-2">
-                                                                <div>
-                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Próg ostrzeżenia (%)</label>
-                                                                    <input
-                                                                        type="number" min="0" max="100"
-                                                                        value={capacity.alertThreshold}
-                                                                        onChange={(e) => handleCapacityChange("alertThreshold", parseInt(e.target.value) || 70)}
-                                                                        className="w-full px-2.5 py-1.5 text-xs border border-amber-300 rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                                                                    />
-                                                                </div>
-                                                                <div>
-                                                                    <label className="block text-[10px] font-bold text-slate-700 mb-1">Próg krytyczny (%)</label>
-                                                                    <input
-                                                                        type="number" min="0" max="100"
-                                                                        value={capacity.criticalThreshold}
-                                                                        onChange={(e) => handleCapacityChange("criticalThreshold", parseInt(e.target.value) || 85)}
-                                                                        className="w-full px-2.5 py-1.5 text-xs border border-red-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                                                                    />
-                                                                </div>
-                                                            </div>
-
-                                                            {/* Uwagi */}
-                                                            <div>
-                                                                <label className="block text-[10px] font-bold text-slate-700 mb-1">Uwagi</label>
-                                                                <textarea
-                                                                    value={capacity.notes}
-                                                                    onChange={(e) => handleCapacityChange("notes", e.target.value)}
-                                                                    rows={2}
-                                                                    className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none"
-                                                                    placeholder="Dodatkowe informacje o tej kategorii..."
-                                                                />
-                                                            </div>
-
-                                                            {/* Metadane */}
-                                                            {capacity.updatedAt && capacity.updatedBy && (
-                                                                <div className="pt-2 border-t border-slate-100">
-                                                                    <p className="text-[10px] text-slate-400">
-                                                                        Ost. zmiana: <strong>{capacity.updatedAt}</strong> przez <strong>{capacity.updatedBy}</strong>
-                                                                    </p>
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
                             {/* Stopka modalu */}
                             <div className="px-6 py-4 border-t bg-slate-50 flex justify-between items-center flex-wrap gap-2">
                                 <p className="text-xs text-slate-500">
@@ -4243,7 +4506,185 @@ export default function InventoryPage() {
                             </div>
                         </div>
                     </div>
-                );
+
+                    {/* MODAL DODAWANIA / EDYCJI MIEJSCA SKŁADOWANIA */}
+                    {isLocationModalOpen && editingLocation && (
+                        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-[60] flex items-center justify-center p-3 sm:p-4 animate-fade-in">
+                            <div className="bg-white rounded-3xl max-w-xl w-full max-h-[92vh] overflow-hidden flex flex-col shadow-2xl border border-slate-200">
+                                {/* Nagłówek */}
+                                <div className="px-6 py-4 bg-gradient-to-r from-emerald-700 via-teal-700 to-slate-900 text-white flex items-center justify-between">
+                                    <div className="flex items-center gap-2.5">
+                                        <span className="text-2xl p-1.5 rounded-xl bg-white/10">📍</span>
+                                        <div>
+                                            <h4 className="text-base font-black">
+                                                {storageLocations.some(l => l.id === editingLocation.id) ? `Edycja: ${editingLocation.name}` : "Nowe Miejsce Składowania"}
+                                            </h4>
+                                            <p className="text-xs text-emerald-100">Zdefiniuj strefę magazynu i przypisz do niej kategorie materiałów</p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => { setIsLocationModalOpen(false); setEditingLocation(null); }}
+                                        className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-lg font-bold transition leading-none"
+                                    >
+                                        &times;
+                                    </button>
+                                </div>
+
+                                {/* Treść */}
+                                <div className="p-6 overflow-y-auto space-y-4 flex-1">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                                            Nazwa Miejsca Składowania <span className="text-red-500">*</span>
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={editingLocation.name}
+                                            onChange={(e) => setEditingLocation({ ...editingLocation, name: e.target.value })}
+                                            placeholder="np. Plac Zewnętrzny, Magazyn Farb i Chemii, Hala A"
+                                            className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-xl font-bold text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                                            Opis / Lokalizacja fizyczna
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={editingLocation.description || ""}
+                                            onChange={(e) => setEditingLocation({ ...editingLocation, description: e.target.value })}
+                                            placeholder="np. Utwardzony plac przy bramie 2, regały ogrzewane"
+                                            className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-xl text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 mb-1">
+                                                Pojemność (JPP / palety) <span className="text-red-500">*</span>
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="0.1"
+                                                step="0.5"
+                                                value={editingLocation.totalCapacity}
+                                                onChange={(e) => setEditingLocation({ ...editingLocation, totalCapacity: parseFloat(e.target.value) || 0 })}
+                                                className="w-full px-3.5 py-2 text-sm font-bold border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500"
+                                                placeholder="np. 30"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 mb-1">
+                                                Aktualnie zajęte (JPP / palety)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                step="0.5"
+                                                value={editingLocation.currentOccupied}
+                                                onChange={(e) => setEditingLocation({ ...editingLocation, currentOccupied: parseFloat(e.target.value) || 0 })}
+                                                className="w-full px-3.5 py-2 text-sm font-bold border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500"
+                                                placeholder="np. 12"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 mb-1">
+                                                Próg ostrzeżenia (%)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="10"
+                                                max="100"
+                                                value={editingLocation.alertThreshold || 70}
+                                                onChange={(e) => setEditingLocation({ ...editingLocation, alertThreshold: parseInt(e.target.value) || 70 })}
+                                                className="w-full px-3.5 py-2 text-xs border border-amber-300 rounded-xl outline-none focus:ring-2 focus:ring-amber-500"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 mb-1">
+                                                Próg krytyczny (%)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="10"
+                                                max="100"
+                                                value={editingLocation.criticalThreshold || 85}
+                                                onChange={(e) => setEditingLocation({ ...editingLocation, criticalThreshold: parseInt(e.target.value) || 85 })}
+                                                className="w-full px-3.5 py-2 text-xs border border-red-300 rounded-xl outline-none focus:ring-2 focus:ring-red-500"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {/* Wybór kategorii */}
+                                    <div className="space-y-2 pt-2">
+                                        <div className="flex items-center justify-between">
+                                            <label className="block text-xs font-black text-slate-800 uppercase tracking-wide">
+                                                Kategorie materiałów w tym miejscu:
+                                            </label>
+                                            <span className="text-[11px] text-slate-500 font-bold">
+                                                Zaznaczono: {(editingLocation.categories || []).length} z {categoriesList.length}
+                                            </span>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500">
+                                            Kliknij w kategorię, aby ją przypisać lub odpiąć od tej strefy:
+                                        </p>
+
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto p-1.5 border rounded-xl bg-slate-50">
+                                            {categoriesList.map(cat => {
+                                                const isChecked = (editingLocation.categories || []).includes(cat.id);
+                                                return (
+                                                    <button
+                                                        key={cat.id}
+                                                        type="button"
+                                                        onClick={() => handleToggleCategoryForLocation(cat.id)}
+                                                        className={`p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition ${
+                                                            isChecked
+                                                                ? "bg-emerald-50 border-emerald-500 text-emerald-950 font-bold shadow-2xs"
+                                                                : "bg-white border-slate-200 text-slate-700 hover:border-slate-300"
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-2 truncate">
+                                                            <span className="text-lg shrink-0">{cat.icon}</span>
+                                                            <span className="text-xs truncate">{cat.name}</span>
+                                                        </div>
+                                                        <span className={`w-5 h-5 rounded-md flex items-center justify-center text-xs font-black shrink-0 ${
+                                                            isChecked ? "bg-emerald-600 text-white" : "border border-slate-300 bg-slate-50 text-transparent"
+                                                        }`}>
+                                                            ✓
+                                                        </span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Stopka */}
+                                <div className="px-6 py-4 border-t bg-slate-50 flex justify-end gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => { setIsLocationModalOpen(false); setEditingLocation(null); }}
+                                        className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 transition"
+                                    >
+                                        Anuluj
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleSaveLocation}
+                                        className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black shadow-md transition active:scale-95"
+                                    >
+                                        💾 Zatwierdź Miejsce
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </>
+            );
             })()}
         </div>
     );
