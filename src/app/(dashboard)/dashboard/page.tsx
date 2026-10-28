@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { collection, getDocs, doc, query, where, orderBy, limit } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, query, where, orderBy, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
@@ -20,10 +20,24 @@ interface InventoryItem {
     imageUrl: string; currentLocation: string; totalQuantity: number; availableQuantity: number;
     purchasePrice: number; allocations: Record<string, number>;
     requiresInspection?: boolean; lastInspectionDate?: string; nextInspectionDate?: string;
+    unit?: string;
 }
 
 interface Site {
     id: string; name: string; status?: string; location?: string;
+}
+
+interface StorageLocation {
+    id: string;
+    name: string;
+    description?: string;
+    totalCapacity: number;     // Łączna pojemność w JPP (miejsca paletowe)
+    currentOccupied: number;   // Aktualnie zajęte w JPP
+    categories: string[];      // ID kategorii przypisanych do tego miejsca
+    alertThreshold: number;    // np. 70 (%)
+    criticalThreshold: number; // np. 85 (%)
+    updatedAt?: string;
+    updatedBy?: string;
 }
 
 export default function DashboardPage() {
@@ -35,6 +49,11 @@ export default function DashboardPage() {
     const [pendingProtocolsCount, setPendingProtocolsCount] = useState(0);
     const [pendingWzCount, setPendingWzCount] = useState(0);
     const [loading, setLoading] = useState(true);
+
+    // NOWE STANY DLA WIDŻETU MIEJSC SKŁADOWANIA (PLAC / HALE)
+    const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
+    const [isStorageWidgetVisible, setIsStorageWidgetVisible] = useState<boolean>(true);
+    const [selectedLocationDetailId, setSelectedLocationDetailId] = useState<string | null>(null);
 
     // NOWE STANY SPECJALNE DLA KIEROWNIKA BUDOWY (OBSŁUGA WIELU BUDÓW)
     const [activeManagerSiteId, setActiveManagerSiteId] = useState("");
@@ -89,6 +108,21 @@ export default function DashboardPage() {
                     setActiveManagerSiteId(mSites[0].id);
                 }
 
+                // Pobierz konfigurację stref magazynowych (JPP / Miejsca składowania)
+                const capSnap = await getDoc(doc(db, "settings", "warehouse_capacity"));
+                if (capSnap.exists()) {
+                    const capData = capSnap.data() || {};
+                    if (Array.isArray(capData.locations) && capData.locations.length > 0) {
+                        setStorageLocations(capData.locations);
+                    }
+                }
+
+                // Wczytaj preferencję widoczności widżetu z localStorage
+                const savedWidgetPref = localStorage.getItem("pesam_widget_storage_locations");
+                if (savedWidgetPref !== null) {
+                    setIsStorageWidgetVisible(savedWidgetPref === "true");
+                }
+
             } catch (error) {
                 console.error("Błąd pobierania danych globalnych:", error);
             } finally {
@@ -110,8 +144,35 @@ export default function DashboardPage() {
     // Sprawdzamy czy użytkownik ma dostęp do przeglądania katalogu sprzętu
     const canViewCatalog = user ? hasPermission("viewInventory", user.rolePermissions, user.permissionOverrides) : false;
 
+    // Sprawdzamy czy użytkownik jest administratorem
+    const isUserAdmin = Boolean(
+        user && (
+            user.roleName?.toLowerCase() === "admin" ||
+            user.roleName?.toLowerCase().includes("administrator") ||
+            user.email?.toLowerCase().includes("admin")
+        )
+    );
+
+    // Dostęp do dedykowanego widżetu zapełnienia stref magazynowych (Plac / JPP)
+    const canViewStorageWidget = Boolean(
+        user && (
+            isUserAdmin ||
+            hasPermission("widgetStorageLocations", user.rolePermissions, user.permissionOverrides)
+        )
+    );
+
+    const toggleStorageWidget = () => {
+        setIsStorageWidgetVisible(prev => {
+            const next = !prev;
+            try {
+                localStorage.setItem("pesam_widget_storage_locations", String(next));
+            } catch (e) {}
+            return next;
+        });
+    };
+
     // Sprawdzamy, czy użytkownik posiada JAKIEKOLWIEK uprawnienie do wyświetlenia sekcji operacyjnych (Magazyn, Biuro, Zarządzanie budową)
-    const hasAnyOperationalPermission = isWarehouse || isAccountant || isManager || canManageCloseouts;
+    const hasAnyOperationalPermission = isWarehouse || isAccountant || isManager || canManageCloseouts || canViewStorageWidget;
 
     // 2. DYNAMICZNE POBIERANIE DANYCH DLA WYBRANEJ BUDOWY KIEROWNIKA
     useEffect(() => {
@@ -299,6 +360,190 @@ export default function DashboardPage() {
                             >
                                 Zatwierdź pozycje WZ ➡️
                             </Link>
+                        </div>
+                    )}
+
+                    {/* WIDŻET: MIEJSCA SKŁADOWANIA & PLAC (ZAPEŁNIENIE MAGAZYNU JPP) */}
+                    {canViewStorageWidget && (
+                        <div className="bg-white border rounded-3xl p-6 shadow-sm space-y-6">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b pb-4">
+                                <div>
+                                    <div className="flex items-center gap-2.5">
+                                        <span className="text-2xl">📍</span>
+                                        <h3 className="text-lg font-black text-slate-800 tracking-tight">
+                                            Miejsca Składowania & Plac (Zapełnienie JPP)
+                                        </h3>
+                                        <span className="bg-blue-100 text-blue-800 text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
+                                            Widżet
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        Monitorowanie wolnych miejsc paletowych (JPP) na placu, halach oraz magazynie chemii.
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={toggleStorageWidget}
+                                        className="text-xs font-bold text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl transition"
+                                        title={isStorageWidgetVisible ? "Zwiń widżet" : "Rozwiń widżet"}
+                                    >
+                                        {isStorageWidgetVisible ? "👁️ Zwiń" : "👁️ Rozwiń widżet"}
+                                    </button>
+                                    <Link
+                                        href="/dashboard/inventory"
+                                        className="text-xs font-black text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-xl transition flex items-center gap-1"
+                                    >
+                                        ⚙️ Konfiguruj strefy ➡️
+                                    </Link>
+                                </div>
+                            </div>
+
+                            {isStorageWidgetVisible && (
+                                <div className="space-y-6">
+                                    {storageLocations.length === 0 ? (
+                                        <div className="p-8 text-center text-slate-400 text-xs italic bg-slate-50 rounded-2xl border border-dashed">
+                                            Brak skonfigurowanych miejsc składowania. Skonfiguruj strefy w module reguł magazynu w Katalogu Sprzętu.
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                                            {storageLocations.map(loc => {
+                                                const totalCap = loc.totalCapacity || 0;
+                                                const occupied = loc.currentOccupied || 0;
+                                                const fillPct = totalCap > 0 ? Math.min(100, Math.round((occupied / totalCap) * 100)) : 0;
+                                                const freeSlots = Math.max(0, totalCap - occupied);
+                                                const isCritical = fillPct >= (loc.criticalThreshold || 85);
+                                                const isAlert = !isCritical && fillPct >= (loc.alertThreshold || 70);
+                                                const isSelected = selectedLocationDetailId === loc.id;
+
+                                                let barColor = "bg-emerald-500";
+                                                let badgeColor = "bg-emerald-100 text-emerald-800 border-emerald-200";
+                                                let badgeText = "Optymalnie";
+                                                if (isCritical) {
+                                                    barColor = "bg-red-600";
+                                                    badgeColor = "bg-red-100 text-red-800 border-red-200";
+                                                    badgeText = "Krytyczne zapełnienie!";
+                                                } else if (isAlert) {
+                                                    barColor = "bg-amber-500";
+                                                    badgeColor = "bg-amber-100 text-amber-800 border-amber-200";
+                                                    badgeText = "Próg ostrzegawczy";
+                                                }
+
+                                                // Przypisane resztki z inwentarza pasujące do kategorii tej strefy
+                                                const assignedItems = items.filter(it => {
+                                                    const isResidual = it.category === "Pozostałości budowlane" || it.inventoryNumber === "RESZTKI" || it.subType === "SUB_ITEM";
+                                                    if (!isResidual) return false;
+                                                    // Sprawdzamy czy kategoria lub podkategoria pasuje do przypisanych kategorii strefy
+                                                    return loc.categories.some(catId => {
+                                                        const catIdLower = catId.toLowerCase();
+                                                        return (it.category && it.category.toLowerCase().includes(catIdLower)) ||
+                                                               (it.subcategory && it.subcategory.toLowerCase().includes(catIdLower)) ||
+                                                               (it.name && it.name.toLowerCase().includes(catIdLower));
+                                                    });
+                                                });
+
+                                                return (
+                                                    <div
+                                                        key={loc.id}
+                                                        className={`p-5 rounded-2xl border transition-all ${
+                                                            isCritical
+                                                                ? "bg-red-50/40 border-red-200 shadow-sm"
+                                                                : isAlert
+                                                                ? "bg-amber-50/40 border-amber-200 shadow-sm"
+                                                                : "bg-slate-50/60 border-slate-200 hover:border-slate-300 shadow-sm"
+                                                        } ${isSelected ? "ring-2 ring-blue-500 shadow-md" : ""}`}
+                                                    >
+                                                        <div className="flex justify-between items-start gap-2">
+                                                            <div>
+                                                                <h4 className="font-black text-slate-800 text-sm">{loc.name}</h4>
+                                                                {loc.description && (
+                                                                    <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">{loc.description}</p>
+                                                                )}
+                                                            </div>
+                                                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${badgeColor} whitespace-nowrap`}>
+                                                                {badgeText}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* Pasek postępu zapełnienia */}
+                                                        <div className="mt-4">
+                                                            <div className="flex justify-between items-baseline mb-1">
+                                                                <span className="text-[11px] font-bold text-slate-500">Zapełnienie strefy:</span>
+                                                                <span className="text-xs font-black font-mono text-slate-800">{fillPct}%</span>
+                                                            </div>
+                                                            <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden">
+                                                                <div
+                                                                    className={`h-full transition-all duration-500 ${barColor}`}
+                                                                    style={{ width: `${fillPct}%` }}
+                                                                />
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Liczniki JPP */}
+                                                        <div className="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-slate-200/80 text-center">
+                                                            <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-xs">
+                                                                <span className="text-[10px] text-slate-400 font-bold block uppercase">Zajęte</span>
+                                                                <span className="text-base font-black text-slate-800 font-mono">{occupied} <span className="text-[10px] font-medium text-slate-400">JPP</span></span>
+                                                            </div>
+                                                            <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-xs">
+                                                                <span className="text-[10px] text-slate-400 font-bold block uppercase">Wolne</span>
+                                                                <span className={`text-base font-black font-mono ${freeSlots <= 2 ? "text-red-600" : "text-emerald-700"}`}>
+                                                                    {freeSlots} <span className="text-[10px] font-medium text-slate-400">JPP</span>
+                                                                </span>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Kategorie powiązane */}
+                                                        <div className="mt-3 flex flex-wrap gap-1">
+                                                            {loc.categories.map(c => (
+                                                                <span key={c} className="text-[10px] font-bold bg-white text-slate-600 px-2 py-0.5 rounded-md border border-slate-200">
+                                                                    {c}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+
+                                                        {/* Przycisk rozwijania podglądu towarów */}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setSelectedLocationDetailId(isSelected ? null : loc.id)}
+                                                            className={`w-full mt-4 text-xs font-black py-2 rounded-xl border transition flex items-center justify-center gap-1.5 ${
+                                                                isSelected
+                                                                    ? "bg-blue-600 text-white border-blue-600"
+                                                                    : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
+                                                            }`}
+                                                        >
+                                                            <span>{isSelected ? "Ukryj spis asortymentu ▲" : `Przeglądaj asortyment (${assignedItems.length}) ▼`}</span>
+                                                        </button>
+
+                                                        {/* Rozwinięty panel ze spisem asortymentu */}
+                                                        {isSelected && (
+                                                            <div className="mt-3 pt-3 border-t border-slate-200 space-y-2 max-h-56 overflow-y-auto">
+                                                                {assignedItems.length === 0 ? (
+                                                                    <p className="text-[11px] text-slate-400 italic text-center py-2">
+                                                                        Brak zarejestrowanych resztek w kategoriach tej strefy.
+                                                                    </p>
+                                                                ) : (
+                                                                    assignedItems.map(item => (
+                                                                        <div key={item.id} className="bg-white p-2 rounded-lg border border-slate-100 flex items-center justify-between text-xs">
+                                                                            <div className="truncate pr-2">
+                                                                                <p className="font-bold text-slate-800 truncate">{item.name}</p>
+                                                                                <p className="text-[10px] text-slate-400 truncate">{item.subcategory || item.category}</p>
+                                                                            </div>
+                                                                            <span className="font-mono font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded text-[11px] whitespace-nowrap">
+                                                                                {item.availableQuantity} {item.unit || "szt."}
+                                                                            </span>
+                                                                        </div>
+                                                                    ))
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     )}
 

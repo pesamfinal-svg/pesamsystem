@@ -48,7 +48,10 @@ export const ALL_PERMISSIONS = {
 
     // --- REGUŁY AI DLA RESZTEK BUDOWLANYCH I ZWROTÓW ---
     manageRulesBoss: "Reguły AI: Zarządzanie wytycznymi Szefa / Dyrekcji (Zwroty resztek)",
-    manageRulesWarehouse: "Reguły AI: Zarządzanie wytycznymi Magazynu (Przyjmowanie resztek)"
+    manageRulesWarehouse: "Reguły AI: Zarządzanie wytycznymi Magazynu (Przyjmowanie resztek)",
+
+    // --- WIDŻETY DASHBOARDU I MIEJSCA SKŁADOWANIA (PLAC / HALE) ---
+    widgetStorageLocations: "Dashboard: Widżet Miejsca Składowania & Plac (Zapełnienie JPP)"
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

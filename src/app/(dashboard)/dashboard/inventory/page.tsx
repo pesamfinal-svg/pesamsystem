@@ -672,6 +672,30 @@ export default function InventoryPage() {
             setCategoryCapacities(updatedCapacities);
             setStorageLocations(updatedLocations);
 
+            // Sprawdź czy któreś miejsce przekroczyło próg alertowy i wyślij powiadomienie e-mail w tle
+            const alertLocations = updatedLocations.filter(loc => {
+                const fillPct = loc.totalCapacity > 0 ? (loc.currentOccupied / loc.totalCapacity) * 100 : 0;
+                return fillPct >= (loc.alertThreshold || 70);
+            });
+
+            if (alertLocations.length > 0) {
+                // Wywołaj endpoint powiadomień e-mail w tle
+                fetch("/api/warehouse-capacity-alert", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        locations: alertLocations.map(l => ({
+                            name: l.name,
+                            totalCapacity: l.totalCapacity,
+                            currentOccupied: l.currentOccupied,
+                            fillPercentage: l.totalCapacity > 0 ? (l.currentOccupied / l.totalCapacity) * 100 : 0,
+                            alertThreshold: l.alertThreshold,
+                            criticalThreshold: l.criticalThreshold
+                        }))
+                    })
+                }).catch(err => console.warn("Błąd wysyłania alertu pojemności e-mail:", err));
+            }
+
             alert("Wszystkie reguły, kategorie, podkategorie oraz miejsca składowania zostały pomyślnie zapisane!");
             setIsRulesModalOpen(false);
         } catch (err) {

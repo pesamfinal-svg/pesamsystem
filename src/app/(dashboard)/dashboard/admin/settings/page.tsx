@@ -14,6 +14,7 @@ interface SystemSettings {
     closeoutEmailRecipients: string[]; // Lista maili do raportów zamknięcia budów
     isCloseoutSandboxMode: boolean; // NOWOŚĆ: Przełącznik trybu testowego
     residualAlertRecipients: string[]; // Lista maili do alertów o naruszeniu reguł zwrotu AI
+    capacityAlertRecipients?: string[]; // Lista maili do alertów o zapełnieniu stref magazynowych (JPP)
 }
 
 export default function SettingsPage() {
@@ -26,11 +27,13 @@ export default function SettingsPage() {
         clsBossEmail: "",
         closeoutEmailRecipients: [],
         isCloseoutSandboxMode: true, // Domyślnie włączony dla bezpieczeństwa testów
-        residualAlertRecipients: []
+        residualAlertRecipients: [],
+        capacityAlertRecipients: []
     });
     const [newEmail, setNewEmail] = useState("");
     const [newCloseoutEmail, setNewCloseoutEmail] = useState("");
     const [newResidualAlertEmail, setNewResidualAlertEmail] = useState("");
+    const [newCapacityAlertEmail, setNewCapacityAlertEmail] = useState("");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
 
@@ -56,7 +59,8 @@ export default function SettingsPage() {
                         clsBossEmail: data.clsBossEmail || "",
                         closeoutEmailRecipients: data.closeoutEmailRecipients || [],
                         isCloseoutSandboxMode: data.isCloseoutSandboxMode !== undefined ? data.isCloseoutSandboxMode : true,
-                        residualAlertRecipients: data.residualAlertRecipients || []
+                        residualAlertRecipients: data.residualAlertRecipients || [],
+                        capacityAlertRecipients: data.capacityAlertRecipients || []
                     });
                 }
             } catch (e) {
@@ -118,6 +122,23 @@ export default function SettingsPage() {
 
     const handleRemoveResidualAlertEmail = (emailToRemove: string) => {
         setSettings(prev => ({ ...prev, residualAlertRecipients: (prev.residualAlertRecipients || []).filter(email => email !== emailToRemove) }));
+    };
+
+    const handleAddCapacityAlertEmail = (e: React.FormEvent) => {
+        e.preventDefault();
+        const email = newCapacityAlertEmail.trim().toLowerCase();
+        if (!email) return;
+
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) return alert("Wprowadź poprawny adres e-mail!");
+        if (settings.capacityAlertRecipients?.includes(email)) return alert("Ten e-mail jest już na liście!");
+
+        setSettings(prev => ({ ...prev, capacityAlertRecipients: [...(prev.capacityAlertRecipients || []), email] }));
+        setNewCapacityAlertEmail("");
+    };
+
+    const handleRemoveCapacityAlertEmail = (emailToRemove: string) => {
+        setSettings(prev => ({ ...prev, capacityAlertRecipients: (prev.capacityAlertRecipients || []).filter(email => email !== emailToRemove) }));
     };
 
     const handleSaveSettings = async () => {
@@ -247,6 +268,56 @@ export default function SettingsPage() {
                             ))}
                             {(!settings.residualAlertRecipients || settings.residualAlertRecipients.length === 0) && (
                                 <p className="text-xs text-slate-400 italic">Brak zdefiniowanych odbiorców alertów o naruszeniach reguł.</p>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* NOWOŚĆ: SEKCJA POWIADOMIEŃ O ZAPEŁNIENIU STREF MAGAZYNOWYCH (JPP / PLAC / HALE) */}
+                    <div className="space-y-4 pt-6 border-t">
+                        <div className="border-b pb-2 flex items-center justify-between">
+                            <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                                <span>📍</span> Powiadomienia o zapełnieniu stref magazynowych (JPP / Plac / Hale)
+                            </h3>
+                            <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full">
+                                Alert e-mail
+                            </span>
+                        </div>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            Adresy e-mail, na które system wyśle natychmiastowe ostrzeżenie, gdy którekolwiek <b>miejsce składowania (np. Plac Zewnętrzny, Magazyn Farb i Chemii)</b> osiągnie próg ostrzegawczy (np. 70%) lub próg krytyczny (np. 85%).
+                        </p>
+                        <form onSubmit={handleAddCapacityAlertEmail} className="flex gap-3">
+                            <input
+                                type="text"
+                                placeholder="np. magazyn@pesam.pl lub kierownik@pesam.pl"
+                                value={newCapacityAlertEmail}
+                                onChange={e => setNewCapacityAlertEmail(e.target.value)}
+                                className="flex-1 p-3 border-2 rounded-xl text-sm outline-none focus:border-amber-500 font-bold bg-slate-50"
+                            />
+                            <button
+                                type="submit"
+                                className="bg-amber-600 hover:bg-amber-700 text-white font-black text-xs px-6 rounded-xl shadow-md transition"
+                            >
+                                + Dodaj do listy
+                            </button>
+                        </form>
+                        <div className="flex flex-wrap gap-2 pt-2">
+                            {(settings.capacityAlertRecipients || []).map(email => (
+                                <span
+                                    key={email}
+                                    className="bg-amber-50 text-amber-900 border border-amber-200 text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-2 shadow-sm"
+                                >
+                                    {email}
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRemoveCapacityAlertEmail(email)}
+                                        className="text-red-500 hover:text-red-700 text-sm font-black"
+                                    >
+                                        &times;
+                                    </button>
+                                </span>
+                            ))}
+                            {(!settings.capacityAlertRecipients || settings.capacityAlertRecipients.length === 0) && (
+                                <p className="text-xs text-slate-400 italic">Brak zdefiniowanych odbiorców alertów o zapełnieniu stref magazynowych.</p>
                             )}
                         </div>
                     </div>
