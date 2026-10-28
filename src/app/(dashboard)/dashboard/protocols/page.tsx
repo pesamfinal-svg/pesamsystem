@@ -2,12 +2,14 @@
 "use client";
 
 import React, { useState, useEffect, Fragment } from "react";
-import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
+import { createPortal } from "react-dom";
+import { collection, getDocs, getDoc, doc, setDoc, deleteDoc, query, orderBy, runTransaction, where, limit } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal";
 import { hasPermission } from "@/lib/auth/permissions";
+import { RESIDUAL_MAIN_CATEGORIES, ResidualCategoryDef } from "@/lib/constants/residualCategories";
 
 // --- INTERFEJSY ---
 interface Site {
@@ -287,11 +289,35 @@ export default function ProtocolsHub() {
         receivedQty: number;
         unit: string;
         matches: InventoryItem[];
+        category?: string;
+        subcategory?: string;
     };
     const [isDuplicateCheckModalOpen, setIsDuplicateCheckModalOpen] = useState(false);
     const [residualDuplicateSuggestions, setResidualDuplicateSuggestions] = useState<ResidualDuplicateSuggestion[]>([]);
-    const [residualDuplicateDecisions, setResidualDuplicateDecisions] = useState<Record<string, { action: 'new' | 'merge'; targetId?: string }>>({});
+    const [residualDuplicateDecisions, setResidualDuplicateDecisions] = useState<Record<string, { action: 'new' | 'merge'; targetId?: string; category?: string; subcategory?: string }>>({});
     const [pendingSubmitContext, setPendingSubmitContext] = useState<'paper' | 'accept' | null>(null);
+    const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
+
+    const normalizeRoot = (w: string) => {
+        let s = w.toLowerCase().trim();
+        s = s.replace(/(ów|om|ami|ach|em|ie|owi|ego|emu|ych|ymi|ym|e|y|a|u|i)$/g, '');
+        if (s.endsWith('ek')) s = s.slice(0, -2) + 'k';
+        return s;
+    };
+
+    const matchesStem = (w1: string, w2: string) => {
+        if (!w1 || !w2) return false;
+        if (w1 === w2) return true;
+        if (w1.length >= 4 && w2.includes(w1)) return true;
+        if (w2.length >= 4 && w1.includes(w2)) return true;
+        const r1 = normalizeRoot(w1);
+        const r2 = normalizeRoot(w2);
+        if (r1.length >= 3 && r2.length >= 3 && (r1 === r2 || r1.includes(r2) || r2.includes(r1))) return true;
+        if (w1.length >= 4 && w2.length >= 4) {
+            return w1.slice(0, 4) === w2.slice(0, 4);
+        }
+        return false;
+    };
 
     const fetchData = async () => {
         setLoading(true);
@@ -301,6 +327,17 @@ export default function ProtocolsHub() {
 
             const invSnap = await getDocs(query(collection(db, "inventory"), orderBy("name", "asc")));
             setInventory(invSnap.docs.map(d => ({ id: d.id, ...d.data() })) as InventoryItem[]);
+
+            try {
+                const catSnap = await getDoc(doc(db, "settings", "residual_categories"));
+                if (catSnap.exists() && Array.isArray(catSnap.data().categories) && catSnap.data().categories.length > 0) {
+                    setCategoriesList(catSnap.data().categories);
+                } else {
+                    setCategoriesList(RESIDUAL_MAIN_CATEGORIES);
+                }
+            } catch (catErr) {
+                console.warn("Błąd pobierania residual_categories w protokołach:", catErr);
+            }
 
             await fetchHistoryProtocols();
         } catch (error) {
@@ -1662,7 +1699,8 @@ export default function ProtocolsHub() {
         setManualIsPermanent(false);
     };
 
-    const handlePaperReturnSubmit = async () => {
+    const handlePaperReturnSubmit = async (skipDuplicateCheckParam: boolean = false) => {
+        const skipDuplicateCheck = typeof skipDuplicateCheckParam === "boolean" ? skipDuplicateCheckParam : false;
         if (!paperReturnSiteId || paperReturnCart.length === 0) return alert("Wybierz budowę i dodaj przynajmniej jeden przedmiot!");
 
         const processedCart: PaperReturnCartItem[] = [];
@@ -1688,9 +1726,8 @@ export default function ProtocolsHub() {
         setIsSubmitting(true);
         const resolvedLastOpDates: Record<string, string> = {};
 
-        // Sprawdzenie duplikatów pozostałości — przed zapisem do Firestore
-        // (Uruchamiane tylko gdy nie ma otwartego modalu duplikatów — tzn. użytkownik jeszcze nie podjął decyzji)
-        if (!isDuplicateCheckModalOpen) {
+        // Sprawdzenie duplikatów i kategoryzacja pozostałości — przed zapisem do Firestore
+        if (!isDuplicateCheckModalOpen && !skipDuplicateCheck) {
             const residualsToCheck = processedCart.filter(ci => ci.isResidual && ci.finalStatus !== 'odpad_utylizacja');
             const existingResiduals = inventory.filter(i =>
                 i.category === 'Pozostałości budowlane' || i.inventoryNumber === 'RESZTKI' || (i as any).isResidual
@@ -1699,30 +1736,71 @@ export default function ProtocolsHub() {
             for (const ri of residualsToCheck) {
                 const cleanNew = normalizeString(ri.name);
                 const newWords = cleanNew.split(/\s+/).filter(w => w.length >= 3);
+                const cleanNewCat = normalizeString(ri.category || "");
+                const cleanNewSub = normalizeString((ri as any).subcategory || "");
+
                 const matches = existingResiduals.filter(ex => {
                     const cleanEx = normalizeString(ex.name);
+                    const exWords = cleanEx.split(/\s+/).filter(w => w.length >= 3);
+                    const cleanExCat = normalizeString(ex.category || "");
+                    const cleanExSub = normalizeString(ex.subcategory || "");
+
                     if (cleanEx === cleanNew) return true;
                     if (cleanNew.length >= 4 && cleanEx.includes(cleanNew)) return true;
                     if (cleanEx.length >= 4 && cleanNew.includes(cleanEx)) return true;
-                    if (newWords.length >= 2) {
-                        const matchingWords = newWords.filter(w => cleanEx.includes(w));
-                        if (matchingWords.length >= 2 && matchingWords.length >= newWords.length * 0.6) return true;
+
+                    const hasCommonStem = newWords.some(nw => 
+                        exWords.some(ew => matchesStem(nw, ew))
+                    );
+                    if (hasCommonStem) return true;
+
+                    if (cleanNewSub && cleanExSub && cleanNewSub.length >= 3 && cleanNewSub === cleanExSub) return true;
+                    if (cleanNewSub && cleanNewSub.length >= 4 && (cleanEx.includes(cleanNewSub) || cleanExSub.includes(cleanNewSub))) return true;
+                    if (cleanExSub && cleanExSub.length >= 4 && (cleanNew.includes(cleanExSub) || cleanExSub.includes(cleanExSub))) return true;
+
+                    if (cleanNewCat && cleanExCat && cleanNewCat === cleanExCat && cleanNewCat !== "pozostalosci budowlane") {
+                        return true;
                     }
-                    if (ri.subcategory && normalizeString(ri.subcategory).length >= 4) {
-                        const cleanSub = normalizeString(ri.subcategory);
-                        if (cleanEx.includes(cleanSub) || (ex.subcategory && normalizeString(ex.subcategory) === cleanSub)) return true;
-                    }
+
                     return false;
                 });
-                if (matches.length > 0) {
-                    suggestions.push({ cartId: ri.cartItemId, name: ri.name, receivedQty: ri.receivedQty, unit: ri.unit || 'szt.', matches });
-                }
+
+                // Zawsze dodajemy do weryfikacji i kategoryzacji magazynowej
+                suggestions.push({
+                    cartId: ri.cartItemId,
+                    name: ri.name,
+                    receivedQty: ri.receivedQty,
+                    unit: ri.unit || 'szt.',
+                    matches,
+                    category: ri.category || "",
+                    subcategory: (ri as any).subcategory || ""
+                });
             }
+
             if (suggestions.length > 0) {
                 setIsSubmitting(false);
-                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string }> = {};
+                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string; category?: string; subcategory?: string }> = {};
                 for (const s of suggestions) {
-                    defaultDecisions[s.cartId] = { action: 'merge', targetId: s.matches[0].id };
+                    if (s.matches.length > 0) {
+                        defaultDecisions[s.cartId] = {
+                            action: 'merge',
+                            targetId: s.matches[0].id,
+                            category: s.matches[0].category || "Pozostałości budowlane",
+                            subcategory: s.matches[0].subcategory || ""
+                        };
+                    } else {
+                        const matchedCat = categoriesList.find(c => {
+                            const cName = c.name.toLowerCase();
+                            const sName = s.name.toLowerCase();
+                            return sName.includes(cName) || c.subcategories.some(sub => sName.includes(sub.toLowerCase()));
+                        }) || categoriesList[0];
+
+                        defaultDecisions[s.cartId] = {
+                            action: 'new',
+                            category: s.category || matchedCat?.name || "Kleje i Zaprawy",
+                            subcategory: s.subcategory || matchedCat?.subcategories[0] || ""
+                        };
+                    }
                 }
                 setResidualDuplicateSuggestions(suggestions);
                 setResidualDuplicateDecisions(defaultDecisions);
@@ -1871,14 +1949,16 @@ export default function ProtocolsHub() {
                                 }
                             }
                             // Tworz nowy wpis (domyślne jeśli brak decyzji lub action === 'new')
+                            const chosenCategory = decision?.category || cartItem.category || "Pozostałości budowlane";
+                            const chosenSubcategory = decision?.subcategory || cartItem.subcategory || "";
                             const newDocRef = doc(collection(db, "inventory"));
                             transaction.set(newDocRef, cleanFirestorePayload({
                                 name: cartItem.name,
                                 type: "BULK",
                                 subType: "MANUAL",
                                 inventoryNumber: "RESZTKI",
-                                category: cartItem.category || "Pozostałości budowlane",
-                                subcategory: cartItem.subcategory || "Materiały otwarte / Resztki",
+                                category: chosenCategory,
+                                subcategory: chosenSubcategory,
                                 unit: cartItem.unit || "szt.",
                                 availableQuantity: cartItem.receivedQty,
                                 totalQuantity: cartItem.receivedQty,
@@ -2550,7 +2630,9 @@ export default function ProtocolsHub() {
         }));
     };
 
-    const handleAcceptSubmit = async (skipInvestigationCheck = false) => {
+    const handleAcceptSubmit = async (skipInvestigationCheckParam: boolean = false, skipDuplicateCheckParam: boolean = false) => {
+        const skipInvestigationCheck = typeof skipInvestigationCheckParam === "boolean" ? skipInvestigationCheckParam : false;
+        const skipDuplicateCheck = typeof skipDuplicateCheckParam === "boolean" ? skipDuplicateCheckParam : false;
         if (!selectedProtocol) return;
 
         if (!investigationDone && !skipInvestigationCheck) {
@@ -2574,9 +2656,9 @@ export default function ProtocolsHub() {
 
         setIsSubmitting(true);
 
-        // Sprawdzenie duplikatów pozostałości przed zapisem
-        if (!isDuplicateCheckModalOpen) {
-            const residualsToCheck = selectedProtocol.items.filter((item: any) => item.isNewManual && item.isResidual);
+        // Sprawdzenie duplikatów i kategoryzacja pozostałości przed zapisem
+        if (!isDuplicateCheckModalOpen && !skipDuplicateCheck) {
+            const residualsToCheck = selectedProtocol.items.filter((item: any) => item.isResidual || item.inventoryNumber === "RESZTKI");
             const existingResiduals = inventory.filter((i: InventoryItem) =>
                 i.category === 'Pozostałości budowlane' || i.inventoryNumber === 'RESZTKI' || (i as any).isResidual
             );
@@ -2588,16 +2670,6 @@ export default function ProtocolsHub() {
                 const newWords = cleanNew.split(/\s+/).filter(w => w.length >= 3);
                 const cleanNewCat = normalizeString(ri.category || "");
                 const cleanNewSub = normalizeString((ri as any).subcategory || "");
-
-                const matchesStem = (w1: string, w2: string) => {
-                    if (w1 === w2) return true;
-                    if (w1.length >= 4 && w2.includes(w1)) return true;
-                    if (w2.length >= 4 && w1.includes(w2)) return true;
-                    if (w1.length >= 4 && w2.length >= 4) {
-                        return w1.slice(0, 4) === w2.slice(0, 4);
-                    }
-                    return false;
-                };
 
                 const matches = existingResiduals.filter((ex: InventoryItem) => {
                     const cleanEx = normalizeString(ex.name);
@@ -2628,15 +2700,43 @@ export default function ProtocolsHub() {
 
                     return false;
                 });
-                if (matches.length > 0) {
-                    suggestions.push({ cartId: ri.inventoryId, name: ri.name, receivedQty: input.receivedQty, unit: ri.unit || 'szt.', matches });
-                }
+
+                // Zawsze dodajemy do weryfikacji i kategoryzacji magazynowej
+                suggestions.push({
+                    cartId: ri.inventoryId,
+                    name: ri.name,
+                    receivedQty: input.receivedQty,
+                    unit: ri.unit || 'szt.',
+                    matches,
+                    category: ri.category || "",
+                    subcategory: (ri as any).subcategory || ""
+                });
             }
+
             if (suggestions.length > 0) {
                 setIsSubmitting(false);
-                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string }> = {};
+                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string; category?: string; subcategory?: string }> = {};
                 for (const s of suggestions) {
-                    defaultDecisions[s.cartId] = { action: 'merge', targetId: s.matches[0].id };
+                    if (s.matches.length > 0) {
+                        defaultDecisions[s.cartId] = {
+                            action: 'merge',
+                            targetId: s.matches[0].id,
+                            category: s.matches[0].category || "Pozostałości budowlane",
+                            subcategory: s.matches[0].subcategory || ""
+                        };
+                    } else {
+                        const matchedCat = categoriesList.find(c => {
+                            const cName = c.name.toLowerCase();
+                            const sName = s.name.toLowerCase();
+                            return sName.includes(cName) || c.subcategories.some(sub => sName.includes(sub.toLowerCase()));
+                        }) || categoriesList[0];
+
+                        defaultDecisions[s.cartId] = {
+                            action: 'new',
+                            category: s.category || matchedCat?.name || "Kleje i Zaprawy",
+                            subcategory: s.subcategory || matchedCat?.subcategories[0] || ""
+                        };
+                    }
                 }
                 setResidualDuplicateSuggestions(suggestions);
                 setResidualDuplicateDecisions(defaultDecisions);
@@ -2777,14 +2877,16 @@ export default function ProtocolsHub() {
                                 }
                             }
                             // Nowy wpis
+                            const chosenCategory = decision?.category || item.category || "Pozostałości budowlane";
+                            const chosenSubcategory = decision?.subcategory || item.subcategory || "";
                             const newDocRef = doc(collection(db, "inventory"));
                             transaction.set(newDocRef, cleanFirestorePayload({
                                 name: item.name,
                                 type: "BULK",
                                 subType: "MANUAL",
                                 inventoryNumber: "RESZTKI",
-                                category: item.category || "Pozostałości budowlane",
-                                subcategory: item.subcategory || "Materiały otwarte / Resztki",
+                                category: chosenCategory,
+                                subcategory: chosenSubcategory,
                                 unit: item.unit || "szt.",
                                 availableQuantity: workerInput.receivedQty,
                                 totalQuantity: workerInput.receivedQty,
@@ -2805,12 +2907,12 @@ export default function ProtocolsHub() {
                                 unit: item.unit || "szt.",
                                 protocolId: selectedProtocol.protocolId,
                                 residualNotes: selectedProtocol.residualNotes || workerInput.notes || "",
-                                description: `Przyjęto ${workerInput.receivedQty} ${item.unit || "szt."} z budowy: ${selectedProtocol.sourceName}. Protokół: ${selectedProtocol.protocolId}.${workerInput.notes ? ' Uwagi: ' + workerInput.notes : ''}`,
+                                description: `Przyjęto ${workerInput.receivedQty} ${item.unit || "szt."} z budowy: ${selectedProtocol.sourceName} do kategorii "${chosenCategory}${chosenSubcategory ? ' / ' + chosenSubcategory : ''}". Protokół: ${selectedProtocol.protocolId}.${workerInput.notes ? ' Uwagi: ' + workerInput.notes : ''}`,
                                 status: workerInput.finalStatus || "sprawne",
                                 user: `${user?.firstName} ${user?.lastName}`
                             }));
 
-                            updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, isPermanent: true, isResidual: true, isWaste: false, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
+                            updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, category: chosenCategory, subcategory: chosenSubcategory, isPermanent: true, isResidual: true, isWaste: false, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
                         } else if (item.isResidual && workerInput.finalStatus === "odpad_utylizacja") {
                             updatedItemsForProtocol.push({ ...item, isResidual: true, isWaste: true, receivedQty: workerInput.receivedQty, finalStatus: "odpad_utylizacja", warehouseNotes: workerInput.notes || "Odpad budowlany do utylizacji", accessories: [] });
                         } else if (item.isPermanent) {
@@ -5099,7 +5201,7 @@ export default function ProtocolsHub() {
 
                                 <div className="p-4 border-t bg-white flex gap-3">
                                     <button onClick={closeModal} className="w-1/3 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-bold rounded-xl border border-slate-200 transition">ANULUJ</button>
-                                    <button onClick={handlePaperReturnSubmit} disabled={isSubmitting || paperReturnCart.length === 0} className="w-2/3 py-3 bg-orange-500 hover:bg-orange-600 text-white text-sm font-black rounded-xl shadow-md disabled:bg-slate-300 transition">
+                                    <button onClick={() => handlePaperReturnSubmit()} disabled={isSubmitting || paperReturnCart.length === 0} className="w-2/3 py-3 bg-orange-500 hover:bg-orange-600 text-white text-sm font-black rounded-xl shadow-md disabled:bg-slate-300 transition">
                                         {isSubmitting ? "ZAPISYWANIE..." : "ZATWIERDŹ ZWROT PAPIEROWY"}
                                     </button>
                                 </div>
@@ -6814,114 +6916,285 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-            {/* MODAL SPRAWDZANIA DUPLIKATÓW POZOSTAŁOŚCI BUDOWLANYCH */}
+            {/* MODAL SPRAWDZANIA DUPLIKATÓW I KATEGORYZACJI POZOSTAŁOŚCI BUDOWLANYCH */}
             {isDuplicateCheckModalOpen && residualDuplicateSuggestions.length > 0 && (
                 <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-fade-in">
-                        <div className="bg-gradient-to-r from-amber-600 to-orange-500 p-6 rounded-t-3xl text-white">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto animate-fade-in flex flex-col">
+                        <div className="bg-gradient-to-r from-amber-600 via-orange-500 to-amber-700 p-6 rounded-t-3xl text-white shrink-0">
                             <div className="flex items-center gap-3">
                                 <span className="text-3xl">🧱</span>
                                 <div>
-                                    <h2 className="text-xl font-black">Podobne pozostałości już istnieją!</h2>
-                                    <p className="text-amber-100 text-sm mt-0.5">Zdecyduj, czy dodać do istniejącego wpisu czy stworzyć nowy</p>
+                                    <h2 className="text-xl font-black">Weryfikacja i Kategoryzacja Zwracanych Resztek</h2>
+                                    <p className="text-amber-100 text-xs sm:text-sm mt-0.5">
+                                        Scal zwrócone materiały z istniejącymi zapasami lub przypisz kategorię dla nowej kartoteki magazynowej.
+                                    </p>
                                 </div>
                             </div>
                         </div>
 
-                        <div className="p-6 space-y-4">
+                        <div className="p-6 space-y-6 flex-1 overflow-y-auto">
                             {residualDuplicateSuggestions.map(suggestion => {
-                                const decision = residualDuplicateDecisions[suggestion.cartId] || { action: 'merge', targetId: suggestion.matches[0]?.id };
+                                const decision = residualDuplicateDecisions[suggestion.cartId] || {
+                                    action: suggestion.matches.length > 0 ? 'merge' : 'new',
+                                    targetId: suggestion.matches[0]?.id,
+                                    category: categoriesList[0]?.name || "Kleje i Zaprawy",
+                                    subcategory: ""
+                                };
+                                const hasMatches = suggestion.matches && suggestion.matches.length > 0;
+                                const selectedCatDef = categoriesList.find(c => c.name === decision.category);
+
                                 return (
-                                    <div key={suggestion.cartId} className="border-2 border-amber-200 rounded-2xl p-4 bg-amber-50">
-                                        <div className="flex items-center gap-2 mb-3">
-                                            <span className="text-lg">📦</span>
-                                            <div>
-                                                <p className="font-black text-slate-800">{suggestion.name}</p>
-                                                <p className="text-xs text-slate-500">Do przyjęcia: <strong>{suggestion.receivedQty} {suggestion.unit}</strong></p>
+                                    <div key={suggestion.cartId} className="border-2 border-amber-200 rounded-2xl p-5 bg-amber-50/60 shadow-sm">
+                                        {/* Nagłówek pozycji */}
+                                        <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-amber-200">
+                                            <div className="flex items-center gap-2.5">
+                                                <span className="text-2xl">📦</span>
+                                                <div>
+                                                    <p className="font-black text-base text-slate-800">{suggestion.name}</p>
+                                                    <p className="text-xs text-slate-600">
+                                                        Do przyjęcia na stan: <strong className="text-amber-800">{suggestion.receivedQty} {suggestion.unit}</strong>
+                                                    </p>
+                                                </div>
                                             </div>
+                                            <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${
+                                                hasMatches ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-blue-100 text-blue-800 border border-blue-300"
+                                            }`}>
+                                                {hasMatches ? `🔍 Znaleziono w bazie (${suggestion.matches.length})` : "✨ Nowa pozycja (brak w bazie)"}
+                                            </span>
                                         </div>
 
-                                        <p className="text-xs font-black text-amber-700 uppercase mb-2">Podobne wpisy w magazynie:</p>
-                                        <div className="space-y-2 mb-3">
-                                            {suggestion.matches.map(match => (
-                                                <label key={match.id} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition ${
-                                                    decision.action === 'merge' && decision.targetId === match.id
-                                                        ? 'border-amber-500 bg-amber-100'
-                                                        : 'border-slate-200 bg-white hover:border-amber-300'
+                                        {/* Jeśli znaleziono pasujące pozycje w bazie */}
+                                        {hasMatches && (
+                                            <div className="mb-4">
+                                                <p className="text-xs font-black text-amber-900 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                                    <span>🔗</span>
+                                                    <span>Scal z istniejącym towarem na magazynie:</span>
+                                                </p>
+                                                <div className="space-y-2">
+                                                    {suggestion.matches.map(match => (
+                                                        <label key={match.id} className={`flex items-center gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition ${
+                                                            decision.action === 'merge' && decision.targetId === match.id
+                                                                ? 'border-amber-500 bg-amber-100/90 shadow-sm'
+                                                                : 'border-slate-200 bg-white hover:border-amber-300'
+                                                        }`}>
+                                                            <input
+                                                                type="radio"
+                                                                name={`residual-decision-${suggestion.cartId}`}
+                                                                checked={decision.action === 'merge' && decision.targetId === match.id}
+                                                                onChange={() => setResidualDuplicateDecisions(prev => ({
+                                                                    ...prev,
+                                                                    [suggestion.cartId]: {
+                                                                        ...prev[suggestion.cartId],
+                                                                        action: 'merge',
+                                                                        targetId: match.id,
+                                                                        category: match.category || "Pozostałości budowlane",
+                                                                        subcategory: match.subcategory || ""
+                                                                    }
+                                                                }))}
+                                                                className="accent-amber-600 w-4 h-4"
+                                                            />
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="flex items-center gap-2">
+                                                                    <p className="font-bold text-sm text-slate-800 truncate">{match.name}</p>
+                                                                    {match.category && (
+                                                                        <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded border border-slate-200 font-mono">
+                                                                            {match.category}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <p className="text-xs text-slate-600 mt-0.5">
+                                                                    Aktualny stan: <strong>{match.availableQuantity} {match.unit || 'szt.'}</strong>
+                                                                    {" → "}
+                                                                    <strong className="text-amber-800 font-black">{(match.availableQuantity || 0) + suggestion.receivedQty} {match.unit || 'szt.'}</strong>
+                                                                    {" po scaleniu"}
+                                                                </p>
+                                                            </div>
+                                                            <span className="text-xs font-black text-amber-800 bg-amber-200 px-2.5 py-1 rounded-lg shrink-0">➕ Scalaj</span>
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Opcja nowego wpisu (dla pozycji ze znalezionymi dopasowaniami lub jedyna opcja dla pozycji bez dopasowań) */}
+                                        <div className="space-y-3">
+                                            {hasMatches && (
+                                                <label className={`flex items-center gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition ${
+                                                    decision.action === 'new'
+                                                        ? 'border-blue-500 bg-blue-50/80 shadow-sm'
+                                                        : 'border-slate-200 bg-white hover:border-blue-300'
                                                 }`}>
                                                     <input
                                                         type="radio"
                                                         name={`residual-decision-${suggestion.cartId}`}
-                                                        checked={decision.action === 'merge' && decision.targetId === match.id}
+                                                        checked={decision.action === 'new'}
                                                         onChange={() => setResidualDuplicateDecisions(prev => ({
                                                             ...prev,
-                                                            [suggestion.cartId]: { action: 'merge', targetId: match.id }
+                                                            [suggestion.cartId]: {
+                                                                ...prev[suggestion.cartId],
+                                                                action: 'new',
+                                                                category: prev[suggestion.cartId]?.category || categoriesList[0]?.name || "Kleje i Zaprawy",
+                                                                subcategory: prev[suggestion.cartId]?.subcategory || ""
+                                                            }
                                                         }))}
-                                                        className="accent-amber-600"
+                                                        className="accent-blue-600 w-4 h-4"
                                                     />
-                                                    <div className="flex-1 min-w-0">
-                                                        <p className="font-bold text-sm text-slate-800 truncate">{match.name}</p>
-                                                        <p className="text-xs text-slate-500">
-                                                            Stan: <strong>{match.availableQuantity} {match.unit || 'szt.'}</strong>
-                                                            {" → "}
-                                                            <strong className="text-amber-700">{(match.availableQuantity || 0) + suggestion.receivedQty} {match.unit || 'szt.'}</strong>
-                                                            {" po scaleniu"}
-                                                        </p>
+                                                    <div className="flex-1">
+                                                        <p className="font-bold text-sm text-blue-900">Utwórz nowy oddzielny wpis w kartotece</p>
+                                                        <p className="text-xs text-slate-500">Np. inny producent, inny rodzaj lub stan otwarcia</p>
                                                     </div>
-                                                    <span className="text-xs font-black text-amber-700 bg-amber-200 px-2 py-0.5 rounded-lg whitespace-nowrap">➕ Scalaj</span>
+                                                    <span className="text-xs font-black text-blue-700 bg-blue-100 px-2.5 py-1 rounded-lg shrink-0">Nowa pozycja</span>
                                                 </label>
-                                            ))}
-                                        </div>
+                                            )}
 
-                                        <label className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer transition ${
-                                            decision.action === 'new'
-                                                ? 'border-blue-500 bg-blue-50'
-                                                : 'border-slate-200 bg-white hover:border-blue-300'
-                                        }`}>
-                                            <input
-                                                type="radio"
-                                                name={`residual-decision-${suggestion.cartId}`}
-                                                checked={decision.action === 'new'}
-                                                onChange={() => setResidualDuplicateDecisions(prev => ({
-                                                    ...prev,
-                                                    [suggestion.cartId]: { action: 'new' }
-                                                }))}
-                                                className="accent-blue-600"
-                                            />
-                                            <div>
-                                                <p className="font-bold text-sm text-blue-700">Utwórz nowy oddzielny wpis</p>
-                                                <p className="text-xs text-slate-500">Np. to inny rodzaj / inne źródło</p>
-                                            </div>
-                                            <span className="text-xs font-black text-blue-700 bg-blue-100 px-2 py-0.5 rounded-lg ml-auto whitespace-nowrap">Nowy wpis</span>
-                                        </label>
+                                            {!hasMatches && (
+                                                <div className="p-3 bg-amber-100/70 border border-amber-300 rounded-xl text-xs text-amber-900 font-medium">
+                                                    ℹ️ System nie znalazł tego artykułu w bazie resztek. Przypisz kategorię magazynową, aby utworzyć nową pozycję w ewidencji:
+                                                </div>
+                                            )}
+
+                                            {/* Formularz wyboru kategorii i podkategorii (widoczny gdy action === 'new') */}
+                                            {decision.action === 'new' && (
+                                                <div className="p-4 bg-white rounded-xl border border-blue-200 space-y-3 mt-2 shadow-inner">
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                        {/* Wybór kategorii głównej */}
+                                                        <div>
+                                                            <label className="block text-[11px] font-black text-slate-700 uppercase tracking-wider mb-1">
+                                                                Kategoria Główna <span className="text-red-500">*</span>
+                                                            </label>
+                                                            <select
+                                                                value={decision.category || ""}
+                                                                onChange={e => {
+                                                                    const newCat = e.target.value;
+                                                                    const catObj = categoriesList.find(c => c.name === newCat);
+                                                                    setResidualDuplicateDecisions(prev => ({
+                                                                        ...prev,
+                                                                        [suggestion.cartId]: {
+                                                                            ...prev[suggestion.cartId],
+                                                                            action: 'new',
+                                                                            category: newCat,
+                                                                            subcategory: catObj?.subcategories[0] || ""
+                                                                        }
+                                                                    }));
+                                                                }}
+                                                                className="w-full text-xs font-bold p-2.5 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-500 outline-none"
+                                                            >
+                                                                <option value="" disabled>-- Wybierz kategorię --</option>
+                                                                {categoriesList.map(c => (
+                                                                    <option key={c.id || c.name} value={c.name}>
+                                                                        {c.icon ? `${c.icon} ` : ""}{c.name}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+
+                                                        {/* Wybór podkategorii */}
+                                                        <div>
+                                                            <label className="block text-[11px] font-black text-slate-700 uppercase tracking-wider mb-1">
+                                                                Podkategoria (lub pusta / inne)
+                                                            </label>
+                                                            <div className="space-y-1.5">
+                                                                <select
+                                                                    value={decision.subcategory || ""}
+                                                                    onChange={e => {
+                                                                        setResidualDuplicateDecisions(prev => ({
+                                                                            ...prev,
+                                                                            [suggestion.cartId]: {
+                                                                                ...prev[suggestion.cartId],
+                                                                                subcategory: e.target.value
+                                                                            }
+                                                                        }));
+                                                                    }}
+                                                                    className="w-full text-xs p-2.5 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white focus:border-blue-500 outline-none"
+                                                                >
+                                                                    <option value="">-- Brak / Inne --</option>
+                                                                    {selectedCatDef?.subcategories?.map(sub => (
+                                                                        <option key={sub} value={sub}>{sub}</option>
+                                                                    ))}
+                                                                </select>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Przycisk dodania nowej kategorii */}
+                                                    <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+                                                        <span className="text-slate-500 text-[11px]">Nie ma odpowiedniej kategorii na liście?</span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                const newCatPrompt = window.prompt("Podaj nazwę nowej kategorii głównej (np. 'Narzędzia ręczne i drobiazgi'):");
+                                                                if (newCatPrompt && newCatPrompt.trim()) {
+                                                                    const trimmed = newCatPrompt.trim();
+                                                                    if (categoriesList.some(c => c.name.toLowerCase() === trimmed.toLowerCase())) {
+                                                                        alert("Taka kategoria już istnieje!");
+                                                                        return;
+                                                                    }
+                                                                    const newCatDef: ResidualCategoryDef = {
+                                                                        id: `cat_${Date.now()}`,
+                                                                        name: trimmed,
+                                                                        icon: "📦",
+                                                                        description: "Kategoria dodana przez magazyniera",
+                                                                        subcategories: ["Inne / Ogólne"]
+                                                                    };
+                                                                    const updated = [...categoriesList, newCatDef];
+                                                                    setCategoriesList(updated);
+                                                                    setResidualDuplicateDecisions(prev => ({
+                                                                        ...prev,
+                                                                        [suggestion.cartId]: {
+                                                                            ...prev[suggestion.cartId],
+                                                                            action: 'new',
+                                                                            category: trimmed,
+                                                                            subcategory: "Inne / Ogólne"
+                                                                        }
+                                                                    }));
+                                                                    setDoc(doc(db, "settings", "residual_categories"), { categories: updated }, { merge: true });
+                                                                }
+                                                            }}
+                                                            className="text-blue-600 hover:text-blue-800 font-bold hover:underline flex items-center gap-1"
+                                                        >
+                                                            <span>➕</span>
+                                                            <span>Utwórz nową kategorię</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 );
                             })}
                         </div>
 
-                        <div className="border-t p-6 flex justify-between gap-3">
+                        <div className="border-t p-5 bg-slate-50 rounded-b-3xl flex justify-between items-center gap-3 shrink-0">
                             <button
+                                type="button"
                                 onClick={() => {
                                     setIsDuplicateCheckModalOpen(false);
                                     setResidualDuplicateSuggestions([]);
                                     setPendingSubmitContext(null);
                                 }}
-                                className="px-5 py-2.5 text-slate-600 font-bold border border-slate-200 rounded-xl hover:bg-slate-50 transition"
+                                className="px-5 py-2.5 text-slate-600 font-bold border border-slate-300 rounded-xl hover:bg-slate-100 transition"
                             >
                                 Anuluj
                             </button>
                             <button
+                                type="button"
                                 onClick={() => {
+                                    for (const s of residualDuplicateSuggestions) {
+                                        const dec = residualDuplicateDecisions[s.cartId];
+                                        if (dec?.action === 'new' && (!dec.category || dec.category.trim() === '')) {
+                                            alert(`Wskaż kategorię główną dla pozycji: "${s.name}". System nie może zapisać nieskategoryzowanej resztki.`);
+                                            return;
+                                        }
+                                    }
                                     const ctx = pendingSubmitContext;
                                     setIsDuplicateCheckModalOpen(false);
-                                    setResidualDuplicateSuggestions([]);
-                                    setPendingSubmitContext(null);
-                                    if (ctx === 'paper') handlePaperReturnSubmit();
-                                    else if (ctx === 'accept') handleAcceptSubmit(true);
+                                    if (ctx === 'paper') handlePaperReturnSubmit(true);
+                                    else if (ctx === 'accept') handleAcceptSubmit(true, true);
                                 }}
-                                className="px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-black rounded-xl shadow transition flex items-center gap-2"
+                                className="px-6 py-2.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white font-black rounded-xl shadow-lg transition flex items-center gap-2 active:scale-95"
                             >
-                                ✅ Zatwierdź i Zapisz
+                                <span>✅</span>
+                                <span>Zatwierdź i Zapisz</span>
                             </button>
                         </div>
                     </div>
@@ -6966,7 +7239,6 @@ export default function ProtocolsHub() {
                                 type="button"
                                 onClick={() => {
                                     setShowPrintSuccessModal(false);
-                                    setTimeout(() => window.print(), 250);
                                 }}
                                 className="flex-1 py-3.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-sm shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
                             >
@@ -7166,8 +7438,8 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
-            {/* ARKUSZ WYDRUKU PROTOKOŁU (WIDOCZNY TYLKO W TRYBIE DRUKOWANIA) */}
-            {protocolToPrint && (
+            {/* ARKUSZ WYDRUKU PROTOKOŁU (WIDOCZNY TYLKO W TRYBIE DRUKOWANIA, ZAMONTOWANY W PORTALU BODY) */}
+            {typeof document !== "undefined" && protocolToPrint && createPortal(
                 <div id="printable-protocol" className="hidden print:block p-8 bg-white text-black font-sans leading-tight">
                     {/* Nagłówek protokołu */}
                     <div className="border-b-4 border-slate-900 pb-4 mb-6 flex justify-between items-start">
@@ -7305,20 +7577,41 @@ export default function ProtocolsHub() {
                             <p className="text-[10px] text-slate-500">czytelny podpis i data</p>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
 
             <style jsx global>{`
                 @media print {
-                    body {
-                        background: white !important;
-                        color: black !important;
+                    @page {
+                        size: A4 portrait;
+                        margin: 10mm;
                     }
-                    button, .print\\:hidden {
+                    html, body {
+                        background: #ffffff !important;
+                        color: #000000 !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        height: auto !important;
+                        min-height: 0 !important;
+                    }
+                    /* Ukryj całą strukturę aplikacji, stronę w tle i modale */
+                    body > *:not(#printable-protocol) {
                         display: none !important;
                     }
                     #printable-protocol {
                         display: block !important;
+                        position: static !important;
+                        width: 100% !important;
+                        background: #ffffff !important;
+                        color: #000000 !important;
+                        box-shadow: none !important;
+                        border: none !important;
+                        padding: 0 !important;
+                        margin: 0 !important;
+                    }
+                    button, .print\\:hidden, [role="dialog"], aside, nav, header {
+                        display: none !important;
                     }
                 }
             `}</style>
