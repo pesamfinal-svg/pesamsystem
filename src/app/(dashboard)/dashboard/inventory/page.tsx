@@ -267,9 +267,18 @@ export default function InventoryPage() {
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
     const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
 
-    // SPLIT-VIEW: stany dla wariantu 3 (podświetlona strefa + item oczekujący na przypisanie)
-    const [splitHighlightLocId, setSplitHighlightLocId] = useState<string | null>(null);
+    // SPLIT-VIEW: stany dla wariantu 3 (strefy JPP, filtrowanie i drag&drop)
+    const [selectedZoneFilterId, setSelectedZoneFilterId] = useState<string | null>(null);
     const [splitAssignItem, setSplitAssignItem] = useState<InventoryItem | null>(null);
+    const [draggedItem, setDraggedItem] = useState<InventoryItem | null>(null);
+    const [dragOverZoneId, setDragOverZoneId] = useState<string | null>(null);
+    const [dragOverCatId, setDragOverCatId] = useState<string | null>(null);
+    const [dropPickerData, setDropPickerData] = useState<{
+        itemId: string;
+        itemName: string;
+        zone: StorageLocation;
+        categories: ResidualCategoryDef[];
+    } | null>(null);
 
     // STANY KATEGORII I ZDJĘĆ POGLĄDOWYCH
     const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
@@ -1813,45 +1822,160 @@ export default function InventoryPage() {
         );
     };
 
-    // 2. Renderowanie Drobnicy / Osprzetu w widoku Split-View (Strefa JPP + Lista resztek) — Wariant 3
+    // 2. Renderowanie Drobnicy / Osprzętu w widoku Split-View (Strefa JPP + Lista resztek z Drag & Drop i Filtrowaniem)
     const renderOtherItemsGroup = () => {
         const residualItems = sortedFilteredItems;
 
-        const unassignedCount = residualItems.filter(item => {
-            const isResidual = item.category === "Pozostalosci budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+        // Funkcja pomocnicza: czy item należy do strefy
+        const isItemInZone = (item: InventoryItem, zone: StorageLocation) => {
+            if (item.currentLocation && item.currentLocation.toLowerCase() === zone.name.toLowerCase()) return true;
+            const zoneCatIds = new Set(zone.categories || []);
+            if (zoneCatIds.has(item.category)) return true;
+            const matchedCat = categoriesList.find(c => c.name === item.category || c.id === item.category);
+            if (matchedCat && (zoneCatIds.has(matchedCat.id) || zoneCatIds.has(matchedCat.name))) {
+                return true;
+            }
+            return false;
+        };
+
+        const isItemUnassigned = (item: InventoryItem) => {
+            const isResidual = item.category === "Pozostałości budowlane" || item.category === "Pozostalosci budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
             return isResidual && !categoriesList.some(c => c.name === item.category);
-        }).length;
+        };
+
+        const unassignedCount = residualItems.filter(isItemUnassigned).length;
+
+        // Aktywna strefa filtrująca
+        const selectedZone = selectedZoneFilterId && selectedZoneFilterId !== "UNASSIGNED"
+            ? storageLocations.find(l => l.id === selectedZoneFilterId)
+            : null;
+
+        // Filtrowanie listy materiałów po klikniętej strefie
+        const displayedItems = selectedZoneFilterId === "UNASSIGNED"
+            ? residualItems.filter(isItemUnassigned)
+            : selectedZone
+                ? residualItems.filter(item => isItemInZone(item, selectedZone))
+                : residualItems;
+
+        // Obsługa upuszczenia materiału na strefę (Drag & Drop)
+        const handleDropOnZone = (itemId: string, zone: StorageLocation) => {
+            const item = items.find(i => i.id === itemId);
+            if (!item) return;
+
+            const zoneCats = (zone.categories || [])
+                .map(catId => categoriesList.find(c => c.id === catId || c.name === catId))
+                .filter(Boolean) as ResidualCategoryDef[];
+
+            if (zoneCats.length === 0) {
+                alert(`Strefa "${zone.name}" nie ma przypisanych żadnych kategorii w regułach magazynu.`);
+                return;
+            }
+
+            if (zoneCats.length === 1) {
+                handleQuickCategoryChange(itemId, zoneCats[0].name);
+            } else {
+                setDropPickerData({
+                    itemId,
+                    itemName: item.name,
+                    zone,
+                    categories: zoneCats
+                });
+            }
+        };
 
         return (
-            <div className="border rounded-2xl overflow-hidden shadow-sm bg-white border-orange-200 animate-fade-in">
-                {/* NAGLOWEK */}
+            <div className="border rounded-2xl overflow-hidden shadow-sm bg-white border-orange-200 animate-fade-in relative">
+                {/* POPUP / MODAL WYBORU KATEGORII PO UPUSZCZENIU NA STREFĘ Z WIELOMA KATEGORIAMI */}
+                {dropPickerData && (
+                    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-fade-in">
+                        <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-200 space-y-4">
+                            <div className="flex items-center justify-between border-b pb-3">
+                                <div className="flex items-center gap-2.5">
+                                    <span className="text-2xl">📍</span>
+                                    <div>
+                                        <h3 className="font-black text-slate-800 text-sm uppercase tracking-tight">Wybierz kategorię</h3>
+                                        <p className="text-[10px] text-slate-400 font-bold">Strefa: {dropPickerData.zone.name}</p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setDropPickerData(null)}
+                                    className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 font-bold flex items-center justify-center transition"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                            <div>
+                                <p className="text-xs text-slate-500 mb-1">Przeciągnięty materiał:</p>
+                                <p className="text-sm font-black text-slate-900 bg-slate-50 p-2.5 rounded-xl border border-slate-200">{dropPickerData.itemName}</p>
+                            </div>
+                            <div className="space-y-1.5">
+                                <p className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Do której kategorii przypisać?</p>
+                                {dropPickerData.categories.map(cat => (
+                                    <button
+                                        key={cat.id || cat.name}
+                                        onClick={() => {
+                                            handleQuickCategoryChange(dropPickerData.itemId, cat.name);
+                                            setDropPickerData(null);
+                                        }}
+                                        className="w-full text-left p-3 rounded-xl border border-slate-200 hover:border-amber-500 hover:bg-amber-50/70 transition flex items-center gap-3 font-bold text-xs text-slate-800 hover:text-amber-950 group"
+                                    >
+                                        <span className="text-xl group-hover:scale-110 transition">{cat.icon || "📦"}</span>
+                                        <div className="flex-1">
+                                            <div className="font-black text-slate-800 group-hover:text-amber-900">{cat.name}</div>
+                                            <div className="text-[10px] text-slate-400 font-normal">{cat.description || `${cat.subcategories?.length || 0} podkategorii`}</div>
+                                        </div>
+                                        <span className="text-xs text-amber-600 opacity-0 group-hover:opacity-100 font-black">Wybierz ➔</span>
+                                    </button>
+                                ))}
+                            </div>
+                            <button
+                                onClick={() => setDropPickerData(null)}
+                                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition"
+                            >
+                                Anuluj
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* NAGŁÓWEK */}
                 <div className="bg-orange-600 text-white p-4 flex items-center justify-between">
                     <div className="flex items-center gap-4">
                         <span className="text-2xl">📦</span>
                         <div>
                             <h2 className="text-lg font-black uppercase tracking-tight">Drobnica, Osprzęt i Materiały</h2>
                             <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">
-                                Widok Split-View — strefy JPP po lewej, lista materiałów po prawej
+                                Widok Split-View — kliknij strefę po lewej by przefiltrować lub przeciągnij materiał (Drag & Drop)
                             </p>
                         </div>
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                         {unassignedCount > 0 && (
-                            <span className="bg-red-500 text-white text-[10px] font-black px-2.5 py-1 rounded-full animate-pulse flex items-center gap-1">
-                                ⚠️ {unassignedCount} bez kategorii
-                            </span>
+                            <button
+                                onClick={() => setSelectedZoneFilterId(prev => prev === "UNASSIGNED" ? null : "UNASSIGNED")}
+                                className={`text-[10px] font-black px-3 py-1.5 rounded-full transition flex items-center gap-1.5 shadow-xs cursor-pointer ${
+                                    selectedZoneFilterId === "UNASSIGNED"
+                                        ? "bg-white text-red-700 ring-2 ring-red-300"
+                                        : "bg-red-500 hover:bg-red-400 text-white animate-pulse"
+                                }`}
+                                title="Kliknij, aby przefiltrować listę tylko do pozycji bez kategorii"
+                            >
+                                <span>⚠️</span>
+                                <span>{unassignedCount} bez kategorii</span>
+                                {selectedZoneFilterId === "UNASSIGNED" && <span className="ml-1 bg-red-100 text-red-800 px-1 rounded-sm text-[9px]">FILTR AKTYWNY</span>}
+                            </button>
                         )}
                         <button
                             onClick={handleCleanupReturnedDebts}
                             className="px-3.5 py-2 bg-white/20 hover:bg-white/30 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5 border border-white/30 shadow-sm"
-                            title="Usuwa z bazy pozycje zalegego osprzetu, ktore maja juz 0 szt. na budowach i zostaly w pelni zwrocone"
+                            title="Usuwa z bazy pozycje zaległego osprzętu, które mają już 0 szt. na budowach i zostały w pełni zwrócone"
                         >
                             <span>🧹</span> Wyczyść zwrócony osprzęt
                         </button>
                     </div>
                 </div>
 
-                {/* PASEK FILTROW */}
+                {/* PASEK FILTRÓW */}
                 <div className="bg-orange-50/80 border-b border-orange-100 p-2.5 px-4 flex items-center justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-2">
                         <span className="text-[10px] font-black uppercase text-orange-900 tracking-wider">Filtr:</span>
@@ -1861,21 +1985,62 @@ export default function InventoryPage() {
                             <button onClick={() => setDrobnicaFilter("OTHER")} className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "OTHER" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}>Osprzęt</button>
                         </div>
                     </div>
-                    <a href="/plac" target="_blank" rel="noreferrer" className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs rounded-xl transition flex items-center gap-1.5 shadow-sm active:scale-95">
-                        <span>📱</span> Otwórz Plac Mobilny
-                    </a>
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-500 font-bold bg-white px-2.5 py-1 rounded-lg border border-orange-200">
+                            💡 Wskazówka: Złap ikonę <span className="font-black text-slate-800">⠿</span> i upuść na strefę po lewej
+                        </span>
+                        <a href="/plac" target="_blank" rel="noreferrer" className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs rounded-xl transition flex items-center gap-1.5 shadow-sm active:scale-95">
+                            <span>📱</span> Plac Mobilny
+                        </a>
+                    </div>
                 </div>
 
                 {/* SPLIT-VIEW: 2 kolumny */}
-                <div className="flex divide-x divide-slate-200 min-h-[400px]">
+                <div className="flex divide-x divide-slate-200 min-h-[460px]">
 
-                    {/* ===== LEWY PANEL: STREFY JPP ===== */}
-                    <div className="w-72 shrink-0 bg-slate-50 p-3 space-y-2.5 overflow-y-auto max-h-[75vh]">
-                        <div className="text-[10px] font-black uppercase text-slate-500 tracking-wider px-1 pb-1 border-b border-slate-200">
-                            📍 Strefy Składowania (JPP)
+                    {/* ===== LEWY PANEL: STREFY JPP (FILTRY & CELE DRAG & DROP) ===== */}
+                    <div className="w-80 shrink-0 bg-slate-50 p-3 space-y-2.5 overflow-y-auto max-h-[75vh]">
+                        <div className="flex items-center justify-between px-1 pb-1 border-b border-slate-200">
+                            <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                                📍 Strefy Składowania (JPP)
+                            </span>
+                            {selectedZoneFilterId && (
+                                <button
+                                    onClick={() => setSelectedZoneFilterId(null)}
+                                    className="text-[10px] font-bold text-blue-600 hover:text-blue-800 hover:underline"
+                                >
+                                    ✕ Wyczyść filtr
+                                </button>
+                            )}
                         </div>
+
+                        {/* PRZYCISK WSZYSTKIE POZYCJE */}
+                        <button
+                            onClick={() => setSelectedZoneFilterId(null)}
+                            className={`w-full text-left p-2.5 rounded-xl border text-xs font-bold transition flex items-center justify-between ${
+                                selectedZoneFilterId === null
+                                    ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                                    : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                            }`}
+                        >
+                            <span className="flex items-center gap-2">
+                                <span>🌐</span> Wszystkie strefy
+                            </span>
+                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${selectedZoneFilterId === null ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>
+                                {residualItems.length}
+                            </span>
+                        </button>
+
+                        {/* WSKAŹNIK TRYBU DRAG & DROP */}
+                        {draggedItem && (
+                            <div className="p-2.5 bg-blue-100 border-2 border-dashed border-blue-400 rounded-xl text-center animate-pulse">
+                                <p className="text-[11px] font-black text-blue-900">👇 Upuść materiał na strefę lub kategorię</p>
+                                <p className="text-[10px] text-blue-700 truncate font-semibold mt-0.5">"{draggedItem.name}"</p>
+                            </div>
+                        )}
+
                         {storageLocations.length === 0 ? (
-                            <div className="text-xs text-slate-400 italic p-3 text-center">
+                            <div className="text-xs text-slate-400 italic p-4 text-center bg-white rounded-xl border border-dashed">
                                 Brak skonfigurowanych stref.<br />Skonfiguruj je w Reguły AI (Capacity).
                             </div>
                         ) : (
@@ -1887,77 +2052,157 @@ export default function InventoryPage() {
                                 const isCritical = fillPct >= (loc.criticalThreshold || 85);
                                 const isAlertPct = !isCritical && fillPct >= (loc.alertThreshold || 70);
                                 const barColor = isCritical ? "bg-red-500" : isAlertPct ? "bg-amber-400" : "bg-emerald-500";
-                                const borderHighlight = splitHighlightLocId === loc.id
-                                    ? "border-blue-500 ring-2 ring-blue-300 shadow-md"
-                                    : isCritical ? "border-red-200" : isAlertPct ? "border-amber-200" : "border-slate-200";
-                                const bgHighlight = splitHighlightLocId === loc.id ? "bg-blue-50" : "bg-white";
-                                const locCategoryNames = (loc.categories || [])
-                                    .map(catId => categoriesList.find(c => c.id === catId))
-                                    .filter(Boolean) as typeof categoriesList;
+
+                                const isSelectedFilter = selectedZoneFilterId === loc.id;
+                                const isDragOverThisZone = dragOverZoneId === loc.id;
+
+                                // Ile pozycji z listy należy obecnie do tej strefy
+                                const itemsInThisZone = residualItems.filter(it => isItemInZone(it, loc));
+
+                                const locCategoryDefs = (loc.categories || [])
+                                    .map(catId => categoriesList.find(c => c.id === catId || c.name === catId))
+                                    .filter(Boolean) as ResidualCategoryDef[];
+
                                 const assignableCats = splitAssignItem
-                                    ? (loc.categories || []).map(catId => categoriesList.find(c => c.id === catId)).filter(Boolean) as typeof categoriesList
+                                    ? (loc.categories || []).map(catId => categoriesList.find(c => c.id === catId || c.name === catId)).filter(Boolean) as ResidualCategoryDef[]
                                     : [];
                                 const isAssignable = splitAssignItem != null && assignableCats.length > 0;
 
                                 return (
                                     <div
                                         key={loc.id}
-                                        className={`rounded-xl border p-3 transition-all cursor-pointer ${borderHighlight} ${bgHighlight} ${splitAssignItem && !isAssignable ? "opacity-40" : ""}`}
-                                        onClick={() => {
-                                            if (splitAssignItem && isAssignable) {
-                                                if (assignableCats.length === 1) {
-                                                    handleQuickCategoryChange(splitAssignItem.id, assignableCats[0]!.name);
-                                                    setSplitAssignItem(null);
-                                                    setSplitHighlightLocId(null);
-                                                } else {
-                                                    setSplitHighlightLocId(loc.id);
-                                                }
-                                            } else {
-                                                setSplitHighlightLocId(prev => prev === loc.id ? null : loc.id);
+                                        onDragOver={(e) => {
+                                            e.preventDefault();
+                                            e.dataTransfer.dropEffect = "move";
+                                            if (dragOverZoneId !== loc.id) {
+                                                setDragOverZoneId(loc.id);
                                             }
                                         }}
-                                        title={splitAssignItem && isAssignable ? `Kliknij, aby przypisać "${splitAssignItem.name}" do strefy ${loc.name}` : (loc.description || loc.name)}
+                                        onDragLeave={(e) => {
+                                            if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                                            if (dragOverZoneId === loc.id) setDragOverZoneId(null);
+                                        }}
+                                        onDrop={(e) => {
+                                            e.preventDefault();
+                                            setDragOverZoneId(null);
+                                            setDragOverCatId(null);
+                                            const itemId = e.dataTransfer.getData("text/plain") || draggedItem?.id;
+                                            if (itemId) {
+                                                handleDropOnZone(itemId, loc);
+                                            }
+                                            setDraggedItem(null);
+                                        }}
+                                        onClick={() => {
+                                            // Jeśli kliknięto w trybie 'Przypisz' przyciskiem:
+                                            if (splitAssignItem) {
+                                                if (isAssignable) {
+                                                    if (assignableCats.length === 1) {
+                                                        handleQuickCategoryChange(splitAssignItem.id, assignableCats[0].name);
+                                                        setSplitAssignItem(null);
+                                                    } else {
+                                                        setDropPickerData({
+                                                            itemId: splitAssignItem.id,
+                                                            itemName: splitAssignItem.name,
+                                                            zone: loc,
+                                                            categories: assignableCats
+                                                        });
+                                                        setSplitAssignItem(null);
+                                                    }
+                                                }
+                                                return;
+                                            }
+                                            // W normalnym trybie: KLIKNIĘCIE FILTRUJE LISTĘ PO PRAWEJ!
+                                            setSelectedZoneFilterId(prev => prev === loc.id ? null : loc.id);
+                                        }}
+                                        className={`rounded-2xl border p-3.5 transition-all cursor-pointer relative ${
+                                            isDragOverThisZone
+                                                ? "border-blue-500 bg-blue-100/90 ring-4 ring-blue-300 scale-[1.02] shadow-lg"
+                                                : isSelectedFilter
+                                                    ? "border-blue-600 bg-blue-50/90 ring-2 ring-blue-400 shadow-md"
+                                                    : draggedItem
+                                                        ? "border-dashed border-2 border-slate-300 bg-white hover:border-blue-400 hover:bg-blue-50/40"
+                                                        : isCritical
+                                                            ? "border-red-200 bg-white hover:border-red-400"
+                                                            : isAlertPct
+                                                                ? "border-amber-200 bg-white hover:border-amber-400"
+                                                                : "border-slate-200 bg-white hover:border-blue-300"
+                                        } ${splitAssignItem && !isAssignable ? "opacity-30" : ""}`}
+                                        title={
+                                            splitAssignItem
+                                                ? `Kliknij, aby przypisać "${splitAssignItem.name}" do strefy ${loc.name}`
+                                                : isSelectedFilter
+                                                    ? "Kliknij, aby wyłączyć filtr tej strefy"
+                                                    : `Kliknij, aby pokazać tylko materiały ze strefy ${loc.name}`
+                                        }
                                     >
-                                        <div className="flex items-center justify-between mb-1.5">
-                                            <span className="text-xs font-black text-slate-800 leading-tight">{loc.name}</span>
-                                            <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${isCritical ? "bg-red-100 text-red-700" : isAlertPct ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                                                {fillPct}%
-                                            </span>
+                                        {/* GÓRNY PASEK KARTY STREFY */}
+                                        <div className="flex items-center justify-between mb-1.5 gap-1">
+                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                <span className="text-xs font-black text-slate-800 truncate">{loc.name}</span>
+                                            </div>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                {isSelectedFilter && (
+                                                    <span className="text-[9px] font-black bg-blue-600 text-white px-1.5 py-0.5 rounded-full uppercase tracking-wider">
+                                                        ✓ Filtr
+                                                    </span>
+                                                )}
+                                                <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
+                                                    isCritical ? "bg-red-100 text-red-700" : isAlertPct ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+                                                }`}>
+                                                    {fillPct}%
+                                                </span>
+                                            </div>
                                         </div>
+
+                                        {/* PASEK ZAPEŁNIENIA JPP */}
                                         <div className="w-full bg-slate-200 rounded-full h-1.5 mb-2">
                                             <div className={`h-1.5 rounded-full transition-all ${barColor}`} style={{ width: `${fillPct}%` }} />
                                         </div>
-                                        <div className="flex justify-between text-[10px] text-slate-500 font-bold mb-1.5">
-                                            <span>Zajęte: {occupied} JPP</span>
-                                            <span>Wolne: {freeSlots} JPP</span>
+
+                                        {/* POJEMNOŚĆ I LICZNIK ASORTYMENTU */}
+                                        <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 mb-2">
+                                            <span>Zajęte: {occupied} / {totalCap} JPP</span>
+                                            <span className="text-blue-700 font-black bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">
+                                                📦 {itemsInThisZone.length} poz.
+                                            </span>
                                         </div>
-                                        {locCategoryNames.length > 0 && (
-                                            <div className="flex flex-wrap gap-1">
-                                                {locCategoryNames.map(cat => (
-                                                    <span key={cat!.id} className="text-[9px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full border border-slate-200">
-                                                        {cat!.icon || "📦"} {cat!.name}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        )}
-                                        {splitAssignItem && isAssignable && (
-                                            <div className="mt-2 pt-2 border-t border-blue-200">
-                                                <div className="text-[10px] font-black text-blue-700 text-center mb-1">
-                                                    ✅ Wybierz kategorię dla tej strefy:
-                                                </div>
-                                                {assignableCats.map(cat => (
-                                                    <button
-                                                        key={cat!.id}
-                                                        onClick={(e) => {
+
+                                        {/* TAGI KATEGORII STREFY - KAŻDY MOŻE BYĆ SAMODZIELNYM CELEM DROP! */}
+                                        {locCategoryDefs.length > 0 && (
+                                            <div className="flex flex-wrap gap-1 pt-1.5 border-t border-slate-100">
+                                                {locCategoryDefs.map(cat => (
+                                                    <span
+                                                        key={cat.id || cat.name}
+                                                        onDragOver={(e) => {
+                                                            e.preventDefault();
                                                             e.stopPropagation();
-                                                            handleQuickCategoryChange(splitAssignItem!.id, cat!.name);
-                                                            setSplitAssignItem(null);
-                                                            setSplitHighlightLocId(null);
+                                                            e.dataTransfer.dropEffect = "move";
+                                                            setDragOverCatId(cat.id || cat.name);
                                                         }}
-                                                        className="w-full text-left text-[10px] font-bold px-2 py-1 rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 transition flex items-center gap-1 mb-1"
+                                                        onDragLeave={(e) => {
+                                                            e.stopPropagation();
+                                                            setDragOverCatId(null);
+                                                        }}
+                                                        onDrop={(e) => {
+                                                            e.preventDefault();
+                                                            e.stopPropagation();
+                                                            setDragOverCatId(null);
+                                                            setDragOverZoneId(null);
+                                                            const dropId = e.dataTransfer.getData("text/plain") || draggedItem?.id;
+                                                            if (dropId) {
+                                                                handleQuickCategoryChange(dropId, cat.name);
+                                                            }
+                                                            setDraggedItem(null);
+                                                        }}
+                                                        className={`text-[9px] font-bold px-2 py-0.5 rounded-full border transition-all ${
+                                                            dragOverCatId === (cat.id || cat.name)
+                                                                ? "bg-emerald-500 text-white border-emerald-600 scale-110 shadow-md ring-2 ring-emerald-300"
+                                                                : "bg-slate-100 text-slate-700 border-slate-200 hover:border-blue-400"
+                                                        }`}
+                                                        title={`Przeciągnij tutaj, aby natychmiast przypisać kategorię: "${cat.name}"`}
                                                     >
-                                                        {cat!.icon} {cat!.name}
-                                                    </button>
+                                                        {cat.icon || "📦"} {cat.name}
+                                                    </span>
                                                 ))}
                                             </div>
                                         )}
@@ -1965,59 +2210,129 @@ export default function InventoryPage() {
                                 );
                             })
                         )}
-                        {splitAssignItem && (
-                            <button
-                                onClick={() => { setSplitAssignItem(null); setSplitHighlightLocId(null); }}
-                                className="w-full text-xs font-bold text-slate-500 hover:text-red-600 py-2 rounded-xl border border-dashed border-slate-300 hover:border-red-300 transition mt-2"
-                            >
-                                ✕ Anuluj tryb przypisywania
-                            </button>
-                        )}
                     </div>
 
-                    {/* ===== PRAWY PANEL: LISTA MATERIALOW ===== */}
+                    {/* ===== PRAWY PANEL: LISTA MATERIAŁÓW (DRAGGABLE ROWS) ===== */}
                     <div className="flex-1 overflow-x-auto overflow-y-auto max-h-[75vh]">
+                        {/* BANNER AKTYWNEGO TRYBU PRZYPISYWANIA */}
                         {splitAssignItem && (
-                            <div className="sticky top-0 z-10 bg-blue-600 text-white px-4 py-2.5 flex items-center gap-3 shadow-md">
+                            <div className="sticky top-0 z-20 bg-blue-600 text-white px-4 py-2.5 flex items-center gap-3 shadow-md">
                                 <span className="text-sm font-black">🎯 Przypisujesz:</span>
                                 <span className="text-sm font-bold truncate max-w-xs">{splitAssignItem.name}</span>
-                                <span className="text-xs text-blue-200 font-bold flex-1">→ Kliknij strefę po lewej</span>
-                                <button onClick={() => { setSplitAssignItem(null); setSplitHighlightLocId(null); }} className="text-xs font-black bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg">✕</button>
+                                <span className="text-xs text-blue-200 font-bold flex-1">➔ Kliknij strefę po lewej stronie</span>
+                                <button onClick={() => setSplitAssignItem(null)} className="text-xs font-black bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg">✕ Anuluj</button>
                             </div>
                         )}
+
+                        {/* BANNER AKTYWNEGO FILTRU STREFY */}
+                        {selectedZone && (
+                            <div className="sticky top-0 z-10 bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-center justify-between shadow-xs">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs font-bold text-amber-900">📍 Przefiltrowano wg strefy:</span>
+                                    <span className="text-xs font-black text-amber-950 bg-amber-200 px-2.5 py-0.5 rounded-lg border border-amber-300">
+                                        {selectedZone.name}
+                                    </span>
+                                    <span className="text-xs font-semibold text-amber-800">
+                                        (pokazano {displayedItems.length} z {residualItems.length} pozycji)
+                                    </span>
+                                </div>
+                                <button
+                                    onClick={() => setSelectedZoneFilterId(null)}
+                                    className="text-xs font-black text-amber-900 hover:text-red-700 bg-white hover:bg-amber-100 px-3 py-1 rounded-lg border border-amber-300 transition"
+                                >
+                                    ✕ Pokaż wszystkie strefy
+                                </button>
+                            </div>
+                        )}
+
+                        {selectedZoneFilterId === "UNASSIGNED" && (
+                            <div className="sticky top-0 z-10 bg-red-50 border-b border-red-200 px-4 py-2.5 flex items-center justify-between shadow-xs">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs font-bold text-red-900">⚠️ Pozycje bez przypisanej kategorii:</span>
+                                    <span className="text-xs font-black text-red-950 bg-red-200 px-2 py-0.5 rounded-lg">
+                                        {displayedItems.length} pozycji
+                                    </span>
+                                </div>
+                                <button
+                                    onClick={() => setSelectedZoneFilterId(null)}
+                                    className="text-xs font-black text-red-900 hover:text-red-700 bg-white hover:bg-red-100 px-3 py-1 rounded-lg border border-red-300 transition"
+                                >
+                                    ✕ Pokaż wszystkie
+                                </button>
+                            </div>
+                        )}
+
                         <table className="w-full text-left">
-                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400 sticky top-0">
+                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400 sticky top-0 z-5">
                                 <tr>
+                                    <th className="p-3 w-8 text-center" title="Uchwyt przeciągania">⠿</th>
                                     <th className="p-3 w-12">Zdj.</th>
-                                    <th className="p-3">Nazwa</th>
-                                    <th className="p-3 min-w-[160px]">Kategoria</th>
-                                    <th className="p-3 min-w-[160px]">Podkategoria</th>
+                                    <th className="p-3">Nazwa materiału</th>
+                                    <th className="p-3 min-w-[170px]">Główna Kategoria</th>
+                                    <th className="p-3 min-w-[170px]">Podkategoria</th>
                                     <th className="p-3 text-center">Kod</th>
                                     <th className="p-3 text-center">Stan</th>
                                     <th className="p-3 text-right">Akcje</th>
                                 </tr>
                             </thead>
                             <tbody className="text-sm divide-y divide-slate-100">
-                                {residualItems.length === 0 ? (
+                                {displayedItems.length === 0 ? (
                                     <tr>
-                                        <td colSpan={7} className="p-10 text-center text-slate-400 text-sm font-bold">
-                                            Brak materiałów spełniających kryteria.
+                                        <td colSpan={8} className="p-12 text-center text-slate-400 text-sm font-bold">
+                                            {selectedZone
+                                                ? `Brak materiałów przypisanych do strefy "${selectedZone.name}".`
+                                                : selectedZoneFilterId === "UNASSIGNED"
+                                                    ? "Świetnie! Wszystkie pozycje mają już przypisaną kategorię."
+                                                    : "Brak materiałów spełniających kryteria filtru."}
                                         </td>
                                     </tr>
                                 ) : (
-                                    residualItems.map(item => {
-                                        const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+                                    displayedItems.map(item => {
+                                        const isResidual = item.category === "Pozostałości budowlane" || item.category === "Pozostalosci budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
                                         const isSaving = savingItemId === item.id;
                                         const catObj = categoriesList.find(c => c.name === item.category);
                                         const subList = catObj?.subcategories || [];
                                         const isUncategorized = isResidual && !categoriesList.some(c => c.name === item.category);
                                         const isBeingAssigned = splitAssignItem?.id === item.id;
+                                        const isBeingDragged = draggedItem?.id === item.id;
 
                                         return (
                                             <tr
                                                 key={item.id}
-                                                className={`hover:bg-slate-50 transition ${isBeingAssigned ? "bg-blue-50 outline outline-2 outline-blue-400 outline-offset-[-2px]" : isUncategorized ? "bg-red-50/40 border-l-4 border-l-red-400" : isResidual ? "bg-amber-50/20" : ""}`}
+                                                draggable={true}
+                                                onDragStart={(e) => {
+                                                    e.dataTransfer.setData("text/plain", item.id);
+                                                    e.dataTransfer.effectAllowed = "move";
+                                                    setDraggedItem(item);
+                                                }}
+                                                onDragEnd={() => {
+                                                    setDraggedItem(null);
+                                                    setDragOverZoneId(null);
+                                                    setDragOverCatId(null);
+                                                }}
+                                                className={`hover:bg-slate-50 transition cursor-default ${
+                                                    isBeingDragged
+                                                        ? "opacity-30 bg-blue-100"
+                                                        : isBeingAssigned
+                                                            ? "bg-blue-50 outline outline-2 outline-blue-400 outline-offset-[-2px]"
+                                                            : isUncategorized
+                                                                ? "bg-red-50/50 border-l-4 border-l-red-500"
+                                                                : isResidual
+                                                                    ? "bg-amber-50/20"
+                                                                    : ""
+                                                }`}
                                             >
+                                                {/* UCHWYT DRAG & DROP */}
+                                                <td className="p-2 text-center">
+                                                    <div
+                                                        className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-blue-600 font-black text-base select-none p-1 rounded hover:bg-slate-100 transition"
+                                                        title="Złap i przeciągnij na strefę po lewej stronie"
+                                                    >
+                                                        ⠿
+                                                    </div>
+                                                </td>
+
+                                                {/* ZDJĘCIE */}
                                                 <td className="p-2">
                                                     <div className="relative group w-10 h-10">
                                                         <img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-10 h-10 object-cover rounded border" alt="item" />
@@ -2031,21 +2346,25 @@ export default function InventoryPage() {
                                                                         await updateDoc(doc(db, "inventory", item.id), { imageUrl: url, updatedAt: new Date().toISOString() });
                                                                         setItems(prev => prev.map(i => i.id === item.id ? { ...i, imageUrl: url } : i));
                                                                     } catch (err: any) {
-                                                                        alert("Blad wgrywania zdjecia: " + (err?.message || err));
+                                                                        alert("Błąd wgrywania zdjęcia: " + (err?.message || err));
                                                                     }
                                                                 }
                                                             }} />
                                                         </label>
                                                     </div>
                                                 </td>
+
+                                                {/* NAZWA */}
                                                 <td className="p-3 cursor-pointer" onClick={() => openItemCard(item)}>
                                                     <div className="flex items-center gap-1.5 flex-wrap">
                                                         <p className="font-bold text-slate-700 text-xs">{item.name}</p>
                                                         {isUncategorized && <span className="bg-red-100 text-red-700 border border-red-300 text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-wider animate-pulse">⚠️ bez kat.</span>}
-                                                        {isResidual && !isUncategorized && <span className="bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-black px-1.5 py-0.5 rounded-full">🧱</span>}
+                                                        {isResidual && !isUncategorized && <span className="bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-black px-1.5 py-0.5 rounded-full">🧱 Resztki</span>}
                                                     </div>
                                                     <p className="text-[10px] text-slate-400 mt-0.5">{item.category || "Brak kategorii"}</p>
                                                 </td>
+
+                                                {/* GŁÓWNA KATEGORIA (INLINE SELECT) */}
                                                 <td className="p-2">
                                                     <select
                                                         value={item.category || ""}
@@ -2064,6 +2383,8 @@ export default function InventoryPage() {
                                                         {item.category && !categoriesList.some(c => c.name === item.category) && <option value={item.category}>{item.category}</option>}
                                                     </select>
                                                 </td>
+
+                                                {/* PODKATEGORIA (INLINE SELECT) */}
                                                 <td className="p-2">
                                                     <select
                                                         value={item.subcategory || ""}
@@ -2076,27 +2397,32 @@ export default function InventoryPage() {
                                                         {item.subcategory && !subList.includes(item.subcategory) && <option value={item.subcategory}>{item.subcategory}</option>}
                                                     </select>
                                                 </td>
+
+                                                {/* KOD */}
                                                 <td className={`p-3 text-center font-mono text-xs font-bold ${isResidual ? "text-amber-700" : "text-orange-600"}`}>
                                                     <div className="flex items-center justify-center gap-1">
                                                         <span>{item.inventoryNumber}</span>
                                                         {isSaving && <span className="animate-spin text-[10px]">⏳</span>}
                                                     </div>
                                                 </td>
+
+                                                {/* STAN */}
                                                 <td className="p-3 text-center font-black text-xs whitespace-nowrap">
                                                     {item.availableQuantity} / {item.totalQuantity}<br />
                                                     <span className="text-[10px] text-slate-400 font-bold">{item.unit || "szt."}</span>
                                                 </td>
+
+                                                {/* AKCJE */}
                                                 <td className="p-3 text-right whitespace-nowrap">
                                                     <div className="flex items-center justify-end gap-1.5 flex-wrap">
                                                         <button
                                                             onClick={() => {
                                                                 setSplitAssignItem(prev => prev?.id === item.id ? null : item);
-                                                                setSplitHighlightLocId(null);
                                                             }}
                                                             className={`text-xs font-black px-2 py-1 rounded-lg border transition ${isBeingAssigned ? "bg-blue-600 text-white border-blue-600" : "text-blue-600 border-blue-200 hover:bg-blue-50"}`}
-                                                            title="Kliknij strefę JPP po lewej, aby szybko przypisać kategorię"
+                                                            title="Wybierz strefę JPP po lewej stronie, aby przypisać kategorię"
                                                         >
-                                                            {isBeingAssigned ? "✕" : "📍"}
+                                                            {isBeingAssigned ? "✕" : "📍 Przypisz"}
                                                         </button>
                                                         <button onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }} className="text-orange-600 hover:underline font-bold text-xs">⚙️</button>
                                                         <span className="text-slate-300">|</span>
