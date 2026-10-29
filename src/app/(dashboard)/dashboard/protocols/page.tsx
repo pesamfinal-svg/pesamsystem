@@ -53,6 +53,9 @@ interface ReturnCartItem {
     subcategory?: string;
     rulesCompliant?: boolean;
     ruleNotes?: string;
+    storageLocation?: string;
+    storageFillPercentage?: number;
+    estimatedJpp?: number;
 }
 
 // Interfejsy dla ZWROTÓW PAPIEROWYCH
@@ -283,6 +286,16 @@ export default function ProtocolsHub() {
     const [histFilterDateTo, setHistFilterDateTo] = useState("");
 
     // STANY SPRAWDZANIA DUPLIKATÓW POZOSTAŁOŚCI BUDOWLANYCH
+    type ResidualDecision = {
+        action: 'new' | 'merge';
+        targetId?: string;
+        category?: string;
+        subcategory?: string;
+        storageLocationId?: string;
+        jppDelta?: number;
+        applyJpp?: boolean;
+    };
+
     type ResidualDuplicateSuggestion = {
         cartId: string;
         name: string;
@@ -291,12 +304,15 @@ export default function ProtocolsHub() {
         matches: InventoryItem[];
         category?: string;
         subcategory?: string;
+        storageLocationId?: string;
+        suggestedJpp?: number;
     };
     const [isDuplicateCheckModalOpen, setIsDuplicateCheckModalOpen] = useState(false);
     const [residualDuplicateSuggestions, setResidualDuplicateSuggestions] = useState<ResidualDuplicateSuggestion[]>([]);
-    const [residualDuplicateDecisions, setResidualDuplicateDecisions] = useState<Record<string, { action: 'new' | 'merge'; targetId?: string; category?: string; subcategory?: string }>>({});
+    const [residualDuplicateDecisions, setResidualDuplicateDecisions] = useState<Record<string, ResidualDecision>>({});
     const [pendingSubmitContext, setPendingSubmitContext] = useState<'paper' | 'accept' | null>(null);
     const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
+    const [warehouseStorageLocations, setWarehouseStorageLocations] = useState<any[]>([]);
 
     const normalizeRoot = (w: string) => {
         let s = w.toLowerCase().trim();
@@ -329,14 +345,20 @@ export default function ProtocolsHub() {
             setInventory(invSnap.docs.map(d => ({ id: d.id, ...d.data() })) as InventoryItem[]);
 
             try {
-                const catSnap = await getDoc(doc(db, "settings", "residual_categories"));
+                const [catSnap, capSnap] = await Promise.all([
+                    getDoc(doc(db, "settings", "residual_categories")),
+                    getDoc(doc(db, "settings", "warehouse_capacity"))
+                ]);
                 if (catSnap.exists() && Array.isArray(catSnap.data().categories) && catSnap.data().categories.length > 0) {
                     setCategoriesList(catSnap.data().categories);
                 } else {
                     setCategoriesList(RESIDUAL_MAIN_CATEGORIES);
                 }
+                if (capSnap.exists() && Array.isArray(capSnap.data().locations)) {
+                    setWarehouseStorageLocations(capSnap.data().locations);
+                }
             } catch (catErr) {
-                console.warn("Błąd pobierania residual_categories w protokołach:", catErr);
+                console.warn("Błąd pobierania residual_categories / warehouse_capacity:", catErr);
             }
 
             await fetchHistoryProtocols();
@@ -1478,6 +1500,9 @@ export default function ProtocolsHub() {
             subcategory: res.subcategory || "",
             rulesCompliant: res.rulesCompliant,
             ruleNotes: res.ruleNotes,
+            storageLocation: res.storageLocation,
+            storageFillPercentage: res.storageFillPercentage,
+            estimatedJpp: typeof res.estimatedJpp === 'number' ? res.estimatedJpp : (res.quantity ? Math.round(Number(res.quantity) * 0.05 * 100) / 100 : 0.05),
             type: "BULK",
             inventoryNumber: "RESZTKI",
             unit: res.unit || "szt.",
@@ -1711,6 +1736,81 @@ export default function ProtocolsHub() {
         setManualIsPermanent(false);
     };
 
+
+    // Funkcja aktualizująca stan zajętości stref magazynowych (JPP) po akceptacji zwrotu resztek
+    const applyStorageLocationJppUpdates = async (decisions: Record<string, { storageLocationId?: string; jppDelta?: number; applyJpp?: boolean }>) => {
+        try {
+            // Zlicz sumaryczny przyrost JPP per strefa
+            const deltasByLocation: Record<string, number> = {};
+            for (const dec of Object.values(decisions)) {
+                if (dec.applyJpp !== false && dec.storageLocationId && dec.jppDelta && dec.jppDelta > 0) {
+                    deltasByLocation[dec.storageLocationId] = (deltasByLocation[dec.storageLocationId] || 0) + dec.jppDelta;
+                }
+            }
+
+            const locationIds = Object.keys(deltasByLocation);
+            if (locationIds.length === 0) return;
+
+            const capRef = doc(db, "settings", "warehouse_capacity");
+            const capSnap = await getDoc(capRef);
+            if (!capSnap.exists()) return;
+
+            const capData = capSnap.data() || {};
+            const existingLocations: any[] = Array.isArray(capData.locations) ? capData.locations : [];
+            const alertLocationsToSend: any[] = [];
+
+            const updatedLocations = existingLocations.map(loc => {
+                const addJpp = deltasByLocation[loc.id];
+                if (!addJpp) return loc;
+
+                const prevOcc = Number(loc.currentOccupied || 0);
+                const newOcc = Math.round((prevOcc + addJpp) * 100) / 100;
+                const totalCap = Number(loc.totalCapacity || 0);
+                const fillPct = totalCap > 0 ? Math.round((newOcc / totalCap) * 100) : 0;
+
+                const isCritical = fillPct >= (loc.criticalThreshold || 85);
+                const isAlert = fillPct >= (loc.alertThreshold || 70);
+
+                if (isAlert || isCritical) {
+                    alertLocationsToSend.push({
+                        name: loc.name,
+                        totalCapacity: totalCap,
+                        currentOccupied: newOcc,
+                        fillPercentage: fillPct,
+                        alertThreshold: loc.alertThreshold || 70,
+                        criticalThreshold: loc.criticalThreshold || 85,
+                        thresholdType: isCritical ? "CRITICAL" : "ALERT",
+                        categories: loc.categories
+                    });
+                }
+
+                return {
+                    ...loc,
+                    currentOccupied: newOcc,
+                    updatedAt: new Date().toISOString(),
+                    updatedBy: user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email : "Magazynier"
+                };
+            });
+
+            await setDoc(capRef, { locations: updatedLocations }, { merge: true });
+            setWarehouseStorageLocations(updatedLocations);
+
+            // Jeśli po zwiększeniu strefa przekracza limit, wyślij alert e-mail w tle
+            if (alertLocationsToSend.length > 0) {
+                fetch("/api/warehouse-capacity-alert", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        locations: alertLocationsToSend,
+                        updaterName: user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email : "Magazynier"
+                    })
+                }).catch(err => console.warn("Błąd wysyłki alertu pojemności po akceptacji zwrotu:", err));
+            }
+        } catch (e) {
+            console.warn("Błąd aktualizacji stref JPP w warehouse_capacity:", e);
+        }
+    };
+
     const handlePaperReturnSubmit = async (skipDuplicateCheckParam: boolean = false) => {
         const skipDuplicateCheck = typeof skipDuplicateCheckParam === "boolean" ? skipDuplicateCheckParam : false;
         if (!paperReturnSiteId || paperReturnCart.length === 0) return alert("Wybierz budowę i dodaj przynajmniej jeden przedmiot!");
@@ -1778,6 +1878,18 @@ export default function ProtocolsHub() {
                 });
 
                 // Zawsze dodajemy do weryfikacji i kategoryzacji magazynowej
+                // Szukamy domyślnej strefy składowania pasującej do kategorii
+                const matchedCategoryName = ri.category || "";
+                const locMatch = warehouseStorageLocations.find(l => 
+                    Array.isArray(l.categories) && l.categories.some((cId: string) => 
+                        matchedCategoryName.toLowerCase().includes(cId.toLowerCase())
+                    )
+                ) || warehouseStorageLocations[0];
+
+                const calcJpp = typeof (ri as any).estimatedJpp === 'number'
+                    ? (ri as any).estimatedJpp
+                    : (ri.receivedQty ? Math.round(Number(ri.receivedQty) * 0.05 * 100) / 100 : 0.05);
+
                 suggestions.push({
                     cartId: ri.cartItemId,
                     name: ri.name,
@@ -1785,20 +1897,25 @@ export default function ProtocolsHub() {
                     unit: ri.unit || 'szt.',
                     matches,
                     category: ri.category || "",
-                    subcategory: (ri as any).subcategory || ""
+                    subcategory: (ri as any).subcategory || "",
+                    storageLocationId: locMatch?.id || "",
+                    suggestedJpp: calcJpp
                 });
             }
 
             if (suggestions.length > 0) {
                 setIsSubmitting(false);
-                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string; category?: string; subcategory?: string }> = {};
+                const defaultDecisions: Record<string, ResidualDecision> = {};
                 for (const s of suggestions) {
                     if (s.matches.length > 0) {
                         defaultDecisions[s.cartId] = {
                             action: 'merge',
                             targetId: s.matches[0].id,
                             category: s.matches[0].category || "Pozostałości budowlane",
-                            subcategory: s.matches[0].subcategory || ""
+                            subcategory: s.matches[0].subcategory || "",
+                            storageLocationId: s.storageLocationId || warehouseStorageLocations[0]?.id || "",
+                            jppDelta: s.suggestedJpp || 0,
+                            applyJpp: true
                         };
                     } else {
                         const matchedCat = categoriesList.find(c => {
@@ -1810,7 +1927,10 @@ export default function ProtocolsHub() {
                         defaultDecisions[s.cartId] = {
                             action: 'new',
                             category: s.category || matchedCat?.name || "Kleje i Zaprawy",
-                            subcategory: s.subcategory || matchedCat?.subcategories[0] || ""
+                            subcategory: s.subcategory || matchedCat?.subcategories[0] || "",
+                            storageLocationId: s.storageLocationId || warehouseStorageLocations[0]?.id || "",
+                            jppDelta: s.suggestedJpp || 0,
+                            applyJpp: true
                         };
                     }
                 }
@@ -2292,6 +2412,10 @@ export default function ProtocolsHub() {
                 }
             }
 
+            // Aktualizacja stref składowania JPP w warehouse_capacity
+            if (residualDuplicateDecisions && Object.keys(residualDuplicateDecisions).length > 0) {
+                await applyStorageLocationJppUpdates(residualDuplicateDecisions);
+            }
             alert("Papierowy protokół zwrotu został wprowadzony i zaakceptowany!");
             closeModal();
             fetchData();
@@ -2714,6 +2838,17 @@ export default function ProtocolsHub() {
                 });
 
                 // Zawsze dodajemy do weryfikacji i kategoryzacji magazynowej
+                // Szukamy domyślnej strefy składowania pasującej do kategorii lub z notatki AI
+                const matchedCatName = ri.category || "";
+                const locMatch = warehouseStorageLocations.find(l => 
+                    (ri.storageLocation && l.name?.toLowerCase() === ri.storageLocation.toLowerCase()) ||
+                    (Array.isArray(l.categories) && l.categories.some((cId: string) => matchedCatName.toLowerCase().includes(cId.toLowerCase())))
+                ) || warehouseStorageLocations[0];
+
+                const calcJpp = typeof ri.estimatedJpp === 'number'
+                    ? ri.estimatedJpp
+                    : (input.receivedQty ? Math.round(Number(input.receivedQty) * 0.05 * 100) / 100 : 0.05);
+
                 suggestions.push({
                     cartId: ri.inventoryId,
                     name: ri.name,
@@ -2721,20 +2856,25 @@ export default function ProtocolsHub() {
                     unit: ri.unit || 'szt.',
                     matches,
                     category: ri.category || "",
-                    subcategory: (ri as any).subcategory || ""
+                    subcategory: (ri as any).subcategory || "",
+                    storageLocationId: locMatch?.id || "",
+                    suggestedJpp: calcJpp
                 });
             }
 
             if (suggestions.length > 0) {
                 setIsSubmitting(false);
-                const defaultDecisions: Record<string, { action: 'new' | 'merge'; targetId?: string; category?: string; subcategory?: string }> = {};
+                const defaultDecisions: Record<string, ResidualDecision> = {};
                 for (const s of suggestions) {
                     if (s.matches.length > 0) {
                         defaultDecisions[s.cartId] = {
                             action: 'merge',
                             targetId: s.matches[0].id,
                             category: s.matches[0].category || "Pozostałości budowlane",
-                            subcategory: s.matches[0].subcategory || ""
+                            subcategory: s.matches[0].subcategory || "",
+                            storageLocationId: s.storageLocationId || warehouseStorageLocations[0]?.id || "",
+                            jppDelta: s.suggestedJpp || 0,
+                            applyJpp: true
                         };
                     } else {
                         const matchedCat = categoriesList.find(c => {
@@ -2746,7 +2886,10 @@ export default function ProtocolsHub() {
                         defaultDecisions[s.cartId] = {
                             action: 'new',
                             category: s.category || matchedCat?.name || "Kleje i Zaprawy",
-                            subcategory: s.subcategory || matchedCat?.subcategories[0] || ""
+                            subcategory: s.subcategory || matchedCat?.subcategories[0] || "",
+                            storageLocationId: s.storageLocationId || warehouseStorageLocations[0]?.id || "",
+                            jppDelta: s.suggestedJpp || 0,
+                            applyJpp: true
                         };
                     }
                 }
@@ -3147,6 +3290,10 @@ export default function ProtocolsHub() {
                 console.warn("Błąd weryfikacji naruszeń reguł do alertu:", vErr);
             }
 
+            // Aktualizacja stref składowania JPP w warehouse_capacity
+            if (residualDuplicateDecisions && Object.keys(residualDuplicateDecisions).length > 0) {
+                await applyStorageLocationJppUpdates(residualDuplicateDecisions);
+            }
             alert("Zwrot został pomyślnie przyjęty!");
             setSelectedProtocol(null);
             setInvestigationDone(false);
@@ -7235,6 +7382,106 @@ export default function ProtocolsHub() {
                                                             <span>➕</span>
                                                             <span>Utwórz nową kategorię</span>
                                                         </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* SEKCJA ZWIĘKSZENIA ZAJĘTOŚCI STREFY MAGAZYNOWEJ (JPP) */}
+                                        <div className="mt-4 pt-3.5 border-t border-amber-300/80 bg-white/80 p-3.5 rounded-xl border border-amber-200 shadow-xs">
+                                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-xl">📍</span>
+                                                    <div>
+                                                        <span className="text-[11px] font-black text-slate-800 uppercase tracking-wider block">
+                                                            Strefa składowania & obciążenie JPP
+                                                        </span>
+                                                        <span className="text-[11px] text-slate-500">
+                                                            Wybierz strefę i określ, o ile miejsc paletowych (JPP) zwiększyć jej stan:
+                                                        </span>
+                                                    </div>
+                                                </div>
+
+                                                <label className="flex items-center gap-2 cursor-pointer select-none bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={decision.applyJpp !== false}
+                                                        onChange={e => setResidualDuplicateDecisions(prev => ({
+                                                            ...prev,
+                                                            [suggestion.cartId]: {
+                                                                ...prev[suggestion.cartId],
+                                                                applyJpp: e.target.checked
+                                                            }
+                                                        }))}
+                                                        className="w-4 h-4 accent-amber-600 rounded cursor-pointer"
+                                                    />
+                                                    <span className="text-xs font-black text-amber-900">Zaktualizuj JPP</span>
+                                                </label>
+                                            </div>
+
+                                            {decision.applyJpp !== false && (
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 pt-2.5 border-t border-slate-100">
+                                                    <div>
+                                                        <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                                                            Docelowa strefa składowania:
+                                                        </label>
+                                                        <select
+                                                            value={decision.storageLocationId || ""}
+                                                            onChange={e => setResidualDuplicateDecisions(prev => ({
+                                                                ...prev,
+                                                                [suggestion.cartId]: {
+                                                                    ...prev[suggestion.cartId],
+                                                                    storageLocationId: e.target.value
+                                                                }
+                                                            }))}
+                                                            className="w-full text-xs font-bold p-2 rounded-lg border border-slate-300 bg-white focus:border-amber-500 outline-none"
+                                                        >
+                                                            {warehouseStorageLocations.length === 0 ? (
+                                                                <option value="">Brak skonfigurowanych stref</option>
+                                                            ) : (
+                                                                warehouseStorageLocations.map((loc: any) => {
+                                                                    const free = Math.round(Math.max(0, (loc.totalCapacity || 0) - (loc.currentOccupied || 0)) * 100) / 100;
+                                                                    return (
+                                                                        <option key={loc.id} value={loc.id}>
+                                                                            {loc.name} (zajęte: {loc.currentOccupied}/{loc.totalCapacity} JPP, wolne: {free} JPP)
+                                                                        </option>
+                                                                    );
+                                                                })
+                                                            )}
+                                                        </select>
+                                                    </div>
+
+                                                    <div>
+                                                        <div className="flex justify-between items-center mb-1">
+                                                            <label className="text-[10px] font-bold text-slate-600 uppercase">
+                                                                Zwiększ zajętość strefy o:
+                                                            </label>
+                                                            {suggestion.suggestedJpp !== undefined && (
+                                                                <span className="text-[10px] text-amber-700 font-bold">
+                                                                    (AI szacuje: +{suggestion.suggestedJpp} JPP)
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5">
+                                                            <input
+                                                                type="number"
+                                                                step="0.05"
+                                                                min="0"
+                                                                value={decision.jppDelta !== undefined ? decision.jppDelta : (suggestion.suggestedJpp || 0)}
+                                                                onChange={e => {
+                                                                    const val = parseFloat(e.target.value);
+                                                                    setResidualDuplicateDecisions(prev => ({
+                                                                        ...prev,
+                                                                        [suggestion.cartId]: {
+                                                                            ...prev[suggestion.cartId],
+                                                                            jppDelta: isNaN(val) ? 0 : val
+                                                                        }
+                                                                    }));
+                                                                }}
+                                                                className="w-full text-xs font-mono font-black p-2 rounded-lg border border-slate-300 bg-white focus:border-amber-500 outline-none text-slate-800"
+                                                            />
+                                                            <span className="text-xs font-black text-slate-500">JPP</span>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             )}

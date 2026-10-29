@@ -126,6 +126,7 @@ Jeśli to miejsce składowania ma wysokie zapełnienie (>= 70% lub krytyczne >= 
             8. 'ruleNotes' - zwięzły komentarz oceny reguł oraz ew. ostrzeżenie o zapełnieniu miejsca składowania.
             9. 'storageLocation' - nazwa miejsca składowania (np. 'Plac Zewnętrzny', 'Magazyn Farb i Chemii') lub null jeśli nieprzypisane.
             10. 'storageFillPercentage' - aktualny procent zapełnienia tego miejsca składowania w magazynie (liczba np. 70) lub null.
+            11. 'estimatedJpp' - szacowana zajętość w jednostkach powierzchni paletowej JPP (liczba z dokładnością do 2 miejsc po przecinku, np. 1.0 dla pełnej palety, 2.0 dla 2 palet, 0.2 dla ok. 10 worków, 0.05 dla pojedynczych wiader/worków). Jeśli odpad do utylizacji lub zerowy gabaryt, podaj 0.
         `;
 
         const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
@@ -202,6 +203,10 @@ Jeśli to miejsce składowania ma wysokie zapełnienie (>= 70% lub krytyczne >= 
                                     storageFillPercentage: {
                                         type: Type.NUMBER,
                                         description: "Aktualny procent zapełnienia tego miejsca składowania (liczba od 0 do 100) lub null."
+                                    },
+                                    estimatedJpp: {
+                                        type: Type.NUMBER,
+                                        description: "Szacowany wpływ na zajętość strefy w JPP (np. 1.0 dla palety, 0.2 dla kilku worków, 0.05 dla drobnicy)."
                                     }
                                 },
                                 required: ["name", "category", "subcategory", "quantity", "unit", "isWaste", "rulesCompliant", "ruleNotes"]
