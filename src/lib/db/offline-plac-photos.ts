@@ -13,6 +13,8 @@ export interface PendingPhotoUpload {
         qty: number;
         unit: string;
         location: string;
+        category?: string;
+        subcategory?: string;
         notes: string;
     };
     createdAt: string;

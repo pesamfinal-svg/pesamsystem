@@ -1039,7 +1039,10 @@ export default function InventoryPage() {
         setLoading(false);
     };
 
-    useEffect(() => { fetchItems(); }, []);
+    useEffect(() => {
+        fetchItems();
+        fetchRules();
+    }, []);
 
     const uploadImage = async (file: File) => {
         const storageRef = ref(storage, `inventory/${Date.now()}_${file.name}`);

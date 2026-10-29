@@ -3,10 +3,11 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
-import { collection, getDocs, doc, setDoc, updateDoc, addDoc, query, orderBy } from "firebase/firestore";
+import { collection, getDocs, doc, setDoc, updateDoc, addDoc, query, orderBy, getDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 import Link from "next/link";
+import { RESIDUAL_MAIN_CATEGORIES, ResidualCategoryDef } from "@/lib/constants/residualCategories";
 import {
     savePendingPhoto,
     getPendingPhotos,
@@ -14,6 +15,21 @@ import {
     blobToDataUrl,
     PendingPhotoUpload
 } from "@/lib/db/offline-plac-photos";
+
+interface StorageLocation {
+    id: string;
+    name: string;
+    description?: string;
+    totalCapacity?: number;
+    currentOccupied?: number;
+    categories?: string[];
+}
+
+const DEFAULT_STORAGE_LOCATIONS: StorageLocation[] = [
+    { id: "loc_plac", name: "Plac Zewnętrzny", totalCapacity: 30, currentOccupied: 12, categories: ["pustaki", "kable-elektryka", "szalunki", "stal-ogrodzenia", "kanalizacja-odwodnienia"] },
+    { id: "loc_chemia", name: "Magazyn Farb i Chemii", totalCapacity: 10, currentOccupied: 4, categories: ["farby-chemia", "pianki-silikony"] },
+    { id: "loc_hala_sucha", name: "Hala Główna - Regały Suche", totalCapacity: 25, currentOccupied: 16, categories: ["kleje", "plyty-gk", "gipsy-gladzie", "izolacje-folie"] }
+];
 
 interface ResidualItem {
     id: string;
@@ -24,6 +40,7 @@ interface ResidualItem {
     currentLocation?: string;
     imageUrl?: string;
     category?: string;
+    subcategory?: string;
     inventoryNumber?: string;
     isResidual?: boolean;
     additionalInfo?: string;
@@ -85,12 +102,18 @@ export default function PlacResidualsPage() {
     const [pendingPhotos, setPendingPhotos] = useState<PendingPhotoUpload[]>([]);
     const [isSyncingPhotos, setIsSyncingPhotos] = useState(false);
 
+    // Dynamiczne kategorie i strefy z Firestore / konfiguracji
+    const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
+    const [storageLocations, setStorageLocations] = useState<StorageLocation[]>(DEFAULT_STORAGE_LOCATIONS);
+
     // Formularz nowej resztki
     const [newItem, setNewItem] = useState<{
         name: string;
         qty: number;
         unit: string;
         location: string;
+        category: string;
+        subcategory: string;
         notes: string;
         photoFile: File | null;
         photoPreview: string | null;
@@ -98,7 +121,9 @@ export default function PlacResidualsPage() {
         name: "",
         qty: 1,
         unit: "szt.",
-        location: "Plac Główny",
+        location: DEFAULT_STORAGE_LOCATIONS[0]?.name || "Plac Zewnętrzny",
+        category: "",
+        subcategory: "",
         notes: "",
         photoFile: null,
         photoPreview: null
@@ -147,10 +172,11 @@ export default function PlacResidualsPage() {
                         availableQuantity: Number(entry.newItemData.qty) || 1,
                         totalQuantity: Number(entry.newItemData.qty) || 1,
                         unit: entry.newItemData.unit || "szt.",
-                        currentLocation: entry.newItemData.location || "Plac Główny",
+                        currentLocation: entry.newItemData.location || "Plac Zewnętrzny",
+                        category: entry.newItemData.category || "Pozostałości budowlane",
+                        subcategory: entry.newItemData.subcategory || "",
                         additionalInfo: entry.newItemData.notes || "",
                         imageUrl: downloadURL,
-                        category: "Pozostałości budowlane",
                         inventoryNumber: "RESZTKI",
                         isResidual: true,
                         type: "BULK",
@@ -159,7 +185,7 @@ export default function PlacResidualsPage() {
                         createdAt: entry.createdAt || new Date().toISOString()
                     };
                     const docRef = await addDoc(collection(db, "inventory"), docData);
-                    setItems(prev => prev.map(i => i.id === entry.itemId ? { ...i, id: docRef.id, imageUrl: downloadURL, isPendingUpload: false } : i));
+                    setItems(prev => prev.map(i => i.id === entry.itemId ? { ...i, id: docRef.id, imageUrl: downloadURL, isPendingUpload: false, category: docData.category, subcategory: docData.subcategory, currentLocation: docData.currentLocation } : i));
                 } else {
                     await updateDoc(doc(db, "inventory", entry.itemId), {
                         imageUrl: downloadURL,
@@ -211,6 +237,22 @@ export default function PlacResidualsPage() {
                 console.error("Błąd odczytu cache:", e);
             }
         }
+        const cachedCats = localStorage.getItem("pesam_residual_categories_cache");
+        if (cachedCats) {
+            try {
+                setCategoriesList(JSON.parse(cachedCats));
+            } catch (e) {
+                console.error("Błąd odczytu cache kategorii:", e);
+            }
+        }
+        const cachedLocs = localStorage.getItem("pesam_storage_locations_cache");
+        if (cachedLocs) {
+            try {
+                setStorageLocations(JSON.parse(cachedLocs));
+            } catch (e) {
+                console.error("Błąd odczytu cache stref:", e);
+            }
+        }
 
         const handleOnline = () => {
             setIsOnline(true);
@@ -241,8 +283,12 @@ export default function PlacResidualsPage() {
 
     const fetchFreshData = async () => {
         try {
-            const q = query(collection(db, "inventory"), orderBy("name"));
-            const querySnapshot = await getDocs(q);
+            const [querySnapshot, catSnap, capacitySnap] = await Promise.all([
+                getDocs(query(collection(db, "inventory"), orderBy("name"))),
+                getDoc(doc(db, "settings", "residual_categories")),
+                getDoc(doc(db, "settings", "warehouse_capacity"))
+            ]);
+
             const filteredItems = querySnapshot.docs
                 .map(docSnap => ({
                     id: docSnap.id,
@@ -256,6 +302,16 @@ export default function PlacResidualsPage() {
 
             setItems(filteredItems);
             localStorage.setItem("pesam_residuals_cache", JSON.stringify(filteredItems));
+
+            if (catSnap.exists() && Array.isArray(catSnap.data().categories) && catSnap.data().categories.length > 0) {
+                setCategoriesList(catSnap.data().categories);
+                localStorage.setItem("pesam_residual_categories_cache", JSON.stringify(catSnap.data().categories));
+            }
+
+            if (capacitySnap.exists() && Array.isArray(capacitySnap.data().locations) && capacitySnap.data().locations.length > 0) {
+                setStorageLocations(capacitySnap.data().locations);
+                localStorage.setItem("pesam_storage_locations_cache", JSON.stringify(capacitySnap.data().locations));
+            }
         } catch (error) {
             console.warn("Błąd pobierania danych (możliwy brak sieci):", error);
         }
@@ -432,7 +488,9 @@ export default function PlacResidualsPage() {
                             name: newItem.name.trim(),
                             qty: Number(newItem.qty) || 1,
                             unit: newItem.unit || "szt.",
-                            location: newItem.location || "Plac Główny",
+                            location: newItem.location || "Plac Zewnętrzny",
+                            category: newItem.category || "Pozostałości budowlane",
+                            subcategory: newItem.subcategory || "",
                             notes: newItem.notes || ""
                         },
                         createdAt: new Date().toISOString(),
@@ -447,10 +505,11 @@ export default function PlacResidualsPage() {
                     availableQuantity: Number(newItem.qty) || 1,
                     totalQuantity: Number(newItem.qty) || 1,
                     unit: newItem.unit || "szt.",
-                    currentLocation: newItem.location || "Plac Główny",
+                    currentLocation: newItem.location || "Plac Zewnętrzny",
+                    category: newItem.category || "Pozostałości budowlane",
+                    subcategory: newItem.subcategory || "",
                     additionalInfo: newItem.notes || "",
                     imageUrl: previewUrl || "",
-                    category: "Pozostałości budowlane",
                     inventoryNumber: "RESZTKI",
                     isResidual: true,
                     isPendingUpload: !!photoBlobToSave,
@@ -467,7 +526,9 @@ export default function PlacResidualsPage() {
                     name: "",
                     qty: 1,
                     unit: "szt.",
-                    location: "Plac Główny",
+                    location: storageLocations[0]?.name || "Plac Zewnętrzny",
+                    category: "",
+                    subcategory: "",
                     notes: "",
                     photoFile: null,
                     photoPreview: null
@@ -494,10 +555,11 @@ export default function PlacResidualsPage() {
                 availableQuantity: Number(newItem.qty) || 1,
                 totalQuantity: Number(newItem.qty) || 1,
                 unit: newItem.unit || "szt.",
-                currentLocation: newItem.location || "Plac Główny",
+                currentLocation: newItem.location || "Plac Zewnętrzny",
+                category: newItem.category || "Pozostałości budowlane",
+                subcategory: newItem.subcategory || "",
                 additionalInfo: newItem.notes || "",
                 imageUrl: finalImageUrl,
-                category: "Pozostałości budowlane",
                 inventoryNumber: "RESZTKI",
                 isResidual: true,
                 type: "BULK",
@@ -519,7 +581,9 @@ export default function PlacResidualsPage() {
                 name: "",
                 qty: 1,
                 unit: "szt.",
-                location: "Plac Główny",
+                location: storageLocations[0]?.name || "Plac Zewnętrzny",
+                category: "",
+                subcategory: "",
                 notes: "",
                 photoFile: null,
                 photoPreview: null
@@ -543,7 +607,9 @@ export default function PlacResidualsPage() {
                             name: newItem.name.trim(),
                             qty: Number(newItem.qty) || 1,
                             unit: newItem.unit || "szt.",
-                            location: newItem.location || "Plac Główny",
+                            location: newItem.location || "Plac Zewnętrzny",
+                            category: newItem.category || "Pozostałości budowlane",
+                            subcategory: newItem.subcategory || "",
                             notes: newItem.notes || ""
                         },
                         createdAt: new Date().toISOString(),
@@ -557,10 +623,11 @@ export default function PlacResidualsPage() {
                         availableQuantity: Number(newItem.qty) || 1,
                         totalQuantity: Number(newItem.qty) || 1,
                         unit: newItem.unit || "szt.",
-                        currentLocation: newItem.location || "Plac Główny",
+                        currentLocation: newItem.location || "Plac Zewnętrzny",
+                        category: newItem.category || "Pozostałości budowlane",
+                        subcategory: newItem.subcategory || "",
                         additionalInfo: newItem.notes || "",
                         imageUrl: previewUrl,
-                        category: "Pozostałości budowlane",
                         inventoryNumber: "RESZTKI",
                         isResidual: true,
                         isPendingUpload: true,
@@ -1055,18 +1122,83 @@ export default function PlacResidualsPage() {
                                 </div>
                             </div>
 
-                            {/* Lokalizacja na placu */}
+                            {/* Kategoria i Podkategoria */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                        Kategoria Główna
+                                    </label>
+                                    <select
+                                        value={newItem.category}
+                                        onChange={e => {
+                                            const newCatName = e.target.value;
+                                            setNewItem({
+                                                ...newItem,
+                                                category: newCatName,
+                                                subcategory: "" // reset podkategorii przy zmianie kategorii
+                                            });
+                                        }}
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white font-semibold outline-none focus:border-amber-500"
+                                    >
+                                        <option value="">-- Wybierz kategorię --</option>
+                                        {categoriesList.map(cat => (
+                                            <option key={cat.id || cat.name} value={cat.name}>
+                                                {cat.icon || "📦"} {cat.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                                        Podkategoria
+                                    </label>
+                                    {(() => {
+                                        const selectedCatDef = categoriesList.find(c => c.name === newItem.category || c.id === newItem.category);
+                                        const subList = selectedCatDef?.subcategories || [];
+
+                                        return (
+                                            <select
+                                                value={newItem.subcategory}
+                                                disabled={!newItem.category || subList.length === 0}
+                                                onChange={e => setNewItem({ ...newItem, subcategory: e.target.value })}
+                                                className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white font-semibold outline-none focus:border-amber-500 disabled:opacity-40 disabled:bg-slate-900"
+                                            >
+                                                <option value="">
+                                                    {!newItem.category
+                                                        ? "-- Najpierw wybierz kategorię --"
+                                                        : subList.length === 0
+                                                        ? "-- Brak zdefiniowanych podkategorii --"
+                                                        : "-- Wybierz podkategorię --"}
+                                                </option>
+                                                {subList.map(sub => (
+                                                    <option key={sub} value={sub}>{sub}</option>
+                                                ))}
+                                            </select>
+                                        );
+                                    })()}
+                                </div>
+                            </div>
+
+                            {/* Strefa składowania / Lokalizacja na placu */}
                             <div>
                                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                                    Lokalizacja na placu / sektor
+                                    Strefa składowania / Sektor
                                 </label>
-                                <input
-                                    type="text"
+                                <select
                                     value={newItem.location}
                                     onChange={e => setNewItem({ ...newItem, location: e.target.value })}
-                                    placeholder="np. Plac Główny - Wiata A, Kontener 2..."
-                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white placeholder-slate-500 outline-none focus:border-amber-500"
-                                />
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm text-white font-bold outline-none focus:border-amber-500"
+                                >
+                                    {storageLocations.map(loc => (
+                                        <option key={loc.id} value={loc.name}>
+                                            📍 {loc.name} {loc.description ? `(${loc.description})` : ""}
+                                        </option>
+                                    ))}
+                                    {newItem.location && !storageLocations.some(l => l.name === newItem.location) && (
+                                        <option value={newItem.location}>📍 {newItem.location}</option>
+                                    )}
+                                    <option value="Plac Główny">📍 Inne: Plac Główny</option>
+                                </select>
                             </div>
 
                             {/* Uwagi / notatka */}
