@@ -267,6 +267,10 @@ export default function InventoryPage() {
     const [formData, setFormData] = useState<Partial<InventoryItem>>(INITIAL_FORM_STATE);
     const [hasOpenClaim, setHasOpenClaim] = useState<string | boolean>(false);
 
+    // SPLIT-VIEW: stany dla wariantu 3 (podświetlona strefa + item oczekujący na przypisanie)
+    const [splitHighlightLocId, setSplitHighlightLocId] = useState<string | null>(null);
+    const [splitAssignItem, setSplitAssignItem] = useState<InventoryItem | null>(null);
+
     // STANY KATEGORII I ZDJĘĆ POGLĄDOWYCH
     const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
     const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);
@@ -1809,191 +1813,306 @@ export default function InventoryPage() {
         );
     };
 
-    // 2. NOWOŚĆ: Renderowanie Drobnicy / Osprzętu w dedykowanej tabeli (Trzecia zakładka)
+    // 2. Renderowanie Drobnicy / Osprzetu w widoku Split-View (Strefa JPP + Lista resztek) — Wariant 3
     const renderOtherItemsGroup = () => {
+        const residualItems = sortedFilteredItems;
+
+        const unassignedCount = residualItems.filter(item => {
+            const isResidual = item.category === "Pozostalosci budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+            return isResidual && !categoriesList.some(c => c.name === item.category);
+        }).length;
+
         return (
             <div className="border rounded-2xl overflow-hidden shadow-sm bg-white border-orange-200 animate-fade-in">
+                {/* NAGLOWEK */}
                 <div className="bg-orange-600 text-white p-4 flex items-center justify-between">
                     <div className="flex items-center gap-4">
                         <span className="text-2xl">📦</span>
                         <div>
                             <h2 className="text-lg font-black uppercase tracking-tight">Drobnica, Osprzęt i Materiały</h2>
-                            <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">Wpisy ręczne z palca, zaległy osprzęt oraz pozostałości budowlane</p>
+                            <p className="text-[10px] text-orange-200 font-bold uppercase tracking-widest">
+                                Widok Split-View — strefy JPP po lewej, lista materiałów po prawej
+                            </p>
                         </div>
                     </div>
-                    <button
-                        onClick={handleCleanupReturnedDebts}
-                        className="px-3.5 py-2 bg-white/20 hover:bg-white/30 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5 border border-white/30 shadow-sm"
-                        title="Usuwa z bazy pozycje zaległego osprzętu, które mają już 0 szt. na budowach i zostały w pełni zwrócone"
-                    >
-                        <span>🧹</span> Wyczyść zwrócony osprzęt
-                    </button>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {unassignedCount > 0 && (
+                            <span className="bg-red-500 text-white text-[10px] font-black px-2.5 py-1 rounded-full animate-pulse flex items-center gap-1">
+                                ⚠️ {unassignedCount} bez kategorii
+                            </span>
+                        )}
+                        <button
+                            onClick={handleCleanupReturnedDebts}
+                            className="px-3.5 py-2 bg-white/20 hover:bg-white/30 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5 border border-white/30 shadow-sm"
+                            title="Usuwa z bazy pozycje zalegego osprzetu, ktore maja juz 0 szt. na budowach i zostaly w pelni zwrocone"
+                        >
+                            <span>🧹</span> Wyczyść zwrócony osprzęt
+                        </button>
+                    </div>
                 </div>
-                {/* SZYBKIE FILTRY DLA DROBNICY / POZOSTAŁOŚCI */}
+
+                {/* PASEK FILTROW */}
                 <div className="bg-orange-50/80 border-b border-orange-100 p-2.5 px-4 flex items-center justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-black uppercase text-orange-900 tracking-wider">Kategoria:</span>
+                        <span className="text-[10px] font-black uppercase text-orange-900 tracking-wider">Filtr:</span>
                         <div className="flex gap-1 bg-white p-1 rounded-xl border border-orange-200 shadow-sm">
-                            <button
-                                onClick={() => setDrobnicaFilter("ALL")}
-                                className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "ALL" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}
-                            >
-                                Wszystko
-                            </button>
-                            <button
-                                onClick={() => setDrobnicaFilter("RESIDUALS")}
-                                className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 ${drobnicaFilter === "RESIDUALS" ? "bg-amber-500 text-white shadow-sm" : "text-amber-800 hover:bg-amber-50"}`}
-                            >
-                                🧱 Pozostałości budowlane
-                            </button>
-                            <button
-                                onClick={() => setDrobnicaFilter("OTHER")}
-                                className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "OTHER" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}
-                            >
-                                Osprzęt i Materiały
-                            </button>
+                            <button onClick={() => setDrobnicaFilter("ALL")} className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "ALL" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}>Wszystko</button>
+                            <button onClick={() => setDrobnicaFilter("RESIDUALS")} className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 ${drobnicaFilter === "RESIDUALS" ? "bg-amber-500 text-white shadow-sm" : "text-amber-800 hover:bg-amber-50"}`}>🧱 Pozostałości</button>
+                            <button onClick={() => setDrobnicaFilter("OTHER")} className={`px-3 py-1 rounded-lg text-xs font-bold transition ${drobnicaFilter === "OTHER" ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-orange-50"}`}>Osprzęt</button>
                         </div>
                     </div>
-                    <a
-                        href="/plac"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs rounded-xl transition flex items-center gap-1.5 shadow-sm active:scale-95"
-                        title="Otwórz dedykowaną aplikację mobilną do obchodu placu i robienia zdjęć telefonem"
-                    >
+                    <a href="/plac" target="_blank" rel="noreferrer" className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs rounded-xl transition flex items-center gap-1.5 shadow-sm active:scale-95">
                         <span>📱</span> Otwórz Plac Mobilny
                     </a>
                 </div>
-                <table className="w-full text-left">
-                    <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400">
-                        <tr>
-                            <th className="p-4 w-20">Zdjęcie</th>
-                            <th className="p-4">Nazwa materiału</th>
-                            <th className="p-4 min-w-[200px]">Główna Kategoria</th>
-                            <th className="p-4 min-w-[200px]">Podkategoria</th>
-                            <th className="p-4 text-center">Kod</th>
-                            <th className="p-4 text-center">Magazyn / Razem</th>
-                            <th className="p-4 text-right">Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody className="text-sm">
-                        {sortedFilteredItems.map(item => {
-                            const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
-                            const isSaving = savingItemId === item.id;
-                            const catObj = categoriesList.find(c => c.name === item.category);
-                            const subList = catObj?.subcategories || [];
 
-                            return (
-                                <tr key={item.id} className={`border-b last:border-0 hover:bg-slate-50 transition ${isResidual ? 'bg-amber-50/20' : ''}`}>
-                                    <td className="p-3">
-                                        <div className="relative group w-12 h-12">
-                                            <img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-12 h-12 object-cover rounded border" alt="item" />
-                                            <label
-                                                title="Szybka zmiana / dodanie zdjęcia"
-                                                className="absolute inset-0 bg-black/60 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center cursor-pointer rounded transition text-xs font-bold"
-                                            >
-                                                📷
-                                                <input
-                                                    type="file"
-                                                    accept="image/*"
-                                                    className="hidden"
-                                                    onChange={async (e) => {
-                                                        if (e.target.files && e.target.files[0]) {
-                                                            const file = e.target.files[0];
-                                                            try {
-                                                                const url = await uploadImage(file);
-                                                                await updateDoc(doc(db, "inventory", item.id), { imageUrl: url, updatedAt: new Date().toISOString() });
-                                                                setItems(prev => prev.map(i => i.id === item.id ? { ...i, imageUrl: url } : i));
-                                                            } catch (err: any) {
-                                                                alert("Błąd wgrywania zdjęcia: " + (err?.message || err));
-                                                            }
-                                                        }
-                                                    }}
-                                                />
-                                            </label>
+                {/* SPLIT-VIEW: 2 kolumny */}
+                <div className="flex divide-x divide-slate-200 min-h-[400px]">
+
+                    {/* ===== LEWY PANEL: STREFY JPP ===== */}
+                    <div className="w-72 shrink-0 bg-slate-50 p-3 space-y-2.5 overflow-y-auto max-h-[75vh]">
+                        <div className="text-[10px] font-black uppercase text-slate-500 tracking-wider px-1 pb-1 border-b border-slate-200">
+                            📍 Strefy Składowania (JPP)
+                        </div>
+                        {storageLocations.length === 0 ? (
+                            <div className="text-xs text-slate-400 italic p-3 text-center">
+                                Brak skonfigurowanych stref.<br />Skonfiguruj je w Reguły AI (Capacity).
+                            </div>
+                        ) : (
+                            storageLocations.map(loc => {
+                                const totalCap = Number((loc.totalCapacity || 0).toFixed(2));
+                                const occupied = Number((loc.currentOccupied || 0).toFixed(2));
+                                const fillPct = totalCap > 0 ? Math.min(100, Math.round((occupied / totalCap) * 100)) : 0;
+                                const freeSlots = Math.max(0, Math.round((totalCap - occupied) * 100) / 100);
+                                const isCritical = fillPct >= (loc.criticalThreshold || 85);
+                                const isAlertPct = !isCritical && fillPct >= (loc.alertThreshold || 70);
+                                const barColor = isCritical ? "bg-red-500" : isAlertPct ? "bg-amber-400" : "bg-emerald-500";
+                                const borderHighlight = splitHighlightLocId === loc.id
+                                    ? "border-blue-500 ring-2 ring-blue-300 shadow-md"
+                                    : isCritical ? "border-red-200" : isAlertPct ? "border-amber-200" : "border-slate-200";
+                                const bgHighlight = splitHighlightLocId === loc.id ? "bg-blue-50" : "bg-white";
+                                const locCategoryNames = (loc.categories || [])
+                                    .map(catId => categoriesList.find(c => c.id === catId))
+                                    .filter(Boolean) as typeof categoriesList;
+                                const assignableCats = splitAssignItem
+                                    ? (loc.categories || []).map(catId => categoriesList.find(c => c.id === catId)).filter(Boolean) as typeof categoriesList
+                                    : [];
+                                const isAssignable = splitAssignItem != null && assignableCats.length > 0;
+
+                                return (
+                                    <div
+                                        key={loc.id}
+                                        className={`rounded-xl border p-3 transition-all cursor-pointer ${borderHighlight} ${bgHighlight} ${splitAssignItem && !isAssignable ? "opacity-40" : ""}`}
+                                        onClick={() => {
+                                            if (splitAssignItem && isAssignable) {
+                                                if (assignableCats.length === 1) {
+                                                    handleQuickCategoryChange(splitAssignItem.id, assignableCats[0]!.name);
+                                                    setSplitAssignItem(null);
+                                                    setSplitHighlightLocId(null);
+                                                } else {
+                                                    setSplitHighlightLocId(loc.id);
+                                                }
+                                            } else {
+                                                setSplitHighlightLocId(prev => prev === loc.id ? null : loc.id);
+                                            }
+                                        }}
+                                        title={splitAssignItem && isAssignable ? `Kliknij, aby przypisać "${splitAssignItem.name}" do strefy ${loc.name}` : (loc.description || loc.name)}
+                                    >
+                                        <div className="flex items-center justify-between mb-1.5">
+                                            <span className="text-xs font-black text-slate-800 leading-tight">{loc.name}</span>
+                                            <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${isCritical ? "bg-red-100 text-red-700" : isAlertPct ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                                                {fillPct}%
+                                            </span>
                                         </div>
-                                    </td>
-                                    <td className="p-4 cursor-pointer" onClick={() => openItemCard(item)}>
-                                        <div className="flex items-center gap-2 flex-wrap">
-                                            <p className="font-bold text-slate-700">{item.name}</p>
-                                            {isResidual && (
-                                                <span className="bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1 shadow-sm">
-                                                    🧱 Resztki
-                                                </span>
-                                            )}
+                                        <div className="w-full bg-slate-200 rounded-full h-1.5 mb-2">
+                                            <div className={`h-1.5 rounded-full transition-all ${barColor}`} style={{ width: `${fillPct}%` }} />
                                         </div>
-                                        <p className="text-[10px] text-slate-400">{item.category || "Wpis ręczny"}</p>
-                                    </td>
-                                    <td className="p-3">
-                                        <div className="relative">
-                                            <select
-                                                value={item.category || ""}
-                                                disabled={isSaving}
-                                                onChange={(e) => handleQuickCategoryChange(item.id, e.target.value)}
-                                                className={`w-full text-xs font-bold p-2 bg-white border rounded-xl outline-none transition cursor-pointer shadow-sm ${
-                                                    item.category && item.category !== "Pozostałości budowlane" 
-                                                        ? "border-amber-400 text-amber-900 bg-amber-50/30" 
-                                                        : "border-slate-300 text-slate-600 hover:border-amber-300"
-                                                } ${isSaving ? "opacity-50" : ""}`}
-                                            >
-                                                <option value="">-- Wybierz kategorię --</option>
-                                                {categoriesList.map(cat => (
-                                                    <option key={cat.id || cat.name} value={cat.name}>
-                                                        {cat.icon || "📦"} {cat.name}
-                                                    </option>
+                                        <div className="flex justify-between text-[10px] text-slate-500 font-bold mb-1.5">
+                                            <span>Zajęte: {occupied} JPP</span>
+                                            <span>Wolne: {freeSlots} JPP</span>
+                                        </div>
+                                        {locCategoryNames.length > 0 && (
+                                            <div className="flex flex-wrap gap-1">
+                                                {locCategoryNames.map(cat => (
+                                                    <span key={cat!.id} className="text-[9px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full border border-slate-200">
+                                                        {cat!.icon || "📦"} {cat!.name}
+                                                    </span>
                                                 ))}
-                                                {item.category && !categoriesList.some(c => c.name === item.category) && (
-                                                    <option value={item.category}>{item.category}</option>
-                                                )}
-                                            </select>
-                                        </div>
-                                    </td>
-                                    <td className="p-3">
-                                        <div className="relative">
-                                            <select
-                                                value={item.subcategory || ""}
-                                                disabled={isSaving || !item.category}
-                                                onChange={(e) => handleQuickSubcategoryChange(item.id, e.target.value)}
-                                                className={`w-full text-xs font-semibold p-2 bg-white border rounded-xl outline-none transition cursor-pointer shadow-sm ${
-                                                    item.subcategory 
-                                                        ? "border-emerald-400 text-emerald-900 bg-emerald-50/30" 
-                                                        : "border-slate-300 text-slate-500 hover:border-amber-300"
-                                                } disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 ${isSaving ? "opacity-50" : ""}`}
-                                            >
-                                                <option value="">-- Wybierz podkategorię --</option>
-                                                {subList.map(sub => (
-                                                    <option key={sub} value={sub}>{sub}</option>
+                                            </div>
+                                        )}
+                                        {splitAssignItem && isAssignable && (
+                                            <div className="mt-2 pt-2 border-t border-blue-200">
+                                                <div className="text-[10px] font-black text-blue-700 text-center mb-1">
+                                                    ✅ Wybierz kategorię dla tej strefy:
+                                                </div>
+                                                {assignableCats.map(cat => (
+                                                    <button
+                                                        key={cat!.id}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleQuickCategoryChange(splitAssignItem!.id, cat!.name);
+                                                            setSplitAssignItem(null);
+                                                            setSplitHighlightLocId(null);
+                                                        }}
+                                                        className="w-full text-left text-[10px] font-bold px-2 py-1 rounded-lg bg-blue-100 text-blue-800 hover:bg-blue-200 transition flex items-center gap-1 mb-1"
+                                                    >
+                                                        {cat!.icon} {cat!.name}
+                                                    </button>
                                                 ))}
-                                                {item.subcategory && !subList.includes(item.subcategory) && (
-                                                    <option value={item.subcategory}>{item.subcategory}</option>
-                                                )}
-                                            </select>
-                                        </div>
-                                    </td>
-                                    <td className={`p-4 text-center font-mono text-xs font-bold ${isResidual ? 'text-amber-700' : 'text-orange-600'}`}>
-                                        <div className="flex items-center justify-center gap-1">
-                                            <span>{item.inventoryNumber}</span>
-                                            {isSaving && <span className="animate-spin text-[10px]">⏳</span>}
-                                        </div>
-                                    </td>
-                                    <td className="p-4 text-center font-black">{item.availableQuantity} / {item.totalQuantity} {item.unit || "szt."}</td>
-                                    <td className="p-4 text-right space-x-3 whitespace-nowrap">
-                                        <button
-                                            onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }}
-                                            className="text-orange-600 hover:underline font-bold text-xs"
-                                        >
-                                            ⚙️ Korekta Stanu
-                                        </button>
-                                        <span className="text-slate-300">|</span>
-                                        <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
-                                        <span className="text-slate-300">|</span>
-                                        <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
-                                    </td>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })
+                        )}
+                        {splitAssignItem && (
+                            <button
+                                onClick={() => { setSplitAssignItem(null); setSplitHighlightLocId(null); }}
+                                className="w-full text-xs font-bold text-slate-500 hover:text-red-600 py-2 rounded-xl border border-dashed border-slate-300 hover:border-red-300 transition mt-2"
+                            >
+                                ✕ Anuluj tryb przypisywania
+                            </button>
+                        )}
+                    </div>
+
+                    {/* ===== PRAWY PANEL: LISTA MATERIALOW ===== */}
+                    <div className="flex-1 overflow-x-auto overflow-y-auto max-h-[75vh]">
+                        {splitAssignItem && (
+                            <div className="sticky top-0 z-10 bg-blue-600 text-white px-4 py-2.5 flex items-center gap-3 shadow-md">
+                                <span className="text-sm font-black">🎯 Przypisujesz:</span>
+                                <span className="text-sm font-bold truncate max-w-xs">{splitAssignItem.name}</span>
+                                <span className="text-xs text-blue-200 font-bold flex-1">→ Kliknij strefę po lewej</span>
+                                <button onClick={() => { setSplitAssignItem(null); setSplitHighlightLocId(null); }} className="text-xs font-black bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg">✕</button>
+                            </div>
+                        )}
+                        <table className="w-full text-left">
+                            <thead className="bg-slate-50 border-b text-[10px] uppercase font-black text-slate-400 sticky top-0">
+                                <tr>
+                                    <th className="p-3 w-12">Zdj.</th>
+                                    <th className="p-3">Nazwa</th>
+                                    <th className="p-3 min-w-[160px]">Kategoria</th>
+                                    <th className="p-3 min-w-[160px]">Podkategoria</th>
+                                    <th className="p-3 text-center">Kod</th>
+                                    <th className="p-3 text-center">Stan</th>
+                                    <th className="p-3 text-right">Akcje</th>
                                 </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
+                            </thead>
+                            <tbody className="text-sm divide-y divide-slate-100">
+                                {residualItems.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={7} className="p-10 text-center text-slate-400 text-sm font-bold">
+                                            Brak materiałów spełniających kryteria.
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    residualItems.map(item => {
+                                        const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+                                        const isSaving = savingItemId === item.id;
+                                        const catObj = categoriesList.find(c => c.name === item.category);
+                                        const subList = catObj?.subcategories || [];
+                                        const isUncategorized = isResidual && !categoriesList.some(c => c.name === item.category);
+                                        const isBeingAssigned = splitAssignItem?.id === item.id;
+
+                                        return (
+                                            <tr
+                                                key={item.id}
+                                                className={`hover:bg-slate-50 transition ${isBeingAssigned ? "bg-blue-50 outline outline-2 outline-blue-400 outline-offset-[-2px]" : isUncategorized ? "bg-red-50/40 border-l-4 border-l-red-400" : isResidual ? "bg-amber-50/20" : ""}`}
+                                            >
+                                                <td className="p-2">
+                                                    <div className="relative group w-10 h-10">
+                                                        <img src={item.imageUrl || 'https://via.placeholder.com/40'} className="w-10 h-10 object-cover rounded border" alt="item" />
+                                                        <label title="Szybka zmiana zdjęcia" className="absolute inset-0 bg-black/60 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center cursor-pointer rounded transition text-xs font-bold">
+                                                            📷
+                                                            <input type="file" accept="image/*" className="hidden" onChange={async (e) => {
+                                                                if (e.target.files && e.target.files[0]) {
+                                                                    const file = e.target.files[0];
+                                                                    try {
+                                                                        const url = await uploadImage(file);
+                                                                        await updateDoc(doc(db, "inventory", item.id), { imageUrl: url, updatedAt: new Date().toISOString() });
+                                                                        setItems(prev => prev.map(i => i.id === item.id ? { ...i, imageUrl: url } : i));
+                                                                    } catch (err: any) {
+                                                                        alert("Blad wgrywania zdjecia: " + (err?.message || err));
+                                                                    }
+                                                                }
+                                                            }} />
+                                                        </label>
+                                                    </div>
+                                                </td>
+                                                <td className="p-3 cursor-pointer" onClick={() => openItemCard(item)}>
+                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                        <p className="font-bold text-slate-700 text-xs">{item.name}</p>
+                                                        {isUncategorized && <span className="bg-red-100 text-red-700 border border-red-300 text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-wider animate-pulse">⚠️ bez kat.</span>}
+                                                        {isResidual && !isUncategorized && <span className="bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-black px-1.5 py-0.5 rounded-full">🧱</span>}
+                                                    </div>
+                                                    <p className="text-[10px] text-slate-400 mt-0.5">{item.category || "Brak kategorii"}</p>
+                                                </td>
+                                                <td className="p-2">
+                                                    <select
+                                                        value={item.category || ""}
+                                                        disabled={isSaving}
+                                                        onChange={(e) => handleQuickCategoryChange(item.id, e.target.value)}
+                                                        className={`w-full text-xs font-bold p-2 bg-white border rounded-xl outline-none transition cursor-pointer shadow-sm ${
+                                                            item.category && categoriesList.some(c => c.name === item.category)
+                                                                ? "border-amber-400 text-amber-900 bg-amber-50/30"
+                                                                : isUncategorized
+                                                                    ? "border-red-400 text-red-700 bg-red-50"
+                                                                    : "border-slate-300 text-slate-600 hover:border-amber-300"
+                                                        } ${isSaving ? "opacity-50" : ""}`}
+                                                    >
+                                                        <option value="">-- Wybierz kategorię --</option>
+                                                        {categoriesList.map(cat => <option key={cat.id || cat.name} value={cat.name}>{cat.icon || "📦"} {cat.name}</option>)}
+                                                        {item.category && !categoriesList.some(c => c.name === item.category) && <option value={item.category}>{item.category}</option>}
+                                                    </select>
+                                                </td>
+                                                <td className="p-2">
+                                                    <select
+                                                        value={item.subcategory || ""}
+                                                        disabled={isSaving || !item.category}
+                                                        onChange={(e) => handleQuickSubcategoryChange(item.id, e.target.value)}
+                                                        className={`w-full text-xs font-semibold p-2 bg-white border rounded-xl outline-none transition cursor-pointer shadow-sm ${item.subcategory ? "border-emerald-400 text-emerald-900 bg-emerald-50/30" : "border-slate-300 text-slate-500"} disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 ${isSaving ? "opacity-50" : ""}`}
+                                                    >
+                                                        <option value="">-- Podkategoria --</option>
+                                                        {subList.map(sub => <option key={sub} value={sub}>{sub}</option>)}
+                                                        {item.subcategory && !subList.includes(item.subcategory) && <option value={item.subcategory}>{item.subcategory}</option>}
+                                                    </select>
+                                                </td>
+                                                <td className={`p-3 text-center font-mono text-xs font-bold ${isResidual ? "text-amber-700" : "text-orange-600"}`}>
+                                                    <div className="flex items-center justify-center gap-1">
+                                                        <span>{item.inventoryNumber}</span>
+                                                        {isSaving && <span className="animate-spin text-[10px]">⏳</span>}
+                                                    </div>
+                                                </td>
+                                                <td className="p-3 text-center font-black text-xs whitespace-nowrap">
+                                                    {item.availableQuantity} / {item.totalQuantity}<br />
+                                                    <span className="text-[10px] text-slate-400 font-bold">{item.unit || "szt."}</span>
+                                                </td>
+                                                <td className="p-3 text-right whitespace-nowrap">
+                                                    <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                                        <button
+                                                            onClick={() => {
+                                                                setSplitAssignItem(prev => prev?.id === item.id ? null : item);
+                                                                setSplitHighlightLocId(null);
+                                                            }}
+                                                            className={`text-xs font-black px-2 py-1 rounded-lg border transition ${isBeingAssigned ? "bg-blue-600 text-white border-blue-600" : "text-blue-600 border-blue-200 hover:bg-blue-50"}`}
+                                                            title="Kliknij strefę JPP po lewej, aby szybko przypisać kategorię"
+                                                        >
+                                                            {isBeingAssigned ? "✕" : "📍"}
+                                                        </button>
+                                                        <button onClick={() => { setAdjustItem(item); setAdjustType("PATH_A"); setPathAAction("ADD"); setAdjustQty(""); setIsAdjustModalOpen(true); }} className="text-orange-600 hover:underline font-bold text-xs">⚙️</button>
+                                                        <span className="text-slate-300">|</span>
+                                                        <button onClick={() => { setEditingItem(item); setFormData({ ...item }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
+                                                        <span className="text-slate-300">|</span>
+                                                        <button onClick={() => handleDelete(item)} className="text-red-400 hover:underline font-bold text-xs">Usuń</button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         );
     };
