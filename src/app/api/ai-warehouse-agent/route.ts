@@ -315,7 +315,7 @@ export async function POST(req: Request) {
             if (roleDoc.exists) rolePerms = roleDoc.data()!.permissions || {};
         }
 
-        const hasChatAI = overrides.useChatAI === true || (!(overrides.useChatAI === false) && rolePerms.useChatAI === true);
+        const hasChatAI = overrides.useChatAI === true || (overrides.useChatAI !== false && (rolePerms.useChatAI === true || rolePerms.manageRoles === true || userData.roleId === 'admin'));
         if (!hasChatAI) {
             return NextResponse.json({ error: 'Brak uprawnienia do Chat AI' }, { status: 403 });
         }

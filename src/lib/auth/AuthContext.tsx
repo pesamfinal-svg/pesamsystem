@@ -72,6 +72,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                                 if ((rawPerms.workersAddToSite || rawPerms.acceptReturns) && rawPerms.wzApproveDelivery === undefined) {
                                     rawPerms.wzApproveDelivery = true;
                                 }
+                                if ((rawPerms.manageRoles || fetchedRoleName.toLowerCase().includes('admin') || userData.roleId === 'admin') && rawPerms.useChatAI === undefined) {
+                                    rawPerms.useChatAI = true;
+                                }
                                 fetchedRolePermissions = rawPerms;
                             }
                         }
