@@ -42,6 +42,7 @@ self.addEventListener('fetch', (event) => {
   // Ignoruj Firebase/API requesty
   if (
     request.method !== 'GET' ||
+    url.pathname.startsWith('/api') ||
     url.href.includes('firestore') ||
     url.href.includes('googleapis') ||
     url.href.includes('firebasestorage') ||
@@ -70,8 +71,8 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(request)
       .then(response => {
-        if (response.status === 200) {
-          caches.open(CACHE_NAME).then(c => c.put(request, response.clone()));
+        if (response.status === 200 && response.type === 'basic') {
+          try { const cl = response.clone(); caches.open(CACHE_NAME).then(c => c.put(request, cl)).catch(() => {}); } catch(e) {}
         }
         return response;
       })
