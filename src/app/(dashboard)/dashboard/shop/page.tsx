@@ -10,8 +10,24 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 import { getStorage, ref, deleteObject } from "firebase/storage";
 import { hasPermission } from "@/lib/auth/permissions";
+import { RESIDUAL_MAIN_CATEGORIES, ResidualCategoryDef } from "@/lib/constants/residualCategories";
 
 // ─── TYPY ────────────────────────────────────────────────────────────────────
+
+interface StorageLocation {
+    id: string;
+    name: string;
+    description?: string;
+    totalCapacity?: number;
+    currentOccupied?: number;
+    categories?: string[];
+}
+
+const DEFAULT_STORAGE_LOCATIONS: StorageLocation[] = [
+    { id: "loc_plac", name: "Plac Zewnętrzny", description: "Utwardzony plac zewnętrzny", categories: ["pustaki", "kable-elektryka", "szalunki", "stal-ogrodzenia", "kanalizacja-odwodnienia"] },
+    { id: "loc_chemia", name: "Magazyn Farb i Chemii", description: "Wydzielona strefa ogrzewana", categories: ["farby-chemia", "pianki-silikony"] },
+    { id: "loc_hala_sucha", name: "Hala Główna - Regały Suche", description: "Regały paletowe pod dachem", categories: ["kleje", "plyty-gk", "gipsy-gladzie", "izolacje-folie"] }
+];
 
 interface InventoryItem {
     id: string;
@@ -22,11 +38,16 @@ interface InventoryItem {
     inventoryNumber: string;
     imageUrl: string;
     availableQuantity: number;
+    totalQuantity?: number;
     status: string;
     category: string;
+    subcategory?: string;
     requiresInspection?: boolean;
     isTemporary?: boolean;
     unit?: string;
+    currentLocation?: string;
+    isResidual?: boolean;
+    additionalInfo?: string;
 }
 interface Site {
     id: string;
@@ -42,10 +63,15 @@ interface CartItem {
     type?: "UNIQUE" | "BULK";
     inventoryNumber?: string;
     quantity: number;
+    unit?: string;
     imageUrl?: string;
     maxQty?: number;
     isBhp?: boolean;
     isDrobnica?: boolean;
+    isResidual?: boolean;
+    category?: string;
+    subcategory?: string;
+    currentLocation?: string;
     assignedWorkerName?: string;
 }
 
@@ -310,9 +336,17 @@ export default function ShopPage() {
 
     // Filtrowanie katalogu
     const [searchTerm, setSearchTerm] = useState("");
-    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "BHP">("UNIQUE");
+    const [activeTab, setActiveTab] = useState<"UNIQUE" | "BULK" | "OTHER" | "RESIDUALS" | "BHP">("UNIQUE");
     const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
+
+    // Dynamiczne kategorie i strefy dla materiałów z placu (Resztki)
+    const [categoriesList, setCategoriesList] = useState<ResidualCategoryDef[]>(RESIDUAL_MAIN_CATEGORIES);
+    const [storageLocations, setStorageLocations] = useState<StorageLocation[]>(DEFAULT_STORAGE_LOCATIONS);
+    const [selectedResidualCategory, setSelectedResidualCategory] = useState<string>("ALL");
+    const [selectedResidualSubcategory, setSelectedResidualSubcategory] = useState<string>("ALL");
+    const [selectedZoneFilter, setSelectedZoneFilter] = useState<string>("ALL");
+    const [drobnicaFilter, setDrobnicaFilter] = useState<"ALL" | "EQUIPMENT" | "RESIDUALS">("ALL");
 
     // Koszyk i zamówienie
     const [cart, setCart] = useState<CartItem[]>([]);
@@ -396,6 +430,22 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
 
                 setSites(filteredSites);
 
+                // Pobierz konfigurację kategorii i stref dla placu
+                try {
+                    const [catSnap, capacitySnap] = await Promise.all([
+                        getDoc(doc(db, "settings", "residual_categories")),
+                        getDoc(doc(db, "settings", "warehouse_capacity"))
+                    ]);
+                    if (catSnap.exists() && Array.isArray(catSnap.data().categories) && catSnap.data().categories.length > 0) {
+                        setCategoriesList(catSnap.data().categories);
+                    }
+                    if (capacitySnap.exists() && Array.isArray(capacitySnap.data().locations) && capacitySnap.data().locations.length > 0) {
+                        setStorageLocations(capacitySnap.data().locations);
+                    }
+                } catch (catErr) {
+                    console.warn("Błąd pobierania konfiguracji kategorii/stref placu:", catErr);
+                }
+
                 // Wczytaj draft koszyka z Firestore
                 const draftRef = doc(db, "cartDrafts", user.uid);
                 const draftSnap = await getDoc(draftRef);
@@ -450,7 +500,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         }, 1200);
     }, [user]);
 
-    // ── Rozpoznawanie kategorii sprzętu (BHP vs Drobnica) ───────────────────────
+    // ── Rozpoznawanie kategorii sprzętu (BHP vs Drobnica vs Resztki) ──────────
 
     const isBhpItem = (i: InventoryItem): boolean => {
         if (i.requiresInspection) return true;
@@ -458,6 +508,39 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         if (cat.includes("OCHRONA OSOBISTA") || cat.includes("BHP OSOBISTE") || cat.includes("BHP")) return true;
         const name = (i.name || "").toLowerCase();
         if (name.includes("szelki") || name.includes("lina do szelek") || name.includes("amortyzator")) return true;
+        return false;
+    };
+
+    const isResidualItem = (i: InventoryItem): boolean => {
+        if (i.isResidual || i.inventoryNumber === "RESZTKI" || i.category === "Pozostałości budowlane") return true;
+        if (categoriesList.some(c => c.name === i.category || c.id === i.category)) return true;
+        return false;
+    };
+
+    const doesItemMatchResidualCategory = (item: InventoryItem, cat: ResidualCategoryDef): boolean => {
+        // 1. Bezpośrednie dopasowanie po nazwie lub ID kategorii
+        if (item.category === cat.name || item.category === cat.id) return true;
+
+        // 2. Dopasowanie po podkategorii
+        if (item.subcategory && cat.subcategories.some(sub => sub.toLowerCase().trim() === item.subcategory?.toLowerCase().trim())) {
+            return true;
+        }
+
+        // 3. Dopasowanie po słowach kluczowych w nazwie (inteligentny fallback dla importowanych materiałów)
+        const nameLower = (item.name || "").toLowerCase();
+        if (cat.id === "pustaki" && (nameLower.includes("bloczek") || nameLower.includes("pustak") || nameLower.includes("cegł") || nameLower.includes("cegl") || nameLower.includes("silikat") || nameLower.includes("termobet") || nameLower.includes("porotherm"))) return true;
+        if (cat.id === "kable-elektryka" && (nameLower.includes("bednarka") || nameLower.includes("kabel") || nameLower.includes("przewód") || nameLower.includes("przewod") || nameLower.includes("peszel") || nameLower.includes("wago"))) return true;
+        if (cat.id === "kleje" && (nameLower.includes("klej") || nameLower.includes("zaprawa") || nameLower.includes("wylewka") || nameLower.includes("sopro") || nameLower.includes("atlas"))) return true;
+        if (cat.id === "plyty-gk" && (nameLower.includes("płyt") || nameLower.includes("plyt") || nameLower.includes("profil") || nameLower.includes("cd60") || nameLower.includes("ud27") || nameLower.includes("knauf"))) return true;
+        if (cat.id === "farby-chemia" && (nameLower.includes("farb") || nameLower.includes("grunt") || nameLower.includes("hydroizolac") || nameLower.includes("impregnat"))) return true;
+        if (cat.id === "pianki-silikony" && (nameLower.includes("pian") || nameLower.includes("silikon") || nameLower.includes("akryl") || nameLower.includes("mamut"))) return true;
+        if (cat.id === "izolacje-folie" && (nameLower.includes("folia") || nameLower.includes("styropian") || nameLower.includes("wełna") || nameLower.includes("welna") || nameLower.includes("kubełkow") || nameLower.includes("kubelkow"))) return true;
+        if (cat.id === "szalunki" && (nameLower.includes("szalunk") || nameLower.includes("dystans") || nameLower.includes("konus") || nameLower.includes("korek beton") || nameLower.includes("gwiazdka"))) return true;
+        if (cat.id === "stal-ogrodzenia" && (nameLower.includes("stal") || nameLower.includes("zbrojen") || nameLower.includes("drut") || nameLower.includes("siatka zbroj") || nameLower.includes("ogrodzeniow"))) return true;
+        if (cat.id === "rury-kanalizacja" && (nameLower.includes("rur") || nameLower.includes("kanalizac") || nameLower.includes("dren") || nameLower.includes("odwodnien") || nameLower.includes("kształtk") || nameLower.includes("pex"))) return true;
+        if (cat.id === "drewno-odpady" && (nameLower.includes("drewn") || nameLower.includes("palet") || nameLower.includes("big-bag") || nameLower.includes("plandek") || nameLower.includes("kantówk"))) return true;
+        if (cat.id === "gipsy-gladzie" && (nameLower.includes("gips") || nameLower.includes("gładź") || nameLower.includes("gladź") || nameLower.includes("gladzie") || nameLower.includes("gładzie") || nameLower.includes("tynk") || nameLower.includes("szpachlow"))) return true;
+
         return false;
     };
 
@@ -473,7 +556,8 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             i.category === "Drobnica i materiały" ||
             i.category === "Materiały i osprzęt" ||
             i.category === "Drobnica" ||
-            i.inventoryNumber === "OSPRZĘT";
+            i.inventoryNumber === "OSPRZĘT" ||
+            isResidualItem(i);
     };
 
     // ── Helpery koszyka (każda zmiana → zapis draftu) ─────────────────────────
@@ -495,6 +579,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         }
 
         const isDrobnica = isDrobnicaItem(item);
+        const isResidual = isResidualItem(item);
 
         const newCart: CartItem[] = [...cart, {
             cartId: Date.now().toString(),
@@ -504,10 +589,15 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             type: item.type,
             inventoryNumber: item.inventoryNumber,
             quantity: 1,
+            unit: item.unit || "szt.",
             imageUrl: item.imageUrl,
             maxQty: item.availableQuantity,
             isBhp: false,
             isDrobnica,
+            isResidual,
+            category: item.category,
+            subcategory: item.subcategory,
+            currentLocation: item.currentLocation,
         }];
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
@@ -528,10 +618,12 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             type: item.type,
             inventoryNumber: item.inventoryNumber,
             quantity: 1,
+            unit: item.unit || "szt.",
             imageUrl: item.imageUrl,
             maxQty: item.availableQuantity,
             isBhp: true,
             isDrobnica: false,
+            isResidual: false,
             assignedWorkerName: workerName.trim(),
         }];
 
@@ -545,10 +637,11 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         const { item, qty } = bulkPickModal;
 
         if (qty <= 0 || qty > item.availableQuantity) {
-            return alert(`Podaj ilość od 1 do ${item.availableQuantity}`);
+            return alert(`Podaj ilość od 0.1 do ${item.availableQuantity} ${item.unit || "szt."}`);
         }
 
         const isDrobnica = isDrobnicaItem(item);
+        const isResidual = isResidualItem(item);
 
         const newCart: CartItem[] = [...cart, {
             cartId: Date.now().toString(),
@@ -558,10 +651,15 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             type: item.type,
             inventoryNumber: item.inventoryNumber,
             quantity: qty,
+            unit: item.unit || "szt.",
             imageUrl: item.imageUrl,
             maxQty: item.availableQuantity,
             isBhp: false,
             isDrobnica,
+            isResidual,
+            category: item.category,
+            subcategory: item.subcategory,
+            currentLocation: item.currentLocation,
         }];
 
         setCart(newCart);
@@ -576,7 +674,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
     };
 
     const updateQty = (cartId: string, qty: number) => {
-        const safeQty = Math.max(1, qty);
+        const safeQty = Math.max(0.01, qty);
         const newCart = cart.map(i => i.cartId === cartId ? { ...i, quantity: safeQty } : i);
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
@@ -1163,13 +1261,18 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                 .map(i => ({ name: i.name, inventoryNumber: i.inventoryNumber, quantity: i.quantity, section: "RUSZTOWANIA" as const }));
 
             const drobnica = cart
-                .filter(i => !i.isManual && i.isDrobnica)
-                .map(i => ({
-                    name: `${i.name}${i.inventoryNumber && i.inventoryNumber !== "OSPRZĘT" ? ` (Kod: ${i.inventoryNumber})` : ""}`,
-                    inventoryNumber: i.inventoryNumber,
-                    quantity: i.quantity,
-                    section: "MATERIAŁY DODATKOWE" as const
-                }));
+                .filter(i => !i.isManual && (i.isDrobnica || i.isResidual))
+                .map(i => {
+                    const locInfo = i.currentLocation ? ` [Sektor: ${i.currentLocation}]` : "";
+                    const codeInfo = i.inventoryNumber && i.inventoryNumber !== "OSPRZĘT" ? ` (Kod: ${i.inventoryNumber})` : "";
+                    const unitInfo = i.unit && i.unit !== "szt." ? ` [${i.unit}]` : "";
+                    return {
+                        name: `${i.name}${codeInfo}${unitInfo}${locInfo}`,
+                        inventoryNumber: i.inventoryNumber,
+                        quantity: i.quantity,
+                        section: "MATERIAŁY DODATKOWE" as const
+                    };
+                });
 
             const materialyDodatkowe = [
                 ...drobnica,
@@ -1228,6 +1331,28 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         new Set(items.filter(i => i.type === "UNIQUE" && !isBhpItem(i) && !isDrobnicaItem(i)).map(i => i.category).filter(Boolean))
     ).sort();
 
+    const getResidualCategoryCount = (cat: ResidualCategoryDef): number => {
+        return items.filter(i =>
+            i.status === "sprawne" &&
+            i.availableQuantity > 0 &&
+            isResidualItem(i) &&
+            doesItemMatchResidualCategory(i, cat)
+        ).length;
+    };
+
+    const totalResidualsCount = items.filter(i =>
+        i.status === "sprawne" &&
+        i.availableQuantity > 0 &&
+        isResidualItem(i)
+    ).length;
+
+    const uncategorizedResidualsCount = items.filter(i =>
+        i.status === "sprawne" &&
+        i.availableQuantity > 0 &&
+        isResidualItem(i) &&
+        !categoriesList.some(cat => doesItemMatchResidualCategory(i, cat))
+    ).length;
+
     const getVisibleItems = (): InventoryItem[] => {
         const filtered = items.filter(i =>
             i.status === "sprawne" &&
@@ -1246,8 +1371,44 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             }
             return bulkItems.filter(i => i.subType === "MAIN_CAT");
         } else if (activeTab === "OTHER") {
-            // Zakładka Drobnica / Osprzęt - ŚCIŚLE BEZ ZALEGŁEGO OSPRZĘTU I BEZ TYMCZASOWYCH
-            return filtered.filter(i => isDrobnicaItem(i) && i.availableQuantity > 0);
+            // Zakładka Drobnica / Osprzęt
+            let drobnicaItems = filtered.filter(i => isDrobnicaItem(i) && i.availableQuantity > 0);
+            if (drobnicaFilter === "EQUIPMENT") {
+                drobnicaItems = drobnicaItems.filter(i => !isResidualItem(i));
+            } else if (drobnicaFilter === "RESIDUALS") {
+                drobnicaItems = drobnicaItems.filter(i => isResidualItem(i));
+            }
+            return drobnicaItems;
+        } else if (activeTab === "RESIDUALS") {
+            // Zakładka Materiały z Placu (Resztki)
+            let residualItems = filtered.filter(i => isResidualItem(i) && i.availableQuantity > 0);
+
+            // Filtr kategorii głównej
+            if (selectedResidualCategory !== "ALL") {
+                if (selectedResidualCategory === "UNCATEGORIZED") {
+                    residualItems = residualItems.filter(i => !categoriesList.some(cat => doesItemMatchResidualCategory(i, cat)));
+                } else {
+                    const targetCat = categoriesList.find(c => c.id === selectedResidualCategory || c.name === selectedResidualCategory);
+                    if (targetCat) {
+                        residualItems = residualItems.filter(i => doesItemMatchResidualCategory(i, targetCat));
+                    }
+                }
+            }
+
+            // Filtr podkategorii
+            if (selectedResidualSubcategory !== "ALL") {
+                residualItems = residualItems.filter(i =>
+                    i.subcategory === selectedResidualSubcategory ||
+                    (i.name || "").toLowerCase().includes(selectedResidualSubcategory.toLowerCase())
+                );
+            }
+
+            // Filtr strefy składowania / sektora
+            if (selectedZoneFilter !== "ALL") {
+                residualItems = residualItems.filter(i => i.currentLocation === selectedZoneFilter);
+            }
+
+            return residualItems;
         } else if (activeTab === "BHP") {
             // Zakładka Ochrona Osobista (BHP)
             return filtered.filter(i => isBhpItem(i) && i.availableQuantity > 0);
@@ -1317,6 +1478,34 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                         ))}
                     </select>
                 )}
+                {activeTab === "RESIDUALS" && (
+                    <select
+                        value={selectedZoneFilter}
+                        onChange={e => setSelectedZoneFilter(e.target.value)}
+                        className="p-2.5 border rounded-xl bg-white text-xs font-bold text-slate-700 outline-none focus:border-amber-500 shadow-sm cursor-pointer"
+                    >
+                        <option value="ALL">📍 Wszystkie strefy / sektory</option>
+                        {storageLocations.map(loc => (
+                            <option key={loc.id} value={loc.name}>📍 {loc.name}</option>
+                        ))}
+                    </select>
+                )}
+                {activeTab === "OTHER" && (
+                    <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-xl p-1 shadow-sm text-[11px] font-bold">
+                        <button
+                            onClick={() => setDrobnicaFilter("ALL")}
+                            className={`px-2.5 py-1 rounded-lg transition ${drobnicaFilter === "ALL" ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+                        >Wszystko</button>
+                        <button
+                            onClick={() => setDrobnicaFilter("EQUIPMENT")}
+                            className={`px-2.5 py-1 rounded-lg transition ${drobnicaFilter === "EQUIPMENT" ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+                        >📦 Tylko osprzęt</button>
+                        <button
+                            onClick={() => { setActiveTab("RESIDUALS"); setSelectedResidualCategory("ALL"); }}
+                            className="px-2.5 py-1 rounded-lg text-amber-800 hover:bg-amber-50 transition flex items-center gap-1 font-black"
+                        >🧱 Materiały z placu ({totalResidualsCount}) →</button>
+                    </div>
+                )}
                 <div className="flex bg-slate-100 p-1 rounded-xl shadow-inner border border-slate-200 flex-wrap gap-1">
                     <button
                         onClick={() => { setActiveTab("UNIQUE"); setSelectedSystemId(null); setSelectedCategory("ALL"); }}
@@ -1327,9 +1516,16 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                         className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "BULK" ? "bg-white text-orange-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
                     >RUSZTOWANIA</button>
                     <button
-                        onClick={() => { setActiveTab("OTHER"); setSelectedSystemId(null); }}
+                        onClick={() => { setActiveTab("OTHER"); setSelectedSystemId(null); setDrobnicaFilter("ALL"); }}
                         className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "OTHER" ? "bg-white text-emerald-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
                     >DROBNICA / OSPRZĘT</button>
+                    <button
+                        onClick={() => { setActiveTab("RESIDUALS"); setSelectedSystemId(null); setSelectedResidualCategory("ALL"); setSelectedResidualSubcategory("ALL"); setSelectedZoneFilter("ALL"); }}
+                        className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all flex items-center gap-1.5 ${activeTab === "RESIDUALS" ? "bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-sm font-black" : "text-amber-800 hover:text-amber-950 hover:bg-amber-100/50"}`}
+                    >
+                        <span>🧱 MATERIAŁY Z PLACU (RESZTKI)</span>
+                        <span className={`px-1.5 py-0.2 rounded-full text-[9px] font-black ${activeTab === "RESIDUALS" ? "bg-slate-950 text-amber-300" : "bg-amber-200/80 text-amber-900"}`}>{totalResidualsCount}</span>
+                    </button>
                     <button
                         onClick={() => { setActiveTab("BHP"); setSelectedSystemId(null); }}
                         className={`px-3.5 py-1.5 rounded-lg text-[11px] font-black transition-all ${activeTab === "BHP" ? "bg-white text-purple-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
@@ -1342,6 +1538,122 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                     >← WRÓĆ DO SYSTEMÓW</button>
                 )}
             </div>
+
+            {/* ── ROZGAŁĘZIENIE KATEGORII DLA MATERIAŁÓW Z PLACU (RESZTEK) ── */}
+            {activeTab === "RESIDUALS" && (
+                <div className="mb-4 space-y-2 animate-fade-in flex-shrink-0">
+                    {/* Pozioma lista głównych kategorii */}
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1.5 scrollbar-thin scrollbar-thumb-amber-300">
+                        <button
+                            onClick={() => { setSelectedResidualCategory("ALL"); setSelectedResidualSubcategory("ALL"); }}
+                            className={`flex-shrink-0 px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm ${
+                                selectedResidualCategory === "ALL"
+                                    ? "bg-amber-500 text-slate-950 ring-2 ring-amber-400 font-black scale-[1.02]"
+                                    : "bg-white text-slate-700 hover:bg-amber-50 border border-slate-200 hover:border-amber-300"
+                            }`}
+                        >
+                            <span>📦 Wszystkie materiały</span>
+                            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                                selectedResidualCategory === "ALL" ? "bg-slate-950 text-amber-300" : "bg-slate-100 text-slate-600"
+                            }`}>{totalResidualsCount}</span>
+                        </button>
+
+                        {categoriesList.map(cat => {
+                            const count = getResidualCategoryCount(cat);
+                            const isSelected = selectedResidualCategory === cat.id || selectedResidualCategory === cat.name;
+
+                            return (
+                                <button
+                                    key={cat.id || cat.name}
+                                    onClick={() => {
+                                        setSelectedResidualCategory(cat.id);
+                                        setSelectedResidualSubcategory("ALL");
+                                    }}
+                                    className={`flex-shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm ${
+                                        isSelected
+                                            ? "bg-amber-500 text-slate-950 ring-2 ring-amber-400 font-black scale-[1.02]"
+                                            : count > 0
+                                                ? "bg-white text-slate-800 hover:bg-amber-50/80 border border-slate-200 hover:border-amber-300"
+                                                : "bg-slate-50 text-slate-400 border border-slate-200 opacity-60 hover:opacity-100"
+                                    }`}
+                                >
+                                    <span>{cat.icon || "📦"}</span>
+                                    <span>{cat.name}</span>
+                                    <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                                        isSelected ? "bg-slate-950 text-amber-300" : count > 0 ? "bg-amber-100 text-amber-900" : "bg-slate-200 text-slate-500"
+                                    }`}>{count}</span>
+                                </button>
+                            );
+                        })}
+
+                        {uncategorizedResidualsCount > 0 && (
+                            <button
+                                onClick={() => { setSelectedResidualCategory("UNCATEGORIZED"); setSelectedResidualSubcategory("ALL"); }}
+                                className={`flex-shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm ${
+                                    selectedResidualCategory === "UNCATEGORIZED"
+                                        ? "bg-amber-500 text-slate-950 ring-2 ring-amber-400 font-black scale-[1.02]"
+                                        : "bg-white text-amber-800 hover:bg-amber-50 border border-amber-200"
+                                }`}
+                            >
+                                <span>⚠️ Pozostałe resztki</span>
+                                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-black bg-amber-100 text-amber-900">
+                                    {uncategorizedResidualsCount}
+                                </span>
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Pasek podkategorii dla wybranej kategorii */}
+                    {selectedResidualCategory !== "ALL" && selectedResidualCategory !== "UNCATEGORIZED" && (() => {
+                        const currentCatDef = categoriesList.find(c => c.id === selectedResidualCategory || c.name === selectedResidualCategory);
+                        const subcategories = currentCatDef?.subcategories || [];
+
+                        if (subcategories.length === 0) return null;
+
+                        return (
+                            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 pl-1 scrollbar-thin scrollbar-thumb-amber-200 bg-amber-50/70 p-2 rounded-xl border border-amber-200">
+                                <span className="text-[10px] font-black text-amber-900 uppercase tracking-wider flex-shrink-0 mr-1">Podkategoria:</span>
+                                <button
+                                    onClick={() => setSelectedResidualSubcategory("ALL")}
+                                    className={`flex-shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                                        selectedResidualSubcategory === "ALL"
+                                            ? "bg-amber-600 text-white shadow-sm"
+                                            : "bg-white text-slate-600 hover:bg-amber-100 border border-amber-200"
+                                    }`}
+                                >
+                                    Wszystkie ({getResidualCategoryCount(currentCatDef!)})
+                                </button>
+                                {subcategories.map(sub => {
+                                    const subCount = items.filter(i =>
+                                        i.status === "sprawne" &&
+                                        i.availableQuantity > 0 &&
+                                        isResidualItem(i) &&
+                                        doesItemMatchResidualCategory(i, currentCatDef!) &&
+                                        (i.subcategory === sub || (i.name || "").toLowerCase().includes(sub.toLowerCase()))
+                                    ).length;
+
+                                    return (
+                                        <button
+                                            key={sub}
+                                            onClick={() => setSelectedResidualSubcategory(sub)}
+                                            className={`flex-shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition flex items-center gap-1 ${
+                                                selectedResidualSubcategory === sub
+                                                    ? "bg-amber-600 text-white font-bold shadow-sm"
+                                                    : subCount > 0
+                                                        ? "bg-white text-slate-700 hover:bg-amber-100 border border-amber-200"
+                                                        : "bg-white/60 text-slate-400 border border-slate-200"
+                                            }`}
+                                        >
+                                            <span>{sub}</span>
+                                            <span className={`text-[9px] px-1 rounded-full font-black ${selectedResidualSubcategory === sub ? "bg-amber-900 text-amber-100" : "bg-slate-100 text-slate-500"}`}>{subCount}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        );
+                    })()}
+                </div>
+            )}
 
             {/* ── Katalog ── */}
             <div className="flex-1 overflow-y-auto pr-2 pb-10">
@@ -1437,6 +1749,16 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                                         <span className="text-[10px] font-mono font-bold text-slate-500">{item.inventoryNumber}</span>
                                                     )}
                                                 </div>
+                                            ) : isResidualItem(item) ? (
+                                                <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+                                                    <span className="text-[9px] font-black text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded border border-amber-300">🧱 PLAC</span>
+                                                    {item.currentLocation && (
+                                                        <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded border border-emerald-200">📍 {item.currentLocation}</span>
+                                                    )}
+                                                    {item.subcategory && (
+                                                        <span className="text-[9px] font-semibold text-slate-500 truncate max-w-[120px]" title={item.subcategory}>{item.subcategory}</span>
+                                                    )}
+                                                </div>
                                             ) : isDrobnicaItem(item) ? (
                                                 <div className="flex items-center gap-1.5 mt-0.5">
                                                     <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">📦 DROBNICA</span>
@@ -1451,7 +1773,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                         <div className="flex items-center justify-between mt-auto">
                                             <div className="flex flex-col">
                                                 <span className="text-[8px] font-bold text-slate-400 uppercase leading-none mb-0.5">Na stanie</span>
-                                                <span className="text-xs font-black text-green-600 leading-none">{item.availableQuantity} szt.</span>
+                                                <span className="text-xs font-black text-green-600 leading-none">{item.availableQuantity} {item.unit || "szt."}</span>
                                             </div>
                                             {isInCart ? (
                                                 <div className="text-[10px] font-black text-green-700 bg-white border border-green-300 px-3 py-1.5 rounded-lg flex items-center gap-1 shadow-sm">
@@ -1477,33 +1799,50 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             {/* ── Modal wyboru ilości (BULK) ── */}
             {bulkPickModal && (
                 <div className="fixed inset-0 bg-black/60 z-[9999999] flex items-center justify-center p-4 backdrop-blur-sm">
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-t-4 border-blue-500">
-                        <h3 className="text-xl font-black text-slate-800 mb-1">Podaj ilość</h3>
-                        <p className="text-sm text-slate-500 mb-5 line-clamp-2">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border-t-4 border-amber-500">
+                        <h3 className="text-xl font-black text-slate-800 mb-1">Podaj ilość do zamówienia</h3>
+                        <p className="text-sm text-slate-500 mb-1 line-clamp-2">
                             <span className="font-bold text-slate-700">{bulkPickModal.item.name}</span>
                         </p>
-                        <div className="flex items-center gap-3 mb-2">
+                        {bulkPickModal.item.currentLocation && (
+                            <p className="text-xs text-emerald-700 font-bold mb-4 flex items-center gap-1">
+                                <span>📍 Sektor składowania:</span>
+                                <span className="underline">{bulkPickModal.item.currentLocation}</span>
+                            </p>
+                        )}
+                        <div className="flex items-center gap-3 mb-2 mt-2">
                             <button
-                                onClick={() => setBulkPickModal(p => p && p.qty > 1 ? { ...p, qty: p.qty - 1 } : p)}
-                                className="w-14 h-14 rounded-2xl bg-slate-100 hover:bg-slate-200 text-3xl font-black text-slate-700 transition flex items-center justify-center"
+                                onClick={() => setBulkPickModal(p => p && p.qty > 1 ? { ...p, qty: Number((p.qty - 1).toFixed(2)) } : p)}
+                                className="w-14 h-14 rounded-2xl bg-slate-100 hover:bg-slate-200 text-3xl font-black text-slate-700 transition flex items-center justify-center active:scale-95"
                             >−</button>
-                            <input
-                                type="number" min="1" max={bulkPickModal.item.availableQuantity}
-                                value={bulkPickModal.qty}
-                                onChange={e => setBulkPickModal(p => p ? { ...p, qty: Math.max(1, Math.min(Number(e.target.value), p.item.availableQuantity)) } : p)}
-                                className="flex-1 text-center text-3xl font-black p-2 border-2 rounded-2xl outline-none focus:border-blue-500 bg-slate-50"
-                            />
+                            <div className="flex-1 text-center">
+                                <input
+                                    type="number"
+                                    step="any"
+                                    min="0.01"
+                                    max={bulkPickModal.item.availableQuantity}
+                                    value={bulkPickModal.qty}
+                                    onChange={e => {
+                                        const val = parseFloat(e.target.value);
+                                        setBulkPickModal(p => p ? { ...p, qty: isNaN(val) ? 0 : Math.min(val, p.item.availableQuantity) } : p);
+                                    }}
+                                    className="w-full text-center text-3xl font-black p-2 border-2 rounded-2xl outline-none focus:border-amber-500 bg-slate-50"
+                                />
+                                <span className="block text-[11px] font-bold text-slate-400 mt-1 uppercase">
+                                    Jednostka: {bulkPickModal.item.unit || "szt."}
+                                </span>
+                            </div>
                             <button
-                                onClick={() => setBulkPickModal(p => p && p.qty < p.item.availableQuantity ? { ...p, qty: p.qty + 1 } : p)}
-                                className="w-14 h-14 rounded-2xl bg-slate-100 hover:bg-slate-200 text-3xl font-black text-slate-700 transition flex items-center justify-center"
+                                onClick={() => setBulkPickModal(p => p && p.qty < p.item.availableQuantity ? { ...p, qty: Number(Math.min(p.item.availableQuantity, p.qty + 1).toFixed(2)) } : p)}
+                                className="w-14 h-14 rounded-2xl bg-slate-100 hover:bg-slate-200 text-3xl font-black text-slate-700 transition flex items-center justify-center active:scale-95"
                             >+</button>
                         </div>
                         <p className="text-[11px] text-slate-400 text-center mb-6">
-                            Maksymalnie na stanie: <span className="font-bold text-slate-600">{bulkPickModal.item.availableQuantity} szt.</span>
+                            Maksymalnie na stanie: <span className="font-bold text-slate-700">{bulkPickModal.item.availableQuantity} {bulkPickModal.item.unit || "szt."}</span>
                         </p>
                         <div className="flex gap-3">
                             <button onClick={() => setBulkPickModal(null)} className="flex-1 py-4 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
-                            <button onClick={confirmBulkAdd} className="flex-1 py-4 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md transition">Dodaj do koszyka</button>
+                            <button onClick={confirmBulkAdd} className="flex-1 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-black rounded-xl shadow-md transition">Dodaj do koszyka</button>
                         </div>
                     </div>
                 </div>
@@ -1756,24 +2095,33 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                                             {c.isBhp && (
                                                                 <span className="text-[9px] font-black text-purple-700 bg-purple-100 px-1 rounded">BHP</span>
                                                             )}
-                                                            {c.isDrobnica && (
+                                                            {c.isResidual ? (
+                                                                <span className="text-[9px] font-black text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded border border-amber-300">🧱 PLAC</span>
+                                                            ) : c.isDrobnica ? (
                                                                 <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1 rounded">DROBNICA</span>
-                                                            )}
+                                                            ) : null}
                                                         </div>
+                                                        {c.currentLocation && (
+                                                            <p className="text-[9px] text-emerald-700 font-bold mt-0.5">📍 Sektor: {c.currentLocation}</p>
+                                                        )}
                                                         <p className="text-[9px] text-blue-500 font-bold mt-0.5">NR: {c.inventoryNumber || "-"}</p>
                                                     </div>
-                                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                                    <div className="flex items-center gap-1.5 flex-shrink-0">
                                                         {c.type === "BULK" && !c.isBhp ? (
-                                                            <input
-                                                                type="number"
-                                                                min="1"
-                                                                max={c.maxQty || 9999}
-                                                                value={c.quantity}
-                                                                onChange={e => updateQty(c.cartId, Number(e.target.value))}
-                                                                className="w-12 p-1 border rounded text-center text-xs font-bold outline-none focus:border-blue-500"
-                                                            />
+                                                            <div className="flex items-center gap-1">
+                                                                <input
+                                                                    type="number"
+                                                                    step="any"
+                                                                    min="0.01"
+                                                                    max={c.maxQty || 9999}
+                                                                    value={c.quantity}
+                                                                    onChange={e => updateQty(c.cartId, parseFloat(e.target.value) || 0)}
+                                                                    className="w-14 p-1 border rounded text-center text-xs font-bold outline-none focus:border-blue-500"
+                                                                />
+                                                                <span className="text-[10px] text-slate-500 font-bold">{c.unit || "szt."}</span>
+                                                            </div>
                                                         ) : (
-                                                            <span className="font-black text-xs bg-slate-100 px-3 py-2 rounded-xl border">1</span>
+                                                            <span className="font-black text-xs bg-slate-100 px-2 py-1.5 rounded-xl border">1 {c.unit || "szt."}</span>
                                                         )}
                                                         <button
                                                             onClick={() => removeFromCart(c.cartId)}
