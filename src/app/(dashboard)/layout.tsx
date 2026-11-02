@@ -1,11 +1,12 @@
-// src/app/(dashboard)/layout.tsx
+﻿// src/app/(dashboard)/layout.tsx
 "use client";
 
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter, usePathname } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { hasPermission, PermissionKey } from "@/lib/auth/permissions";
+import { WarehouseChatWidget } from "@/components/ai/WarehouseChatWidget";
 
 // ZMIANA: requiredPermission może teraz być pojedynczym kluczem lub tablicą kluczy
 type MenuItem = {
@@ -19,6 +20,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const { user, loading, signOut } = useAuth();
     const router = useRouter();
     const pathname = usePathname();
+    const [isChatOpen, setIsChatOpen] = useState(false);
 
     useEffect(() => {
         if (!loading && !user) router.push("/login");
@@ -153,6 +155,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6">
                     <h2 className="font-semibold text-slate-700">System Magazynowy</h2>
                     <div className="flex items-center gap-4">
+                        {hasPermission('useChatAI' as PermissionKey, user.rolePermissions, user.permissionOverrides) && (
+                            <button
+                                onClick={() => setIsChatOpen(true)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold transition shadow-sm"
+                            >
+                                🤖 Chat z AI
+                            </button>
+                        )}
                         <span className="text-sm text-slate-600">Zalogowany: <b>{user.firstName} {user.lastName}</b></span>
                         <button onClick={handleLogout} className="px-4 py-2 bg-red-50 text-red-600 rounded-md hover:bg-red-100 text-sm font-bold transition">
                             Wyloguj
@@ -162,6 +172,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <main className="flex-1 overflow-auto">
                     {children}
                 </main>
+                <WarehouseChatWidget isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
             </div>
         </div>
     );

@@ -51,7 +51,10 @@ export const ALL_PERMISSIONS = {
     manageRulesWarehouse: "Reguły AI: Zarządzanie wytycznymi Magazynu (Przyjmowanie resztek)",
 
     // --- WIDŻETY DASHBOARDU I MIEJSCA SKŁADOWANIA (PLAC / HALE) ---
-    widgetStorageLocations: "Dashboard: Widżet Miejsca Składowania & Plac (Zapełnienie JPP)"
+    widgetStorageLocations: "Dashboard: Widżet Miejsca Składowania & Plac (Zapełnienie JPP)",
+
+    // --- CHAT AI AGENT ---
+    useChatAI: "Chat z AI: Dostęp do Asystenta Magazynowego (Analiza danych głosem/tekstem)",
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;
