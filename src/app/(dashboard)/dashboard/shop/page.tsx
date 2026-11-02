@@ -503,11 +503,18 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
     // ── Rozpoznawanie kategorii sprzętu (BHP vs Drobnica vs Resztki) ──────────
 
     const isBhpItem = (i: InventoryItem): boolean => {
-        if (i.requiresInspection) return true;
+        // Priorytet: jeśli kategoria jest explicite ustawiona na coś innego niż BHP → NIE jest BHP
         const cat = (i.category || "").toUpperCase();
+        // Kategoria wprost wskazuje na BHP
         if (cat.includes("OCHRONA OSOBISTA") || cat.includes("BHP OSOBISTE") || cat.includes("BHP")) return true;
-        const name = (i.name || "").toLowerCase();
-        if (name.includes("szelki") || name.includes("lina do szelek") || name.includes("amortyzator")) return true;
+        // Flaga requiresInspection = BHP TYLKO gdy kategoria też to wskazuje lub nie jest ustawiona inaczej
+        // (uniknięcie błędu gdy zmieniono kategorię ale zostawiono starą flagę)
+        const hasNonBhpCategory = cat.length > 0 &&
+            !cat.includes("OCHRONA OSOBISTA") &&
+            !cat.includes("BHP") &&
+            !cat.includes("RESZTKI") &&
+            !cat.includes("POZOSTA");
+        if (i.requiresInspection && !hasNonBhpCategory) return true;
         return false;
     };
 

@@ -1620,25 +1620,40 @@ export default function InventoryPage() {
             if (item.type !== "BULK" || item.subType === "MANUAL" || item.category === "Zaległości osprzętu") return false;
         } else if (activeTab === "OTHER") {
             // Zakładka Drobnica: Wszystkie BULK będące wpisami ręcznymi, zaległym osprzętem lub pozostałościami budowlanymi
-            const isResidualItem = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
-            const isLoose = item.subType === "MANUAL" || item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || isResidualItem;
+
+            // "Resztka budowlana" = ma flagę isResidual LUB kategorię Pozostałości budowlane LUB inventoryNumber RESZTKI
+            // WAŻNE: osprzęt (Zaległości osprzętu) NIE jest resztką, nawet jeśli ma isResidual: true przez edycję
+            const isOsprzet = item.category === "Zaległości osprzętu" ||
+                item.inventoryNumber === "OSPRZĘT" ||
+                (item.name && item.name.startsWith("[Zaległy osprzęt]"));
+            const isResidualItem = !isOsprzet && (
+                (item as any).isResidual === true ||
+                item.category === "Pozostałości budowlane" ||
+                item.inventoryNumber === "RESZTKI" ||
+                categoriesList.some(c => c.name === item.category)
+            );
+            const isLoose = isOsprzet || isResidualItem || item.subType === "MANUAL";
             if (item.type !== "BULK" || !isLoose) return false;
 
             // UKRYWANIE ROZLICZONEGO ZALEGŁEGO OSPRZĘTU (brak długu na budowach):
-            if (item.category === "Zaległości osprzętu" || (item.name && item.name.startsWith("[Zaległy osprzęt]"))) {
+            if (isOsprzet) {
                 const totalAllocated = Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0);
                 if (totalAllocated <= 0) return false;
             }
             // UKRYWANIE JEDNORAZOWYCH WPISÓW RĘCZNYCH, KTÓRE JUŻ WRÓCIŁY Z BUDOWY (nie dotyczy trwałych pozostałości):
-            if (!isResidualItem && item.isTemporary && Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0) <= 0) {
+            if (!isResidualItem && !isOsprzet && item.isTemporary && Object.values(item.allocations || {}).reduce((a, b) => a + (Number(b) || 0), 0) <= 0) {
                 return false;
             }
 
-            // Podfiltr Drobnicy (Wszystko / Resztki / Inne)
+            // Podfiltr Drobnicy (Wszystko / Resztki / Osprzęt)
             if (drobnicaFilter === "RESIDUALS" && !isResidualItem) return false;
-            if (drobnicaFilter === "OTHER" && isResidualItem) return false;
+            if (drobnicaFilter === "OTHER" && !isOsprzet) return false;
         } else if (activeTab === "BHP") {
-            const isBhpPersonal = item.requiresInspection || (item.category || "").toUpperCase().includes("OCHRONA OSOBISTA") || (item.category || "").toUpperCase().includes("BHP OSOBISTE");
+            const cat = (item.category || "").toUpperCase();
+            const hasBhpCategory = cat.includes("OCHRONA OSOBISTA") || cat.includes("BHP OSOBISTE") || cat.includes("BHP");
+            // Element z requiresInspection jest BHP TYLKO jeśli kategoria to potwierdza lub nie ma innej kategorii
+            const hasNonBhpCategory = cat.length > 0 && !hasBhpCategory;
+            const isBhpPersonal = hasBhpCategory || (item.requiresInspection && !hasNonBhpCategory);
             if (!isBhpPersonal) return false;
         }
 
@@ -2291,7 +2306,8 @@ export default function InventoryPage() {
                                     </tr>
                                 ) : (
                                     displayedItems.map(item => {
-                                        const isResidual = item.category === "Pozostałości budowlane" || item.category === "Pozostalosci budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
+                                        const isOsprzet = item.category === "Zaległości osprzętu" || item.inventoryNumber === "OSPRZĘT" || (item.name && item.name.startsWith("[Zaległy osprzęt]"));
+                                        const isResidual = !isOsprzet && ((item as any).isResidual === true || item.category === "Pozostałości budowlane" || item.category === "Pozostalosci budowlane" || item.inventoryNumber === "RESZTKI" || categoriesList.some(c => c.name === item.category));
                                         const isSaving = savingItemId === item.id;
                                         const catObj = categoriesList.find(c => c.name === item.category);
                                         const subList = catObj?.subcategories || [];
@@ -2657,8 +2673,10 @@ export default function InventoryPage() {
                     </div>
                 ) : activeTab === "BULK" ? (
                     <div>{renderBulkGroups()}</div>
-                ) : (
+                ) : activeTab === "OTHER" ? (
                     <div>{renderOtherItemsGroup()}</div>
+                ) : (
+                    <div>{renderBhpItemsGroup()}</div>
                 )
             )}
 
