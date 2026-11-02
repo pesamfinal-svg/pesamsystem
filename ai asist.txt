@@ -1,0 +1,172 @@
+# 🤖 PESAM System — Mapa drogowa funkcji AI dla aplikacji mobilnej
+
+> [!NOTE]
+> Analiza projektu na podstawie kodu źródłowego. Projekt to system zarządzania **magazynem resztek budowlanych i flotą pojazdów** dla firmy budowlanej, oparty o Next.js 16 + Firebase + Google Vertex AI (Gemini).
+> Już istniejące moduły AI: `ai-analyst`, `ai-calculator`, `ai-chat-order`, `ai-equipment`, `ai-knowledge`, `ai-voice-order`, `parse-audio`, `parse-invoice`, wieloagentowy `kosztorysant`, `technolog`.
+
+---
+
+## 📸 1. „Zapytaj AI" — Rozpoznawanie materiałów z aparatu
+
+Twój pomysł #1 — **przycisk „🤖 Zapytaj AI" przy każdej pozycji na placu.**
+
+### Jak to działa
+```
+[Użytkownik robi zdjęcie] → Gemini Vision (gemini-2.5-flash)
+→ rozpoznaje materiał budowlany
+→ sugeruje nazwę, kategorię, jednostkę miary
+→ opcjonalnie: proponuje dopasowanie do istniejącej pozycji w magazynie
+```
+
+### Endpoint do stworzenia
+**`POST /api/ai-identify-material`**
+
+```typescript
+// Payload wejściowy
+{ imageBase64: string; hint?: string }
+
+// Odpowiedź
+{
+  name: string;          // "Bloczek betonowy 590x120x239"
+  category: string;      // "pustaki"
+  unit: string;          // "szt."
+  confidence: number;    // 0.92
+  description: string;   // "Bloczek termoizolacyjny, seria Pro..."
+  matchedItemId?: string; // ID istniejącej pozycji w Firebase
+}
+```
+
+### UI — gdzie dodać przycisk
+W [`plac/resztki/page.tsx`](file:///c:/Users/admin/Desktop/pesam-system/src/app/plac/resztki/page.tsx) — na każdej karcie pozycji (obok „ZRÓB FOTO"):
+
+```
+[🤖 Zapytaj AI]  ←  nowy przycisk, żółty/pomarańczowy
+```
+
+> [!TIP]
+> Gemini `gemini-2.5-flash` doskonale rozpoznaje materiały budowlane ze zdjęć. Możesz przekazać mu też kontekst: *„Jesteśmy hurtownią materiałów budowlanych, rozpoznaj co to za materiał"*.
+
+---
+
+## 🎚️ 2. Suwak zapełnienia stref magazynowych
+
+Twój pomysł #2 — **zakładka ustawień poziomu zapełnienia stref z suwakiem.**
+
+### Istniejące dane
+W kodzie już są zdefiniowane strefy [`StorageLocation`](file:///c:/Users/admin/Desktop/pesam-system/src/app/plac/resztki/page.tsx):
+- `Plac Zewnętrzny` (capacity: 30, occupied: 12)
+- `Magazyn Farb i Chemii` (capacity: 10, occupied: 4)
+- `Hala Główna - Regały Suche` (capacity: 25, occupied: 16)
+
+### Nowa zakładka: „⚙️ Strefy"
+
+```
+┌─────────────────────────────────────────┐
+│  🏭 Plac Zewnętrzny                      │
+│  ████████████░░░░░░░░  40%               │
+│  [──────────●──────────────]  12 / 30   │
+│                                          │
+│  🧪 Magazyn Farb                         │
+│  ████░░░░░░░░░░░░░░░░  40%               │
+│  [────●─────────────────]  4 / 10       │
+└─────────────────────────────────────────┘
+```
+
+**Komponent HTML range slider:**
+```html
+<input type="range" min="0" max={zone.totalCapacity}
+  value={zone.currentOccupied}
+  onChange={handleCapacityChange} />
+```
+
+> [!IMPORTANT]
+> Po zmianie suwaka → `updateDoc` do Firebase → automatyczny alert AI gdy strefa > 80% pojemności (już masz endpoint `warehouse-capacity-alert`!).
+
+---
+
+## 🤖 Pełna lista pomysłów AI dla aplikacji mobilnej PESAM
+
+### 🥇 Priorytet WYSOKI (łatwe do wdrożenia, duża wartość)
+
+| # | Funkcja | Moduł | Czas est. |
+|---|---------|-------|-----------|
+| 1 | **📸 Scan & Identify** — rozpoznaj materiał z foto | `ai-identify-material` (nowy) | 1 dzień |
+| 2 | **🎚️ Suwaki stref** — edycja zapełnienia | UI w `resztki/page.tsx` | 0.5 dnia |
+| 3 | **🎙️ Głosowe dodawanie resztek** — „dodaj 5 palet bloczków" | rozszerzenie `parse-audio-residuals` | 1 dzień |
+| 4 | **🏷️ Auto-kategoryzacja** — AI sugeruje kategorię przy dodawaniu | inline w formularzu dodawania | 1 dzień |
+
+### 🥈 Priorytet ŚREDNI (ciekawe, wymagają więcej pracy)
+
+| # | Funkcja | Opis | Czas est. |
+|---|---------|------|-----------|
+| 5 | **📊 Asystent resztek** | Chat AI: „Co mamy za dużo?", „Które resztki się nie ruszają od miesiąca?" | 2 dni |
+| 6 | **🔍 Smart Search** | Szukasz „coś do uszczelnienia" → AI mapuje na konkretne pozycje | 2 dni |
+| 7 | **⚠️ Alert o rotacji** | AI wykrywa pozycje bez ruchu >30 dni i sugeruje akcję (sprzedaj, zwróć) | 2 dni |
+| 8 | **📋 AI Protokół zdawczo-odbiorczy** | Zrób zdjęcie stosu materiałów → AI generuje protokół z ilościami | 3 dni |
+| 9 | **💰 Wycena resztek** | Na podstawie nazwy + zdjęcia AI szacuje wartość rynkową resztki | 2 dni |
+
+### 🥉 Priorytet NISKI (zaawansowane, strategiczne)
+
+| # | Funkcja | Opis | Czas est. |
+|---|---------|------|-----------|
+| 10 | **🗺️ Mapa placu AI** | Interaktywna mapa magazynu z wizualizacją zajętości stref | 5 dni |
+| 11 | **🔄 Agent Optymalizacji** | AI sugeruje przeniesienie materiałów między strefami dla lepszej organizacji | 5 dni |
+| 12 | **📦 Predykcja zapotrzebowania** | Na podstawie historii zamówień AI przewiduje co będzie potrzebne | 5 dni |
+| 13 | **🤝 Giełda resztek** | AI automatycznie wystawia nadmiarowe resztki na giełdę między firmami | 7 dni |
+| 14 | **🌿 CO₂ Calculator** | Dla każdej resztki oblicz ślad węglowy (masz już moduł `co2`!) | 3 dni |
+
+---
+
+## 🏗️ Architektura „Scan & Identify" — szczegóły implementacji
+
+```mermaid
+sequenceDiagram
+    participant U as 📱 Użytkownik (plac)
+    participant App as PWA (resztki/page.tsx)
+    participant API as /api/ai-identify-material
+    participant G as Gemini 2.5 Flash
+    participant DB as Firebase Firestore
+
+    U->>App: Klik 🤖 przy pozycji "Big Bag"
+    App->>U: Otwórz kamerę (input[capture])
+    U->>App: Zrób zdjęcie
+    App->>API: POST {imageBase64, currentItems[]}
+    API->>G: "Co to za materiał budowlany?"
+    G-->>API: {name, category, unit, confidence}
+    API->>DB: Szukaj podobnej pozycji
+    DB-->>API: matchedItem (opcjonalnie)
+    API-->>App: Wynik identyfikacji
+    App->>U: Modal z wynikiem + "Dodaj do magazynu?"
+```
+
+---
+
+## 💡 Szybkie wygrane — co wdrożyć NAJPIERW
+
+> [!IMPORTANT]
+> **Plan na najbliższy sprint (3 dni):**
+
+### Dzień 1: „Zapytaj AI" przy resztce
+1. Nowy endpoint `POST /api/ai-identify-material`
+2. Przycisk 🤖 na karcie pozycji w `plac/resztki/page.tsx`
+3. Modal z wynikiem identyfikacji
+
+### Dzień 2: Suwaki stref
+1. Nowa zakładka „Strefy" w nawigacji placu
+2. Komponent `ZoneCapacitySlider`
+3. Zapis do Firebase + trigger alertu przy > 80%
+
+### Dzień 3: Głosowe dodawanie
+1. Rozszerz istniejący `parse-audio-residuals` o dodawanie nowych pozycji
+2. Przycisk 🎙️ na głównej stronie placu
+
+---
+
+## 🔗 Pliki do modyfikacji
+
+| Plik | Co zmienić |
+|------|------------|
+| [`plac/resztki/page.tsx`](file:///c:/Users/admin/Desktop/pesam-system/src/app/plac/resztki/page.tsx) | Dodać przycisk AI + modal identyfikacji + zakładkę stref |
+| [`api/ai-identify-material/route.ts`](file:///c:/Users/admin/Desktop/pesam-system/src/app/api/) | Nowy endpoint (stworzyć) |
+| [`plac/layout.tsx`](file:///c:/Users/admin/Desktop/pesam-system/src/app/plac/layout.tsx) | Ewentualnie nowa zakładka nawigacji |
+
