@@ -32,6 +32,9 @@ interface CartItem {
     inventoryNumber?: string; availableQuantity?: number; currentLocation?: string; status?: string;
     name: string; issueQty: number; unit?: string; accessories: Accessory[];
     isPermanent?: boolean;
+    category?: string;
+    subcategory?: string;
+    location?: string;
 }
 
 // Interfejsy dla ZWROTÓW APLIKACYJNYCH
@@ -51,6 +54,7 @@ interface ReturnCartItem {
     isWaste?: boolean;
     category?: string;
     subcategory?: string;
+    location?: string;
     rulesCompliant?: boolean;
     ruleNotes?: string;
     storageLocation?: string;
@@ -78,6 +82,8 @@ interface PaperReturnCartItem {
     isWaste?: boolean;
     category?: string;
     subcategory?: string;
+    storageLocation?: string;
+    location?: string;
 }
 
 type PaperDocSource = "KIEROWNIK" | "KIEROWCA" | "BRAK_PROTOKOLU";
@@ -100,6 +106,115 @@ export default function ProtocolsHub() {
     const [manualQty, setManualQty] = useState<number | "">("");
     const [manualUnit, setManualUnit] = useState("szt.");
     const [manualIsPermanent, setManualIsPermanent] = useState(false);
+    const [manualLocation, setManualLocation] = useState("");
+    const [manualCategory, setManualCategory] = useState("");
+    const [manualSubcategory, setManualSubcategory] = useState("");
+
+    const resetManualFields = () => {
+        setManualName("");
+        setManualQty("");
+        setManualUnit("szt.");
+        setManualIsPermanent(false);
+        setManualLocation("");
+        setManualCategory("");
+        setManualSubcategory("");
+        setManualSuggestions([]);
+        setSelectedManualItem(null);
+    };
+
+    const renderManualPermanentSettings = (accentColor: "orange" | "blue" | "purple" = "orange") => {
+        if (!manualIsPermanent) return null;
+
+        const borderFocus = accentColor === "blue" 
+            ? "focus:border-blue-500" 
+            : accentColor === "purple" 
+                ? "focus:border-purple-500" 
+                : "focus:border-orange-500";
+
+        const currentCatObj = categoriesList.find(c => c.name === manualCategory || c.id === manualCategory);
+        const subList = currentCatObj?.subcategories || [];
+
+        return (
+            <div className="space-y-3 p-3 bg-amber-50/80 border border-amber-200 rounded-xl animate-fade-in text-left">
+                <div className="flex items-center gap-1.5 text-[11px] font-black text-amber-900 uppercase tracking-tight">
+                    <span>📍</span>
+                    <span>Przypisz do strefy i kategorii</span>
+                </div>
+
+                {/* 1. Strefa składowania (Sektor placu) */}
+                <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">
+                        Strefa składowania (Sektor placu)
+                    </label>
+                    <select
+                        value={manualLocation}
+                        onChange={(e) => {
+                            const locName = e.target.value;
+                            setManualLocation(locName);
+                            // Inteligentna podpowiedź kategorii ze strefy (jeśli użytkownik jeszcze nie wybrał):
+                            if (locName && !manualCategory) {
+                                const locObj = warehouseStorageLocations.find((l: any) => l.name === locName);
+                                if (locObj && Array.isArray(locObj.categories) && locObj.categories.length > 0) {
+                                    const firstCatId = locObj.categories[0];
+                                    const matched = categoriesList.find(c => c.id === firstCatId || c.name === firstCatId);
+                                    if (matched) setManualCategory(matched.name);
+                                }
+                            }
+                        }}
+                        className={`w-full p-2.5 border-2 border-amber-300 rounded-xl outline-none ${borderFocus} text-xs font-bold bg-white text-slate-800 cursor-pointer`}
+                    >
+                        <option value="">-- Wybierz strefę na placu --</option>
+                        {warehouseStorageLocations.map((loc: any) => (
+                            <option key={loc.id || loc.name} value={loc.name}>
+                                📍 {loc.name} {loc.capacityJpp ? `(max ${loc.capacityJpp} JPP)` : ""}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+
+                {/* 2. Główna Kategoria */}
+                <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">
+                        Główna Kategoria
+                    </label>
+                    <select
+                        value={manualCategory}
+                        onChange={(e) => {
+                            setManualCategory(e.target.value);
+                            setManualSubcategory("");
+                        }}
+                        className={`w-full p-2.5 border-2 border-amber-300 rounded-xl outline-none ${borderFocus} text-xs font-bold bg-white text-slate-800 cursor-pointer`}
+                    >
+                        <option value="">-- Wybierz kategorię --</option>
+                        {categoriesList.map(cat => (
+                            <option key={cat.id || cat.name} value={cat.name}>
+                                {cat.icon || "📦"} {cat.name}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+
+                {/* 3. Podkategoria (dynamiczna wg kategorii) */}
+                {manualCategory && subList.length > 0 && (
+                    <div>
+                        <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">
+                            Podkategoria
+                        </label>
+                        <select
+                            value={manualSubcategory}
+                            onChange={(e) => setManualSubcategory(e.target.value)}
+                            className={`w-full p-2.5 border-2 border-amber-300 rounded-xl outline-none ${borderFocus} text-xs font-bold bg-white text-slate-800 cursor-pointer`}
+                        >
+                            <option value="">-- Wybierz podkategorię --</option>
+                            {subList.map(sub => (
+                                <option key={sub} value={sub}>{sub}</option>
+                            ))}
+                        </select>
+                    </div>
+                )}
+            </div>
+        );
+    };
 
     // --- NOWE: Wyszukiwarka dla wpisów ręcznych ---
     const [manualSuggestions, setManualSuggestions] = useState<InventoryItem[]>([]);
@@ -702,17 +817,20 @@ export default function ProtocolsHub() {
             isManual: true,
             isPermanent: manualIsPermanent,
             dbId: foundExistingItem ? foundExistingItem.id : undefined,
-            inventoryNumber: foundExistingItem ? foundExistingItem.inventoryNumber : "RĘCZNY",
+            inventoryNumber: foundExistingItem 
+                ? foundExistingItem.inventoryNumber 
+                : (manualIsPermanent ? "RĘCZNY" : "JEDNORAZ"),
             name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
             issueQty: Number(manualQty),
             unit: manualUnit,
+            location: manualLocation,
+            category: manualCategory,
+            subcategory: manualSubcategory,
             accessories: []
         }]);
 
         setIsManualModalOpen(false);
-        setManualSuggestions([]);
-        setSelectedManualItem(null);
-        setManualIsPermanent(false);
+        resetManualFields();
     };
 
     const removeFromCart = (cartItemId: string) => setCart(cart.filter(i => i.cartItemId !== cartItemId));
@@ -862,14 +980,21 @@ export default function ProtocolsHub() {
                             // SCENARIUSZ 2: Całkowicie nowy wpis z palca, którego w bazie nie ma
                             const isPermanent = cartItem.isPermanent === true;
                             const newDocRef = doc(collection(db, "inventory"));
+                            const resolvedCategory = isPermanent
+                                ? (cartItem.category || "Drobnica i materiały")
+                                : "Wpis ręczny jednorazowy";
+
                             transaction.set(newDocRef, {
                                 name: cartItem.name,
                                 type: "BULK",
                                 subType: "MANUAL",
-                                inventoryNumber: "RĘCZNY",
-                                category: isPermanent ? "Drobnica i materiały" : "Wpis ręczny jednorazowy",
+                                inventoryNumber: isPermanent ? "RĘCZNY" : "JEDNORAZ",
+                                category: resolvedCategory,
+                                subcategory: cartItem.subcategory || "",
+                                currentLocation: cartItem.location || "",
                                 isPermanent: isPermanent,
                                 isTemporary: !isPermanent,
+                                isResidual: isPermanent && !!cartItem.category && cartItem.category !== "Drobnica i materiały",
                                 unit: cartItem.unit || "szt.",
                                 availableQuantity: 0,
                                 totalQuantity: cartItem.issueQty,
@@ -883,9 +1008,12 @@ export default function ProtocolsHub() {
                                 isManual: true,
                                 isPermanent: isPermanent,
                                 name: cartItem.name,
-                                inventoryNumber: "RĘCZNY",
+                                inventoryNumber: isPermanent ? "RĘCZNY" : "JEDNORAZ",
                                 quantity: cartItem.issueQty,
                                 unit: cartItem.unit || "szt.",
+                                category: resolvedCategory,
+                                subcategory: cartItem.subcategory || "",
+                                location: cartItem.location || "",
                                 accessories: cartItem.accessories
                             });
                         }
@@ -1072,11 +1200,16 @@ export default function ProtocolsHub() {
             isPermanent: manualIsPermanent,
             name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
             type: "BULK",
-            inventoryNumber: foundExistingItem ? foundExistingItem.inventoryNumber : "RĘCZNY ZWROT",
-            unit: manualUnit, maxQty: 999999, returnQty: Number(manualQty), declaredStatus: "sprawne", accessories: []
+            inventoryNumber: foundExistingItem 
+                ? foundExistingItem.inventoryNumber 
+                : (manualIsPermanent ? "RĘCZNY ZWROT" : "JEDNORAZ"),
+            unit: manualUnit, maxQty: 999999, returnQty: Number(manualQty), declaredStatus: "sprawne", accessories: [],
+            category: manualCategory,
+            subcategory: manualSubcategory,
+            storageLocation: manualLocation
         }]);
         setIsReturnManualModalOpen(false);
-        setManualIsPermanent(false);
+        resetManualFields();
     };
 
     const cleanFirestorePayload = (obj: any): any => {
@@ -1723,17 +1856,22 @@ export default function ProtocolsHub() {
             isPermanent: manualIsPermanent,
             name: foundExistingItem ? foundExistingItem.name : manualName.trim(),
             type: "BULK",
-            inventoryNumber: foundExistingItem ? (foundExistingItem.inventoryNumber || "RĘCZNY PAPIER") : "RĘCZNY PAPIER",
+            inventoryNumber: foundExistingItem 
+                ? (foundExistingItem.inventoryNumber || "RĘCZNY PAPIER") 
+                : (manualIsPermanent ? "RĘCZNY PAPIER" : "JEDNORAZ"),
             unit: manualUnit,
             maxQty: 999999,
             declaredQty: Number(manualQty),
             receivedQty: Number(manualQty),
             finalStatus: "sprawne",
             notes: foundExistingItem ? "Dopisane z papieru (istniejący)" : "Dopisane z papieru",
-            isReturningMainItem: true
+            isReturningMainItem: true,
+            category: manualCategory,
+            subcategory: manualSubcategory,
+            storageLocation: manualLocation
         }]);
         setIsPaperManualModalOpen(false);
-        setManualIsPermanent(false);
+        resetManualFields();
     };
 
 
@@ -2151,10 +2289,23 @@ export default function ProtocolsHub() {
                             });
                         } else if (cartItem.isPermanent) {
                             const newDocRef = doc(collection(db, "inventory"));
+                            const resolvedCat = cartItem.category || "Drobnica i materiały";
                             transaction.set(newDocRef, cleanFirestorePayload({
-                                name: cartItem.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Drobnica i materiały",
-                                unit: cartItem.unit || "szt.", availableQuantity: cartItem.receivedQty, totalQuantity: cartItem.receivedQty,
-                                status: "sprawne", allocations: {}, createdAt: new Date().toISOString(), isPermanent: true
+                                name: cartItem.name,
+                                type: "BULK",
+                                subType: "MANUAL",
+                                inventoryNumber: "RĘCZNY ZWROT",
+                                category: resolvedCat,
+                                subcategory: cartItem.subcategory || "",
+                                currentLocation: cartItem.storageLocation || cartItem.location || "",
+                                isResidual: !!cartItem.category && cartItem.category !== "Drobnica i materiały",
+                                unit: cartItem.unit || "szt.",
+                                availableQuantity: cartItem.receivedQty,
+                                totalQuantity: cartItem.receivedQty,
+                                status: "sprawne",
+                                allocations: {},
+                                createdAt: new Date().toISOString(),
+                                isPermanent: true
                             }));
 
                             finalProtocolItems.push({
@@ -2742,13 +2893,17 @@ export default function ProtocolsHub() {
         setIsAddFromSiteOpen(false);
     };
 
-    const openAddManualToAccept = () => { setManualName(""); setManualQty(""); setManualUnit("szt."); setManualIsPermanent(false); setIsAddManualToAcceptOpen(true); };
+    const openAddManualToAccept = () => { resetManualFields(); setIsAddManualToAcceptOpen(true); };
     const confirmAddManualToAccept = () => {
         if (!manualName.trim() || !manualQty || Number(manualQty) <= 0) return alert("Podaj prawidłową nazwę oraz ilość większą od 0!");
         const tempId = `temp-${Date.now()}`;
         const newItem = {
             inventoryId: tempId, isNewManual: true, isManual: true, isPermanent: manualIsPermanent, name: manualName.trim(), type: "BULK", unit: manualUnit,
-            declaredQty: 0, declaredStatus: null, accessories: []
+            declaredQty: 0, declaredStatus: null, accessories: [],
+            category: manualCategory,
+            subcategory: manualSubcategory,
+            location: manualLocation,
+            storageLocation: manualLocation
         };
         setSelectedProtocol((prev: any) => ({ ...prev, items: [...prev.items, newItem] }));
         setAcceptInputs(prev => ({
@@ -2756,7 +2911,7 @@ export default function ProtocolsHub() {
             [tempId]: { receivedQty: Number(manualQty), finalStatus: "sprawne", notes: "Wpis ręczny (Dopisane przez magazyn)", createClaim: false, verifiedAccessories: {} }
         }));
         setIsAddManualToAcceptOpen(false);
-        setManualIsPermanent(false);
+        resetManualFields();
     };
 
     const removeItemFromAcceptProtocol = (inventoryIdToRemove: string) => {
@@ -3072,10 +3227,23 @@ export default function ProtocolsHub() {
                             updatedItemsForProtocol.push({ ...item, isResidual: true, isWaste: true, receivedQty: workerInput.receivedQty, finalStatus: "odpad_utylizacja", warehouseNotes: workerInput.notes || "Odpad budowlany do utylizacji", accessories: [] });
                         } else if (item.isPermanent) {
                             const newDocRef = doc(collection(db, "inventory"));
+                            const resolvedCat = item.category || "Drobnica i materiały";
                             transaction.set(newDocRef, cleanFirestorePayload({
-                                name: item.name, type: "BULK", subType: "MANUAL", inventoryNumber: "RĘCZNY ZWROT", category: "Drobnica i materiały",
-                                unit: item.unit || "szt.", availableQuantity: workerInput.receivedQty, totalQuantity: workerInput.receivedQty,
-                                status: "sprawne", allocations: {}, createdAt: new Date().toISOString(), isPermanent: true
+                                name: item.name,
+                                type: "BULK",
+                                subType: "MANUAL",
+                                inventoryNumber: "RĘCZNY ZWROT",
+                                category: resolvedCat,
+                                subcategory: item.subcategory || "",
+                                currentLocation: item.storageLocation || item.location || "",
+                                isResidual: !!item.category && item.category !== "Drobnica i materiały",
+                                unit: item.unit || "szt.",
+                                availableQuantity: workerInput.receivedQty,
+                                totalQuantity: workerInput.receivedQty,
+                                status: "sprawne",
+                                allocations: {},
+                                createdAt: new Date().toISOString(),
+                                isPermanent: true
                             }));
                             updatedItemsForProtocol.push({ ...item, inventoryId: newDocRef.id, receivedQty: workerInput.receivedQty, finalStatus: workerInput.finalStatus, warehouseNotes: workerInput.notes, accessories: [] });
                         } else {
@@ -4390,9 +4558,19 @@ export default function ProtocolsHub() {
                                                         <div className="flex-1">
                                                             <p className="font-bold text-sm text-slate-800">
                                                                 {cItem.name}
-                                                                {cItem.isManual && <span className="ml-2 text-[9px] bg-orange-200 text-orange-800 px-2 rounded uppercase">Ręczny</span>}
+                                                                {cItem.isManual && (
+                                                                    <span className={`ml-2 text-[9px] px-2 py-0.5 rounded font-black uppercase ${cItem.isPermanent ? 'bg-amber-200 text-amber-900 border border-amber-300' : 'bg-orange-200 text-orange-800'}`}>
+                                                                        {cItem.isPermanent ? "STAŁY (DROBNICA)" : "JEDNORAZ"}
+                                                                    </span>
+                                                                )}
                                                                 {!cItem.isManual && cItem.inventoryNumber && <span className="text-slate-500 font-mono ml-2 font-bold text-sm">Nr Mag: {cItem.inventoryNumber}</span>}
                                                             </p>
+                                                            {cItem.isManual && cItem.isPermanent && (cItem.location || cItem.category) && (
+                                                                <p className="text-[10px] text-slate-500 font-bold mt-1 flex items-center gap-1.5 flex-wrap">
+                                                                    {cItem.location && <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">📍 {cItem.location}</span>}
+                                                                    {cItem.category && <span className="text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">📦 {cItem.category}{cItem.subcategory ? ` / ${cItem.subcategory}` : ""}</span>}
+                                                                </p>
+                                                            )}
                                                         </div>
                                                         <div className="flex items-center gap-3">
                                                             {cItem.type === "BULK" || cItem.isManual ? (
@@ -4499,7 +4677,7 @@ export default function ProtocolsHub() {
             {/* MINI-MODAL: Wpis ręczny (Wydania) */}
             {isManualModalOpen && (
                 <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 animate-fade-in">
                         <h3 className="text-lg font-black text-orange-600 mb-4 flex items-center gap-2">
                             <span>📝</span> Wpis ręczny (poza bazą)
                         </h3>
@@ -4564,7 +4742,15 @@ export default function ProtocolsHub() {
                                 <input
                                     type="checkbox"
                                     checked={manualIsPermanent}
-                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setManualIsPermanent(checked);
+                                        if (!checked) {
+                                            setManualLocation("");
+                                            setManualCategory("");
+                                            setManualSubcategory("");
+                                        }
+                                    }}
                                     className="w-4 h-4 mt-0.5 text-orange-600 rounded border-slate-300 focus:ring-orange-500"
                                 />
                                 <div className="flex flex-col">
@@ -4576,9 +4762,10 @@ export default function ProtocolsHub() {
                                     </span>
                                 </div>
                             </label>
+                            {renderManualPermanentSettings("orange")}
                         </div>
                         <div className="flex gap-3">
-                            <button onClick={() => setIsManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={() => { setIsManualModalOpen(false); resetManualFields(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                             <button onClick={confirmManualAdd} className="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl hover:bg-orange-600 shadow-md transition">Zatwierdź</button>
                         </div>
                     </div>
@@ -4886,7 +5073,7 @@ export default function ProtocolsHub() {
             {/* MINI-MODAL: Wpis ręczny dla protokołu zwrotu (Aplikacyjnego) */}
             {isReturnManualModalOpen && (
                 <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border border-blue-300">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 animate-fade-in border border-blue-300">
                         <h3 className="text-lg font-black text-blue-700 mb-4 flex items-center gap-2"><span>📝</span> Dodaj wpis z palca</h3>
                         <div className="space-y-4 mb-6">
                             <div>
@@ -4909,7 +5096,15 @@ export default function ProtocolsHub() {
                                 <input
                                     type="checkbox"
                                     checked={manualIsPermanent}
-                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setManualIsPermanent(checked);
+                                        if (!checked) {
+                                            setManualLocation("");
+                                            setManualCategory("");
+                                            setManualSubcategory("");
+                                        }
+                                    }}
                                     className="w-4 h-4 mt-0.5 text-blue-600 rounded border-slate-300 focus:ring-blue-500"
                                 />
                                 <div className="flex flex-col">
@@ -4921,9 +5116,10 @@ export default function ProtocolsHub() {
                                     </span>
                                 </div>
                             </label>
+                            {renderManualPermanentSettings("blue")}
                         </div>
                         <div className="flex gap-3">
-                            <button onClick={() => setIsReturnManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={() => { setIsReturnManualModalOpen(false); resetManualFields(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                             <button onClick={confirmReturnManualAdd} className="flex-1 py-3 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md transition">Dodaj</button>
                         </div>
                     </div>
@@ -5698,7 +5894,7 @@ export default function ProtocolsHub() {
             {/* MINI-MODAL: Wpis ręczny dla protokołu papierowego */}
             {isPaperManualModalOpen && (
                 <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in border border-orange-300">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 animate-fade-in border border-orange-300">
                         <h3 className="text-lg font-black text-orange-700 mb-4 flex items-center gap-2"><span>📝</span> Dodaj wpis z palca</h3>
                         <div className="space-y-4 mb-6">
                             <div>
@@ -5721,7 +5917,15 @@ export default function ProtocolsHub() {
                                 <input
                                     type="checkbox"
                                     checked={manualIsPermanent}
-                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setManualIsPermanent(checked);
+                                        if (!checked) {
+                                            setManualLocation("");
+                                            setManualCategory("");
+                                            setManualSubcategory("");
+                                        }
+                                    }}
                                     className="w-4 h-4 mt-0.5 text-orange-600 rounded border-slate-300 focus:ring-orange-500"
                                 />
                                 <div className="flex flex-col">
@@ -5733,9 +5937,10 @@ export default function ProtocolsHub() {
                                     </span>
                                 </div>
                             </label>
+                            {renderManualPermanentSettings("orange")}
                         </div>
                         <div className="flex gap-3">
-                            <button onClick={() => setIsPaperManualModalOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={() => { setIsPaperManualModalOpen(false); resetManualFields(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                             <button onClick={confirmPaperManualAdd} className="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl hover:bg-orange-600 shadow-md transition">Dodaj</button>
                         </div>
                     </div>
@@ -6291,7 +6496,7 @@ export default function ProtocolsHub() {
             {/* SUB-MODAL WEWNĄTRZ AKCEPTACJI ZWROTÓW (Wpis całkowicie ręczny) */}
             {isAddManualToAcceptOpen && (
                 <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 animate-fade-in">
                         <h3 className="text-lg font-black text-purple-700 mb-4 flex items-center gap-2"><span>📝</span> Dodaj nowy wpis z palca</h3>
                         <div className="space-y-4 mb-6">
                             <div>
@@ -6314,7 +6519,15 @@ export default function ProtocolsHub() {
                                 <input
                                     type="checkbox"
                                     checked={manualIsPermanent}
-                                    onChange={(e) => setManualIsPermanent(e.target.checked)}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setManualIsPermanent(checked);
+                                        if (!checked) {
+                                            setManualLocation("");
+                                            setManualCategory("");
+                                            setManualSubcategory("");
+                                        }
+                                    }}
                                     className="w-4 h-4 mt-0.5 text-purple-600 rounded border-slate-300 focus:ring-purple-500"
                                 />
                                 <div className="flex flex-col">
@@ -6326,9 +6539,10 @@ export default function ProtocolsHub() {
                                     </span>
                                 </div>
                             </label>
+                            {renderManualPermanentSettings("purple")}
                         </div>
                         <div className="flex gap-3">
-                            <button onClick={() => setIsAddManualToAcceptOpen(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
+                            <button onClick={() => { setIsAddManualToAcceptOpen(false); resetManualFields(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition">Anuluj</button>
                             <button onClick={confirmAddManualToAccept} className="flex-1 py-3 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 shadow-md transition">Zatwierdź wpis</button>
                         </div>
                     </div>
