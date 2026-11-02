@@ -518,6 +518,15 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
         return false;
     };
 
+    const getItemLocationName = (item: InventoryItem): string => {
+        if (item.currentLocation && item.currentLocation.trim()) return item.currentLocation;
+        const matchedZone = storageLocations.find(l => 
+            (l.categories || []).includes(item.category) || 
+            (l.categories || []).some(catId => categoriesList.find(c => c.id === catId || c.name === catId)?.name === item.category)
+        );
+        return matchedZone ? matchedZone.name : "";
+    };
+
     const isResidualItem = (i: InventoryItem): boolean => {
         if (i.isResidual || i.inventoryNumber === "RESZTKI" || i.category === "Pozostałości budowlane") return true;
         if (categoriesList.some(c => c.name === i.category || c.id === i.category)) return true;
@@ -604,7 +613,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             isResidual,
             category: item.category,
             subcategory: item.subcategory,
-            currentLocation: item.currentLocation,
+            currentLocation: getItemLocationName(item) || item.currentLocation,
         }];
         setCart(newCart);
         saveDraft(newCart, selectedSiteId, orderNotes);
@@ -666,7 +675,7 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
             isResidual,
             category: item.category,
             subcategory: item.subcategory,
-            currentLocation: item.currentLocation,
+            currentLocation: getItemLocationName(item) || item.currentLocation,
         }];
 
         setCart(newCart);
@@ -1412,7 +1421,10 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
 
             // Filtr strefy składowania / sektora
             if (selectedZoneFilter !== "ALL") {
-                residualItems = residualItems.filter(i => i.currentLocation === selectedZoneFilter);
+                residualItems = residualItems.filter(i => {
+                    const loc = getItemLocationName(i);
+                    return loc && loc.toLowerCase() === selectedZoneFilter.toLowerCase();
+                });
             }
 
             return residualItems;
@@ -1759,9 +1771,12 @@ const [chatSelections, setChatSelections] = useState<Record<number, Record<strin
                                             ) : isResidualItem(item) ? (
                                                 <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                                                     <span className="text-[9px] font-black text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded border border-amber-300">🧱 PLAC</span>
-                                                    {item.currentLocation && (
-                                                        <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded border border-emerald-200">📍 {item.currentLocation}</span>
-                                                    )}
+                                                    {(() => {
+                                                        const loc = getItemLocationName(item);
+                                                        return loc ? (
+                                                            <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded border border-emerald-200">📍 {loc}</span>
+                                                        ) : null;
+                                                    })()}
                                                     {item.subcategory && (
                                                         <span className="text-[9px] font-semibold text-slate-500 truncate max-w-[120px]" title={item.subcategory}>{item.subcategory}</span>
                                                     )}

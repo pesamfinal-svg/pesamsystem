@@ -574,7 +574,7 @@ export default function InventoryPage() {
     // SZYBKA ZMIANA KATEGORII I PODKATEGORII RESZTEK BEZPOŚREDNIO W TABELI
     const [savingItemId, setSavingItemId] = useState<string | null>(null);
 
-    const handleQuickCategoryChange = async (itemId: string, newCategory: string) => {
+    const handleQuickCategoryChange = async (itemId: string, newCategory: string, targetZoneName?: string) => {
         try {
             setSavingItemId(itemId);
             const targetCatObj = categoriesList.find(c => c.name === newCategory);
@@ -582,18 +582,40 @@ export default function InventoryPage() {
             const currentItem = items.find(i => i.id === itemId);
             const newSub = validSubs.includes(currentItem?.subcategory || "") ? currentItem?.subcategory : "";
 
-            await updateDoc(doc(db, "inventory", itemId), {
+            // Wyznacz lokalizację / strefę: podana wprost LUB dopasowana do strefy mającej tę kategorię
+            let resolvedLocation = targetZoneName;
+            if (!resolvedLocation) {
+                const matchedZone = storageLocations.find(l => 
+                    (l.categories || []).includes(newCategory) || 
+                    (l.categories || []).some(catId => {
+                        const c = categoriesList.find(x => x.id === catId || x.name === catId);
+                        return c && (c.name === newCategory || c.id === newCategory);
+                    })
+                );
+                if (matchedZone) {
+                    resolvedLocation = matchedZone.name;
+                }
+            }
+
+            const updatePayload: any = {
                 category: newCategory,
                 subcategory: newSub || "",
                 isResidual: true,
                 updatedAt: new Date().toISOString()
-            });
+            };
+
+            if (resolvedLocation) {
+                updatePayload.currentLocation = resolvedLocation;
+            }
+
+            await updateDoc(doc(db, "inventory", itemId), updatePayload);
 
             setItems(prev => prev.map(i => i.id === itemId ? {
                 ...i,
                 category: newCategory,
                 subcategory: newSub || "",
-                isResidual: true
+                isResidual: true,
+                ...(resolvedLocation ? { currentLocation: resolvedLocation } : {})
             } : i));
         } catch (err: any) {
             console.error("Błąd aktualizacji kategorii:", err);
@@ -1890,7 +1912,7 @@ export default function InventoryPage() {
             }
 
             if (zoneCats.length === 1) {
-                handleQuickCategoryChange(itemId, zoneCats[0].name);
+                handleQuickCategoryChange(itemId, zoneCats[0].name, zone.name);
             } else {
                 setDropPickerData({
                     itemId,
@@ -1932,7 +1954,7 @@ export default function InventoryPage() {
                                     <button
                                         key={cat.id || cat.name}
                                         onClick={() => {
-                                            handleQuickCategoryChange(dropPickerData.itemId, cat.name);
+                                            handleQuickCategoryChange(dropPickerData.itemId, cat.name, dropPickerData.zone.name);
                                             setDropPickerData(null);
                                         }}
                                         className="w-full text-left p-3 rounded-xl border border-slate-200 hover:border-amber-500 hover:bg-amber-50/70 transition flex items-center gap-3 font-bold text-xs text-slate-800 hover:text-amber-950 group"
@@ -2115,7 +2137,7 @@ export default function InventoryPage() {
                                             if (splitAssignItem) {
                                                 if (isAssignable) {
                                                     if (assignableCats.length === 1) {
-                                                        handleQuickCategoryChange(splitAssignItem.id, assignableCats[0].name);
+                                                        handleQuickCategoryChange(splitAssignItem.id, assignableCats[0].name, loc.name);
                                                         setSplitAssignItem(null);
                                                     } else {
                                                         setDropPickerData({
@@ -2208,7 +2230,7 @@ export default function InventoryPage() {
                                                             setDragOverZoneId(null);
                                                             const dropId = e.dataTransfer.getData("text/plain") || draggedItem?.id;
                                                             if (dropId) {
-                                                                handleQuickCategoryChange(dropId, cat.name);
+                                                                handleQuickCategoryChange(dropId, cat.name, loc.name);
                                                             }
                                                             setDraggedItem(null);
                                                         }}
