@@ -55,6 +55,7 @@ interface InventoryItem {
     unit?: string;
     isPermanent?: boolean;
     isTemporary?: boolean;
+    isResidual?: boolean;
 }
 
 const DEFAULT_CATEGORY_TREE: Record<string, string[]> = {
@@ -1085,6 +1086,24 @@ export default function InventoryPage() {
         }
     };
 
+    const cleanFirestorePayload = (obj: any): any => {
+        if (obj === undefined) return null;
+        if (obj === null) return null;
+        if (Array.isArray(obj)) {
+            return obj.map(cleanFirestorePayload).filter(x => x !== undefined);
+        }
+        if (typeof obj === "object" && !(obj instanceof Date)) {
+            const cleaned: Record<string, any> = {};
+            for (const [k, v] of Object.entries(obj)) {
+                if (v !== undefined) {
+                    cleaned[k] = cleanFirestorePayload(v);
+                }
+            }
+            return cleaned;
+        }
+        return obj;
+    };
+
     const handleSave = async (e: React.FormEvent, addAnother = false) => {
         if (e && e.preventDefault) e.preventDefault();
         setIsUploading(true);
@@ -1101,8 +1120,20 @@ export default function InventoryPage() {
             let finalInvNumber = formData.inventoryNumber || "";
             let generatedDocId = "";
 
-            if (formData.type === "BULK" && !finalInvNumber) {
-                finalInvNumber = generateBulkId(formData.name || "", formData.subType as "MAIN_CAT" | "SUB_ITEM" | "MANUAL", formData.mainCategoryId || "");
+            if (formData.type === "BULK") {
+                if (formData.subType === "SUB_ITEM") {
+                    if (!finalInvNumber || finalInvNumber === "RESZTKI") {
+                        finalInvNumber = generateBulkId(formData.name || "", "SUB_ITEM", formData.mainCategoryId || "");
+                    }
+                } else if (formData.subType === "MAIN_CAT") {
+                    if (!finalInvNumber || finalInvNumber === "RESZTKI") {
+                        finalInvNumber = generateBulkId(formData.name || "", "MAIN_CAT", "");
+                    }
+                } else if (formData.subType === "MANUAL") {
+                    if (!finalInvNumber) {
+                        finalInvNumber = editingItem?.inventoryNumber || "RESZTKI";
+                    }
+                }
                 generatedDocId = finalInvNumber;
             }
 
@@ -1124,11 +1155,16 @@ export default function InventoryPage() {
                 finalSubcategory = formData.name || "";
             }
 
+            if (formData.type === "BULK" && formData.subType === "MAIN_CAT") {
+                finalCategory = formData.name || "System";
+                finalSubcategory = "";
+            }
+
             // Jeśli tworzymy luźny materiał (MANUAL), to nie ma on systemu nadrzędnego
             if (formData.type === "BULK" && formData.subType === "MANUAL") {
-                finalCategory = "Materiały i osprzęt";
-                finalSubcategory = formData.category || "Drobnica";
-                finalInvNumber = finalInvNumber || "RĘCZNY";
+                finalCategory = formData.category || (editingItem?.category || "Materiały i osprzęt");
+                finalSubcategory = formData.subcategory || (editingItem?.subcategory || "Drobnica");
+                finalInvNumber = finalInvNumber || "RESZTKI";
             }
 
             const qty = formData.type === "UNIQUE" ? 1 : (formData.subType === "MAIN_CAT" ? 0 : Number(formData.totalQuantity));
@@ -1146,25 +1182,36 @@ export default function InventoryPage() {
                 nextInspectionDate: calculatedNextDate
             };
 
+            const isNowResidual = formData.type === "BULK" && formData.subType === "MANUAL"
+                ? (editingItem ? (editingItem.isResidual ?? true) : false)
+                : false;
+
             let savedDocId = "";
 
             if (editingItem) {
-                const { availableQuantity, allocations, createdAt } = editingItem;
-                await updateDoc(doc(db, "inventory", editingItem.id), {
+                const safeAllocations = editingItem.allocations || {};
+                const safeAvailableQty = editingItem.availableQuantity !== undefined ? editingItem.availableQuantity : qty;
+                const safeCreatedAt = editingItem.createdAt || new Date().toISOString();
+
+                const updatePayload = cleanFirestorePayload({
                     ...itemDataToSave,
-                    inventoryNumber: finalInvNumber || editingItem.inventoryNumber,
+                    inventoryNumber: finalInvNumber || editingItem.inventoryNumber || "RESZTKI",
                     category: finalCategory,
                     subcategory: finalSubcategory,
                     imageUrl: finalImageUrl,
                     isUsingTemplateImage: finalIsUsingTemplate,
                     totalQuantity: qty,
-                    availableQuantity,
-                    allocations,
-                    createdAt
+                    availableQuantity: safeAvailableQty,
+                    allocations: safeAllocations,
+                    createdAt: safeCreatedAt,
+                    isResidual: isNowResidual,
+                    updatedAt: new Date().toISOString()
                 });
+
+                await updateDoc(doc(db, "inventory", editingItem.id), updatePayload);
                 savedDocId = editingItem.id;
             } else {
-                const newDocData = {
+                const newDocData = cleanFirestorePayload({
                     ...itemDataToSave,
                     inventoryNumber: finalInvNumber,
                     category: finalCategory,
@@ -1174,8 +1221,9 @@ export default function InventoryPage() {
                     totalQuantity: qty,
                     availableQuantity: qty,
                     allocations: {},
+                    isResidual: isNowResidual,
                     createdAt: new Date().toISOString()
-                };
+                });
 
                 if (generatedDocId) {
                     await setDoc(doc(db, "inventory", generatedDocId), newDocData);

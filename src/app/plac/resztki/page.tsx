@@ -209,6 +209,7 @@ export default function PlacResidualsPage() {
                         type: "BULK",
                         subType: "MANUAL",
                         status: "DOSTĘPNY",
+                        allocations: {},
                         createdAt: entry.createdAt || new Date().toISOString()
                     };
                     const docRef = await addDoc(collection(db, "inventory"), docData);
@@ -522,7 +523,7 @@ export default function PlacResidualsPage() {
                 };
                 finalImageUrl = await Promise.race([uploadPromise(), new Promise<string>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 7000))]);
             }
-            const docData = { name: newItem.name.trim(), availableQuantity: Number(newItem.qty) || 1, totalQuantity: Number(newItem.qty) || 1, unit: newItem.unit || "szt.", currentLocation: newItem.location || "Plac Zewnętrzny", category: newItem.category || "Pozostałości budowlane", subcategory: newItem.subcategory || "", additionalInfo: newItem.notes || "", imageUrl: finalImageUrl, inventoryNumber: "RESZTKI", isResidual: true, type: "BULK", subType: "MANUAL", status: "DOSTĘPNY", createdAt: new Date().toISOString() };
+            const docData = { name: newItem.name.trim(), availableQuantity: Number(newItem.qty) || 1, totalQuantity: Number(newItem.qty) || 1, unit: newItem.unit || "szt.", currentLocation: newItem.location || "Plac Zewnętrzny", category: newItem.category || "Pozostałości budowlane", subcategory: newItem.subcategory || "", additionalInfo: newItem.notes || "", imageUrl: finalImageUrl, inventoryNumber: "RESZTKI", isResidual: true, type: "BULK", subType: "MANUAL", status: "DOSTĘPNY", allocations: {}, createdAt: new Date().toISOString() };
             const docRef = await addDoc(collection(db, "inventory"), docData);
             const createdItem: ResidualItem = { id: docRef.id, ...docData };
             const updatedItems = [createdItem, ...items].sort((a, b) => a.name.localeCompare(b.name));
