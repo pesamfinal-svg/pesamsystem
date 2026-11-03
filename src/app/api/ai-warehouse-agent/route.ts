@@ -1,23 +1,23 @@
 // src/app/api/ai-warehouse-agent/route.ts
 // =============================================================================
-// PESAM Autonomous Data-Driven Multi-Agent Orchestrator v8.0
+// PESAM Autonomous Self-Learning Multi-Agent Orchestrator v9.0
 //
-// Architektura Wieloagentowa Sterowana Słownikiem Bazy Danych (Data Dictionary):
+// Dynamic Schema Discovery & Autonomous Agent Collaboration:
 //
-// 1. Mózg / Orchestrator (gemini-2.5-pro z Google Vertex AI):
-//    - Zna nazwy tabel i kolumn w DB_SCHEMA.
-//    - Nie używa sztywnych filtrów ani maskowań typu "wszystkie".
-//    - Jeśli pytanie jest ogólne (np. "jakimi autami dysponujemy"), generuje
-//      czyste zapytanie o całą kolekcję bez warunków 'where'.
-//    - Jeśli pytanie jest szczegółowe, precyzyjnie wskazuje kolumnę i operator.
-// 2. Inżynier Danych (Data Engine):
-//    - Wykonuje deklaratywne zapytania Firestore (collection, where, limit)
-//    - Równoległe pobieranie przez Promise.all, automatyczna konwersja Timestamp
-// 3. Rejestr ai_tools w Firestore:
-//    - Zapisuje wytworzone narzędzia, aby nie tworzyć ich ponownie
-// 4. Matematyk & Data Scientist (gemini-2.5-flash + Python Sandbox):
+// 1. Dynamic Schema Introspection (Brak sztywnego schematu w kodzie!):
+//    - adminDb.listCollections() + próbkowanie dokumentów w locie
+//    - Automatycznie wykrywa każdą nową kolekcję, nowe pole i typ danych
+// 2. Mózg / Orchestrator (gemini-2.5-pro z Google Vertex AI):
+//    - Otrzymuje świeżo zbadany schemat bazy i rejestr ai_tools
+//    - Zleca zadania specjalistycznym agentom
+// 3. Inżynier Danych (Firestore Expert):
+//    - Posiada kompletną wiedzę jak operować na Firestore SDK
+//    - Zamienia zlecenia na bezpieczne, wydajne zapytania (where, limit, relacje)
+// 4. Rejestr ai_tools w Firestore:
+//    - Pamięć długoterminowa: zapisuje nowe narzędzia, by natychmiast użyć ich w przyszłości
+// 5. Matematyk & Data Scientist (gemini-2.5-flash + Python Sandbox):
 //    - 100% precyzji obliczeniowej w bezpiecznej piaskownicy Vertex AI
-// 5. Prezenter UI (gemini-2.5-flash-lite):
+// 6. Prezenter UI (gemini-2.5-flash-lite):
 //    - Formatuje wynik: wykres (bar, pie, line), tabela lub KPI
 // =============================================================================
 
@@ -34,71 +34,110 @@ const ai = new GoogleGenAI({
 
 export const maxDuration = 60;
 
-// Modele Gemini dostępne w Google Cloud na endpointzie Global
+// Modele Gemini na endpointzie Global w Google Cloud
 const ORCHESTRATOR_MODEL = 'gemini-2.5-pro';
 const ORCHESTRATOR_FALLBACK = 'gemini-2.5-flash';
 const MATH_MODEL = 'gemini-2.5-flash';
 const PRESENTER_MODEL = 'gemini-2.5-flash-lite';
 
-// ─── SŁOWNIK BAZY DANYCH (Wstrzykiwany Mózgowi Orchestratora) ────────────────
-const DB_SCHEMA = `
-PESAM — SŁOWNIK BAZY DANYCH (DATA DICTIONARY):
+// ─── 1. DYNAMICZNA INSPEKCJA SCHEMATU BAZY DANYCH (Live Discovery) ────────────
+interface SchemaFieldInfo {
+    type: string;
+    sample: any;
+}
 
-1. KOLEKCJA "vehicles" (Flota samochodów firmy):
-   - id: string (identyfikator unikalny)
-   - brand: string (np. "Iveco", "Ford", "Renault", "Mercedes")
-   - model: string (np. "Daily", "Transit", "Master", "Sprinter")
-   - registration: string (np. "RDE HF31", "RDE 4522A")
-   - year: number (rok produkcji)
-   - initialMileage: number (przebieg początkowy w km)
-   - currentTires: string ("Letnie" | "Zimowe")
-   - inspectionDate: string (data badania technicznego YYYY-MM-DD)
+interface CollectionSchema {
+    collection: string;
+    fields: Record<string, SchemaFieldInfo>;
+}
 
-2. KOLEKCJA "repairs" (Historia napraw i serwisu samochodów):
-   - id: string (identyfikator unikalny)
-   - vehicleId: string (FK -> wskazuje na vehicles.id)
-   - date: string (format YYYY-MM-DD, np. "2024-03-15")
-   - cost: number (kwota netto naprawy w PLN)
-   - category: string ("Mechaniczna"|"Silnik"|"Układ hamulcowy"|"Zawieszenie"|
-               "Elektryczna"|"Klimatyzacja"|"Opony"|"Eksploatacyjna"|"Blacharsko-Lakiernicza"|"Przeglądy"|"Inne")
-   - mileage: number (przebieg w momencie naprawy)
-   - comments: string (opis naprawy / wykonanych prac)
-   - location: string (warsztat wykonujący)
-   - partsList: string[] (tablica wymienionych części)
+// Pamięć podręczna schematu (TTL: 5 minut), aby nie badać bazy przy każdym zapytaniu
+let cachedSchema: { timestamp: number; schema: Record<string, CollectionSchema> } | null = null;
 
-3. KOLEKCJA "residuals" (Resztki budowlane i materiały na placu/magazynie):
-   - id: string
-   - name: string (nazwa materiału, np. "Klej Atlas Plus 25kg", "Bloczek 590x120x239")
-   - quantity: number (ilość)
-   - unit: string (np. "szt.", "op.", "paleta", "m2", "mb")
-   - category: string ("kleje"|"pustaki"|"plyty-gk"|"farby-chemia"|"pianki-silikony"|
-               "kable-elektryka"|"gipsy-gladzie"|"izolacje-folie"|"szalunki"|"stal-ogrodzenia"|
-               "rury-kanalizacja"|"drewno-odpady")
-   - subcategory: string
-   - storageZone: string (strefa: "Plac Zewnętrzny"|"Magazyn Farb i Chemii"|"Hala rozsuwana"|"Regał na stal"|"Wiata otwarta"|"Spawalnia")
-   - updatedAt: Timestamp (data ostatniego ruchu / modyfikacji)
-   - siteId: string (budowa źródłowa)
+async function getLiveDatabaseSchema(): Promise<Record<string, CollectionSchema>> {
+    const now = Date.now();
+    if (cachedSchema && (now - cachedSchema.timestamp < 300000)) {
+        return cachedSchema.schema;
+    }
 
-4. KOLEKCJA "inventory" (Sprzęt budowlany, narzędzia i maszyny):
-   - id: string
-   - name: string (np. "Zagęszczarka Wacker Neuson", "Wkrętarka Makita")
-   - category: string
-   - quantity: number
-   - unit: string
-   - location: string
+    try {
+        const collections = await adminDb.listCollections();
+        const result: Record<string, CollectionSchema> = {};
 
-5. KOLEKCJA "orders" (Zamówienia z budów):
-   - id: string
-   - status: string ("pending"|"completed"|"cancelled")
-   - createdAt: Timestamp
-   - items: array
-   - siteId: string
+        // Badamy kolekcje biznesowe (pomijając wewnętrzne systemowe)
+        const businessCollections = collections.filter(c => !c.id.startsWith('_') && c.id !== 'ai_tools');
 
-6. KOLEKCJA "sites" (Budowy / Obiekty):
-   - id: string
-   - name: string
-   - address: string
-   - status: string ("active"|"closed")
+        await Promise.all(businessCollections.map(async (colRef) => {
+            try {
+                const snap = await colRef.limit(3).get();
+                const fields: Record<string, SchemaFieldInfo> = {};
+
+                snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    for (const [key, val] of Object.entries(data)) {
+                        if (val instanceof Timestamp) {
+                            fields[key] = { type: 'Timestamp', sample: val.toDate().toISOString().split('T')[0] };
+                        } else if (Array.isArray(val)) {
+                            fields[key] = { type: 'array', sample: val.slice(0, 2) };
+                        } else if (val === null) {
+                            if (!fields[key]) fields[key] = { type: 'null', sample: null };
+                        } else if (typeof val === 'object') {
+                            fields[key] = { type: 'object', sample: '{...}' };
+                        } else if (typeof val === 'string') {
+                            fields[key] = { type: 'string', sample: val.length > 50 ? val.slice(0, 45) + '...' : val };
+                        } else {
+                            fields[key] = { type: typeof val, sample: val };
+                        }
+                    }
+                });
+
+                result[colRef.id] = {
+                    collection: colRef.id,
+                    fields
+                };
+            } catch (colErr) {
+                console.error(`Błąd badania kolekcji ${colRef.id}:`, colErr);
+            }
+        }));
+
+        cachedSchema = { timestamp: now, schema: result };
+        return result;
+    } catch (err) {
+        console.error('Błąd badania schematu Firestore:', err);
+        return cachedSchema?.schema || {};
+    }
+}
+
+function formatSchemaForPrompt(schemaMap: Record<string, CollectionSchema>): string {
+    const lines: string[] = ['AKTUALNA STRUKTURA BAZY DANYCH (POBRANA NA ŻYWO Z FIRESTORE):'];
+    for (const [colName, colData] of Object.entries(schemaMap)) {
+        lines.push(`\nKOLEKCJA "${colName}":`);
+        const fieldEntries = Object.entries(colData.fields);
+        if (fieldEntries.length === 0) {
+            lines.push('  (Kolekcja pusta lub brak dokumentów próbnych)');
+        } else {
+            for (const [fname, finfo] of fieldEntries) {
+                const sampleStr = finfo.sample !== undefined ? ` [np. ${JSON.stringify(finfo.sample)}]` : '';
+                lines.push(`  - ${fname}: ${finfo.type}${sampleStr}`);
+            }
+        }
+    }
+    return lines.join('\n');
+}
+
+// ─── 2. INSTRUKCJA DLA AGENTA INŻYNIERA DANYCH (FIRESTORE EXPERT) ────────────
+const FIRESTORE_ENGINEER_INSTRUCTION = `
+JESTEŚ EKSPERTEM BAZY FIRESTORE (INŻYNIEREM DANYCH):
+Twoja wiedza o zasadach Firestore:
+1. Pobieranie danych:
+   - Jeśli zapytanie dotyczy ogółu danych (np. "wszystkie auta", "stany magazynowe", "jakie mamy pojazdy"), tablica 'where' MUSI być pusta [].
+   - Nie dodawaj filtrów jeśli użytkownik nie sprecyzował konkretnej wartości w pytaniu.
+2. Filtrowanie 'where':
+   - Używaj wyłącznie pól, które naprawdę istnieją w zbadanym schemacie bazy.
+   - Dozwolone operatory: '==' (równość), '>=' i '<=' (zakresy dat/liczb).
+   - Nie łącz filtrów nierówności na różnych polach bez composite index.
+3. Wydajność:
+   - Ustawiaj limit w granicach 100-350 dokumentów.
 `;
 
 // ─── RETRY Z EXPONENTIAL BACKOFF ─────────────────────────────────────────────
@@ -119,31 +158,30 @@ async function runWithRetry(params: any, retries = 3, delay = 1000): Promise<any
     }
 }
 
-// ─── SCHEMAT DEKLARATYWNEGO PLANU ZAPYTAŃ DLA ORCHESTRATORA ──────────────────
+// ─── SCHEMATY JSON ───────────────────────────────────────────────────────────
 const QUERY_STEP_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         collection: {
             type: Type.STRING,
-            enum: ['vehicles', 'repairs', 'residuals', 'inventory', 'orders', 'sites'],
-            description: 'Nazwa kolekcji z DB_SCHEMA, którą należy pobrać z bazy'
+            description: 'Nazwa kolekcji wykrytej w zbadanym schemacie bazy danych'
         },
         where: {
             type: Type.ARRAY,
-            description: 'Opcjonalne filtry. UŻYWAJ TYLKO jeśli użytkownik w pytaniu podał konkretne ograniczenie (np. konkretną markę "Iveco", konkretną kategorię czy datę). Jeśli pyta ogólnie o wszystkie samochody, naprawy lub resztki — zostaw tę tablicę PUSTĄ.',
+            description: 'Filtry where. PUSTA TABLICA [] jeśli użytkownik pyta ogólnie o wszystkie rekordy (np. wszystkie auta, wszystkie naprawy, cały magazyn). Filtry dodawaj TYLKO gdy użytkownik wprost podał konkretną wartość (np. markę "Iveco" lub datę).',
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    field: { type: Type.STRING, description: 'Dokładna nazwa kolumny z DB_SCHEMA, np. "brand", "category", "storageZone", "date"' },
+                    field: { type: Type.STRING, description: 'Rzeczywista nazwa kolumny ze zbadanego schematu' },
                     op: { type: Type.STRING, enum: ['==', '>=', '<=', '>', '<'] },
-                    value: { type: Type.STRING, description: 'Konkretna wartość filtra (np. "Iveco", "2024-01-01")' }
+                    value: { type: Type.STRING, description: 'Wartość filtra' }
                 },
                 required: ['field', 'op', 'value']
             }
         },
         limit: {
             type: Type.NUMBER,
-            description: 'Maksymalna liczba rekordów (domyślnie 250, max 500)'
+            description: 'Limit rekordów (domyślnie 250, max 500)'
         }
     },
     required: ['collection']
@@ -154,7 +192,7 @@ const ORCHESTRATOR_SCHEMA = {
     properties: {
         isAnalysis: {
             type: Type.BOOLEAN,
-            description: 'true = zapytanie o dane z bazy (flota, naprawy, magazyn, resztki, budowy, koszty); false = zwykłe powitanie, rozmowa ogólna, kim jesteś'
+            description: 'true = zapytanie o dane z bazy; false = zwykłe powitanie, rozmowa ogólna, kim jesteś'
         },
         conversationalReply: {
             type: Type.STRING,
@@ -162,7 +200,7 @@ const ORCHESTRATOR_SCHEMA = {
         },
         toolAction: {
             type: Type.STRING,
-            description: '"USE_EXISTING" jeśli zapytanie pasuje do jednego z zarejestrowanych narzędzi z EXISTING_TOOLS; "CREATE_NEW" jeśli takiego narzędzia jeszcze nie ma w rejestrze.',
+            description: '"USE_EXISTING" jeśli zapytanie pasuje do jednego z zarejestrowanych narzędzi z EXISTING_TOOLS; "CREATE_NEW" jeśli takiego narzędzia jeszcze nie ma w bazie.',
             enum: ['USE_EXISTING', 'CREATE_NEW']
         },
         matchedToolId: {
@@ -173,9 +211,9 @@ const ORCHESTRATOR_SCHEMA = {
             type: Type.OBJECT,
             description: 'Definicja nowego narzędzia jeśli toolAction == "CREATE_NEW"',
             properties: {
-                id: { type: Type.STRING, description: 'Unikalny slug w snake_case, np. "fleet_cost_per_vehicle", "residual_stock_by_zone"' },
+                id: { type: Type.STRING, description: 'Slug w snake_case' },
                 name: { type: Type.STRING, description: 'Zwięzła polska nazwa narzędzia' },
-                description: { type: Type.STRING, description: 'Opis co narzędzie liczy i kiedy go używać' },
+                description: { type: Type.STRING, description: 'Opis działania narzędzia' },
                 analyticalGoal: { type: Type.STRING, description: 'Dokładny cel wyliczeń dla Agenta Pythona' },
                 preferredWidget: { type: Type.STRING, enum: ['chart', 'table', 'kpi'] },
                 chartType: { type: Type.STRING, enum: ['bar', 'pie', 'line'] }
@@ -184,12 +222,12 @@ const ORCHESTRATOR_SCHEMA = {
         },
         queries: {
             type: Type.ARRAY,
-            description: 'Lista zapytań do wykonania przez Inżyniera Danych w Firestore. Określ które kolekcje pobrać i czy mają mieć filtry.',
+            description: 'Zlecenie dla Inżyniera Danych: lista zapytań do wykonania na kolekcjach zbadanego schematu.',
             items: QUERY_STEP_SCHEMA
         },
         analyticalGoal: {
             type: Type.STRING,
-            description: 'Dokładny cel matematyczny dla Agenta Pythona (co ma policzyć, pogrupować, zsumować lub porównać ze zwróconych danych)'
+            description: 'Instrukcja obliczeniowa dla Agenta Matematyka'
         }
     },
     required: ['isAnalysis']
@@ -255,14 +293,14 @@ const TOOL_RENDER_KPI = {
     }
 };
 
-// ─── DEKLARATYWNY SILNIK DANYCH (Inżynier Danych) ────────────────────────────
+// ─── WYKONYWANIE ZAPYTAŃ PRZEZ INŻYNIERA DANYCH ──────────────────────────────
 export interface FirestoreQueryStep {
     collection: string;
     where?: Array<{ field: string; op: string; value: any }>;
     limit?: number;
 }
 
-async function executeDeclarativeQueries(queries: FirestoreQueryStep[]): Promise<{ data: Record<string, any[]>; collectionsUsed: string[] }> {
+async function executeDataEngineQueries(queries: FirestoreQueryStep[]): Promise<{ data: Record<string, any[]>; collectionsUsed: string[] }> {
     const data: Record<string, any[]> = {};
     const collectionsUsed: string[] = [];
 
@@ -270,7 +308,6 @@ async function executeDeclarativeQueries(queries: FirestoreQueryStep[]): Promise
         const colName = step.collection;
         let q: FirebaseFirestore.Query = adminDb.collection(colName);
 
-        // Zastosuj filtry where tylko jeśli zostały rzeczywiście zdefiniowane
         if (Array.isArray(step.where) && step.where.length > 0) {
             for (const filter of step.where) {
                 if (filter.field && filter.op && filter.value !== undefined && filter.value !== null) {
@@ -291,7 +328,6 @@ async function executeDeclarativeQueries(queries: FirestoreQueryStep[]): Promise
                     record[key] = val.toDate().toISOString().split('T')[0];
                     record[`${key}Millis`] = val.toMillis();
                 } else if (typeof val === 'string' && val.length > 500) {
-                    // Ignoruj olbrzymie stringi / skany / base64
                     continue;
                 } else {
                     record[key] = val;
@@ -348,7 +384,7 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Brak uprawnienia do Asystenta AI' }, { status: 403 });
         }
 
-        // 3. Pobranie zapytania
+        // 3. Pobranie zapytania użytkownika
         const { messages } = await req.json() as { messages: Array<{ role: string; content: string }> };
         if (!messages?.length) {
             return NextResponse.json({ error: 'Brak treści wiadomości' }, { status: 400 });
@@ -356,7 +392,12 @@ export async function POST(req: Request) {
         const latestQuestion = messages[messages.length - 1].content;
         logs.push(`[Użytkownik] "${latestQuestion}"`);
 
-        // 4. Pobranie biblioteki nauczonych narzędzi z Firestore (ai_tools)
+        // 4. DYNAMICZNA INSPEKCJA BAZY DANYCH (Odkrywanie schematu na żywo)
+        logs.push(`[Introspection] Badanie struktury Firestore w czasie rzeczywistym...`);
+        const liveSchema = await getLiveDatabaseSchema();
+        const liveSchemaPromptText = formatSchemaForPrompt(liveSchema);
+
+        // 5. Pobranie biblioteki nauczonych narzędzi z Firestore (ai_tools)
         const savedToolsSnap = await adminDb.collection('ai_tools').orderBy('usageCount', 'desc').limit(40).get();
         const existingToolsList = savedToolsSnap.docs.map(d => {
             const data = d.data();
@@ -376,12 +417,14 @@ export async function POST(req: Request) {
             : '(Brak zarejestrowanych narzędzi — system wytworzy pierwsze narzędzie dla tego pytania)';
 
         // =====================================================================
-        // AGENT 1: ORCHESTRATOR / MÓZG (gemini-2.5-pro)
+        // AGENT 1: ORCHESTRATOR / GŁÓWNY MÓZG (gemini-2.5-pro)
         // =====================================================================
         logs.push(`[Mózg: Orchestrator] Analiza zapytania (Model: ${ORCHESTRATOR_MODEL})...`);
 
         const orchestratorPrompt = `
-${DB_SCHEMA}
+${liveSchemaPromptText}
+
+${FIRESTORE_ENGINEER_INSTRUCTION}
 
 ZAREJESTROWANE NARZĘDZIA W BAZIE FIRESTORE (ai_tools):
 ${toolsSummary}
@@ -389,17 +432,16 @@ ${toolsSummary}
 Pytanie użytkownika: "${latestQuestion}"
 Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
-ZASADY DLA ORCHESTRATORA:
-1. Znasz dokładne nazwy tabel i kolumn w DB_SCHEMA.
-2. Gdy pytanie to zwykłe powitanie/rozmowa ogólna -> isAnalysis=false, conversationalReply="...".
-3. Gdy pytanie dotyczy danych z bazy:
-   a) Sprawdź, czy któreś narzędzie z ZAREJESTROWANYCH NARZĘDZI pasuje:
-      - Jeśli TAK: ustaw toolAction="USE_EXISTING" oraz matchedToolId na ID pasującego narzędzia.
-      - Jeśli NIE: ustaw toolAction="CREATE_NEW" i zdefiniuj newToolDefinition (slug, nazwa, opis, analyticalGoal dla Pythona).
-   b) ZBUDUJ PRECYZYJNE ZAPYTANIA W 'queries':
-      - Określ, które kolekcje z DB_SCHEMA muszą zostać pobrane ('vehicles', 'repairs', 'residuals', 'inventory', 'orders', 'sites').
-      - Jeśli użytkownik pyta OGÓLNIE (np. "jakimi samochodami dysponujemy", "ile wydaliśmy na naprawy", "co mamy na magazynie") -> NIE DODAWASZ ŻADNYCH FILTRÓW! Zostaw tablicę 'where' jako pustą []. Wtedy Inżynier Danych pobierze wszystkie rekordy.
-      - Jeśli użytkownik wskazał KONKRETNY filtr w pytaniu (np. "Iveco", "Zawieszenie", "rok 2024") -> dodaj filtr do tablicy 'where' z dokładną nazwą kolumny z DB_SCHEMA (np. field: "brand", op: "==", value: "Iveco").
+ROLA ORCHESTRATORA:
+1. Przeanalizuj pytanie użytkownika w kontekście zbadanej struktury bazy danych.
+2. Zdecyduj czy to zwykła rozmowa (isAnalysis=false), czy zadanie na danych.
+3. Jeśli zadanie na danych:
+   a) Sprawdź czy któreś z zarejestrowanych narzędzi (ai_tools) pasuje do pytania (USE_EXISTING).
+   b) Jeśli nie, stwórz nowe narzędzie (CREATE_NEW) z definicją i celem analitycznym.
+   c) Zleć Inżynierowi Danych zapytania 'queries':
+      - Wybierz odpowiednie kolekcje ze zbadanego schematu bazy danych.
+      - PAMIĘTAJ: Jeśli użytkownik pyta OGÓLNIE (np. o wszystkie samochody, wszystkie naprawy, stan magazynu), tablica 'where' MUSI być pusta [].
+      - Jeśli pyta o konkretną wartość (np. markę lub kategorię), wskaż pole ze schematu i wartość.
 `;
 
         let orchestratorRes: any;
@@ -408,7 +450,7 @@ ZASADY DLA ORCHESTRATORA:
                 model: ORCHESTRATOR_MODEL,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem i Architektem Bazy Danych PESAM. Posługujesz się schematem DB_SCHEMA. Budujesz precyzyjne zapytania w 'queries'. Gdy pytanie jest ogólne o daną encję, tablica 'where' MUSI być pusta [].`,
+                    systemInstruction: `Jesteś Głównym Mózgiem i Menedżerem PESAM. Otrzymujesz strukturę bazy danych odkrytą na żywo. Zlecasz zapytania do bazy Inżynierowi Danych.`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
@@ -420,7 +462,7 @@ ZASADY DLA ORCHESTRATORA:
                 model: ORCHESTRATOR_FALLBACK,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem i Architektem PESAM. Budujesz zapytania w 'queries' na podstawie DB_SCHEMA.`,
+                    systemInstruction: `Jesteś Głównym Mózgiem PESAM. Zlecasz zapytania do bazy na podstawie zbadanego schematu.`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
@@ -479,30 +521,11 @@ ZASADY DLA ORCHESTRATORA:
             logs.push(`[ai_tools] 🎓 Tworzenie nowej umiejętności: "${activeTool.name}"`);
         }
 
-        // Zabezpieczenie: jeśli queriesToRun jest puste, wywnioskuj kolekcję z intencji pytania
-        if (queriesToRun.length === 0) {
-            const ql = latestQuestion.toLowerCase();
-            if (ql.includes('samoch') || ql.includes('aut') || ql.includes('flot') || ql.includes('pojazd') || ql.includes('napraw')) {
-                queriesToRun.push({ collection: 'vehicles' });
-                if (ql.includes('napraw') || ql.includes('koszt') || ql.includes('serwis') || ql.includes('pieni')) {
-                    queriesToRun.push({ collection: 'repairs' });
-                }
-            } else if (ql.includes('resztk') || ql.includes('plac') || ql.includes('stref') || ql.includes('magazyn')) {
-                queriesToRun.push({ collection: 'residuals' });
-            } else if (ql.includes('sprzęt') || ql.includes('narzędz') || ql.includes('maszyn')) {
-                queriesToRun.push({ collection: 'inventory' });
-            } else if (ql.includes('zamówien')) {
-                queriesToRun.push({ collection: 'orders' });
-            } else if (ql.includes('budow')) {
-                queriesToRun.push({ collection: 'sites' });
-            }
-        }
-
         // =====================================================================
         // AGENT 2: INŻYNIER DANYCH — POBIERANIE ZAPYTANIAMI DEKLARATYWNYMI
         // =====================================================================
         logs.push(`[Agent 2: Inżynier Danych] Wykonywanie zapytań do Firestore (${queriesToRun.map(q => q.collection).join(', ')})...`);
-        const { data: dbData, collectionsUsed } = await executeDeclarativeQueries(queriesToRun);
+        const { data: dbData, collectionsUsed } = await executeDataEngineQueries(queriesToRun);
         logs.push(`[Firestore] Pobrane rekordy z kolekcji: ${collectionsUsed.join(', ') || 'brak'}`);
 
         const totalRecords = Object.values(dbData).reduce((acc: number, arr: any[]) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
@@ -671,7 +694,7 @@ BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
         });
 
     } catch (err: any) {
-        console.error('Błąd Orchestratora v8.0:', err);
+        console.error('Błąd Orchestratora v9.0:', err);
         return NextResponse.json({
             error: 'Błąd przetwarzania wieloagentowego',
             detail: String(err?.message || err),
