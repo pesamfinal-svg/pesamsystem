@@ -251,9 +251,15 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
             });
 
             if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                const errorObj = new Error(err.error || err.detail || 'Błąd serwera');
-                (errorObj as any).logs = err.logs;
+                const text = await res.text();
+                let errData: any = {};
+                try {
+                    errData = JSON.parse(text);
+                } catch {
+                    errData = { error: text || `Błąd serwera (HTTP ${res.status})` };
+                }
+                const errorObj = new Error(errData.detail ? `${errData.error || 'Błąd'}: ${errData.detail}` : (errData.error || `Błąd serwera (HTTP ${res.status})`));
+                (errorObj as any).logs = Array.isArray(errData.logs) ? errData.logs : [];
                 throw errorObj;
             }
 

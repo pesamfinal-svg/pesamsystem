@@ -35,8 +35,8 @@ const ai = new GoogleGenAI({
 export const maxDuration = 60;
 
 // Modele Gemini na endpointzie Global w Google Cloud
-const ORCHESTRATOR_MODEL = 'gemini-2.5-pro';
-const ORCHESTRATOR_FALLBACK = 'gemini-2.5-flash';
+const ORCHESTRATOR_MODEL = 'gemini-2.5-flash';
+const ORCHESTRATOR_FALLBACK = 'gemini-2.5-flash-lite';
 const MATH_MODEL = 'gemini-2.5-flash';
 const PRESENTER_MODEL = 'gemini-2.5-flash-lite';
 
@@ -191,7 +191,7 @@ const QUERY_STEP_SCHEMA = {
                 type: Type.OBJECT,
                 properties: {
                     field: { type: Type.STRING, description: 'Rzeczywista nazwa kolumny ze zbadanego schematu' },
-                    op: { type: Type.STRING, enum: ['==', '>=', '<=', '>', '<'] },
+                    op: { type: Type.STRING, description: 'Operator porównania: ==, >=, <=, >, <' },
                     value: { type: Type.STRING, description: 'Wartość filtra' }
                 },
                 required: ['field', 'op', 'value']
@@ -239,7 +239,7 @@ const ORCHESTRATOR_SCHEMA = {
         },
         queries: {
             type: Type.ARRAY,
-            description: 'Zlecenie dla Inżyniera Danych: lista zapytań do wykonania na kolekcjach zbadanego schematu. Gdy isAnalysis=true, MUSI zawierać co najmniej 1 kolekcję (np. collection="repairs", where=[]).',
+            description: 'Zlecenie dla Inżyniera Danych: lista zapytań do wykonania na kolekcjach zbadanego schematu. Gdy isAnalysis=true, podaj co najmniej 1 kolekcję (np. collection="repairs", where=[]).',
             items: QUERY_STEP_SCHEMA
         },
         analyticalGoal: {
@@ -247,7 +247,7 @@ const ORCHESTRATOR_SCHEMA = {
             description: 'Instrukcja obliczeniowa dla Agenta Matematyka'
         }
     },
-    required: ['isAnalysis', 'toolAction', 'queries', 'analyticalGoal']
+    required: ['isAnalysis']
 };
 
 // ─── NARZĘDZIA PREZENTERA UI ─────────────────────────────────────────────────
@@ -483,37 +483,39 @@ ROLA ORCHESTRATORA:
 `;
 
         let orchestratorRes: any;
+        let plan: any = {};
         try {
             orchestratorRes = await runWithRetry({
                 model: ORCHESTRATOR_MODEL,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem i Menedżerem PESAM. Otrzymujesz strukturę bazy danych odkrytą na żywo. Zlecasz zapytania do bazy Inżynierowi Danych. ZAWSZE wypełniaj 'queries' co najmniej jedną kolekcją ze schematu.`,
+                    systemInstruction: `Jesteś Głównym Mózgiem i Menedżerem PESAM. Otrzymujesz strukturę bazy danych odkrytą na żywo. Zlecasz zapytania do bazy Inżynierowi Danych. ZAWSZE wypełniaj 'queries' co najmniej jedną trafną kolekcją ze schematu (np. repairs, vehicles, inventory).`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
                 }
             });
+            plan = JSON.parse(orchestratorRes.text?.replace(/```json|```/g, '').trim() || '{}');
         } catch (err: any) {
             logs.push(`[Mózg: Błąd ${ORCHESTRATOR_MODEL}] ${err?.message || err}`);
             logs.push(`[Orchestrator Fallback] Przełączanie na ${ORCHESTRATOR_FALLBACK}...`);
-            orchestratorRes = await runWithRetry({
-                model: ORCHESTRATOR_FALLBACK,
-                contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
-                config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem PESAM. Zlecasz zapytania do bazy na podstawie zbadanego schematu. ZAWSZE wypełniaj 'queries' co najmniej jedną trafną kolekcją ze schematu (np. repairs, vehicles, inventory).`,
-                    temperature: 0.1,
-                    responseMimeType: 'application/json',
-                    responseSchema: ORCHESTRATOR_SCHEMA
-                }
-            });
-        }
-
-        let plan: any = {};
-        try {
-            plan = JSON.parse(orchestratorRes.text?.replace(/```json|```/g, '').trim() || '{}');
-        } catch {
-            plan = { isAnalysis: true, toolAction: 'CREATE_NEW' };
+            try {
+                orchestratorRes = await runWithRetry({
+                    model: ORCHESTRATOR_FALLBACK,
+                    contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
+                    config: {
+                        systemInstruction: `Jesteś Głównym Mózgiem PESAM. Zlecasz zapytania do bazy na podstawie zbadanego schematu. ZAWSZE wypełniaj 'queries' co najmniej jedną trafną kolekcją ze schematu (np. repairs, vehicles, inventory).`,
+                        temperature: 0.1,
+                        responseMimeType: 'application/json',
+                        responseSchema: ORCHESTRATOR_SCHEMA
+                    }
+                });
+                plan = JSON.parse(orchestratorRes.text?.replace(/```json|```/g, '').trim() || '{}');
+            } catch (fallbackErr: any) {
+                logs.push(`[Mózg: Błąd ${ORCHESTRATOR_FALLBACK}] ${fallbackErr?.message || fallbackErr}`);
+                // Bezpieczny fallback — Inteligentna Siatka Bezpieczeństwa wyznaczy kolekcje z pytania!
+                plan = { isAnalysis: true, toolAction: 'CREATE_NEW', analyticalGoal: latestQuestion };
+            }
         }
 
         // Ścieżka rozmowy ogólnej
