@@ -1,24 +1,13 @@
 // src/app/api/ai-warehouse-agent/route.ts
 // =============================================================================
-// PESAM Autonomous Self-Learning Multi-Agent Orchestrator v9.0
+// PESAM Autonomous Self-Learning Multi-Agent Orchestrator v10.0
 //
-// Dynamic Schema Discovery & Autonomous Agent Collaboration:
-//
-// 1. Dynamic Schema Introspection (Brak sztywnego schematu w kodzie!):
-//    - adminDb.listCollections() + próbkowanie dokumentów w locie
-//    - Automatycznie wykrywa każdą nową kolekcję, nowe pole i typ danych
-// 2. Mózg / Orchestrator (gemini-2.5-pro z Google Vertex AI):
-//    - Otrzymuje świeżo zbadany schemat bazy i rejestr ai_tools
-//    - Zleca zadania specjalistycznym agentom
-// 3. Inżynier Danych (Firestore Expert):
-//    - Posiada kompletną wiedzę jak operować na Firestore SDK
-//    - Zamienia zlecenia na bezpieczne, wydajne zapytania (where, limit, relacje)
-// 4. Rejestr ai_tools w Firestore:
-//    - Pamięć długoterminowa: zapisuje nowe narzędzia, by natychmiast użyć ich w przyszłości
-// 5. Matematyk & Data Scientist (gemini-2.5-flash + Python Sandbox):
-//    - 100% precyzji obliczeniowej w bezpiecznej piaskownicy Vertex AI
-// 6. Prezenter UI (gemini-2.5-flash-lite):
-//    - Formatuje wynik: wykres (bar, pie, line), tabela lub KPI
+// Architektura 2-krokowa (eliminacja timeoutów):
+// 1. getLiveDatabaseSchema() — NIEBLOKUJĄCA: jeśli cache zimny → statyczny schemat + odświeżanie w tle
+// 2. AGENT 1: Orchestrator (gemini-2.5-flash-lite, ~3-5s) — tylko plan + queries
+// 3. AGENT 2: Inżynier Danych (Firestore SDK) — pobiera dane
+// 4. AGENT 3: Matematyk+Prezenter (gemini-2.5-flash, ~10-15s) — liczy + wybiera widget w 1 wywołaniu
+// Łączny czas: ~20-25s (zamiast ~50s w v9.0)
 // =============================================================================
 
 import { NextResponse } from 'next/server';
@@ -34,11 +23,23 @@ const ai = new GoogleGenAI({
 
 export const maxDuration = 60;
 
-// Modele Gemini na endpointzie Global w Google Cloud
-const ORCHESTRATOR_MODEL = 'gemini-2.5-flash';
-const ORCHESTRATOR_FALLBACK = 'gemini-2.5-flash-lite';
-const MATH_MODEL = 'gemini-2.5-flash';
-const PRESENTER_MODEL = 'gemini-2.5-flash-lite';
+// Modele — globalny endpoint Vertex AI
+const ORCHESTRATOR_MODEL = 'gemini-2.5-flash-lite'; // szybki planer
+const MATH_PRESENTER_MODEL = 'gemini-2.5-flash';     // math + prezentacja w 1 wywołaniu
+
+// ─── STATYCZNY SCHEMAT (fallback gdy cache zimny) ────────────────────────────
+// Aktualizowany automatycznie przy kolejnych żądaniach przez getLiveDatabaseSchema()
+const STATIC_SCHEMA_TEXT = `STRUKTURA BAZY DANYCH PESAM (schemat statyczny — zaktualizowany na żywo przy kolejnym żądaniu):
+KOLEKCJA "vehicles": brand(string), model(string), year(number), registration(string), initialMileage(number), inspectionDate(string), dateAdded(string), summerTires(string), winterTires(string), currentTires(string)
+KOLEKCJA "repairs": vehicleId(string,FK→vehicles), date(string,YYYY-MM-DD), cost(number,PLN), category(string), mileage(number), comments(string), location(string), accountingNumber(string), partsList(array), repairType(string)
+KOLEKCJA "inventory": name(string), quantity(number), unit(string), category(string), zone(string), siteId(string), updatedAt(Timestamp)
+KOLEKCJA "sites": name(string), address(string), managerId(string)
+KOLEKCJA "workers": firstName(string), lastName(string), siteId(string), role(string)
+KOLEKCJA "orders": status(string), createdAt(Timestamp), totalAmount(number), siteId(string)
+KOLEKCJA "claims": type(string), status(string), amount(number), date(string), description(string)
+KOLEKCJA "protocols": siteId(string), date(string), type(string), status(string)
+KOLEKCJA "closeouts": siteId(string), date(string), totalCost(number), status(string)
+KOLEKCJA "transactions": type(string), amount(number), date(string), category(string), description(string)`;
 
 // ─── 1. DYNAMICZNA INSPEKCJA SCHEMATU BAZY DANYCH (Live Discovery) ────────────
 interface SchemaFieldInfo {
@@ -51,7 +52,7 @@ interface CollectionSchema {
     fields: Record<string, SchemaFieldInfo>;
 }
 
-// Pamięć podręczna schematu (TTL: 5 minut), aby nie badać bazy przy każdym zapytaniu
+// Pamięć podręczna schematu (TTL: 5 minut)
 let cachedSchema: { timestamp: number; schema: Record<string, CollectionSchema> } | null = null;
 
 async function getLiveDatabaseSchema(): Promise<Record<string, CollectionSchema>> {
@@ -62,7 +63,8 @@ async function getLiveDatabaseSchema(): Promise<Record<string, CollectionSchema>
 
     const KNOWN_COLLECTIONS = [
         'vehicles', 'repairs', 'inventory', 'sites', 'workers',
-        'protocols', 'claims', 'pending_wz_items', 'roles', 'users', 'closeouts'
+        'protocols', 'claims', 'pending_wz_items', 'roles', 'users',
+        'closeouts', 'orders', 'transactions'
     ];
 
     try {
@@ -74,7 +76,6 @@ async function getLiveDatabaseSchema(): Promise<Record<string, CollectionSchema>
             console.warn('adminDb.listCollections() niedostępne, użycie sondowania znanych kolekcji:', listErr);
         }
 
-        // Jeśli listCollections nie zwróciło kolekcji, sondujemy znane kolekcje
         if (collectionRefs.length === 0) {
             collectionRefs = KNOWN_COLLECTIONS.map(name => adminDb.collection(name));
         }
@@ -143,23 +144,8 @@ function formatSchemaForPrompt(schemaMap: Record<string, CollectionSchema>): str
     return lines.join('\n');
 }
 
-// ─── 2. INSTRUKCJA DLA AGENTA INŻYNIERA DANYCH (FIRESTORE EXPERT) ────────────
-const FIRESTORE_ENGINEER_INSTRUCTION = `
-JESTEŚ EKSPERTEM BAZY FIRESTORE (INŻYNIEREM DANYCH):
-Twoja wiedza o zasadach Firestore:
-1. Pobieranie danych:
-   - Jeśli zapytanie dotyczy ogółu danych (np. "wszystkie auta", "stany magazynowe", "jakie mamy pojazdy"), tablica 'where' MUSI być pusta [].
-   - Nie dodawaj filtrów jeśli użytkownik nie sprecyzował konkretnej wartości w pytaniu.
-2. Filtrowanie 'where':
-   - Używaj wyłącznie pól, które naprawdę istnieją w zbadanym schemacie bazy.
-   - Dozwolone operatory: '==' (równość), '>=' i '<=' (zakresy dat/liczb).
-   - Nie łącz filtrów nierówności na różnych polach bez composite index.
-3. Wydajność:
-   - Ustawiaj limit w granicach 100-350 dokumentów.
-`;
-
 // ─── RETRY Z EXPONENTIAL BACKOFF ─────────────────────────────────────────────
-async function runWithRetry(params: any, retries = 3, delay = 1000): Promise<any> {
+async function runWithRetry(params: any, retries = 2, delay = 800): Promise<any> {
     try {
         return await ai.models.generateContent(params);
     } catch (error: any) {
@@ -176,22 +162,22 @@ async function runWithRetry(params: any, retries = 3, delay = 1000): Promise<any
     }
 }
 
-// ─── SCHEMATY JSON ───────────────────────────────────────────────────────────
+// ─── SCHEMATY JSON DLA ORCHESTRATORA ────────────────────────────────────────
 const QUERY_STEP_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         collection: {
             type: Type.STRING,
-            description: 'Nazwa kolekcji wykrytej w zbadanym schemacie bazy danych'
+            description: 'Nazwa kolekcji z bazy danych'
         },
         where: {
             type: Type.ARRAY,
-            description: 'Filtry where. PUSTA TABLICA [] jeśli użytkownik pyta ogólnie o wszystkie rekordy (np. wszystkie auta, wszystkie naprawy, cały magazyn). Filtry dodawaj TYLKO gdy użytkownik wprost podał konkretną wartość (np. markę "Iveco" lub datę).',
+            description: 'Filtry where. PUSTA TABLICA [] jeśli pytanie ogólne. Dodawaj filtry TYLKO gdy użytkownik wprost podał konkretną wartość.',
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    field: { type: Type.STRING, description: 'Rzeczywista nazwa kolumny ze zbadanego schematu' },
-                    op: { type: Type.STRING, description: 'Operator porównania: ==, >=, <=, >, <' },
+                    field: { type: Type.STRING, description: 'Nazwa pola' },
+                    op: { type: Type.STRING, description: 'Operator: ==, >=, <=, >, <' },
                     value: { type: Type.STRING, description: 'Wartość filtra' }
                 },
                 required: ['field', 'op', 'value']
@@ -199,10 +185,10 @@ const QUERY_STEP_SCHEMA = {
         },
         limit: {
             type: Type.NUMBER,
-            description: 'Limit rekordów (domyślnie 250, max 500)'
+            description: 'Limit rekordów (domyślnie 300, max 500)'
         }
     },
-    required: ['collection']
+    required: ['collection', 'where']
 };
 
 const ORCHESTRATOR_SCHEMA = {
@@ -210,7 +196,7 @@ const ORCHESTRATOR_SCHEMA = {
     properties: {
         isAnalysis: {
             type: Type.BOOLEAN,
-            description: 'true = zapytanie o dane z bazy; false = zwykłe powitanie, rozmowa ogólna, kim jesteś'
+            description: 'true = zapytanie o dane z bazy; false = zwykłe powitanie lub rozmowa ogólna'
         },
         conversationalReply: {
             type: Type.STRING,
@@ -218,36 +204,36 @@ const ORCHESTRATOR_SCHEMA = {
         },
         toolAction: {
             type: Type.STRING,
-            description: '"USE_EXISTING" jeśli zapytanie pasuje do jednego z zarejestrowanych narzędzi z EXISTING_TOOLS; "CREATE_NEW" jeśli takiego narzędzia jeszcze nie ma w bazie.',
+            description: '"USE_EXISTING" jeśli pasuje do istniejącego narzędzia; "CREATE_NEW" jeśli nowe zapytanie',
             enum: ['USE_EXISTING', 'CREATE_NEW']
         },
         matchedToolId: {
             type: Type.STRING,
-            description: 'ID narzędzia z EXISTING_TOOLS jeśli toolAction == "USE_EXISTING"'
+            description: 'ID istniejącego narzędzia gdy toolAction == "USE_EXISTING"'
         },
         newToolDefinition: {
             type: Type.OBJECT,
-            description: 'Definicja nowego narzędzia jeśli toolAction == "CREATE_NEW"',
+            description: 'Definicja nowego narzędzia gdy toolAction == "CREATE_NEW"',
             properties: {
                 id: { type: Type.STRING, description: 'Slug w snake_case, np. suma_kosztow_napraw' },
                 name: { type: Type.STRING, description: 'Zwięzła polska nazwa narzędzia' },
                 description: { type: Type.STRING, description: 'Opis działania narzędzia' },
-                analyticalGoal: { type: Type.STRING, description: 'Dokładny cel wyliczeń dla Agenta Pythona' },
+                analyticalGoal: { type: Type.STRING, description: 'Dokładny cel wyliczeń' },
                 preferredWidget: { type: Type.STRING, enum: ['chart', 'table', 'kpi'] },
                 chartType: { type: Type.STRING, enum: ['bar', 'pie', 'line'] }
             }
         },
         queries: {
             type: Type.ARRAY,
-            description: 'Zlecenie dla Inżyniera Danych: lista zapytań do wykonania na kolekcjach zbadanego schematu. Gdy isAnalysis=true, podaj co najmniej 1 kolekcję (np. collection="repairs", where=[]).',
+            description: 'Lista zapytań do Firestore. GDY isAnalysis=true: OBOWIĄZKOWO co najmniej 1 element! Pytania o naprawy → "repairs", o auta → "vehicles", o magazyn → "inventory", o budowy → "sites", o pracowników → "workers".',
             items: QUERY_STEP_SCHEMA
         },
         analyticalGoal: {
             type: Type.STRING,
-            description: 'Instrukcja obliczeniowa dla Agenta Matematyka'
+            description: 'Instrukcja obliczeniowa dla Matematyka'
         }
     },
-    required: ['isAnalysis']
+    required: ['isAnalysis', 'queries', 'toolAction', 'analyticalGoal']
 };
 
 // ─── NARZĘDZIA PREZENTERA UI ─────────────────────────────────────────────────
@@ -257,10 +243,10 @@ const TOOL_RENDER_CHART = {
     parameters: {
         type: Type.OBJECT,
         properties: {
-            aiMessage: { type: Type.STRING, description: 'Czyste zdanie podsumowujące po polsku do dymku czatu. BEZ KODU PYTHON!' },
+            aiMessage: { type: Type.STRING, description: 'Zwięzłe podsumowanie po polsku do czatu. BEZ KODU PYTHON!' },
             chartType: { type: Type.STRING, description: '"bar" | "pie" | "line"' },
             title: { type: Type.STRING, description: 'Tytuł wykresu' },
-            datasetLabel: { type: Type.STRING, description: 'Etykieta serii danych, np. "Koszt (PLN)" lub "Ilość"' },
+            datasetLabel: { type: Type.STRING, description: 'Etykieta serii danych' },
             labels: { type: Type.ARRAY, items: { type: Type.STRING } },
             values: { type: Type.ARRAY, items: { type: Type.NUMBER } }
         },
@@ -270,11 +256,11 @@ const TOOL_RENDER_CHART = {
 
 const TOOL_RENDER_TABLE = {
     name: 'renderTableWidget',
-    description: 'Tabela danych. Użyj dla list pozycji, szczegółowych rankingów lub zestawień wielokolumnowych.',
+    description: 'Tabela danych. Użyj dla list pozycji lub zestawień wielokolumnowych.',
     parameters: {
         type: Type.OBJECT,
         properties: {
-            aiMessage: { type: Type.STRING, description: 'Czyste zdanie podsumowujące po polsku do dymku czatu.' },
+            aiMessage: { type: Type.STRING, description: 'Zwięzłe podsumowanie po polsku do czatu.' },
             title: { type: Type.STRING },
             columns: { type: Type.ARRAY, items: { type: Type.STRING } },
             rows: {
@@ -292,7 +278,7 @@ const TOOL_RENDER_KPI = {
     parameters: {
         type: Type.OBJECT,
         properties: {
-            aiMessage: { type: Type.STRING, description: 'Czysty tekst podsumowania do dymku czatu.' },
+            aiMessage: { type: Type.STRING, description: 'Czysty tekst podsumowania do czatu.' },
             title: { type: Type.STRING },
             metrics: {
                 type: Type.ARRAY,
@@ -344,11 +330,11 @@ async function executeDataEngineQueries(queries: FirestoreQueryStep[], logs: str
         q = q.limit(limitVal);
 
         const filterSummary = filterDescs.length > 0 ? `filtry: [${filterDescs.join(', ')}]` : 'bez filtrów (pobieranie całości)';
-        logs.push(`[Inżynier Danych -> Firestore] Zapytanie do "${colName}" (${filterSummary}, limit=${limitVal})`);
+        logs.push(`[Inżynier Danych → Firestore] Zapytanie do "${colName}" (${filterSummary}, limit=${limitVal})`);
 
         try {
             const snap = await q.get();
-            logs.push(`[Inżynier Danych <- Firestore] Kolekcja "${colName}": pobrano ${snap.size} dokumentów`);
+            logs.push(`[Inżynier Danych ← Firestore] Kolekcja "${colName}": pobrano ${snap.size} dokumentów`);
 
             data[colName] = snap.docs.map(doc => {
                 const raw = doc.data();
@@ -376,6 +362,51 @@ async function executeDataEngineQueries(queries: FirestoreQueryStep[], logs: str
 
     await Promise.all(tasks);
     return { data, collectionsUsed };
+}
+
+// ─── INTELIGENTNA SIATKA BEZPIECZEŃSTWA ─────────────────────────────────────
+// Jeśli Mózg zwrócił pustą listę queries, automatycznie przypisujemy kolekcje
+// na podstawie słów kluczowych w pytaniu użytkownika.
+function keywordFallbackQueries(question: string): FirestoreQueryStep[] {
+    const qLower = question.toLowerCase();
+    const fallback: FirestoreQueryStep[] = [];
+
+    if (qLower.includes('napraw') || qLower.includes('serwis') || qLower.includes('remont')) {
+        fallback.push({ collection: 'repairs', where: [] });
+    }
+    if (qLower.includes('samoch') || qLower.includes('aut') || qLower.includes('flot') || qLower.includes('pojazd')) {
+        if (!fallback.some(q => q.collection === 'vehicles')) {
+            fallback.push({ collection: 'vehicles', where: [] });
+        }
+    }
+    if (qLower.includes('magazyn') || qLower.includes('resztk') || qLower.includes('materiał') || qLower.includes('towar') || qLower.includes('stan')) {
+        if (!fallback.some(q => q.collection === 'inventory')) {
+            fallback.push({ collection: 'inventory', where: [] });
+        }
+    }
+    if (qLower.includes('budow') || qLower.includes('obiekt') || qLower.includes('lokalizac')) {
+        if (!fallback.some(q => q.collection === 'sites')) {
+            fallback.push({ collection: 'sites', where: [] });
+        }
+    }
+    if (qLower.includes('pracownik') || qLower.includes('monter') || qLower.includes('brygad')) {
+        if (!fallback.some(q => q.collection === 'workers')) {
+            fallback.push({ collection: 'workers', where: [] });
+        }
+    }
+    if (qLower.includes('zamówi') || qLower.includes('zamowien') || qLower.includes('order')) {
+        if (!fallback.some(q => q.collection === 'orders')) {
+            fallback.push({ collection: 'orders', where: [] });
+        }
+    }
+    if (qLower.includes('wydatek') || qLower.includes('wydatk') || qLower.includes('transakcj') || qLower.includes('koszt') || qLower.includes('wydali')) {
+        // koszt może być w repairs LUB transactions — sprawdź czy repairs już nie ma
+        if (!fallback.some(q => q.collection === 'repairs')) {
+            fallback.push({ collection: 'transactions', where: [] });
+        }
+    }
+
+    return fallback;
 }
 
 // ─── GŁÓWNY HANDLER POST ─────────────────────────────────────────────────────
@@ -423,17 +454,27 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Brak treści wiadomości' }, { status: 400 });
         }
         const latestQuestion = messages[messages.length - 1].content;
-        logs.push(`[Użytkownik] "${latestQuestion}"`);
+        logs.push(`👤 USER "${latestQuestion}"`);
 
-        // 4. DYNAMICZNA INSPEKCJA BAZY DANYCH (Odkrywanie schematu na żywo)
-        logs.push(`[Introspection] Badanie struktury Firestore w czasie rzeczywistym...`);
-        const liveSchema = await getLiveDatabaseSchema();
-        const detectedCols = Object.keys(liveSchema);
-        logs.push(`[Live Schema] Wykryto ${detectedCols.length} kolekcji: ${detectedCols.join(', ')}`);
-        const liveSchemaPromptText = formatSchemaForPrompt(liveSchema);
+        // 4. SCHEMAT BAZY — nieblokujące: jeśli cache zimny → statyczny schemat, odświeżanie w tle
+        let schemaPromptText: string;
+        if (cachedSchema && (Date.now() - cachedSchema.timestamp < 300000)) {
+            logs.push('🔍 SCHEMAT Używam schematu z cache...');
+            const detectedCols = Object.keys(cachedSchema.schema);
+            logs.push(`🔍 SCHEMAT Wykryto ${detectedCols.length} kolekcji: ${detectedCols.join(', ')}`);
+            schemaPromptText = formatSchemaForPrompt(cachedSchema.schema);
+        } else {
+            logs.push('🔍 SCHEMAT Brak aktualnego cache — używam schematu statycznego. Odświeżanie w tle...');
+            schemaPromptText = STATIC_SCHEMA_TEXT;
+            // Odświeżanie schematu w tle (nieblokujące)
+            getLiveDatabaseSchema().then((freshSchema) => {
+                const detectedCols = Object.keys(freshSchema);
+                console.log(`[Schema BG refresh] Wykryto ${detectedCols.length} kolekcji: ${detectedCols.join(', ')}`);
+            }).catch(err => console.error('[Schema BG refresh error]', err));
+        }
 
         // 5. Pobranie biblioteki nauczonych narzędzi z Firestore (ai_tools)
-        const savedToolsSnap = await adminDb.collection('ai_tools').orderBy('usageCount', 'desc').limit(40).get();
+        const savedToolsSnap = await adminDb.collection('ai_tools').orderBy('usageCount', 'desc').limit(20).get();
         const existingToolsList = savedToolsSnap.docs.map(d => {
             const data = d.data();
             return {
@@ -449,83 +490,58 @@ export async function POST(req: Request) {
 
         const toolsSummary = existingToolsList.length > 0
             ? existingToolsList.map(t => `- [${t.id}] "${t.name}": ${t.description}`).join('\n')
-            : '(Brak zarejestrowanych narzędzi — system wytworzy pierwsze narzędzie dla tego pytania)';
+            : '(Brak zarejestrowanych narzędzi — pierwsze zapytanie)';
 
         // =====================================================================
-        // AGENT 1: ORCHESTRATOR / GŁÓWNY MÓZG (gemini-2.5-pro)
+        // AGENT 1: ORCHESTRATOR / MÓZG (gemini-2.5-flash-lite — szybki planer)
         // =====================================================================
-        logs.push(`[Mózg: Orchestrator] Analiza zapytania (Model: ${ORCHESTRATOR_MODEL})...`);
+        logs.push(`🧠 MÓZG Analiza zapytania (Model: ${ORCHESTRATOR_MODEL})...`);
 
-        const orchestratorPrompt = `
-${liveSchemaPromptText}
+        const orchestratorPrompt = `${schemaPromptText}
 
-${FIRESTORE_ENGINEER_INSTRUCTION}
-
-ZAREJESTROWANE NARZĘDZIA W BAZIE FIRESTORE (ai_tools):
+ZAREJESTROWANE NARZĘDZIA (ai_tools):
 ${toolsSummary}
 
 Pytanie użytkownika: "${latestQuestion}"
 Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
-ROLA ORCHESTRATORA:
-1. Przeanalizuj pytanie użytkownika w kontekście zbadanej struktury bazy danych.
-2. Zdecyduj czy to zwykła rozmowa (isAnalysis=false), czy zadanie na danych (isAnalysis=true).
-3. JEŚLI isAnalysis=true (OBOWIĄZKOWE ZASADY):
-   - Tablica 'queries' NIE MOŻE BYĆ PUSTA! Musisz wyznaczyć co najmniej 1 trafną kolekcję ze zbadanego schematu.
-     * Pytania o naprawy / serwisy / koszty eksploatacji -> kolekcja 'repairs'
-     * Pytania o samochody / flotę / auta / pojazdy -> kolekcja 'vehicles'
-     * Pytania o magazyn / resztki / stan towaru / materiały -> kolekcja 'inventory'
-     * Pytania o budowy / lokalizacje -> kolekcja 'sites'
-     * Pytania o pracowników / monterów -> kolekcja 'workers'
-   - PAMIĘTAJ: Jeśli użytkownik pyta OGÓLNIE (np. "ile wydaliśmy na naprawy", "jakie mamy auta", "co jest w magazynie"), tablica 'where' MUSI być pusta []! Nie filtruj daty ani typu na poziomie bazy, ponieważ Agent Matematyk w Pythonie przeliczy daty i kwoty z pełną precyzją.
-   - Ustaw toolAction="CREATE_NEW" (lub "USE_EXISTING" jeśli zapytanie pasuje do narzędzia z ai_tools).
-   - Wypełnij newToolDefinition (slug, czytelna nazwa, analyticalGoal).
-`;
+INSTRUKCJE DLA ORCHESTRATORA:
+1. Zdecyduj czy to pytanie o dane (isAnalysis=true) czy rozmowa (isAnalysis=false).
+2. GDY isAnalysis=true — OBOWIĄZKOWO wypełnij tablicę 'queries' co najmniej 1 elementem:
+   - Pytania o naprawy / serwisy / koszty napraw → collection: "repairs", where: []
+   - Pytania o samochody / flotę / auta / pojazdy → collection: "vehicles", where: []
+   - Pytania o magazyn / materiały / towar → collection: "inventory", where: []
+   - Pytania o budowy / obiekty / lokalizacje → collection: "sites", where: []
+   - Pytania o pracowników / monterów → collection: "workers", where: []
+   - Pytania o transakcje / wydatki finansowe → collection: "transactions", where: []
+3. Filtry 'where' TYLKO gdy użytkownik wprost podał konkretną wartość (np. markę "Iveco" lub konkretny rok).
+   W przeciwnym razie where: [] — Agent Matematyk przefiltruje i policzy daty w Pythonie.
+4. Ustaw toolAction: "CREATE_NEW" lub "USE_EXISTING" (jeśli pasuje do ai_tools).
+5. Wypełnij analyticalGoal — precyzyjny cel wyliczeń dla Agenta Matematyka.`;
 
-        let orchestratorRes: any;
         let plan: any = {};
         try {
-            orchestratorRes = await runWithRetry({
+            const orchestratorRes = await runWithRetry({
                 model: ORCHESTRATOR_MODEL,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem i Menedżerem PESAM. Otrzymujesz strukturę bazy danych odkrytą na żywo. Zlecasz zapytania do bazy Inżynierowi Danych. ZAWSZE wypełniaj 'queries' co najmniej jedną trafną kolekcją ze schematu (np. repairs, vehicles, inventory).`,
-                    temperature: 0.1,
+                    systemInstruction: `Jesteś Głównym Mózgiem PESAM. Analizujesz pytania i zlecasz zapytania do bazy danych. GDY isAnalysis=true, ZAWSZE wypełniaj 'queries' co najmniej jedną kolekcją. Nie zostawiaj queries jako pustej tablicy gdy pytanie dotyczy danych.`,
+                    temperature: 0.0,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
                 }
             });
             plan = JSON.parse(orchestratorRes.text?.replace(/```json|```/g, '').trim() || '{}');
+            logs.push(`🧠 MÓZG Plan: isAnalysis=${plan.isAnalysis}, toolAction=${plan.toolAction}, queries=${JSON.stringify((plan.queries||[]).map((q:any)=>q.collection))}`);
         } catch (err: any) {
-            logs.push(`[Mózg: Błąd ${ORCHESTRATOR_MODEL}] ${err?.message || err}`);
-            logs.push(`[Orchestrator Fallback] Przełączanie na ${ORCHESTRATOR_FALLBACK}...`);
-            try {
-                orchestratorRes = await runWithRetry({
-                    model: ORCHESTRATOR_FALLBACK,
-                    contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
-                    config: {
-                        systemInstruction: `Jesteś Głównym Mózgiem PESAM. Zlecasz zapytania do bazy na podstawie zbadanego schematu. ZAWSZE wypełniaj 'queries' co najmniej jedną trafną kolekcją ze schematu (np. repairs, vehicles, inventory).`,
-                        temperature: 0.1,
-                        responseMimeType: 'application/json',
-                        responseSchema: ORCHESTRATOR_SCHEMA
-                    }
-                });
-                plan = JSON.parse(orchestratorRes.text?.replace(/```json|```/g, '').trim() || '{}');
-            } catch (fallbackErr: any) {
-                logs.push(`[Mózg: Błąd ${ORCHESTRATOR_FALLBACK}] ${fallbackErr?.message || fallbackErr}`);
-                // Bezpieczny fallback — Inteligentna Siatka Bezpieczeństwa wyznaczy kolekcje z pytania!
-                plan = { isAnalysis: true, toolAction: 'CREATE_NEW', analyticalGoal: latestQuestion };
-            }
+            logs.push(`🧠 MÓZG ⚠️ Błąd modelu: ${err?.message?.slice(0, 100) || err}`);
+            plan = { isAnalysis: true, toolAction: 'CREATE_NEW', analyticalGoal: latestQuestion, queries: [] };
         }
 
         // Ścieżka rozmowy ogólnej
         if (!plan.isAnalysis && plan.conversationalReply) {
-            logs.push('[Orchestrator] Rozmowa ogólna -> Natychmiastowa odpowiedź.');
-            return NextResponse.json({
-                reply: plan.conversationalReply,
-                widget: null,
-                logs
-            });
+            logs.push('🧠 MÓZG Rozmowa ogólna → Natychmiastowa odpowiedź.');
+            return NextResponse.json({ reply: plan.conversationalReply, widget: null, logs });
         }
 
         // =====================================================================
@@ -533,14 +549,14 @@ ROLA ORCHESTRATORA:
         // =====================================================================
         let activeTool: any = null;
         let isToolNew = false;
-        let queriesToRun: FirestoreQueryStep[] = Array.isArray(plan.queries) ? plan.queries : [];
+        let queriesToRun: FirestoreQueryStep[] = Array.isArray(plan.queries) ? plan.queries.filter((q: any) => q?.collection) : [];
         let analyticalGoal: string = plan.analyticalGoal || latestQuestion;
 
         if (plan.toolAction === 'USE_EXISTING' && plan.matchedToolId) {
             activeTool = existingToolsList.find(t => t.id === plan.matchedToolId);
             if (activeTool) {
-                logs.push(`[ai_tools] ⚡ Błyskawiczne dopasowanie narzędzia: "${activeTool.name}" [${activeTool.id}]`);
-                analyticalGoal = activeTool.analyticalGoal;
+                logs.push(`💾 TOOL ⚡ Narzędzie z biblioteki: "${activeTool.name}" [${activeTool.id}]`);
+                analyticalGoal = activeTool.analyticalGoal || analyticalGoal;
                 if (!queriesToRun.length && activeTool.queries?.length) {
                     queriesToRun = activeTool.queries;
                 }
@@ -559,182 +575,103 @@ ROLA ORCHESTRATORA:
             };
             activeTool = { ...newDef, queries: queriesToRun };
             analyticalGoal = newDef.analyticalGoal || analyticalGoal;
-            logs.push(`[ai_tools] 🎓 Tworzenie nowego narzędzia: "${activeTool.name}"`);
+            logs.push(`💾 TOOL 🎓 Tworzenie nowego narzędzia: "${activeTool.name}"`);
         }
 
-        // ─── INTELIGENTNA SIATKA BEZPIECZEŃSTWA (Safety Net) ────────────────────────
-        // Jeśli Mózg zwrócił pustą listę queries, na podstawie słów kluczowych zapytania
-        // i zbadanego schematu automatycznie przypisujemy odpowiednią kolekcję.
-        if (queriesToRun.length === 0 && plan.isAnalysis) {
-            const qLower = latestQuestion.toLowerCase();
-            const fallbackQueries: FirestoreQueryStep[] = [];
-
-            if (qLower.includes('napraw') || qLower.includes('serwis') || qLower.includes('koszt') || qLower.includes('faktur')) {
-                fallbackQueries.push({ collection: 'repairs', where: [] });
-            }
-            if (qLower.includes('samoch') || qLower.includes('aut') || qLower.includes('flot') || qLower.includes('pojazd')) {
-                if (!fallbackQueries.some(q => q.collection === 'vehicles')) {
-                    fallbackQueries.push({ collection: 'vehicles', where: [] });
-                }
-            }
-            if (qLower.includes('magazyn') || qLower.includes('resztk') || qLower.includes('piank') || qLower.includes('klej') || qLower.includes('materiał') || qLower.includes('towar') || qLower.includes('stan') || qLower.includes('pozycj')) {
-                if (!fallbackQueries.some(q => q.collection === 'inventory')) {
-                    fallbackQueries.push({ collection: 'inventory', where: [] });
-                }
-            }
-            if (qLower.includes('budow') || qLower.includes('budów') || qLower.includes('site') || qLower.includes('obiekt')) {
-                if (!fallbackQueries.some(q => q.collection === 'sites')) {
-                    fallbackQueries.push({ collection: 'sites', where: [] });
-                }
-            }
-            if (qLower.includes('pracownik') || qLower.includes('ludzi') || qLower.includes('monter') || qLower.includes('brygadz')) {
-                if (!fallbackQueries.some(q => q.collection === 'workers')) {
-                    fallbackQueries.push({ collection: 'workers', where: [] });
-                }
-            }
-
-            if (fallbackQueries.length > 0) {
-                queriesToRun = fallbackQueries;
+        // ─── INTELIGENTNA SIATKA BEZPIECZEŃSTWA ─────────────────────────────
+        if (queriesToRun.length === 0 && plan.isAnalysis !== false) {
+            const fallback = keywordFallbackQueries(latestQuestion);
+            if (fallback.length > 0) {
+                queriesToRun = fallback;
                 activeTool.queries = queriesToRun;
-                logs.push(`[Inżynier Danych] 🛡️ Inteligentna siatka bezpieczeństwa: automatycznie wyznaczono kolekcje [${queriesToRun.map(q => q.collection).join(', ')}] na podstawie zapytania.`);
+                logs.push(`🛡️ SIATKA Automatycznie wyznaczono kolekcje: [${queriesToRun.map(q => q.collection).join(', ')}]`);
             }
         }
 
-        logs.push(`[Mózg: Decyzja] akcja=${plan.toolAction || 'NOWE'}, cel="${analyticalGoal}"`);
+        logs.push(`🧠 MÓZG Decyzja: akcja=${plan.toolAction || 'CREATE_NEW'}, cel="${analyticalGoal}"`);
 
         // =====================================================================
-        // AGENT 2: INŻYNIER DANYCH — POBIERANIE ZAPYTANIAMI DEKLARATYWNYMI
+        // AGENT 2: INŻYNIER DANYCH — POBIERANIE Z FIRESTORE
         // =====================================================================
-        logs.push(`[Agent 2: Inżynier Danych] Rozpoczęcie wykonywania zapytań do Firestore...`);
+        logs.push(`🗄️ BAZA [Inżynier Danych] Wykonywanie zapytań do Firestore...`);
         const { data: dbData, collectionsUsed } = await executeDataEngineQueries(queriesToRun, logs);
 
         const totalRecords = Object.values(dbData).reduce((acc: number, arr: any[]) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
-        logs.push(`[Inżynier Danych] Łącznie pobrano ${totalRecords} rekordów z bazy.`);
+        logs.push(`🗄️ BAZA Łącznie pobrano ${totalRecords} rekordów z ${collectionsUsed.join(', ') || 'brak'}.`);
 
         if (totalRecords === 0) {
-            logs.push(`[Orchestrator] ⚠️ Brak rekordów dla zapytania. Zakończono.`);
+            logs.push(`🧠 MÓZG ⚠️ Brak rekordów. Zakończono.`);
             return NextResponse.json({
-                reply: `W systemie nie znaleziono rekordów odpowiadających podanemu zapytaniu (przeszukano: ${collectionsUsed.join(', ') || 'brak'}). Rozwiń podgląd procesu poniżej, aby zweryfikować filtry bazy danych.`,
+                reply: `W systemie nie znaleziono rekordów odpowiadających zapytaniu (przeszukano: ${collectionsUsed.join(', ') || 'brak'}). Rozwiń podgląd procesu poniżej, aby zobaczyć zastosowane filtry.`,
                 widget: null,
                 dataUsed: collectionsUsed,
                 logs
             });
         }
 
-        // =====================================================================
-        // AGENT 4: MATEMATYK & DATA SCIENTIST (Python Code Execution)
-        // =====================================================================
-        logs.push(`[Agent 4: Matematyk] Uruchamianie Python Sandbox (Google Cloud)...`);
+        // Ogranicz dane do 150 rekordów na kolekcję aby nie przekroczyć limitu tokenów
+        const trimmedData: Record<string, any[]> = {};
+        for (const [col, records] of Object.entries(dbData)) {
+            trimmedData[col] = (records as any[]).slice(0, 150);
+        }
 
-        const mathPrompt = `
-Pytanie użytkownika: "${latestQuestion}"
-Narzędzie: "${activeTool.name}"
-Cel wyliczeń: "${analyticalGoal}"
+        // =====================================================================
+        // AGENT 3: MATEMATYK + PREZENTER (gemini-2.5-flash) — JEDNO WYWOŁANIE
+        // =====================================================================
+        logs.push(`🐍 PYTHON [Matematyk+Prezenter] Obliczenia i wizualizacja (Model: ${MATH_PRESENTER_MODEL})...`);
+
+        const mathPresenterPrompt = `Pytanie użytkownika: "${latestQuestion}"
+Cel analizy: "${analyticalGoal}"
 Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
 DANE POBRANE Z FIRESTORE (JSON):
-${JSON.stringify(dbData)}
+${JSON.stringify(trimmedData)}
 
-TWOJE ZADANIE:
-1. Napisz i uruchom kod w Pythonie, który przetworzy powyższe dane.
-2. Wykonaj 100% precyzyjne obliczenia (sumy, średnie, wykaz samochodów, koszty napraw, rotacje).
-3. Wypisz wyniki na stdout.
-4. Na końcu wypisz sekcję:
-PODSUMOWANIE DLA KIEROWNIKA:
-(2-3 konkretne, czytelne zdania po polsku z liczbami i wnioskami biznesowymi)
-`;
+ZADANIE (2 kroki):
+KROK 1 — PYTHON: Napisz i uruchom kod Pythona który:
+  - Przetworzy powyższe dane
+  - Wykona dokładne obliczenia (sumy, średnie, zakresy dat)
+  - Wypisze wyniki i 2-3 zdania po polsku z wnioskami biznesowymi
 
-        const mathRes = await runWithRetry({
-            model: MATH_MODEL,
-            contents: [{ role: 'user', parts: [{ text: mathPrompt }] }],
+KROK 2 — WIDGET: Po otrzymaniu wyników, wywołaj JEDNO narzędzie wizualne:
+  - renderChartWidget → gdy porównujesz liczby wielu kategorii lub trend czasowy (chartType: "bar", "pie" lub "line")
+  - renderTableWidget → gdy to lista pozycji z wieloma polami (auta, pracownicy, pozycje)
+  - renderKpiWidget → gdy to 1-4 kluczowe liczby sumaryczne (łączna kwota, count, max)
+
+W aiMessage napisz TYLKO podsumowanie po polsku (2-4 zdania). BEZ KODU PYTHON!`;
+
+        const mathPresenterRes = await runWithRetry({
+            model: MATH_PRESENTER_MODEL,
+            contents: [{ role: 'user', parts: [{ text: mathPresenterPrompt }] }],
             config: {
-                systemInstruction: `Jesteś Matematykiem PESAM. Piszesz kod w Pythonie i wykonujesz go w sandboxie. Tylko bezbłędne, precyzyjne liczby. Zero halucynacji.`,
+                systemInstruction: `Jesteś Matematykiem i Prezenterem PESAM. Najpierw wykonaj obliczenia w Pythonie z pełną precyzją. Następnie wywołaj narzędzie wizualne z wynikami. aiMessage to czyste zdania po polsku, ZERO kodu.`,
                 temperature: 0.0,
-                tools: [{ codeExecution: {} }]
+                tools: [
+                    { codeExecution: {} },
+                    { functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }
+                ]
             }
         });
 
-        const mathParts = mathRes.candidates?.[0]?.content?.parts || [];
-        const mathOutput = mathParts
-            .map((p: any) => p.text || p.codeExecutionResult?.output || '')
+        // Zbierz logi z Python sandbox
+        const mathParts = mathPresenterRes.candidates?.[0]?.content?.parts || [];
+        const pythonOutput = mathParts
+            .map((p: any) => p.codeExecutionResult?.output || '')
             .filter(Boolean)
-            .join('\n') || 'Obliczenia zakończone.';
-
+            .join('\n');
         const pythonRan = mathParts.some((p: any) => p.executableCode || p.codeExecutionResult);
+
         if (pythonRan) {
-            logs.push(`[Matematyk] ✓ Kod Python wykonany pomyślnie. Wynik: ${mathOutput.slice(0, 200).replace(/\n/g, ' ')}...`);
+            logs.push(`🐍 PYTHON ✓ Kod Python wykonany. Wynik: ${pythonOutput.slice(0, 300).replace(/\n/g, ' ')}`);
         } else {
-            logs.push(`[Matematyk] Obliczenia zakończone.`);
+            logs.push(`🐍 PYTHON Model odpowiedział bez kodu Python.`);
         }
 
-        // =====================================================================
-        // ZAPIS NOWEGO NARZĘDZIA DO FIRESTORE (ai_tools)
-        // =====================================================================
-        if (isToolNew && activeTool.id) {
-            try {
-                const toolRef = adminDb.collection('ai_tools').doc(activeTool.id);
-                await toolRef.set({
-                    id: activeTool.id,
-                    name: activeTool.name,
-                    description: activeTool.description || '',
-                    analyticalGoal: activeTool.analyticalGoal || analyticalGoal,
-                    preferredWidget: activeTool.preferredWidget || 'chart',
-                    chartType: activeTool.chartType || 'bar',
-                    queries: queriesToRun,
-                    createdAt: new Date().toISOString(),
-                    lastUsedAt: new Date().toISOString(),
-                    usageCount: 1
-                }, { merge: true });
-                logs.push(`[ai_tools] 💾 Zapisano nowe narzędzie "${activeTool.name}" do bazy Firestore!`);
-            } catch (saveErr) {
-                console.error('Błąd zapisu do ai_tools:', saveErr);
-            }
-        } else if (activeTool.id) {
-            try {
-                await adminDb.collection('ai_tools').doc(activeTool.id).update({
-                    usageCount: FieldValue.increment(1),
-                    lastUsedAt: new Date().toISOString()
-                });
-            } catch {}
-        }
-
-        // =====================================================================
-        // AGENT 5: PREZENTER UI (Architekt Raportów & Wykresów)
-        // =====================================================================
-        logs.push(`[Agent 5: Prezenter UI] Dobieranie wizualizacji...`);
-
-        const presenterPrompt = `
-Pytanie: "${latestQuestion}"
-Narzędzie: "${activeTool.name}"
-
-WYNIKI Z PIASKOWNICY PYTHON:
-${mathOutput}
-
-ZADANIE:
-Wybierz JEDNO narzędzie i przygotuj dane:
-1. renderChartWidget -> jeśli to porównanie liczb lub trend (chartType: "bar" | "pie" | "line").
-2. renderTableWidget -> jeśli to szczegółowa lista (np. lista samochodów z markami, modelami i rejestracjami).
-3. renderKpiWidget -> jeśli to 1-3 kluczowe liczby sumaryczne (np. łączny koszt napraw).
-
-WAŻNE DLA aiMessage:
-Napisz zwięzłe podsumowanie po polsku dla czatu (2-4 zdania). Wskaż najważniejsze liczby i wnioski.
-BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
-`;
-
-        const presenterRes = await runWithRetry({
-            model: PRESENTER_MODEL,
-            contents: [{ role: 'user', parts: [{ text: presenterPrompt }] }],
-            config: {
-                systemInstruction: `Jesteś Architektem UI PESAM. Wybierz narzędzie wizualne. aiMessage musi być czystym tekstem po polsku bez kodu.`,
-                temperature: 0.0,
-                tools: [{ functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }]
-            }
-        });
-
+        // Parsuj wynik prezentera
         let finalReply = 'Analiza zakończona.';
         let widgetData: any = null;
 
-        const calls = presenterRes.functionCalls;
+        const calls = mathPresenterRes.functionCalls;
         if (calls && calls.length > 0) {
             const call = calls[0];
             const args = (call.args || {}) as any;
@@ -749,6 +686,7 @@ BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
                     labels: args.labels || [],
                     values: args.values || []
                 };
+                logs.push(`🎨 UI Wykres ${args.chartType}: "${args.title}" (${(args.labels||[]).length} kategorii)`);
             } else if (call.name === 'renderTableWidget') {
                 widgetData = {
                     type: 'table',
@@ -756,18 +694,51 @@ BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
                     columns: args.columns || [],
                     rows: args.rows || []
                 };
+                logs.push(`🎨 UI Tabela: "${args.title}" (${(args.rows||[]).length} wierszy)`);
             } else if (call.name === 'renderKpiWidget') {
                 widgetData = {
                     type: 'kpi',
                     title: args.title || activeTool.name,
                     metrics: args.metrics || []
                 };
+                logs.push(`🎨 UI KPI: "${args.title}" (${(args.metrics||[]).length} wskaźników)`);
             }
         } else {
-            finalReply = presenterRes.text || mathOutput.split('PODSUMOWANIE DLA KIEROWNIKA:')[1]?.trim() || 'Oto wyniki zapytania.';
+            // Fallback — tekst z Python output
+            const textParts = mathParts.map((p: any) => p.text || '').filter(Boolean).join('\n');
+            finalReply = textParts.split('PODSUMOWANIE')[1]?.trim() || textParts || pythonOutput || 'Oto wyniki analizy.';
+            logs.push(`🎨 UI Brak wywołania narzędzia — odpowiedź tekstowa.`);
         }
 
-        logs.push(`[Prezenter UI] Przygotowano wizualizację: ${widgetData ? `Widget ${widgetData.type} ("${widgetData.title}")` : 'Podsumowanie tekstowe'}`);
+        // =====================================================================
+        // ZAPIS / AKTUALIZACJA NARZĘDZIA W FIRESTORE (ai_tools)
+        // =====================================================================
+        if (isToolNew && activeTool.id) {
+            try {
+                await adminDb.collection('ai_tools').doc(activeTool.id).set({
+                    id: activeTool.id,
+                    name: activeTool.name,
+                    description: activeTool.description || '',
+                    analyticalGoal: activeTool.analyticalGoal || analyticalGoal,
+                    preferredWidget: activeTool.preferredWidget || 'chart',
+                    chartType: activeTool.chartType || 'bar',
+                    queries: queriesToRun,
+                    createdAt: new Date().toISOString(),
+                    lastUsedAt: new Date().toISOString(),
+                    usageCount: 1
+                }, { merge: true });
+                logs.push(`💾 TOOL Zapisano narzędzie "${activeTool.name}" do ai_tools.`);
+            } catch (saveErr) {
+                console.error('Błąd zapisu do ai_tools:', saveErr);
+            }
+        } else if (activeTool.id) {
+            try {
+                await adminDb.collection('ai_tools').doc(activeTool.id).update({
+                    usageCount: FieldValue.increment(1),
+                    lastUsedAt: new Date().toISOString()
+                });
+            } catch { /* ignoruj błędy aktualizacji */ }
+        }
 
         return NextResponse.json({
             reply: finalReply,
@@ -783,7 +754,7 @@ BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
         });
 
     } catch (err: any) {
-        console.error('Błąd Orchestratora v9.0:', err);
+        console.error('Błąd Orchestratora v10.0:', err);
         return NextResponse.json({
             error: 'Błąd przetwarzania wieloagentowego',
             detail: String(err?.message || err),
