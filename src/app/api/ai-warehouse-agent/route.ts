@@ -1,23 +1,24 @@
 // src/app/api/ai-warehouse-agent/route.ts
 // =============================================================================
-// PESAM Self-Growing Multi-Agent Orchestrator v7.0
+// PESAM Autonomous Data-Driven Multi-Agent Orchestrator v8.0
 //
-// Architektura Wieloagentowa z Rejestrem Narzędzi (Self-Growing Tool Registry):
+// Architektura Wieloagentowa Sterowana Słownikiem Bazy Danych (Data Dictionary):
 //
-// 1. Rejestr "ai_tools" w Firestore:
-//    - Trwała baza nauczonych narzędzi AI (kod Pythona, plany zapytań, widgety)
-// 2. Agent 1: Orchestrator / Główny Mózg (gemini-2.5-pro / gemini-2.5-flash)
-//    - Posiada wstrzyknięty słownik danych (DB_SCHEMA) i listę istniejących toolsów
-//    - Decyduje: SZYBKA ŚCIEŻKA (istniejące narzędzie) vs ŚCIEŻKA NAUKI (tworzy nowy tool)
-// 3. Agent 2: Inżynier Danych (gemini-2.5-flash)
-//    - Posiada instrukcję obsługi zapytań Firestore SDK (where, limit, daty, relacje)
-//    - Pobiera z bazy optymalny zestaw rekordów po stronie serwera
-// 4. Agent 3: Programista Narzędzi & Zapis do Firestore:
-//    - Zapisuje nowo stworzone narzędzie do kolekcji 'ai_tools' na przyszłość
-// 5. Agent 4: Matematyk & Data Scientist (gemini-2.5-flash + Python Sandbox codeExecution)
-//    - 100% precyzyjne obliczenia matematyczne w piaskownicy Pythona Google
-// 6. Agent 5: Prezenter UI (gemini-2.5-flash-lite)
-//    - Formatuje wynik: wykres słupkowy (bar), kołowy (pie), liniowy (line), tabela lub KPI
+// 1. Mózg / Orchestrator (gemini-2.5-pro z Google Vertex AI):
+//    - Zna nazwy tabel i kolumn w DB_SCHEMA.
+//    - Nie używa sztywnych filtrów ani maskowań typu "wszystkie".
+//    - Jeśli pytanie jest ogólne (np. "jakimi autami dysponujemy"), generuje
+//      czyste zapytanie o całą kolekcję bez warunków 'where'.
+//    - Jeśli pytanie jest szczegółowe, precyzyjnie wskazuje kolumnę i operator.
+// 2. Inżynier Danych (Data Engine):
+//    - Wykonuje deklaratywne zapytania Firestore (collection, where, limit)
+//    - Równoległe pobieranie przez Promise.all, automatyczna konwersja Timestamp
+// 3. Rejestr ai_tools w Firestore:
+//    - Zapisuje wytworzone narzędzia, aby nie tworzyć ich ponownie
+// 4. Matematyk & Data Scientist (gemini-2.5-flash + Python Sandbox):
+//    - 100% precyzji obliczeniowej w bezpiecznej piaskownicy Vertex AI
+// 5. Prezenter UI (gemini-2.5-flash-lite):
+//    - Formatuje wynik: wykres (bar, pie, line), tabela lub KPI
 // =============================================================================
 
 import { NextResponse } from 'next/server';
@@ -33,82 +34,74 @@ const ai = new GoogleGenAI({
 
 export const maxDuration = 60;
 
-// Modele dla poszczególnych ról
+// Modele Gemini dostępne w Google Cloud na endpointzie Global
 const ORCHESTRATOR_MODEL = 'gemini-2.5-pro';
 const ORCHESTRATOR_FALLBACK = 'gemini-2.5-flash';
-const DATA_ENGINEER_MODEL = 'gemini-2.5-flash';
 const MATH_MODEL = 'gemini-2.5-flash';
 const PRESENTER_MODEL = 'gemini-2.5-flash-lite';
 
-// ─── SŁOWNIK BAZY DANYCH (Wstrzykiwany Mózgowi i Inżynierowi Danych) ─────────
+// ─── SŁOWNIK BAZY DANYCH (Wstrzykiwany Mózgowi Orchestratora) ────────────────
 const DB_SCHEMA = `
-PESAM — SŁOWNIK BAZY DANYCH (FIRESTORE DATA DICTIONARY):
+PESAM — SŁOWNIK BAZY DANYCH (DATA DICTIONARY):
 
-1. KOLEKCJA "residuals" (Resztki budowlane na placu i magazynach):
+1. KOLEKCJA "vehicles" (Flota samochodów firmy):
+   - id: string (identyfikator unikalny)
+   - brand: string (np. "Iveco", "Ford", "Renault", "Mercedes")
+   - model: string (np. "Daily", "Transit", "Master", "Sprinter")
+   - registration: string (np. "RDE HF31", "RDE 4522A")
+   - year: number (rok produkcji)
+   - initialMileage: number (przebieg początkowy w km)
+   - currentTires: string ("Letnie" | "Zimowe")
+   - inspectionDate: string (data badania technicznego YYYY-MM-DD)
+
+2. KOLEKCJA "repairs" (Historia napraw i serwisu samochodów):
+   - id: string (identyfikator unikalny)
+   - vehicleId: string (FK -> wskazuje na vehicles.id)
+   - date: string (format YYYY-MM-DD, np. "2024-03-15")
+   - cost: number (kwota netto naprawy w PLN)
+   - category: string ("Mechaniczna"|"Silnik"|"Układ hamulcowy"|"Zawieszenie"|
+               "Elektryczna"|"Klimatyzacja"|"Opony"|"Eksploatacyjna"|"Blacharsko-Lakiernicza"|"Przeglądy"|"Inne")
+   - mileage: number (przebieg w momencie naprawy)
+   - comments: string (opis naprawy / wykonanych prac)
+   - location: string (warsztat wykonujący)
+   - partsList: string[] (tablica wymienionych części)
+
+3. KOLEKCJA "residuals" (Resztki budowlane i materiały na placu/magazynie):
    - id: string
-   - name: string (np. "Klej Atlas Plus 25kg", "Bloczek betonowy 590x120x239")
-   - quantity: number (ilość na stanie)
+   - name: string (nazwa materiału, np. "Klej Atlas Plus 25kg", "Bloczek 590x120x239")
+   - quantity: number (ilość)
    - unit: string (np. "szt.", "op.", "paleta", "m2", "mb")
    - category: string ("kleje"|"pustaki"|"plyty-gk"|"farby-chemia"|"pianki-silikony"|
                "kable-elektryka"|"gipsy-gladzie"|"izolacje-folie"|"szalunki"|"stal-ogrodzenia"|
                "rury-kanalizacja"|"drewno-odpady")
    - subcategory: string
-   - storageZone: string (strefa składowania: "Plac Zewnętrzny"|"Magazyn Farb i Chemii"|"Hala rozsuwana"|"Regał na stal"|"Wiata otwarta"|"Spawalnia")
-   - updatedAt: Timestamp (data ostatniego ruchu / inwentaryzacji resztki)
-   - siteId: string (budowa źródłowa zwrotu)
+   - storageZone: string (strefa: "Plac Zewnętrzny"|"Magazyn Farb i Chemii"|"Hala rozsuwana"|"Regał na stal"|"Wiata otwarta"|"Spawalnia")
+   - updatedAt: Timestamp (data ostatniego ruchu / modyfikacji)
+   - siteId: string (budowa źródłowa)
 
-2. KOLEKCJA "inventory" (Katalog sprzętu, elektronarzędzi i maszyn):
+4. KOLEKCJA "inventory" (Sprzęt budowlany, narzędzia i maszyny):
    - id: string
-   - name: string (np. "Zagęszczarka Wacker Neuson", "Wkrętarka Makita DDF484")
+   - name: string (np. "Zagęszczarka Wacker Neuson", "Wkrętarka Makita")
    - category: string
    - quantity: number
    - unit: string
    - location: string
 
-3. KOLEKCJA "vehicles" (Flota samochodowa firmy):
-   - id: string
-   - brand: string (np. "Iveco", "Ford", "Renault", "Mercedes")
-   - model: string (np. "Daily", "Transit", "Master", "Sprinter")
-   - registration: string (np. "RDE HF31", "RDE 4522A")
-   - initialMileage: number (przebieg początkowy w km)
-
-4. KOLEKCJA "repairs" (Książka serwisowa i historia napraw pojazdów):
-   - id: string
-   - vehicleId: string (FK do vehicles.id)
-   - date: string (format ISO YYYY-MM-DD, np. "2024-03-15")
-   - cost: number (koszt naprawy w PLN netto)
-   - category: string ("Mechaniczna"|"Silnik"|"Układ hamulcowy"|"Zawieszenie"|
-               "Elektryczna"|"Klimatyzacja"|"Opony"|"Eksploatacyjna"|"Blacharsko-Lakiernicza"|"Przeglądy"|"Inne")
-   - mileage: number (przebieg licznika w momencie naprawy)
-   - comments: string (opis usterki i wykonanych prac)
-   - location: string (nazwa warsztatu / mechanika)
-   - partsList: string[] (lista wymienionych części)
-
-5. KOLEKCJA "orders" (Zamówienia zapotrzebowania z budów):
+5. KOLEKCJA "orders" (Zamówienia z budów):
    - id: string
    - status: string ("pending"|"completed"|"cancelled")
    - createdAt: Timestamp
-   - items: array (pozycje zamówione)
+   - items: array
    - siteId: string
 
-6. KOLEKCJA "sites" (Budowy i obiekty PESAM):
+6. KOLEKCJA "sites" (Budowy / Obiekty):
    - id: string
-   - name: string (np. "Hala Rzeszów", "Osiedle Słoneczne")
+   - name: string
    - address: string
    - status: string ("active"|"closed")
 `;
 
-// ─── INSTRUKCJA OBSŁUGI ZAPYTAŃ FIRESTORE (DLA INŻYNIERA DANYCH) ─────────────
-const FIRESTORE_QUERY_MANUAL = `
-INSTRUKCJA ZAPYTAŃ FIRESTORE ADMIN SDK:
-1. Filtry proste: używaj where('field', '==', value).
-2. Filtry zakresowe: where('date', '>=', dateFrom) i where('date', '<=', dateTo) — dozwolone tylko na JEDNYM polu w zapytaniu.
-3. Nigdy nie łącz filtrów nierówności (<, >, <=, >=) na dwóch różnych polach bez composite index.
-4. Zawsze stosuj limit(n) [domyślnie 100-250], aby zapobiec przeciążeniu pamięci.
-5. Post-filtering w Pythonie: Jeśli zapytanie wymaga wyszukiwania tekstu w komentarzach ('comments'), częściach ('partsList') lub zaawansowanych korelacji, pobierz szerszy zestaw po pojeździe lub dacie, a dokładne filtrowanie powierz Pythonowi.
-`;
-
-// ─── FUNKCJA RETRY Z EXPONENTIAL BACKOFF ─────────────────────────────────────
+// ─── RETRY Z EXPONENTIAL BACKOFF ─────────────────────────────────────────────
 async function runWithRetry(params: any, retries = 3, delay = 1000): Promise<any> {
     try {
         return await ai.models.generateContent(params);
@@ -126,23 +119,50 @@ async function runWithRetry(params: any, retries = 3, delay = 1000): Promise<any
     }
 }
 
-// ─── SCHEMATY JSON ───────────────────────────────────────────────────────────
+// ─── SCHEMAT DEKLARATYWNEGO PLANU ZAPYTAŃ DLA ORCHESTRATORA ──────────────────
+const QUERY_STEP_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        collection: {
+            type: Type.STRING,
+            enum: ['vehicles', 'repairs', 'residuals', 'inventory', 'orders', 'sites'],
+            description: 'Nazwa kolekcji z DB_SCHEMA, którą należy pobrać z bazy'
+        },
+        where: {
+            type: Type.ARRAY,
+            description: 'Opcjonalne filtry. UŻYWAJ TYLKO jeśli użytkownik w pytaniu podał konkretne ograniczenie (np. konkretną markę "Iveco", konkretną kategorię czy datę). Jeśli pyta ogólnie o wszystkie samochody, naprawy lub resztki — zostaw tę tablicę PUSTĄ.',
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    field: { type: Type.STRING, description: 'Dokładna nazwa kolumny z DB_SCHEMA, np. "brand", "category", "storageZone", "date"' },
+                    op: { type: Type.STRING, enum: ['==', '>=', '<=', '>', '<'] },
+                    value: { type: Type.STRING, description: 'Konkretna wartość filtra (np. "Iveco", "2024-01-01")' }
+                },
+                required: ['field', 'op', 'value']
+            }
+        },
+        limit: {
+            type: Type.NUMBER,
+            description: 'Maksymalna liczba rekordów (domyślnie 250, max 500)'
+        }
+    },
+    required: ['collection']
+};
 
-// Schemat decyzji Orchestratora
 const ORCHESTRATOR_SCHEMA = {
     type: Type.OBJECT,
     properties: {
         isAnalysis: {
             type: Type.BOOLEAN,
-            description: 'true = użytkownik pyta o dane, raporty, magazyn, resztki, flotę, koszty, budowy; false = zwykłe powitanie, rozmowa ogólna, kim jesteś'
+            description: 'true = zapytanie o dane z bazy (flota, naprawy, magazyn, resztki, budowy, koszty); false = zwykłe powitanie, rozmowa ogólna, kim jesteś'
         },
         conversationalReply: {
             type: Type.STRING,
-            description: 'Uprzejma, pomocna odpowiedź gdy isAnalysis=false (po polsku).'
+            description: 'Odpowiedź gdy isAnalysis=false (po polsku)'
         },
         toolAction: {
             type: Type.STRING,
-            description: '"USE_EXISTING" jeśli zapytanie pasuje do jednego z zarejestrowanych narzędzi z EXISTING_TOOLS; "CREATE_NEW" jeśli takiego narzędzia jeszcze nie ma i trzeba je wytworzyć.',
+            description: '"USE_EXISTING" jeśli zapytanie pasuje do jednego z zarejestrowanych narzędzi z EXISTING_TOOLS; "CREATE_NEW" jeśli takiego narzędzia jeszcze nie ma w rejestrze.',
             enum: ['USE_EXISTING', 'CREATE_NEW']
         },
         matchedToolId: {
@@ -153,43 +173,29 @@ const ORCHESTRATOR_SCHEMA = {
             type: Type.OBJECT,
             description: 'Definicja nowego narzędzia jeśli toolAction == "CREATE_NEW"',
             properties: {
-                id: { type: Type.STRING, description: 'Slug w snake_case, np. "fleet_cost_per_vehicle", "residual_stock_by_zone"' },
-                name: { type: Type.STRING, description: 'Zwięzła polska nazwa narzędzia, np. "Koszty napraw aut w podziale na pojazdy"' },
+                id: { type: Type.STRING, description: 'Unikalny slug w snake_case, np. "fleet_cost_per_vehicle", "residual_stock_by_zone"' },
+                name: { type: Type.STRING, description: 'Zwięzła polska nazwa narzędzia' },
                 description: { type: Type.STRING, description: 'Opis co narzędzie liczy i kiedy go używać' },
                 analyticalGoal: { type: Type.STRING, description: 'Dokładny cel wyliczeń dla Agenta Pythona' },
-                preferredWidget: { type: Type.STRING, description: '"chart" | "table" | "kpi"' },
-                chartType: { type: Type.STRING, description: '"bar" | "pie" | "line"' }
-            }
+                preferredWidget: { type: Type.STRING, enum: ['chart', 'table', 'kpi'] },
+                chartType: { type: Type.STRING, enum: ['bar', 'pie', 'line'] }
+            },
+            required: ['id', 'name', 'analyticalGoal']
         },
-        dataRequirements: {
-            type: Type.OBJECT,
-            description: 'Instrukcje dla Inżyniera Danych — jakie dane pobrać z Firestore',
-            properties: {
-                needsResiduals: { type: Type.BOOLEAN },
-                residualsCategory: { type: Type.STRING },
-                residualsStorageZone: { type: Type.STRING },
-                residualsLimit: { type: Type.NUMBER },
-                needsInventory: { type: Type.BOOLEAN },
-                inventoryCategory: { type: Type.STRING },
-                needsVehicles: { type: Type.BOOLEAN },
-                vehicleBrand: { type: Type.STRING },
-                vehicleRegistration: { type: Type.STRING },
-                needsRepairs: { type: Type.BOOLEAN },
-                repairsDateFrom: { type: Type.STRING },
-                repairsDateTo: { type: Type.STRING },
-                repairsCategory: { type: Type.STRING },
-                repairsLimit: { type: Type.NUMBER },
-                needsOrders: { type: Type.BOOLEAN },
-                ordersStatus: { type: Type.STRING },
-                needsSites: { type: Type.BOOLEAN },
-                reasoning: { type: Type.STRING }
-            }
+        queries: {
+            type: Type.ARRAY,
+            description: 'Lista zapytań do wykonania przez Inżyniera Danych w Firestore. Określ które kolekcje pobrać i czy mają mieć filtry.',
+            items: QUERY_STEP_SCHEMA
+        },
+        analyticalGoal: {
+            type: Type.STRING,
+            description: 'Dokładny cel matematyczny dla Agenta Pythona (co ma policzyć, pogrupować, zsumować lub porównać ze zwróconych danych)'
         }
     },
     required: ['isAnalysis']
 };
 
-// Narzędzia Prezentera UI
+// ─── NARZĘDZIA PREZENTERA UI ─────────────────────────────────────────────────
 const TOOL_RENDER_CHART = {
     name: 'renderChartWidget',
     description: 'Wykres słupkowy (bar), kołowy (pie) lub liniowy (line). Użyj dla porównań kategorii, kosztów lub trendów czasowych.',
@@ -249,140 +255,55 @@ const TOOL_RENDER_KPI = {
     }
 };
 
-// ─── AGENT 2: INŻYNIER DANYCH — POBIERANIE Z FIRESTORE ───────────────────────
-async function fetchFirestoreData(reqs: any): Promise<{ data: Record<string, any>; collectionsUsed: string[] }> {
-    const data: Record<string, any> = {};
+// ─── DEKLARATYWNY SILNIK DANYCH (Inżynier Danych) ────────────────────────────
+export interface FirestoreQueryStep {
+    collection: string;
+    where?: Array<{ field: string; op: string; value: any }>;
+    limit?: number;
+}
+
+async function executeDeclarativeQueries(queries: FirestoreQueryStep[]): Promise<{ data: Record<string, any[]>; collectionsUsed: string[] }> {
+    const data: Record<string, any[]> = {};
     const collectionsUsed: string[] = [];
-    const tasks: Promise<void>[] = [];
 
-    // 1. Resztki budowlane
-    if (reqs?.needsResiduals) {
-        tasks.push((async () => {
-            let q = adminDb.collection('residuals').limit(reqs.residualsLimit || 150);
-            if (reqs.residualsCategory) {
-                q = q.where('category', '==', reqs.residualsCategory) as typeof q;
-            }
-            if (reqs.residualsStorageZone) {
-                q = q.where('storageZone', '==', reqs.residualsStorageZone) as typeof q;
-            }
-            const snap = await q.get();
-            data.residuals = snap.docs.map(doc => {
-                const d = doc.data();
-                const ts = d.updatedAt as Timestamp | undefined;
-                return {
-                    id: doc.id,
-                    name: d.name || 'Brak nazwy',
-                    quantity: Number(d.quantity) || 0,
-                    unit: d.unit || 'szt.',
-                    category: d.category || 'inne',
-                    subcategory: d.subcategory || '',
-                    storageZone: d.storageZone || 'Nieokreślona',
-                    updatedAt: ts?.toDate?.() ? ts.toDate().toISOString().split('T')[0] : null,
-                    updatedAtMillis: ts?.toMillis?.() || null
-                };
-            });
-            collectionsUsed.push('residuals');
-        })());
-    }
+    const tasks = queries.map(async (step) => {
+        const colName = step.collection;
+        let q: FirebaseFirestore.Query = adminDb.collection(colName);
 
-    // 2. Narzędzia i sprzęt
-    if (reqs?.needsInventory) {
-        tasks.push((async () => {
-            let q = adminDb.collection('inventory').limit(reqs.inventoryLimit || 100);
-            if (reqs.inventoryCategory) {
-                q = q.where('category', '==', reqs.inventoryCategory) as typeof q;
+        // Zastosuj filtry where tylko jeśli zostały rzeczywiście zdefiniowane
+        if (Array.isArray(step.where) && step.where.length > 0) {
+            for (const filter of step.where) {
+                if (filter.field && filter.op && filter.value !== undefined && filter.value !== null) {
+                    q = q.where(filter.field, filter.op as any, filter.value);
+                }
             }
-            const snap = await q.get();
-            data.inventory = snap.docs.map(doc => ({
-                id: doc.id,
-                name: doc.data().name,
-                category: doc.data().category,
-                quantity: Number(doc.data().quantity) || 0,
-                unit: doc.data().unit || 'szt.',
-                location: doc.data().location || ''
-            }));
-            collectionsUsed.push('inventory');
-        })());
-    }
+        }
 
-    // 3. Pojazdy
-    if (reqs?.needsVehicles || reqs?.needsRepairs) {
-        tasks.push((async () => {
-            const snap = await adminDb.collection('vehicles').get();
-            let vehicles = snap.docs.map(doc => ({
-                id: doc.id,
-                brand: doc.data().brand || '',
-                model: doc.data().model || '',
-                registration: doc.data().registration || '',
-                initialMileage: Number(doc.data().initialMileage) || 0
-            }));
-            if (reqs.vehicleBrand) {
-                vehicles = vehicles.filter(v => v.brand.toLowerCase().includes(reqs.vehicleBrand.toLowerCase()));
-            }
-            if (reqs.vehicleRegistration) {
-                vehicles = vehicles.filter(v => v.registration.toLowerCase().includes(reqs.vehicleRegistration.toLowerCase()));
-            }
-            data.vehicles = vehicles;
-            collectionsUsed.push('vehicles');
-        })());
-    }
+        const limitVal = step.limit && step.limit > 0 ? Math.min(step.limit, 500) : 300;
+        q = q.limit(limitVal);
 
-    // 4. Naprawy pojazdów
-    if (reqs?.needsRepairs) {
-        tasks.push((async () => {
-            let q = adminDb.collection('repairs').limit(reqs.repairsLimit || 200);
-            if (reqs.repairsCategory) {
-                q = q.where('category', '==', reqs.repairsCategory) as typeof q;
+        const snap = await q.get();
+        data[colName] = snap.docs.map(doc => {
+            const raw = doc.data();
+            const record: Record<string, any> = { id: doc.id };
+            for (const [key, val] of Object.entries(raw)) {
+                if (val instanceof Timestamp) {
+                    record[key] = val.toDate().toISOString().split('T')[0];
+                    record[`${key}Millis`] = val.toMillis();
+                } else if (typeof val === 'string' && val.length > 500) {
+                    // Ignoruj olbrzymie stringi / skany / base64
+                    continue;
+                } else {
+                    record[key] = val;
+                }
             }
-            const snap = await q.get();
-            let repairs = snap.docs.map(doc => ({
-                id: doc.id,
-                vehicleId: doc.data().vehicleId,
-                date: doc.data().date || '',
-                cost: Number(doc.data().cost) || 0,
-                category: doc.data().category || 'Inne',
-                mileage: Number(doc.data().mileage) || 0,
-                comments: doc.data().comments || '',
-                location: doc.data().location || ''
-            }));
-            if (reqs.repairsDateFrom) repairs = repairs.filter(r => r.date >= reqs.repairsDateFrom);
-            if (reqs.repairsDateTo) repairs = repairs.filter(r => r.date <= reqs.repairsDateTo);
-            data.repairs = repairs;
-            collectionsUsed.push('repairs');
-        })());
-    }
+            return record;
+        });
 
-    // 5. Zamówienia
-    if (reqs?.needsOrders) {
-        tasks.push((async () => {
-            let q = adminDb.collection('orders').limit(50);
-            if (reqs.ordersStatus) {
-                q = q.where('status', '==', reqs.ordersStatus) as typeof q;
-            }
-            const snap = await q.get();
-            data.orders = snap.docs.map(doc => ({
-                id: doc.id,
-                status: doc.data().status,
-                createdAt: doc.data().createdAt?.toDate?.() ? doc.data().createdAt.toDate().toISOString().split('T')[0] : null,
-                itemCount: Array.isArray(doc.data().items) ? doc.data().items.length : 0,
-                siteId: doc.data().siteId
-            }));
-            collectionsUsed.push('orders');
-        })());
-    }
-
-    // 6. Budowy
-    if (reqs?.needsSites) {
-        tasks.push((async () => {
-            const snap = await adminDb.collection('sites').get();
-            data.sites = snap.docs.map(doc => ({
-                id: doc.id,
-                name: doc.data().name,
-                status: doc.data().status
-            }));
-            collectionsUsed.push('sites');
-        })());
-    }
+        if (!collectionsUsed.includes(colName)) {
+            collectionsUsed.push(colName);
+        }
+    });
 
     await Promise.all(tasks);
     return { data, collectionsUsed };
@@ -393,7 +314,7 @@ export async function POST(req: Request) {
     const logs: string[] = [];
 
     try {
-        // 1. Weryfikacja tożsamości użytkownika
+        // 1. Weryfikacja sesji użytkownika
         const authHeader = req.headers.get('Authorization');
         if (!authHeader?.startsWith('Bearer ')) {
             return NextResponse.json({ error: 'Brak autoryzacji' }, { status: 401 });
@@ -401,7 +322,7 @@ export async function POST(req: Request) {
         const token = authHeader.slice(7);
         const decoded = await adminAuth.verifyIdToken(token);
 
-        // 2. Uprawnienia useChatAI
+        // 2. Weryfikacja uprawnień
         const userDoc = await adminDb.doc(`users/${decoded.uid}`).get();
         if (!userDoc.exists) {
             return NextResponse.json({ error: 'Użytkownik nie istnieje w systemie' }, { status: 403 });
@@ -435,7 +356,7 @@ export async function POST(req: Request) {
         const latestQuestion = messages[messages.length - 1].content;
         logs.push(`[Użytkownik] "${latestQuestion}"`);
 
-        // 4. Pobranie zarejestrowanych narzędzi z Firestore (ai_tools)
+        // 4. Pobranie biblioteki nauczonych narzędzi z Firestore (ai_tools)
         const savedToolsSnap = await adminDb.collection('ai_tools').orderBy('usageCount', 'desc').limit(40).get();
         const existingToolsList = savedToolsSnap.docs.map(d => {
             const data = d.data();
@@ -446,7 +367,7 @@ export async function POST(req: Request) {
                 analyticalGoal: data.analyticalGoal || '',
                 preferredWidget: data.preferredWidget || 'chart',
                 chartType: data.chartType || 'bar',
-                dataRequirements: data.dataRequirements || {}
+                queries: (data.queries as FirestoreQueryStep[]) || []
             };
         });
 
@@ -455,14 +376,12 @@ export async function POST(req: Request) {
             : '(Brak zarejestrowanych narzędzi — system wytworzy pierwsze narzędzie dla tego pytania)';
 
         // =====================================================================
-        // AGENT 1: ORCHESTRATOR / GŁÓWNY MÓZG
+        // AGENT 1: ORCHESTRATOR / MÓZG (gemini-2.5-pro)
         // =====================================================================
-        logs.push(`[Agent 1: Orchestrator] Analiza zapytania (Model: ${ORCHESTRATOR_MODEL})...`);
+        logs.push(`[Mózg: Orchestrator] Analiza zapytania (Model: ${ORCHESTRATOR_MODEL})...`);
 
         const orchestratorPrompt = `
 ${DB_SCHEMA}
-
-${FIRESTORE_QUERY_MANUAL}
 
 ZAREJESTROWANE NARZĘDZIA W BAZIE FIRESTORE (ai_tools):
 ${toolsSummary}
@@ -470,12 +389,17 @@ ${toolsSummary}
 Pytanie użytkownika: "${latestQuestion}"
 Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
-ZADANIE DLA ORCHESTRATORA:
-1. Jeśli to zwykłe powitanie/rozmowa ogólna -> isAnalysis=false, conversationalReply="...".
-2. Jeśli to zapytanie analityczne:
+ZASADY DLA ORCHESTRATORA:
+1. Znasz dokładne nazwy tabel i kolumn w DB_SCHEMA.
+2. Gdy pytanie to zwykłe powitanie/rozmowa ogólna -> isAnalysis=false, conversationalReply="...".
+3. Gdy pytanie dotyczy danych z bazy:
    a) Sprawdź, czy któreś narzędzie z ZAREJESTROWANYCH NARZĘDZI pasuje:
       - Jeśli TAK: ustaw toolAction="USE_EXISTING" oraz matchedToolId na ID pasującego narzędzia.
-      - Jeśli NIE: ustaw toolAction="CREATE_NEW" i zdefiniuj newToolDefinition (slug, czytelna nazwa, opis, analyticalGoal dla Pythona) oraz dataRequirements dla Inżyniera Danych.
+      - Jeśli NIE: ustaw toolAction="CREATE_NEW" i zdefiniuj newToolDefinition (slug, nazwa, opis, analyticalGoal dla Pythona).
+   b) ZBUDUJ PRECYZYJNE ZAPYTANIA W 'queries':
+      - Określ, które kolekcje z DB_SCHEMA muszą zostać pobrane ('vehicles', 'repairs', 'residuals', 'inventory', 'orders', 'sites').
+      - Jeśli użytkownik pyta OGÓLNIE (np. "jakimi samochodami dysponujemy", "ile wydaliśmy na naprawy", "co mamy na magazynie") -> NIE DODAWASZ ŻADNYCH FILTRÓW! Zostaw tablicę 'where' jako pustą []. Wtedy Inżynier Danych pobierze wszystkie rekordy.
+      - Jeśli użytkownik wskazał KONKRETNY filtr w pytaniu (np. "Iveco", "Zawieszenie", "rok 2024") -> dodaj filtr do tablicy 'where' z dokładną nazwą kolumny z DB_SCHEMA (np. field: "brand", op: "==", value: "Iveco").
 `;
 
         let orchestratorRes: any;
@@ -484,7 +408,7 @@ ZADANIE DLA ORCHESTRATORA:
                 model: ORCHESTRATOR_MODEL,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Architektem i Orchestratorem PESAM. Masz przed sobą schemat bazy i rejestr narzędzi. Decydujesz czy użyć gotowego narzędzia, czy utworzyć nowe.`,
+                    systemInstruction: `Jesteś Głównym Mózgiem i Architektem Bazy Danych PESAM. Posługujesz się schematem DB_SCHEMA. Budujesz precyzyjne zapytania w 'queries'. Gdy pytanie jest ogólne o daną encję, tablica 'where' MUSI być pusta [].`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
@@ -496,7 +420,7 @@ ZADANIE DLA ORCHESTRATORA:
                 model: ORCHESTRATOR_FALLBACK,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Architektem PESAM. Decydujesz czy użyć gotowego narzędzia, czy utworzyć nowe.`,
+                    systemInstruction: `Jesteś Głównym Mózgiem i Architektem PESAM. Budujesz zapytania w 'queries' na podstawie DB_SCHEMA.`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
@@ -526,15 +450,17 @@ ZADANIE DLA ORCHESTRATORA:
         // =====================================================================
         let activeTool: any = null;
         let isToolNew = false;
-        let dataRequirements: any = plan.dataRequirements || {};
-        let analyticalGoal: string = '';
+        let queriesToRun: FirestoreQueryStep[] = Array.isArray(plan.queries) ? plan.queries : [];
+        let analyticalGoal: string = plan.analyticalGoal || latestQuestion;
 
         if (plan.toolAction === 'USE_EXISTING' && plan.matchedToolId) {
             activeTool = existingToolsList.find(t => t.id === plan.matchedToolId);
             if (activeTool) {
-                logs.push(`[Rejestr ai_tools] ⚡ Błyskawiczne dopasowanie: "${activeTool.name}" [${activeTool.id}]`);
+                logs.push(`[ai_tools] ⚡ Błyskawiczne dopasowanie: "${activeTool.name}" [${activeTool.id}]`);
                 analyticalGoal = activeTool.analyticalGoal;
-                dataRequirements = { ...activeTool.dataRequirements, ...(plan.dataRequirements || {}) };
+                if (!queriesToRun.length && activeTool.queries?.length) {
+                    queriesToRun = activeTool.queries;
+                }
             }
         }
 
@@ -542,28 +468,47 @@ ZADANIE DLA ORCHESTRATORA:
             isToolNew = true;
             const newDef = plan.newToolDefinition || {
                 id: `tool_${Date.now()}`,
-                name: 'Nowa analiza magazynowa',
+                name: 'Nowa analiza danych',
                 description: latestQuestion,
                 analyticalGoal: latestQuestion,
                 preferredWidget: 'chart',
                 chartType: 'bar'
             };
-            activeTool = { ...newDef, dataRequirements };
-            analyticalGoal = newDef.analyticalGoal || latestQuestion;
-            logs.push(`[Rejestr ai_tools] 🎓 Tworzenie nowej umiejętności: "${activeTool.name}"`);
+            activeTool = { ...newDef, queries: queriesToRun };
+            analyticalGoal = newDef.analyticalGoal || analyticalGoal;
+            logs.push(`[ai_tools] 🎓 Tworzenie nowej umiejętności: "${activeTool.name}"`);
+        }
+
+        // Zabezpieczenie: jeśli queriesToRun jest puste, wywnioskuj kolekcję z intencji pytania
+        if (queriesToRun.length === 0) {
+            const ql = latestQuestion.toLowerCase();
+            if (ql.includes('samoch') || ql.includes('aut') || ql.includes('flot') || ql.includes('pojazd') || ql.includes('napraw')) {
+                queriesToRun.push({ collection: 'vehicles' });
+                if (ql.includes('napraw') || ql.includes('koszt') || ql.includes('serwis') || ql.includes('pieni')) {
+                    queriesToRun.push({ collection: 'repairs' });
+                }
+            } else if (ql.includes('resztk') || ql.includes('plac') || ql.includes('stref') || ql.includes('magazyn')) {
+                queriesToRun.push({ collection: 'residuals' });
+            } else if (ql.includes('sprzęt') || ql.includes('narzędz') || ql.includes('maszyn')) {
+                queriesToRun.push({ collection: 'inventory' });
+            } else if (ql.includes('zamówien')) {
+                queriesToRun.push({ collection: 'orders' });
+            } else if (ql.includes('budow')) {
+                queriesToRun.push({ collection: 'sites' });
+            }
         }
 
         // =====================================================================
-        // AGENT 2: INŻYNIER DANYCH — POBIERANIE REKORDÓW Z FIRESTORE
+        // AGENT 2: INŻYNIER DANYCH — POBIERANIE ZAPYTANIAMI DEKLARATYWNYMI
         // =====================================================================
-        logs.push(`[Agent 2: Inżynier Danych] Pobieranie danych z Firestore wg instrukcji...`);
-        const { data: dbData, collectionsUsed } = await fetchFirestoreData(dataRequirements);
-        logs.push(`[Firestore] Pobrane kolekcje: ${collectionsUsed.join(', ') || 'brak'}`);
+        logs.push(`[Agent 2: Inżynier Danych] Wykonywanie zapytań do Firestore (${queriesToRun.map(q => q.collection).join(', ')})...`);
+        const { data: dbData, collectionsUsed } = await executeDeclarativeQueries(queriesToRun);
+        logs.push(`[Firestore] Pobrane rekordy z kolekcji: ${collectionsUsed.join(', ') || 'brak'}`);
 
-        const totalRecords = Object.values(dbData).reduce((acc: number, arr: any) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
+        const totalRecords = Object.values(dbData).reduce((acc: number, arr: any[]) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
         if (totalRecords === 0) {
             return NextResponse.json({
-                reply: 'W systemie nie znaleziono rekordów odpowiadających podanym kryteriom filtrowania.',
+                reply: 'W systemie nie znaleziono rekordów odpowiadających podanemu zapytaniu.',
                 widget: null,
                 dataUsed: collectionsUsed,
                 logs
@@ -581,12 +526,12 @@ Narzędzie: "${activeTool.name}"
 Cel wyliczeń: "${analyticalGoal}"
 Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
-DANE WEJŚCIOWE Z FIRESTORE (JSON):
+DANE POBRANE Z FIRESTORE (JSON):
 ${JSON.stringify(dbData)}
 
 TWOJE ZADANIE:
 1. Napisz i uruchom kod w Pythonie, który przetworzy powyższe dane.
-2. Wykonaj 100% precyzyjne operacje matematyczne (sumy, średnie, grupowania, sortowania, rotacja >30 dni).
+2. Wykonaj 100% precyzyjne obliczenia (sumy, średnie, wykaz samochodów, koszty napraw, rotacje).
 3. Wypisz wyniki na stdout.
 4. Na końcu wypisz sekcję:
 PODSUMOWANIE DLA KIEROWNIKA:
@@ -622,10 +567,10 @@ PODSUMOWANIE DLA KIEROWNIKA:
                     id: activeTool.id,
                     name: activeTool.name,
                     description: activeTool.description || '',
-                    analyticalGoal: activeTool.analyticalGoal || '',
+                    analyticalGoal: activeTool.analyticalGoal || analyticalGoal,
                     preferredWidget: activeTool.preferredWidget || 'chart',
                     chartType: activeTool.chartType || 'bar',
-                    dataRequirements,
+                    queries: queriesToRun,
                     createdAt: new Date().toISOString(),
                     lastUsedAt: new Date().toISOString(),
                     usageCount: 1
@@ -635,7 +580,6 @@ PODSUMOWANIE DLA KIEROWNIKA:
                 console.error('Błąd zapisu do ai_tools:', saveErr);
             }
         } else if (activeTool.id) {
-            // Inkrementacja licznika użyć
             try {
                 await adminDb.collection('ai_tools').doc(activeTool.id).update({
                     usageCount: FieldValue.increment(1),
@@ -659,8 +603,8 @@ ${mathOutput}
 ZADANIE:
 Wybierz JEDNO narzędzie i przygotuj dane:
 1. renderChartWidget -> jeśli to porównanie liczb lub trend (chartType: "bar" | "pie" | "line").
-2. renderTableWidget -> jeśli to szczegółowa lista z wieloma wierszami.
-3. renderKpiWidget -> jeśli to 1-3 kluczowe liczby sumaryczne.
+2. renderTableWidget -> jeśli to szczegółowa lista (np. lista samochodów z markami, modelami i rejestracjami).
+3. renderKpiWidget -> jeśli to 1-3 kluczowe liczby sumaryczne (np. łączny koszt napraw).
 
 WAŻNE DLA aiMessage:
 Napisz zwięzłe podsumowanie po polsku dla czatu (2-4 zdania). Wskaż najważniejsze liczby i wnioski.
@@ -727,7 +671,7 @@ BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
         });
 
     } catch (err: any) {
-        console.error('Błąd Orchestratora v7.0:', err);
+        console.error('Błąd Orchestratora v8.0:', err);
         return NextResponse.json({
             error: 'Błąd przetwarzania wieloagentowego',
             detail: String(err?.message || err),

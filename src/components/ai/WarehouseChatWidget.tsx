@@ -378,7 +378,7 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
                                 {msg.widget && <MessageWidget widget={msg.widget} />}
 
                                 {/* Odznaka weryfikacji i źródła danych */}
-                                {msg.role === 'assistant' && (msg.toolUsed || msg.pythonExecuted || msg.dataUsed?.length) && (
+                                {msg.role === 'assistant' && Boolean(msg.toolUsed || msg.pythonExecuted || (msg.dataUsed && msg.dataUsed.length > 0)) && (
                                     <div className="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap items-center gap-2 text-[10px] text-slate-400">
                                         {msg.toolUsed && (
                                             <span className={`inline-flex items-center gap-1 font-semibold px-2 py-0.5 rounded border ${
