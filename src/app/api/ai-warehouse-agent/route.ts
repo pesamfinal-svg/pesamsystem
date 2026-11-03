@@ -229,18 +229,17 @@ const ORCHESTRATOR_SCHEMA = {
             type: Type.OBJECT,
             description: 'Definicja nowego narzędzia jeśli toolAction == "CREATE_NEW"',
             properties: {
-                id: { type: Type.STRING, description: 'Slug w snake_case' },
+                id: { type: Type.STRING, description: 'Slug w snake_case, np. suma_kosztow_napraw' },
                 name: { type: Type.STRING, description: 'Zwięzła polska nazwa narzędzia' },
                 description: { type: Type.STRING, description: 'Opis działania narzędzia' },
                 analyticalGoal: { type: Type.STRING, description: 'Dokładny cel wyliczeń dla Agenta Pythona' },
                 preferredWidget: { type: Type.STRING, enum: ['chart', 'table', 'kpi'] },
                 chartType: { type: Type.STRING, enum: ['bar', 'pie', 'line'] }
-            },
-            required: ['id', 'name', 'analyticalGoal']
+            }
         },
         queries: {
             type: Type.ARRAY,
-            description: 'Zlecenie dla Inżyniera Danych: lista zapytań do wykonania na kolekcjach zbadanego schematu.',
+            description: 'Zlecenie dla Inżyniera Danych: lista zapytań do wykonania na kolekcjach zbadanego schematu. Gdy isAnalysis=true, MUSI zawierać co najmniej 1 kolekcję (np. collection="repairs", where=[]).',
             items: QUERY_STEP_SCHEMA
         },
         analyticalGoal: {
@@ -248,7 +247,7 @@ const ORCHESTRATOR_SCHEMA = {
             description: 'Instrukcja obliczeniowa dla Agenta Matematyka'
         }
     },
-    required: ['isAnalysis']
+    required: ['isAnalysis', 'toolAction', 'queries', 'analyticalGoal']
 };
 
 // ─── NARZĘDZIA PREZENTERA UI ─────────────────────────────────────────────────
@@ -471,13 +470,16 @@ Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 ROLA ORCHESTRATORA:
 1. Przeanalizuj pytanie użytkownika w kontekście zbadanej struktury bazy danych.
 2. Zdecyduj czy to zwykła rozmowa (isAnalysis=false), czy zadanie na danych (isAnalysis=true).
-3. Jeśli zadanie na danych:
-   a) Sprawdź czy któreś z zarejestrowanych narzędzi (ai_tools) pasuje do pytania (USE_EXISTING).
-   b) Jeśli nie, stwórz nowe narzędzie (CREATE_NEW) z definicją i celem analitycznym.
-   c) Zleć Inżynierowi Danych zapytania 'queries':
-      - Wybierz kolekcje ze zbadanego schematu bazy danych (np. 'vehicles' dla floty/aut, 'repairs' dla napraw/serwisów, 'inventory' dla resztek/artykułów, 'sites' dla budów).
-      - PAMIĘTAJ: Jeśli użytkownik pyta OGÓLNIE (np. "jakie samochody posiadamy", "ile wydaliśmy na naprawy", "co mamy w magazynie"), tablica 'where' MUSI być pusta []!
-      - Filtry dodawaj TYLKO gdy użytkownik WPROST podał konkretną wartość (np. markę lub kategorię) w pytaniu.
+3. JEŚLI isAnalysis=true (OBOWIĄZKOWE ZASADY):
+   - Tablica 'queries' NIE MOŻE BYĆ PUSTA! Musisz wyznaczyć co najmniej 1 trafną kolekcję ze zbadanego schematu.
+     * Pytania o naprawy / serwisy / koszty eksploatacji -> kolekcja 'repairs'
+     * Pytania o samochody / flotę / auta / pojazdy -> kolekcja 'vehicles'
+     * Pytania o magazyn / resztki / stan towaru / materiały -> kolekcja 'inventory'
+     * Pytania o budowy / lokalizacje -> kolekcja 'sites'
+     * Pytania o pracowników / monterów -> kolekcja 'workers'
+   - PAMIĘTAJ: Jeśli użytkownik pyta OGÓLNIE (np. "ile wydaliśmy na naprawy", "jakie mamy auta", "co jest w magazynie"), tablica 'where' MUSI być pusta []! Nie filtruj daty ani typu na poziomie bazy, ponieważ Agent Matematyk w Pythonie przeliczy daty i kwoty z pełną precyzją.
+   - Ustaw toolAction="CREATE_NEW" (lub "USE_EXISTING" jeśli zapytanie pasuje do narzędzia z ai_tools).
+   - Wypełnij newToolDefinition (slug, czytelna nazwa, analyticalGoal).
 `;
 
         let orchestratorRes: any;
@@ -486,19 +488,20 @@ ROLA ORCHESTRATORA:
                 model: ORCHESTRATOR_MODEL,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem i Menedżerem PESAM. Otrzymujesz strukturę bazy danych odkrytą na żywo. Zlecasz zapytania do bazy Inżynierowi Danych.`,
+                    systemInstruction: `Jesteś Głównym Mózgiem i Menedżerem PESAM. Otrzymujesz strukturę bazy danych odkrytą na żywo. Zlecasz zapytania do bazy Inżynierowi Danych. ZAWSZE wypełniaj 'queries' co najmniej jedną kolekcją ze schematu.`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
                 }
             });
-        } catch (err) {
+        } catch (err: any) {
+            logs.push(`[Mózg: Błąd ${ORCHESTRATOR_MODEL}] ${err?.message || err}`);
             logs.push(`[Orchestrator Fallback] Przełączanie na ${ORCHESTRATOR_FALLBACK}...`);
             orchestratorRes = await runWithRetry({
                 model: ORCHESTRATOR_FALLBACK,
                 contents: [{ role: 'user', parts: [{ text: orchestratorPrompt }] }],
                 config: {
-                    systemInstruction: `Jesteś Głównym Mózgiem PESAM. Zlecasz zapytania do bazy na podstawie zbadanego schematu.`,
+                    systemInstruction: `Jesteś Głównym Mózgiem PESAM. Zlecasz zapytania do bazy na podstawie zbadanego schematu. ZAWSZE wypełniaj 'queries' co najmniej jedną trafną kolekcją ze schematu (np. repairs, vehicles, inventory).`,
                     temperature: 0.1,
                     responseMimeType: 'application/json',
                     responseSchema: ORCHESTRATOR_SCHEMA
@@ -555,6 +558,44 @@ ROLA ORCHESTRATORA:
             activeTool = { ...newDef, queries: queriesToRun };
             analyticalGoal = newDef.analyticalGoal || analyticalGoal;
             logs.push(`[ai_tools] 🎓 Tworzenie nowego narzędzia: "${activeTool.name}"`);
+        }
+
+        // ─── INTELIGENTNA SIATKA BEZPIECZEŃSTWA (Safety Net) ────────────────────────
+        // Jeśli Mózg zwrócił pustą listę queries, na podstawie słów kluczowych zapytania
+        // i zbadanego schematu automatycznie przypisujemy odpowiednią kolekcję.
+        if (queriesToRun.length === 0 && plan.isAnalysis) {
+            const qLower = latestQuestion.toLowerCase();
+            const fallbackQueries: FirestoreQueryStep[] = [];
+
+            if (qLower.includes('napraw') || qLower.includes('serwis') || qLower.includes('koszt') || qLower.includes('faktur')) {
+                fallbackQueries.push({ collection: 'repairs', where: [] });
+            }
+            if (qLower.includes('samoch') || qLower.includes('aut') || qLower.includes('flot') || qLower.includes('pojazd')) {
+                if (!fallbackQueries.some(q => q.collection === 'vehicles')) {
+                    fallbackQueries.push({ collection: 'vehicles', where: [] });
+                }
+            }
+            if (qLower.includes('magazyn') || qLower.includes('resztk') || qLower.includes('piank') || qLower.includes('klej') || qLower.includes('materiał') || qLower.includes('towar') || qLower.includes('stan') || qLower.includes('pozycj')) {
+                if (!fallbackQueries.some(q => q.collection === 'inventory')) {
+                    fallbackQueries.push({ collection: 'inventory', where: [] });
+                }
+            }
+            if (qLower.includes('budow') || qLower.includes('budów') || qLower.includes('site') || qLower.includes('obiekt')) {
+                if (!fallbackQueries.some(q => q.collection === 'sites')) {
+                    fallbackQueries.push({ collection: 'sites', where: [] });
+                }
+            }
+            if (qLower.includes('pracownik') || qLower.includes('ludzi') || qLower.includes('monter') || qLower.includes('brygadz')) {
+                if (!fallbackQueries.some(q => q.collection === 'workers')) {
+                    fallbackQueries.push({ collection: 'workers', where: [] });
+                }
+            }
+
+            if (fallbackQueries.length > 0) {
+                queriesToRun = fallbackQueries;
+                activeTool.queries = queriesToRun;
+                logs.push(`[Inżynier Danych] 🛡️ Inteligentna siatka bezpieczeństwa: automatycznie wyznaczono kolekcje [${queriesToRun.map(q => q.collection).join(', ')}] na podstawie zapytania.`);
+            }
         }
 
         logs.push(`[Mózg: Decyzja] akcja=${plan.toolAction || 'NOWE'}, cel="${analyticalGoal}"`);
