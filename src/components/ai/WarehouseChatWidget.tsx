@@ -57,6 +57,11 @@ interface ChatMessage {
     role: 'user' | 'assistant';
     content: string;
     widget?: ChatWidgetData | null;
+    toolUsed?: {
+        id: string;
+        name: string;
+        isNew?: boolean;
+    } | null;
     pythonExecuted?: boolean;
     dataUsed?: string[];
 }
@@ -256,6 +261,7 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
                     role: 'assistant',
                     content: data.reply,
                     widget: data.widget,
+                    toolUsed: data.toolUsed,
                     pythonExecuted: data.pythonExecuted,
                     dataUsed: data.dataUsed
                 }
@@ -372,12 +378,22 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
                                 {msg.widget && <MessageWidget widget={msg.widget} />}
 
                                 {/* Odznaka weryfikacji i źródła danych */}
-                                {msg.role === 'assistant' && (msg.pythonExecuted || msg.dataUsed?.length) && (
+                                {msg.role === 'assistant' && (msg.toolUsed || msg.pythonExecuted || msg.dataUsed?.length) && (
                                     <div className="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap items-center gap-2 text-[10px] text-slate-400">
+                                        {msg.toolUsed && (
+                                            <span className={`inline-flex items-center gap-1 font-semibold px-2 py-0.5 rounded border ${
+                                                msg.toolUsed.isNew
+                                                    ? 'text-amber-700 bg-amber-50 border-amber-200'
+                                                    : 'text-indigo-700 bg-indigo-50 border-indigo-200'
+                                            }`}>
+                                                <span>{msg.toolUsed.isNew ? '🎓 Nowy tool:' : '⚡ Gotowy tool:'}</span>
+                                                <span className="font-bold">{msg.toolUsed.name}</span>
+                                            </span>
+                                        )}
                                         {msg.pythonExecuted && (
                                             <span className="inline-flex items-center gap-1 font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
                                                 <span>🐍</span>
-                                                <span>Python Sandbox (precyzyjna kalkulacja)</span>
+                                                <span>Python Sandbox</span>
                                             </span>
                                         )}
                                         {msg.dataUsed && msg.dataUsed.length > 0 && (
