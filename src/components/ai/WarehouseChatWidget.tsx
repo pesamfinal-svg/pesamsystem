@@ -64,6 +64,7 @@ interface ChatMessage {
     } | null;
     pythonExecuted?: boolean;
     dataUsed?: string[];
+    logs?: string[];
 }
 
 interface Props {
@@ -251,7 +252,9 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
 
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
-                throw new Error(err.error || err.detail || 'Błąd serwera');
+                const errorObj = new Error(err.error || err.detail || 'Błąd serwera');
+                (errorObj as any).logs = err.logs;
+                throw errorObj;
             }
 
             const data = await res.json();
@@ -263,7 +266,8 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
                     widget: data.widget,
                     toolUsed: data.toolUsed,
                     pythonExecuted: data.pythonExecuted,
-                    dataUsed: data.dataUsed
+                    dataUsed: data.dataUsed,
+                    logs: data.logs || []
                 }
             ]);
         } catch (err: any) {
@@ -271,7 +275,8 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
                 ...prev,
                 {
                     role: 'assistant',
-                    content: `❌ Wystąpił błąd: ${err?.message || 'Nieznany błąd zapytania.'}`
+                    content: `❌ Wystąpił błąd: ${err?.message || 'Nieznany błąd zapytania.'}`,
+                    logs: err?.logs || []
                 }
             ]);
         } finally {
@@ -402,6 +407,77 @@ export function WarehouseChatWidget({ isOpen, onClose }: Props) {
                                             </span>
                                         )}
                                     </div>
+                                )}
+
+                                {/* Podgląd procesu AI & Logi kroków */}
+                                {msg.role === 'assistant' && msg.logs && msg.logs.length > 0 && (
+                                    <details className="mt-2.5 pt-2 border-t border-slate-100 group/logs">
+                                        <summary className="cursor-pointer select-none text-[11px] font-semibold text-slate-500 hover:text-indigo-600 flex items-center justify-between transition py-0.5">
+                                            <span className="flex items-center gap-1.5">
+                                                <span className="text-[10px] group-open/logs:rotate-90 transition-transform duration-150 inline-block">▶</span>
+                                                <span>⚙️ Podgląd procesu AI & Logi ({msg.logs.length})</span>
+                                            </span>
+                                            <span className="text-[10px] text-slate-400 group-open/logs:hidden">Rozwiń ▾</span>
+                                        </summary>
+                                        <div className="mt-2 p-2.5 bg-slate-950 text-slate-200 rounded-xl font-mono text-[10.5px] leading-relaxed max-h-72 overflow-y-auto space-y-1.5 border border-slate-800 shadow-inner">
+                                            {msg.logs.map((log, lIdx) => {
+                                                let tag = '';
+                                                let badgeColor = 'text-slate-300';
+                                                let badgeBg = 'bg-slate-800/70 border-slate-700/60';
+                                                let cleanText = log;
+
+                                                if (log.startsWith('[Użytkownik]')) {
+                                                    tag = '👤 USER';
+                                                    badgeColor = 'text-sky-300';
+                                                    badgeBg = 'bg-sky-950/60 border-sky-800/60';
+                                                    cleanText = log.replace('[Użytkownik]', '').trim();
+                                                } else if (log.includes('Mózg') || log.includes('Orchestrator')) {
+                                                    tag = '🧠 MÓZG';
+                                                    badgeColor = 'text-purple-300';
+                                                    badgeBg = 'bg-purple-950/60 border-purple-800/60';
+                                                    cleanText = log.replace(/\[Mózg:?[^\]]*\]/, '').trim();
+                                                } else if (log.includes('Live Schema') || log.includes('Introspection') || log.includes('Schemat')) {
+                                                    tag = '🔍 SCHEMAT';
+                                                    badgeColor = 'text-blue-300';
+                                                    badgeBg = 'bg-blue-950/60 border-blue-800/60';
+                                                    cleanText = log.replace(/\[Live Schema\]|\[Introspection\]/, '').trim();
+                                                } else if (log.includes('Inżynier Danych') || log.includes('Firestore')) {
+                                                    tag = '🗄️ BAZA';
+                                                    badgeColor = 'text-amber-300';
+                                                    badgeBg = 'bg-amber-950/60 border-amber-800/60';
+                                                    cleanText = log.replace(/\[Inżynier Danych[^\]]*\]|\[Firestore\]/, '').trim();
+                                                } else if (log.includes('Matematyk') || log.includes('Python')) {
+                                                    tag = '🐍 PYTHON';
+                                                    badgeColor = 'text-emerald-300';
+                                                    badgeBg = 'bg-emerald-950/60 border-emerald-800/60';
+                                                    cleanText = log.replace(/\[Matematyk[^\]]*\]/, '').trim();
+                                                } else if (log.includes('ai_tools')) {
+                                                    tag = '💾 TOOL';
+                                                    badgeColor = 'text-pink-300';
+                                                    badgeBg = 'bg-pink-950/60 border-pink-800/60';
+                                                    cleanText = log.replace(/\[ai_tools\]/, '').trim();
+                                                } else if (log.includes('Prezenter')) {
+                                                    tag = '🎨 UI';
+                                                    badgeColor = 'text-cyan-300';
+                                                    badgeBg = 'bg-cyan-950/60 border-cyan-800/60';
+                                                    cleanText = log.replace(/\[Prezenter UI[^\]]*\]/, '').trim();
+                                                }
+
+                                                return (
+                                                    <div key={lIdx} className="break-words border-b border-slate-900/80 pb-1.5 last:border-b-0 flex items-start gap-1.5">
+                                                        {tag && (
+                                                            <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border flex-shrink-0 ${badgeBg} ${badgeColor}`}>
+                                                                {tag}
+                                                            </span>
+                                                        )}
+                                                        <span className={badgeColor}>
+                                                            {cleanText || log}
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </details>
                                 )}
                             </div>
                         </div>

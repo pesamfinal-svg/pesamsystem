@@ -60,16 +60,34 @@ async function getLiveDatabaseSchema(): Promise<Record<string, CollectionSchema>
         return cachedSchema.schema;
     }
 
+    const KNOWN_COLLECTIONS = [
+        'vehicles', 'repairs', 'inventory', 'sites', 'workers',
+        'protocols', 'claims', 'pending_wz_items', 'roles', 'users', 'closeouts'
+    ];
+
     try {
-        const collections = await adminDb.listCollections();
+        let collectionRefs: FirebaseFirestore.CollectionReference[] = [];
+        try {
+            const cols = await adminDb.listCollections();
+            collectionRefs = cols.filter(c => !c.id.startsWith('_') && c.id !== 'ai_tools');
+        } catch (listErr) {
+            console.warn('adminDb.listCollections() niedostępne, użycie sondowania znanych kolekcji:', listErr);
+        }
+
+        // Jeśli listCollections nie zwróciło kolekcji, sondujemy znane kolekcje
+        if (collectionRefs.length === 0) {
+            collectionRefs = KNOWN_COLLECTIONS.map(name => adminDb.collection(name));
+        }
+
         const result: Record<string, CollectionSchema> = {};
 
-        // Badamy kolekcje biznesowe (pomijając wewnętrzne systemowe)
-        const businessCollections = collections.filter(c => !c.id.startsWith('_') && c.id !== 'ai_tools');
-
-        await Promise.all(businessCollections.map(async (colRef) => {
+        await Promise.all(collectionRefs.map(async (colRef) => {
             try {
                 const snap = await colRef.limit(3).get();
+                if (snap.empty && !KNOWN_COLLECTIONS.includes(colRef.id)) {
+                    return;
+                }
+
                 const fields: Record<string, SchemaFieldInfo> = {};
 
                 snap.docs.forEach(doc => {
@@ -300,18 +318,25 @@ export interface FirestoreQueryStep {
     limit?: number;
 }
 
-async function executeDataEngineQueries(queries: FirestoreQueryStep[]): Promise<{ data: Record<string, any[]>; collectionsUsed: string[] }> {
+async function executeDataEngineQueries(queries: FirestoreQueryStep[], logs: string[]): Promise<{ data: Record<string, any[]>; collectionsUsed: string[] }> {
     const data: Record<string, any[]> = {};
     const collectionsUsed: string[] = [];
+
+    if (!queries || queries.length === 0) {
+        logs.push('[Inżynier Danych] ⚠️ Brak zapytań (queries: []) — Mózg nie wyznaczył żadnej kolekcji');
+        return { data, collectionsUsed };
+    }
 
     const tasks = queries.map(async (step) => {
         const colName = step.collection;
         let q: FirebaseFirestore.Query = adminDb.collection(colName);
 
+        const filterDescs: string[] = [];
         if (Array.isArray(step.where) && step.where.length > 0) {
             for (const filter of step.where) {
                 if (filter.field && filter.op && filter.value !== undefined && filter.value !== null) {
                     q = q.where(filter.field, filter.op as any, filter.value);
+                    filterDescs.push(`${filter.field} ${filter.op} ${JSON.stringify(filter.value)}`);
                 }
             }
         }
@@ -319,25 +344,34 @@ async function executeDataEngineQueries(queries: FirestoreQueryStep[]): Promise<
         const limitVal = step.limit && step.limit > 0 ? Math.min(step.limit, 500) : 300;
         q = q.limit(limitVal);
 
-        const snap = await q.get();
-        data[colName] = snap.docs.map(doc => {
-            const raw = doc.data();
-            const record: Record<string, any> = { id: doc.id };
-            for (const [key, val] of Object.entries(raw)) {
-                if (val instanceof Timestamp) {
-                    record[key] = val.toDate().toISOString().split('T')[0];
-                    record[`${key}Millis`] = val.toMillis();
-                } else if (typeof val === 'string' && val.length > 500) {
-                    continue;
-                } else {
-                    record[key] = val;
-                }
-            }
-            return record;
-        });
+        const filterSummary = filterDescs.length > 0 ? `filtry: [${filterDescs.join(', ')}]` : 'bez filtrów (pobieranie całości)';
+        logs.push(`[Inżynier Danych -> Firestore] Zapytanie do "${colName}" (${filterSummary}, limit=${limitVal})`);
 
-        if (!collectionsUsed.includes(colName)) {
-            collectionsUsed.push(colName);
+        try {
+            const snap = await q.get();
+            logs.push(`[Inżynier Danych <- Firestore] Kolekcja "${colName}": pobrano ${snap.size} dokumentów`);
+
+            data[colName] = snap.docs.map(doc => {
+                const raw = doc.data();
+                const record: Record<string, any> = { id: doc.id };
+                for (const [key, val] of Object.entries(raw)) {
+                    if (val instanceof Timestamp) {
+                        record[key] = val.toDate().toISOString().split('T')[0];
+                        record[`${key}Millis`] = val.toMillis();
+                    } else if (typeof val === 'string' && val.length > 500) {
+                        continue;
+                    } else {
+                        record[key] = val;
+                    }
+                }
+                return record;
+            });
+
+            if (!collectionsUsed.includes(colName)) {
+                collectionsUsed.push(colName);
+            }
+        } catch (fetchErr: any) {
+            logs.push(`[Inżynier Danych ❌ Błąd] Kolekcja "${colName}": ${fetchErr?.message || fetchErr}`);
         }
     });
 
@@ -395,6 +429,8 @@ export async function POST(req: Request) {
         // 4. DYNAMICZNA INSPEKCJA BAZY DANYCH (Odkrywanie schematu na żywo)
         logs.push(`[Introspection] Badanie struktury Firestore w czasie rzeczywistym...`);
         const liveSchema = await getLiveDatabaseSchema();
+        const detectedCols = Object.keys(liveSchema);
+        logs.push(`[Live Schema] Wykryto ${detectedCols.length} kolekcji: ${detectedCols.join(', ')}`);
         const liveSchemaPromptText = formatSchemaForPrompt(liveSchema);
 
         // 5. Pobranie biblioteki nauczonych narzędzi z Firestore (ai_tools)
@@ -434,14 +470,14 @@ Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
 ROLA ORCHESTRATORA:
 1. Przeanalizuj pytanie użytkownika w kontekście zbadanej struktury bazy danych.
-2. Zdecyduj czy to zwykła rozmowa (isAnalysis=false), czy zadanie na danych.
+2. Zdecyduj czy to zwykła rozmowa (isAnalysis=false), czy zadanie na danych (isAnalysis=true).
 3. Jeśli zadanie na danych:
    a) Sprawdź czy któreś z zarejestrowanych narzędzi (ai_tools) pasuje do pytania (USE_EXISTING).
    b) Jeśli nie, stwórz nowe narzędzie (CREATE_NEW) z definicją i celem analitycznym.
    c) Zleć Inżynierowi Danych zapytania 'queries':
-      - Wybierz odpowiednie kolekcje ze zbadanego schematu bazy danych.
-      - PAMIĘTAJ: Jeśli użytkownik pyta OGÓLNIE (np. o wszystkie samochody, wszystkie naprawy, stan magazynu), tablica 'where' MUSI być pusta [].
-      - Jeśli pyta o konkretną wartość (np. markę lub kategorię), wskaż pole ze schematu i wartość.
+      - Wybierz kolekcje ze zbadanego schematu bazy danych (np. 'vehicles' dla floty/aut, 'repairs' dla napraw/serwisów, 'inventory' dla resztek/artykułów, 'sites' dla budów).
+      - PAMIĘTAJ: Jeśli użytkownik pyta OGÓLNIE (np. "jakie samochody posiadamy", "ile wydaliśmy na naprawy", "co mamy w magazynie"), tablica 'where' MUSI być pusta []!
+      - Filtry dodawaj TYLKO gdy użytkownik WPROST podał konkretną wartość (np. markę lub kategorię) w pytaniu.
 `;
 
         let orchestratorRes: any;
@@ -498,7 +534,7 @@ ROLA ORCHESTRATORA:
         if (plan.toolAction === 'USE_EXISTING' && plan.matchedToolId) {
             activeTool = existingToolsList.find(t => t.id === plan.matchedToolId);
             if (activeTool) {
-                logs.push(`[ai_tools] ⚡ Błyskawiczne dopasowanie: "${activeTool.name}" [${activeTool.id}]`);
+                logs.push(`[ai_tools] ⚡ Błyskawiczne dopasowanie narzędzia: "${activeTool.name}" [${activeTool.id}]`);
                 analyticalGoal = activeTool.analyticalGoal;
                 if (!queriesToRun.length && activeTool.queries?.length) {
                     queriesToRun = activeTool.queries;
@@ -518,20 +554,24 @@ ROLA ORCHESTRATORA:
             };
             activeTool = { ...newDef, queries: queriesToRun };
             analyticalGoal = newDef.analyticalGoal || analyticalGoal;
-            logs.push(`[ai_tools] 🎓 Tworzenie nowej umiejętności: "${activeTool.name}"`);
+            logs.push(`[ai_tools] 🎓 Tworzenie nowego narzędzia: "${activeTool.name}"`);
         }
+
+        logs.push(`[Mózg: Decyzja] akcja=${plan.toolAction || 'NOWE'}, cel="${analyticalGoal}"`);
 
         // =====================================================================
         // AGENT 2: INŻYNIER DANYCH — POBIERANIE ZAPYTANIAMI DEKLARATYWNYMI
         // =====================================================================
-        logs.push(`[Agent 2: Inżynier Danych] Wykonywanie zapytań do Firestore (${queriesToRun.map(q => q.collection).join(', ')})...`);
-        const { data: dbData, collectionsUsed } = await executeDataEngineQueries(queriesToRun);
-        logs.push(`[Firestore] Pobrane rekordy z kolekcji: ${collectionsUsed.join(', ') || 'brak'}`);
+        logs.push(`[Agent 2: Inżynier Danych] Rozpoczęcie wykonywania zapytań do Firestore...`);
+        const { data: dbData, collectionsUsed } = await executeDataEngineQueries(queriesToRun, logs);
 
         const totalRecords = Object.values(dbData).reduce((acc: number, arr: any[]) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
+        logs.push(`[Inżynier Danych] Łącznie pobrano ${totalRecords} rekordów z bazy.`);
+
         if (totalRecords === 0) {
+            logs.push(`[Orchestrator] ⚠️ Brak rekordów dla zapytania. Zakończono.`);
             return NextResponse.json({
-                reply: 'W systemie nie znaleziono rekordów odpowiadających podanemu zapytaniu.',
+                reply: `W systemie nie znaleziono rekordów odpowiadających podanemu zapytaniu (przeszukano: ${collectionsUsed.join(', ') || 'brak'}). Rozwiń podgląd procesu poniżej, aby zweryfikować filtry bazy danych.`,
                 widget: null,
                 dataUsed: collectionsUsed,
                 logs
@@ -578,7 +618,11 @@ PODSUMOWANIE DLA KIEROWNIKA:
             .join('\n') || 'Obliczenia zakończone.';
 
         const pythonRan = mathParts.some((p: any) => p.executableCode || p.codeExecutionResult);
-        logs.push(pythonRan ? '[Matematyk] ✓ Kod Python wykonany pomyślnie' : '[Matematyk] Kalkulacja zakończona');
+        if (pythonRan) {
+            logs.push(`[Matematyk] ✓ Kod Python wykonany pomyślnie. Wynik: ${mathOutput.slice(0, 200).replace(/\n/g, ' ')}...`);
+        } else {
+            logs.push(`[Matematyk] Obliczenia zakończone.`);
+        }
 
         // =====================================================================
         // ZAPIS NOWEGO NARZĘDZIA DO FIRESTORE (ai_tools)
@@ -679,6 +723,8 @@ BEZWZGLĘDNIE UKRYJ KOD PYTHONA I ZWYKŁY STDOUT!
         } else {
             finalReply = presenterRes.text || mathOutput.split('PODSUMOWANIE DLA KIEROWNIKA:')[1]?.trim() || 'Oto wyniki zapytania.';
         }
+
+        logs.push(`[Prezenter UI] Przygotowano wizualizację: ${widgetData ? `Widget ${widgetData.type} ("${widgetData.title}")` : 'Podsumowanie tekstowe'}`);
 
         return NextResponse.json({
             reply: finalReply,
