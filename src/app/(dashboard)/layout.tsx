@@ -1,4 +1,4 @@
-﻿// src/app/(dashboard)/layout.tsx
+// src/app/(dashboard)/layout.tsx
 "use client";
 
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -37,7 +37,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const menuItems: MenuItem[] = [
         { name: "Pulpit", path: "/dashboard", icon: "📊" },
         { name: "Sklep (Zamówienia)", path: "/dashboard/shop", icon: "🛒", requiredPermission: "createOrder" },
-        { name: "Zamówienia Głosowe", path: "/dashboard/voice-order", icon: "🎙️", requiredPermission: "voiceOrdering" },
+        { name: "Zamówienia Głosowe", path: "/voice-order", icon: "🎙️", requiredPermission: "voiceOrdering" },
         
         // PROFESJONALNY PANEL KOSZTORYSOWANIA
         { name: "Kosztorysant RMS", path: "/dashboard/estimator", icon: "🧮", requiredPermission: "useEstimatingPanel" },

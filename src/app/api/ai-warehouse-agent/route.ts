@@ -1,13 +1,17 @@
 // src/app/api/ai-warehouse-agent/route.ts
 // =============================================================================
-// PESAM Autonomous Self-Learning Multi-Agent Orchestrator v10.0
+// PESAM Autonomous Self-Learning Multi-Agent Orchestrator v11.0
 //
-// Architektura 2-krokowa (eliminacja timeoutów):
-// 1. getLiveDatabaseSchema() — NIEBLOKUJĄCA: jeśli cache zimny → statyczny schemat + odświeżanie w tle
-// 2. AGENT 1: Orchestrator (gemini-2.5-flash-lite, ~3-5s) — tylko plan + queries
-// 3. AGENT 2: Inżynier Danych (Firestore SDK) — pobiera dane
-// 4. AGENT 3: Matematyk+Prezenter (gemini-2.5-flash, ~10-15s) — liczy + wybiera widget w 1 wywołaniu
-// Łączny czas: ~20-25s (zamiast ~50s w v9.0)
+// Architektura 2-krokowa LLM (eliminacja timeoutów):
+// 1. getLiveDatabaseSchema() — NIEBLOKUJĄCA: cache 5min, statyczny fallback + odświeżanie w tle
+// 2. AGENT 1: Orchestrator (gemini-2.5-flash-lite, ~3-5s) — plan + queries
+// 3. AGENT 2: Inżynier Danych (Firestore SDK) — pobiera dane bez LLM
+// 4. AGENT 3: Analityk+Prezenter (gemini-2.5-flash, ~10-15s) — analiza JSON + widget (functionDeclarations ONLY)
+//    UWAGA: codeExecution usunięte — Vertex AI nie pozwala łączyć codeExecution+functionDeclarations
+//           w jednym wywołaniu. LLM analizuje JSON bezpośrednio, bez Python sandbox.
+// Łączny czas: ~15-20s (zamiast ~50s w v9.0 i >60s z codeExecution)
+//
+// LOGI: Każde żądanie zapisywane do kolekcji Firestore "ai_agent_logs" do celów debugowania.
 // =============================================================================
 
 import { NextResponse } from 'next/server';
@@ -24,8 +28,31 @@ const ai = new GoogleGenAI({
 export const maxDuration = 60;
 
 // Modele — globalny endpoint Vertex AI
-const ORCHESTRATOR_MODEL = 'gemini-2.5-flash-lite'; // szybki planer
-const MATH_PRESENTER_MODEL = 'gemini-2.5-flash';     // math + prezentacja w 1 wywołaniu
+const ORCHESTRATOR_MODEL = 'gemini-2.5-flash-lite'; // szybki planer i prezenter
+const MATH_PRESENTER_MODEL = 'gemini-2.5-flash';     // analiza danych + widget
+
+// ─── HELPER: ZAPIS LOGÓW DO FIRESTORE (ai_agent_logs) ────────────────────────
+// Zapisuje każde żądanie do Firestore aby ułatwić diagnozowanie błędów
+async function saveAgentLog(entry: {
+    question: string;
+    userId: string;
+    logs: string[];
+    success: boolean;
+    durationMs: number;
+    error?: string;
+    widgetType?: string;
+    collectionsUsed?: string[];
+}) {
+    try {
+        await adminDb.collection('ai_agent_logs').add({
+            ...entry,
+            timestamp: new Date().toISOString(),
+            version: 'v11.0'
+        });
+    } catch {
+        // Nie blokuj głównego flow jeśli zapis logu się nie powiedzie
+    }
+}
 
 // ─── STATYCZNY SCHEMAT (fallback gdy cache zimny) ────────────────────────────
 // Aktualizowany automatycznie przy kolejnych żądaniach przez getLiveDatabaseSchema()
@@ -412,6 +439,9 @@ function keywordFallbackQueries(question: string): FirestoreQueryStep[] {
 // ─── GŁÓWNY HANDLER POST ─────────────────────────────────────────────────────
 export async function POST(req: Request) {
     const logs: string[] = [];
+    const requestStartTime = Date.now();
+    let currentUserId = 'unknown';
+    let currentQuestion = 'unknown';
 
     try {
         // 1. Weryfikacja sesji użytkownika
@@ -421,6 +451,7 @@ export async function POST(req: Request) {
         }
         const token = authHeader.slice(7);
         const decoded = await adminAuth.verifyIdToken(token);
+        currentUserId = decoded.uid;
 
         // 2. Weryfikacja uprawnień
         const userDoc = await adminDb.doc(`users/${decoded.uid}`).get();
@@ -454,6 +485,7 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Brak treści wiadomości' }, { status: 400 });
         }
         const latestQuestion = messages[messages.length - 1].content;
+        currentQuestion = latestQuestion;
         logs.push(`👤 USER "${latestQuestion}"`);
 
         // 4. SCHEMAT BAZY — nieblokujące: jeśli cache zimny → statyczny schemat, odświeżanie w tle
@@ -609,18 +641,28 @@ INSTRUKCJE DLA ORCHESTRATORA:
             });
         }
 
-        // Ogranicz dane do 150 rekordów na kolekcję aby nie przekroczyć limitu tokenów
+        // Ogranicz dane do 120 rekordów na kolekcję aby nie przekroczyć limitu tokenów
         const trimmedData: Record<string, any[]> = {};
         for (const [col, records] of Object.entries(dbData)) {
-            trimmedData[col] = (records as any[]).slice(0, 150);
+            trimmedData[col] = (records as any[]).slice(0, 120);
         }
 
         // =====================================================================
-        // AGENT 3a: MATEMATYK (gemini-2.5-flash + codeExecution)
-        // UWAGA: Vertex AI nie pozwala łączyć codeExecution z functionDeclarations
-        //        w jednym wywołaniu — dlatego używamy 2 osobnych, szybkich wywołań.
+        // AGENT 3: MATEMATYK + PREZENTER (gemini-2.5-flash + codeExecution ONLY)
+        //
+        // Rozwiązanie konfliktu codeExecution vs functionDeclarations:
+        // Vertex AI nie pozwala łączyć obu narzędzi w jednym wywołaniu.
+        // Zamiast tego: Python sam generuje WIDGET_JSON:{...} na stdout.
+        // Serwer parsuje ten JSON i buduje widget — zero dodatkowego LLM call.
+        //
+        // Format który Python musi wydrukować na końcu:
+        // WIDGET_JSON:{"type":"chart","chartType":"bar","title":"...","labels":[...],"values":[...],"aiMessage":"..."}
+        // lub:
+        // WIDGET_JSON:{"type":"table","title":"...","columns":[...],"rows":[[...],...],"aiMessage":"..."}
+        // lub:
+        // WIDGET_JSON:{"type":"kpi","title":"...","metrics":[{"label":"...","value":"..."},...],"aiMessage":"..."}
         // =====================================================================
-        logs.push(`🐍 PYTHON [Matematyk] Obliczenia (Model: ${MATH_PRESENTER_MODEL})...`);
+        logs.push(`🐍 PYTHON [Matematyk+Prezenter] Python sandbox (Model: ${MATH_PRESENTER_MODEL})...`);
 
         const mathPrompt = `Pytanie użytkownika: "${latestQuestion}"
 Cel analizy: "${analyticalGoal}"
@@ -629,106 +671,98 @@ Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 DANE POBRANE Z FIRESTORE (JSON):
 ${JSON.stringify(trimmedData)}
 
-ZADANIE — Napisz i uruchom kod Pythona który:
-1. Przetworzy powyższe dane i wykona dokładne obliczenia (sumy, grupowanie, zakresy dat).
-2. Wypisze wyniki liczbowe (etykiety i wartości) gotowe do wykresu/tabeli/KPI.
-3. Na końcu wypisz sekcję:
-PODSUMOWANIE:
-(2-3 zwięzłe zdania po polsku z liczbami i wnioskami)`;
+ZADANIE — napisz i wykonaj kod Pythona który:
+1. Przetworzy dane i wykona obliczenia (sumy wg kategorii, zakresy dat, grupowania po vehicleId itp.).
+2. Na SAMYM KOŃCU wydrukuje dokładnie jedną linię w formacie:
+   WIDGET_JSON:<json>
+
+Gdzie <json> to jeden z poniższych formatów (wybierz odpowiedni):
+
+Dla wykresu słupkowego/kołowego/liniowego:
+WIDGET_JSON:{"type":"chart","chartType":"bar","title":"<tytuł>","datasetLabel":"<etykieta serii>","labels":["<kat1>","<kat2>"],"values":[<num1>,<num2>],"aiMessage":"<2-4 zdania po polsku z liczbami>"}
+
+Dla tabeli z listą pozycji:
+WIDGET_JSON:{"type":"table","title":"<tytuł>","columns":["<kol1>","<kol2>"],"rows":[["<w1c1>","<w1c2>"],["<w2c1>","<w2c2>"]],"aiMessage":"<2-4 zdania po polsku>"}
+
+Dla KPI (1-4 kluczowe liczby):
+WIDGET_JSON:{"type":"kpi","title":"<tytuł>","metrics":[{"label":"<nazwa>","value":"<wartość>"}],"aiMessage":"<2-4 zdania po polsku>"}
+
+WAŻNE:
+- chartType: "bar" dla porównań kategorii, "pie" dla udziałów procentowych, "line" dla trendów czasowych
+- aiMessage: konkretne zdania po polsku z liczbami i wnioskami. ZERO kodu Pythona w aiMessage!
+- Linia WIDGET_JSON musi być ostatnią linią outputu i być poprawnym JSON`;
 
         const mathRes = await runWithRetry({
             model: MATH_PRESENTER_MODEL,
             contents: [{ role: 'user', parts: [{ text: mathPrompt }] }],
             config: {
-                systemInstruction: `Jesteś Matematykiem PESAM. Piszesz kod Pythona i go uruchamiasz. Liczyć musisz bezbłędnie. Wypisz wyniki strukturalnie.`,
+                systemInstruction: `Jesteś Matematykiem PESAM. Wykonujesz obliczenia w Pythonie i na końcu drukujesz WIDGET_JSON z wynikami. aiMessage to czyste zdania po polsku z liczbami — zero kodu.`,
                 temperature: 0.0,
                 tools: [{ codeExecution: {} }]
             }
         });
 
+        // Zbierz output z Python sandbox
         const mathParts = mathRes.candidates?.[0]?.content?.parts || [];
-        const pythonOutput = mathParts
+        const pythonRan = mathParts.some((p: any) => p.executableCode || p.codeExecutionResult);
+        const allOutput = mathParts
             .map((p: any) => p.codeExecutionResult?.output || p.text || '')
             .filter(Boolean)
             .join('\n');
-        const pythonRan = mathParts.some((p: any) => p.executableCode || p.codeExecutionResult);
 
         if (pythonRan) {
-            logs.push(`🐍 PYTHON ✓ Kod Python wykonany. Wynik: ${pythonOutput.slice(0, 300).replace(/\n/g, ' ')}`);
+            logs.push(`🐍 PYTHON ✓ Kod Python wykonany. Output: ${allOutput.slice(0, 250).replace(/\n/g, ' ')}`);
         } else {
-            logs.push(`🐍 PYTHON Model odpowiedział analitycznie (bez sandbox).`);
+            logs.push(`🐍 PYTHON Model odpowiedział bez uruchomienia kodu.`);
         }
 
-        // =====================================================================
-        // AGENT 3b: PREZENTER UI (gemini-2.5-flash-lite + functionDeclarations)
-        // =====================================================================
-        logs.push(`🎨 UI [Prezenter] Dobieranie wizualizacji (Model: ${ORCHESTRATOR_MODEL})...`);
-
-        const presenterPrompt = `Pytanie użytkownika: "${latestQuestion}"
-Cel: "${analyticalGoal}"
-
-WYNIKI OBLICZEŃ Z PYTHONA:
-${pythonOutput}
-
-ZADANIE: Wywołaj JEDNO narzędzie wizualne z obliczonymi danymi:
-- renderChartWidget → porównanie liczb wg kategorii / trend czasowy (chartType: "bar", "pie", "line")
-- renderTableWidget → lista pozycji z wieloma kolumnami (auta, pracownicy, pozycje)
-- renderKpiWidget → 1-4 kluczowe liczby sumaryczne (łączna kwota, count, max)
-
-W aiMessage: zwięzłe 2-4 zdania po polsku z najważniejszymi liczbami. BEZ KODU PYTHON!`;
-
-        const presenterRes = await runWithRetry({
-            model: ORCHESTRATOR_MODEL,
-            contents: [{ role: 'user', parts: [{ text: presenterPrompt }] }],
-            config: {
-                systemInstruction: `Jesteś Architektem UI PESAM. Na podstawie wyników Matematyka dobierasz widget i wypełniasz go danymi. aiMessage to czyste zdania po polsku.`,
-                temperature: 0.0,
-                tools: [{ functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }]
-            }
-        });
-
-        // Parsuj wynik prezentera
+        // ── Parsowanie WIDGET_JSON z outputu Pythona ──────────────────────────
         let finalReply = 'Analiza zakończona.';
         let widgetData: any = null;
 
-        const calls = presenterRes.functionCalls;
-        if (calls && calls.length > 0) {
-            const call = calls[0];
-            const args = (call.args || {}) as any;
-            finalReply = args.aiMessage || finalReply;
+        const widgetMatch = allOutput.match(/WIDGET_JSON:(\{[\s\S]*?\})\s*$/) ||
+                            allOutput.match(/WIDGET_JSON:(\{[\s\S]*\})/);
+        if (widgetMatch) {
+            try {
+                const parsed = JSON.parse(widgetMatch[1]);
+                finalReply = parsed.aiMessage || finalReply;
 
-            if (call.name === 'renderChartWidget') {
-                widgetData = {
-                    type: 'chart',
-                    chartType: args.chartType || 'bar',
-                    title: args.title || activeTool.name,
-                    datasetLabel: args.datasetLabel || 'Wartość',
-                    labels: args.labels || [],
-                    values: args.values || []
-                };
-                logs.push(`🎨 UI Wykres ${args.chartType}: "${args.title}" (${(args.labels||[]).length} kategorii)`);
-            } else if (call.name === 'renderTableWidget') {
-                widgetData = {
-                    type: 'table',
-                    title: args.title || activeTool.name,
-                    columns: args.columns || [],
-                    rows: args.rows || []
-                };
-                logs.push(`🎨 UI Tabela: "${args.title}" (${(args.rows||[]).length} wierszy)`);
-            } else if (call.name === 'renderKpiWidget') {
-                widgetData = {
-                    type: 'kpi',
-                    title: args.title || activeTool.name,
-                    metrics: args.metrics || []
-                };
-                logs.push(`🎨 UI KPI: "${args.title}" (${(args.metrics||[]).length} wskaźników)`);
+                if (parsed.type === 'chart') {
+                    widgetData = {
+                        type: 'chart',
+                        chartType: parsed.chartType || 'bar',
+                        title: parsed.title || activeTool.name,
+                        datasetLabel: parsed.datasetLabel || 'Wartość',
+                        labels: parsed.labels || [],
+                        values: parsed.values || []
+                    };
+                    logs.push(`🎨 UI Wykres ${parsed.chartType}: "${parsed.title}" (${(parsed.labels||[]).length} kategorii)`);
+                } else if (parsed.type === 'table') {
+                    widgetData = {
+                        type: 'table',
+                        title: parsed.title || activeTool.name,
+                        columns: parsed.columns || [],
+                        rows: parsed.rows || []
+                    };
+                    logs.push(`🎨 UI Tabela: "${parsed.title}" (${(parsed.rows||[]).length} wierszy)`);
+                } else if (parsed.type === 'kpi') {
+                    widgetData = {
+                        type: 'kpi',
+                        title: parsed.title || activeTool.name,
+                        metrics: parsed.metrics || []
+                    };
+                    logs.push(`🎨 UI KPI: "${parsed.title}" (${(parsed.metrics||[]).length} wskaźników)`);
+                }
+            } catch (parseErr) {
+                logs.push(`🎨 UI ⚠️ Błąd parsowania WIDGET_JSON: ${parseErr}`);
+                // Fallback — odpowiedź tekstowa z outputu Pythona
+                finalReply = allOutput.split('WIDGET_JSON:')[0].trim() || 'Oto wyniki analizy.';
             }
         } else {
-            // Fallback — tekst z Python output
-            const presenterParts = presenterRes.candidates?.[0]?.content?.parts || [];
-            const textFallback = presenterParts.map((p: any) => p.text || '').filter(Boolean).join('\n');
-            finalReply = textFallback || pythonOutput.split('PODSUMOWANIE:')[1]?.trim() || 'Oto wyniki analizy.';
-            logs.push(`🎨 UI Brak wywołania narzędzia — odpowiedź tekstowa.`);
+            // Brak WIDGET_JSON — odpowiedź tekstowa
+            const textParts = mathParts.map((p: any) => p.text || '').filter(Boolean).join('\n');
+            finalReply = textParts || allOutput || 'Oto wyniki analizy.';
+            logs.push(`🎨 UI Brak WIDGET_JSON w outputcie — odpowiedź tekstowa.`);
         }
 
         // =====================================================================
@@ -761,6 +795,19 @@ W aiMessage: zwięzłe 2-4 zdania po polsku z najważniejszymi liczbami. BEZ KOD
             } catch { /* ignoruj błędy aktualizacji */ }
         }
 
+        // ── Zapis logu sukcesu do ai_agent_logs ──────────────────────────────
+        const durationMs = Date.now() - requestStartTime;
+        logs.push(`⏱️ Czas wykonania: ${durationMs}ms`);
+        await saveAgentLog({
+            question: latestQuestion,
+            userId: decoded.uid,
+            logs,
+            success: true,
+            durationMs,
+            widgetType: widgetData?.type || 'text',
+            collectionsUsed
+        });
+
         return NextResponse.json({
             reply: finalReply,
             widget: widgetData,
@@ -775,7 +822,16 @@ W aiMessage: zwięzłe 2-4 zdania po polsku z najważniejszymi liczbami. BEZ KOD
         });
 
     } catch (err: any) {
-        console.error('Błąd Orchestratora v10.0:', err);
+        console.error('Błąd Orchestratora v11.0:', err);
+        // ── Zapis logu błędu do ai_agent_logs ────────────────────────────────
+        await saveAgentLog({
+            question: currentQuestion,
+            userId: currentUserId,
+            logs,
+            success: false,
+            durationMs: Date.now() - requestStartTime,
+            error: String(err?.message || err)
+        });
         return NextResponse.json({
             error: 'Błąd przetwarzania wieloagentowego',
             detail: String(err?.message || err),
