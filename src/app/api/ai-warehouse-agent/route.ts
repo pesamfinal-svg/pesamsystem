@@ -616,47 +616,39 @@ INSTRUKCJE DLA ORCHESTRATORA:
         }
 
         // =====================================================================
-        // AGENT 3: MATEMATYK + PREZENTER (gemini-2.5-flash) — JEDNO WYWOŁANIE
+        // AGENT 3a: MATEMATYK (gemini-2.5-flash + codeExecution)
+        // UWAGA: Vertex AI nie pozwala łączyć codeExecution z functionDeclarations
+        //        w jednym wywołaniu — dlatego używamy 2 osobnych, szybkich wywołań.
         // =====================================================================
-        logs.push(`🐍 PYTHON [Matematyk+Prezenter] Obliczenia i wizualizacja (Model: ${MATH_PRESENTER_MODEL})...`);
+        logs.push(`🐍 PYTHON [Matematyk] Obliczenia (Model: ${MATH_PRESENTER_MODEL})...`);
 
-        const mathPresenterPrompt = `Pytanie użytkownika: "${latestQuestion}"
+        const mathPrompt = `Pytanie użytkownika: "${latestQuestion}"
 Cel analizy: "${analyticalGoal}"
 Dzisiejsza data: ${new Date().toISOString().split('T')[0]}
 
 DANE POBRANE Z FIRESTORE (JSON):
 ${JSON.stringify(trimmedData)}
 
-ZADANIE (2 kroki):
-KROK 1 — PYTHON: Napisz i uruchom kod Pythona który:
-  - Przetworzy powyższe dane
-  - Wykona dokładne obliczenia (sumy, średnie, zakresy dat)
-  - Wypisze wyniki i 2-3 zdania po polsku z wnioskami biznesowymi
+ZADANIE — Napisz i uruchom kod Pythona który:
+1. Przetworzy powyższe dane i wykona dokładne obliczenia (sumy, grupowanie, zakresy dat).
+2. Wypisze wyniki liczbowe (etykiety i wartości) gotowe do wykresu/tabeli/KPI.
+3. Na końcu wypisz sekcję:
+PODSUMOWANIE:
+(2-3 zwięzłe zdania po polsku z liczbami i wnioskami)`;
 
-KROK 2 — WIDGET: Po otrzymaniu wyników, wywołaj JEDNO narzędzie wizualne:
-  - renderChartWidget → gdy porównujesz liczby wielu kategorii lub trend czasowy (chartType: "bar", "pie" lub "line")
-  - renderTableWidget → gdy to lista pozycji z wieloma polami (auta, pracownicy, pozycje)
-  - renderKpiWidget → gdy to 1-4 kluczowe liczby sumaryczne (łączna kwota, count, max)
-
-W aiMessage napisz TYLKO podsumowanie po polsku (2-4 zdania). BEZ KODU PYTHON!`;
-
-        const mathPresenterRes = await runWithRetry({
+        const mathRes = await runWithRetry({
             model: MATH_PRESENTER_MODEL,
-            contents: [{ role: 'user', parts: [{ text: mathPresenterPrompt }] }],
+            contents: [{ role: 'user', parts: [{ text: mathPrompt }] }],
             config: {
-                systemInstruction: `Jesteś Matematykiem i Prezenterem PESAM. Najpierw wykonaj obliczenia w Pythonie z pełną precyzją. Następnie wywołaj narzędzie wizualne z wynikami. aiMessage to czyste zdania po polsku, ZERO kodu.`,
+                systemInstruction: `Jesteś Matematykiem PESAM. Piszesz kod Pythona i go uruchamiasz. Liczyć musisz bezbłędnie. Wypisz wyniki strukturalnie.`,
                 temperature: 0.0,
-                tools: [
-                    { codeExecution: {} },
-                    { functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }
-                ]
+                tools: [{ codeExecution: {} }]
             }
         });
 
-        // Zbierz logi z Python sandbox
-        const mathParts = mathPresenterRes.candidates?.[0]?.content?.parts || [];
+        const mathParts = mathRes.candidates?.[0]?.content?.parts || [];
         const pythonOutput = mathParts
-            .map((p: any) => p.codeExecutionResult?.output || '')
+            .map((p: any) => p.codeExecutionResult?.output || p.text || '')
             .filter(Boolean)
             .join('\n');
         const pythonRan = mathParts.some((p: any) => p.executableCode || p.codeExecutionResult);
@@ -664,14 +656,42 @@ W aiMessage napisz TYLKO podsumowanie po polsku (2-4 zdania). BEZ KODU PYTHON!`;
         if (pythonRan) {
             logs.push(`🐍 PYTHON ✓ Kod Python wykonany. Wynik: ${pythonOutput.slice(0, 300).replace(/\n/g, ' ')}`);
         } else {
-            logs.push(`🐍 PYTHON Model odpowiedział bez kodu Python.`);
+            logs.push(`🐍 PYTHON Model odpowiedział analitycznie (bez sandbox).`);
         }
+
+        // =====================================================================
+        // AGENT 3b: PREZENTER UI (gemini-2.5-flash-lite + functionDeclarations)
+        // =====================================================================
+        logs.push(`🎨 UI [Prezenter] Dobieranie wizualizacji (Model: ${ORCHESTRATOR_MODEL})...`);
+
+        const presenterPrompt = `Pytanie użytkownika: "${latestQuestion}"
+Cel: "${analyticalGoal}"
+
+WYNIKI OBLICZEŃ Z PYTHONA:
+${pythonOutput}
+
+ZADANIE: Wywołaj JEDNO narzędzie wizualne z obliczonymi danymi:
+- renderChartWidget → porównanie liczb wg kategorii / trend czasowy (chartType: "bar", "pie", "line")
+- renderTableWidget → lista pozycji z wieloma kolumnami (auta, pracownicy, pozycje)
+- renderKpiWidget → 1-4 kluczowe liczby sumaryczne (łączna kwota, count, max)
+
+W aiMessage: zwięzłe 2-4 zdania po polsku z najważniejszymi liczbami. BEZ KODU PYTHON!`;
+
+        const presenterRes = await runWithRetry({
+            model: ORCHESTRATOR_MODEL,
+            contents: [{ role: 'user', parts: [{ text: presenterPrompt }] }],
+            config: {
+                systemInstruction: `Jesteś Architektem UI PESAM. Na podstawie wyników Matematyka dobierasz widget i wypełniasz go danymi. aiMessage to czyste zdania po polsku.`,
+                temperature: 0.0,
+                tools: [{ functionDeclarations: [TOOL_RENDER_CHART, TOOL_RENDER_TABLE, TOOL_RENDER_KPI] }]
+            }
+        });
 
         // Parsuj wynik prezentera
         let finalReply = 'Analiza zakończona.';
         let widgetData: any = null;
 
-        const calls = mathPresenterRes.functionCalls;
+        const calls = presenterRes.functionCalls;
         if (calls && calls.length > 0) {
             const call = calls[0];
             const args = (call.args || {}) as any;
@@ -705,8 +725,9 @@ W aiMessage napisz TYLKO podsumowanie po polsku (2-4 zdania). BEZ KODU PYTHON!`;
             }
         } else {
             // Fallback — tekst z Python output
-            const textParts = mathParts.map((p: any) => p.text || '').filter(Boolean).join('\n');
-            finalReply = textParts.split('PODSUMOWANIE')[1]?.trim() || textParts || pythonOutput || 'Oto wyniki analizy.';
+            const presenterParts = presenterRes.candidates?.[0]?.content?.parts || [];
+            const textFallback = presenterParts.map((p: any) => p.text || '').filter(Boolean).join('\n');
+            finalReply = textFallback || pythonOutput.split('PODSUMOWANIE:')[1]?.trim() || 'Oto wyniki analizy.';
             logs.push(`🎨 UI Brak wywołania narzędzia — odpowiedź tekstowa.`);
         }
 
