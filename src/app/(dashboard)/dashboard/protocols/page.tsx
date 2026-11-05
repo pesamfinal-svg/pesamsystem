@@ -1497,7 +1497,8 @@ export default function ProtocolsHub() {
         });
 
     const filteredReturnInventory = inventoryOnSelectedSite.filter(item => {
-        const isBhp = (item as any).requiresInspection || item.category === "BHP" || (item.name || "").toLowerCase().includes("szelki") || (item.name || "").toLowerCase().includes("linka");
+        const cat = (item.category || "").toUpperCase();
+        const isBhp = cat.includes("OCHRONA OSOBISTA") || cat.includes("BHP OSOBISTE") || cat.includes("BHP") || (item.name || "").toLowerCase().includes("szelki") || (item.name || "").toLowerCase().includes("linka asekur");
         if (returnActiveTab === "BHP") return isBhp;
         if (returnActiveTab === "UNIQUE") return item.type === "UNIQUE" && !isBhp;
         if (returnActiveTab === "BULK") return item.type === "BULK" && item.subType !== "MANUAL" && item.category !== "Zaległości osprzętu" && !isBhp;
@@ -1751,7 +1752,8 @@ export default function ProtocolsHub() {
     };
 
     const filteredPaperInventory = inventory.filter(item => {
-        const isBhp = (item as any).requiresInspection || item.category === "BHP" || (item.name || "").toLowerCase().includes("szelki") || (item.name || "").toLowerCase().includes("linka");
+        const cat = (item.category || "").toUpperCase();
+        const isBhp = cat.includes("OCHRONA OSOBISTA") || cat.includes("BHP OSOBISTE") || cat.includes("BHP") || (item.name || "").toLowerCase().includes("szelki") || (item.name || "").toLowerCase().includes("linka asekur");
         if (paperReturnActiveTab === "BHP") {
             if (!isBhp) return false;
         } else if (paperReturnActiveTab === "UNIQUE") {

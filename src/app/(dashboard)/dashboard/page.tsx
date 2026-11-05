@@ -329,7 +329,8 @@ export default function DashboardPage() {
 
     const upcomingBhpItems = items.filter(i => {
         if (!i.requiresInspection || !i.nextInspectionDate) return false;
-        const nextDate = new Date(i.nextInspectionDate);
+        const parts = i.nextInspectionDate.split('-');
+        const nextDate = parts.length === 3 ? new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10)) : new Date(i.nextInspectionDate);
         nextDate.setHours(0, 0, 0, 0);
         const diffDays = Math.ceil((nextDate.getTime() - todayDate.getTime()) / (1000 * 3600 * 24));
         return diffDays >= 0 && diffDays <= 30;
@@ -366,14 +367,14 @@ export default function DashboardPage() {
             {/* ========================================================================= */}
             {user && hasAnyOperationalPermission ? (
                 <div className="space-y-8">
-                    {/* BANER ALERTO-NOTYFIKACJA O PRZEGLĄDACH BHP */}
+                    {/* BANER ALERTO-NOTYFIKACJA O PRZEGLĄDACH TECHNICZNYCH & BHP */}
                     {(overdueBhpItems.length > 0 || upcomingBhpItems.length > 0) && (
-                        <div className="bg-gradient-to-r from-purple-900 to-indigo-900 text-white p-6 rounded-3xl shadow-xl flex flex-col md:flex-row justify-between items-center gap-4 animate-fade-in border-2 border-purple-400">
-                            <div className="flex items-center gap-4">
-                                <div className="bg-purple-800/80 p-3.5 rounded-2xl text-3xl border border-purple-400">🦺</div>
-                                <div>
+                        <div className="bg-gradient-to-r from-purple-950 via-indigo-950 to-slate-900 text-white p-6 rounded-3xl shadow-xl flex flex-col md:flex-row justify-between items-center gap-6 animate-fade-in border-2 border-purple-400">
+                            <div className="flex items-start gap-4 flex-1">
+                                <div className="bg-purple-800/80 p-3.5 rounded-2xl text-3xl border border-purple-400 shrink-0">🔧</div>
+                                <div className="space-y-2">
                                     <h4 className="font-extrabold text-base uppercase tracking-wider flex items-center gap-2 flex-wrap">
-                                        <span>Alerty Przeglądów Technicznych & BHP</span>
+                                        <span>Alerty Przeglądów Technicznych, Serwisowych & BHP</span>
                                         {overdueBhpItems.length > 0 && (
                                             <span className="bg-red-600 text-white text-xs px-3 py-0.5 rounded-full font-black animate-pulse">
                                                 🔴 Przeterminowane: {overdueBhpItems.length}
@@ -381,20 +382,45 @@ export default function DashboardPage() {
                                         )}
                                         {upcomingBhpItems.length > 0 && (
                                             <span className="bg-amber-400 text-amber-950 text-xs px-3 py-0.5 rounded-full font-black">
-                                                ⚠️ Do 30 dni: {upcomingBhpItems.length}
+                                                ⚠️ W ciągu 30 dni: {upcomingBhpItems.length}
                                             </span>
                                         )}
                                     </h4>
-                                    <p className="text-xs text-purple-200 mt-1 leading-relaxed">
-                                        Wykryto sprzęt ochrony osobistej (szelki, liny, osprzęt), którego okresowy przegląd minął lub upływa w ciągu najbliższych 30 dni.
+                                    <p className="text-xs text-purple-200 leading-relaxed">
+                                        Wykryto sprzęt (zagęszczarki, maszyny, elektronarzędzia, szelki/liny BHP), którego termin okresowego serwisu, gwarancji lub atestu minął albo upływa w ciągu najbliższych 30 dni.
                                     </p>
+                                    <div className="flex flex-wrap gap-2 pt-1">
+                                        {[...overdueBhpItems, ...upcomingBhpItems].slice(0, 5).map(item => {
+                                            const isOverdue = item.nextInspectionDate && item.nextInspectionDate < todayStr;
+                                            return (
+                                                <span
+                                                    key={item.id}
+                                                    className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border flex items-center gap-1.5 ${
+                                                        isOverdue
+                                                            ? "bg-red-900/60 border-red-500 text-red-200"
+                                                            : "bg-amber-900/50 border-amber-500/70 text-amber-200"
+                                                    }`}
+                                                >
+                                                    <span>{isOverdue ? "🔴" : "⚠️"}</span>
+                                                    <span>{item.name}</span>
+                                                    <span className="font-mono opacity-80">({item.inventoryNumber})</span>
+                                                    <span className="text-[10px] opacity-75">{item.nextInspectionDate}</span>
+                                                </span>
+                                            );
+                                        })}
+                                        {overdueBhpItems.length + upcomingBhpItems.length > 5 && (
+                                            <span className="text-[11px] font-bold px-2 py-1 text-purple-300">
+                                                +{overdueBhpItems.length + upcomingBhpItems.length - 5} więcej...
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                             <Link
-                                href="/dashboard/inventory"
-                                className="bg-purple-400 hover:bg-purple-300 text-purple-950 px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition whitespace-nowrap"
+                                href="/dashboard/inventory?tab=BHP"
+                                className="bg-purple-400 hover:bg-purple-300 text-purple-950 px-6 py-3.5 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition whitespace-nowrap shrink-0 hover:scale-105"
                             >
-                                Przejdź do BHP ➡️
+                                Sprawdź w Katalogu ➡️
                             </Link>
                         </div>
                     )}
