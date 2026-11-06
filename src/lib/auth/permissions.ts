@@ -3,6 +3,7 @@
 // Słownik wszystkich uprawnień w systemie PESAM
 export const ALL_PERMISSIONS = {
     viewMySite: "Widok: Twoja budowa (stan Twoich budów)",
+    manageSiteExpenses: "Budowy: Rejestracja drobnych wydatków i napraw na budowie",
     manageUsers: "Zarządzanie pracownikami (Dodawanie/Edycja)",
     manageRoles: "Zarządzanie rolami i uprawnieniami",
     manageSites: "Zarządzanie budowami",

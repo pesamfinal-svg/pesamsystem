@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useState, useEffect, Suspense, Fragment } from "react";
-import { collection, getDocs, doc, query, orderBy, where, addDoc } from "firebase/firestore";
+import { collection, getDocs, doc, query, orderBy, where, addDoc, deleteDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -31,12 +31,22 @@ function MySiteHubContent() {
     const [selectedSiteId, setSelectedSiteId] = useState("");
     const [loading, setLoading] = useState(true);
 
-    const [activeView, setActiveView] = useState<"HUB" | "INVENTORY" | "HISTORY" | "DAMAGES" | "CLAIMS">("HUB");
+    const [activeView, setActiveView] = useState<"HUB" | "INVENTORY" | "HISTORY" | "DAMAGES" | "EXPENSES" | "CLAIMS">("HUB");
 
     const [itemsOnSite, setItemsOnSite] = useState<InventoryItem[]>([]);
     const [siteProtocols, setSiteProtocols] = useState<Protocol[]>([]);
     const [damages, setDamages] = useState<any[]>([]);
     const [reportedSiteDamages, setReportedSiteDamages] = useState<any[]>([]);
+
+    // Drobne wydatki i naprawy na budowie (site_expenses)
+    const [siteExpenses, setSiteExpenses] = useState<any[]>([]);
+    const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
+    const [expenseTitle, setExpenseTitle] = useState("");
+    const [expenseCategory, setExpenseCategory] = useState("NAPRAWA");
+    const [expenseAmount, setExpenseAmount] = useState<number | "">("");
+    const [expenseDate, setExpenseDate] = useState(new Date().toISOString().split("T")[0]);
+    const [expenseNotes, setExpenseNotes] = useState("");
+    const [isSubmittingExpense, setIsSubmittingExpense] = useState(false);
 
     // Stan modala zgłaszania uszkodzenia
     const [isDamageModalOpen, setIsDamageModalOpen] = useState(false);
@@ -55,6 +65,7 @@ function MySiteHubContent() {
     const [selectedPrintIds, setSelectedPrintIds] = useState<string[]>([]);
 
     const canViewSiteState = user ? hasPermission("viewSiteState", user.rolePermissions, user.permissionOverrides) : false;
+    const canManageExpenses = user ? (hasPermission("manageSiteExpenses", user.rolePermissions, user.permissionOverrides) || hasPermission("manageSites", user.rolePermissions, user.permissionOverrides)) : false;
 
     // Odczytywanie parametru ?view= z adresu URL
     useEffect(() => {
@@ -62,7 +73,7 @@ function MySiteHubContent() {
             const viewParam = searchParams.get("view");
             if (viewParam) {
                 const upperView = viewParam.toUpperCase();
-                if (["HUB", "INVENTORY", "HISTORY", "DAMAGES", "CLAIMS"].includes(upperView)) {
+                if (["HUB", "INVENTORY", "HISTORY", "DAMAGES", "EXPENSES", "CLAIMS"].includes(upperView)) {
                     setActiveView(upperView as any);
                 }
             }
@@ -138,9 +149,73 @@ function MySiteHubContent() {
             } catch (sdErr) {
                 console.error("Błąd pobierania site_damages:", sdErr);
             }
+
+            // Pobieranie drobnych wydatków i napraw z kolekcji site_expenses
+            try {
+                const expQ = query(collection(db, "site_expenses"), where("siteId", "==", selectedSiteId));
+                const expSnap = await getDocs(expQ);
+                const expList = expSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                expList.sort((a: any, b: any) => (b.date || "").localeCompare(a.date || ""));
+                setSiteExpenses(expList);
+            } catch (expErr) {
+                console.error("Błąd pobierania site_expenses:", expErr);
+            }
         };
         fetchDataForSite();
     }, [selectedSiteId, canViewSiteState]);
+
+    const handleSaveExpense = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedSiteId || !user) return;
+        if (!canManageExpenses) return alert("Brak uprawnień do rejestracji wydatków i napraw na budowie!");
+        if (!expenseTitle.trim()) return alert("Podaj nazwę wydatku / naprawy!");
+        if (!expenseAmount || Number(expenseAmount) <= 0) return alert("Podaj prawidłową kwotę w PLN!");
+
+        setIsSubmittingExpense(true);
+        try {
+            const currentSite = mySites.find(s => s.id === selectedSiteId);
+            await addDoc(collection(db, "site_expenses"), {
+                siteId: selectedSiteId,
+                siteName: currentSite?.name || "Budowa",
+                title: expenseTitle.trim(),
+                category: expenseCategory,
+                amount: Number(expenseAmount),
+                date: expenseDate || new Date().toISOString().split("T")[0],
+                notes: expenseNotes.trim(),
+                reportedByUid: user.uid,
+                reportedByName: `${user.firstName} ${user.lastName}`,
+                createdAt: new Date().toISOString()
+            });
+
+            alert("✅ Wydatek / naprawa budowy została pomyślnie zapisana!");
+            setIsExpenseModalOpen(false);
+            setExpenseTitle("");
+            setExpenseAmount("");
+            setExpenseNotes("");
+
+            // Odśwież listę wydatków
+            const expQ = query(collection(db, "site_expenses"), where("siteId", "==", selectedSiteId));
+            const expSnap = await getDocs(expQ);
+            const expList = expSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            expList.sort((a: any, b: any) => (b.date || "").localeCompare(a.date || ""));
+            setSiteExpenses(expList);
+        } catch (err: any) {
+            console.error("Błąd zapisu wydatku:", err);
+            alert("Błąd: " + err.message);
+        } finally {
+            setIsSubmittingExpense(false);
+        }
+    };
+
+    const handleDeleteExpense = async (expenseId: string) => {
+        if (!window.confirm("Czy na pewno chcesz usunąć ten wpis wydatku?")) return;
+        try {
+            await deleteDoc(doc(db, "site_expenses", expenseId));
+            setSiteExpenses(prev => prev.filter(e => e.id !== expenseId));
+        } catch (err: any) {
+            alert("Błąd usuwania: " + err.message);
+        }
+    };
 
     const handleSaveDamageReport = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -608,6 +683,81 @@ function MySiteHubContent() {
                         </div>
                     </div>
                 );
+            case "EXPENSES":
+                const totalExpensesAmount = siteExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+                return (
+                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in space-y-6">
+                        <div className="bg-slate-900 text-white p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                            <div>
+                                <h3 className="font-bold text-xl">Drobne Wydatki i Naprawy na Budowie</h3>
+                                <p className="text-slate-400 text-xs mt-1">Rejestr bieżących drobnych kosztów, zakupów i napraw na placu (np. wtyczki, tarcze, paliwo).</p>
+                            </div>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => setIsExpenseModalOpen(true)}
+                                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4 py-2 rounded-xl text-xs sm:text-sm shadow-md transition flex items-center gap-1.5"
+                                >
+                                    ➕ Dodaj wydatek / naprawę
+                                </button>
+                                <button onClick={() => setActiveView("HUB")} className="bg-slate-800 hover:bg-slate-700 px-4 py-2 rounded-xl font-bold transition text-xs sm:text-sm">Powrót</button>
+                            </div>
+                        </div>
+
+                        {/* SUMARYCZNY BANER FINANSOWY */}
+                        <div className="px-6">
+                            <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex justify-between items-center">
+                                <div>
+                                    <p className="text-xs font-bold text-emerald-800 uppercase tracking-wide">Suma bieżących drobnych wydatków tej budowy:</p>
+                                    <p className="text-2xl font-black text-emerald-950 mt-0.5">{totalExpensesAmount} zł</p>
+                                </div>
+                                <span className="text-3xl">💰</span>
+                            </div>
+                        </div>
+
+                        <div className="p-6 pt-0">
+                            {siteExpenses.length === 0 ? (
+                                <div className="text-center p-12 text-slate-400 border-2 border-dashed rounded-2xl">
+                                    <div className="text-4xl mb-2">🧾</div>
+                                    Brak zarejestrowanych drobnych wydatków dla tej budowy.
+                                    <p className="text-xs text-slate-400 mt-1">Kliknij przycisk powyżej, aby dodać np. wymianę wtyczki, bezpiecznika czy zakup drobnych materiałów.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {siteExpenses.map((exp: any) => (
+                                        <div key={exp.id} className="p-4 border rounded-2xl bg-white hover:bg-slate-50 transition shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <p className="font-bold text-slate-800 text-base">{exp.title}</p>
+                                                    <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                                                        {exp.category || "OGÓLNE"}
+                                                    </span>
+                                                </div>
+                                                <p className="text-xs text-slate-500 mt-1">
+                                                    📅 Data: <b>{exp.date || "-"}</b> • Dodał: <b>{exp.reportedByName || "Pracownik"}</b>
+                                                </p>
+                                                {exp.notes && <p className="text-xs text-slate-600 italic mt-1 bg-slate-50 p-2 rounded-lg border">💬 {exp.notes}</p>}
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <span className="text-xl font-black text-emerald-600 bg-emerald-50 px-3 py-1 rounded-xl border border-emerald-100">
+                                                    {exp.amount} zł
+                                                </span>
+                                                {canManageExpenses && (
+                                                    <button
+                                                        onClick={() => handleDeleteExpense(exp.id)}
+                                                        className="text-red-500 hover:text-red-700 text-sm font-bold p-1"
+                                                        title="Usuń wydatek"
+                                                    >
+                                                        🗑️
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
             case "CLAIMS":
                 return (
                     <div className="animate-fade-in flex flex-col items-center justify-center p-10 bg-gradient-to-br from-purple-50 to-white rounded-3xl border border-purple-100 shadow-inner">
@@ -623,7 +773,7 @@ function MySiteHubContent() {
                 );
             default:
                 return (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fade-in">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 animate-fade-in">
                         <div onClick={() => setActiveView("INVENTORY")} className="bg-white hover:bg-green-50 border border-slate-200 p-8 rounded-3xl cursor-pointer transition shadow-sm hover:shadow-md group">
                             <div className="text-4xl mb-4 group-hover:scale-110 transition">🏗️</div>
                             <h3 className="font-black text-slate-800 uppercase text-xs tracking-widest">Wykaz sprzętu</h3>
@@ -641,6 +791,16 @@ function MySiteHubContent() {
                             <div className="text-4xl mb-4 group-hover:scale-110 transition">💥</div>
                             <h3 className="font-black text-slate-800 uppercase text-xs tracking-widest">Szkody / Straty</h3>
                             <p className="text-slate-400 text-[11px] mt-1 font-medium">Sprzęt uszkodzony i utracony</p>
+                        </div>
+                        <div onClick={() => setActiveView("EXPENSES")} className="bg-white hover:bg-emerald-50 border border-slate-200 p-8 rounded-3xl cursor-pointer transition shadow-sm hover:shadow-md group relative">
+                            {siteExpenses.length > 0 && (
+                                <div className="absolute top-4 right-4 bg-emerald-600 text-white px-2 py-0.5 rounded-full flex items-center justify-center text-[10px] font-black shadow-sm">
+                                    {siteExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0)} zł
+                                </div>
+                            )}
+                            <div className="text-4xl mb-4 group-hover:scale-110 transition">💰</div>
+                            <h3 className="font-black text-slate-800 uppercase text-xs tracking-widest">Wydatki & Naprawy</h3>
+                            <p className="text-slate-400 text-[11px] mt-1 font-medium">Bieżące koszty na budowie ({siteExpenses.length} wpisów)</p>
                         </div>
                         <div onClick={() => setActiveView("CLAIMS")} className="bg-white hover:bg-purple-50 border border-slate-200 p-8 rounded-3xl cursor-pointer transition shadow-sm hover:shadow-md group relative">
                             <div className="absolute top-4 right-4 bg-purple-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shadow-md">0</div>
@@ -916,6 +1076,119 @@ function MySiteHubContent() {
                                     className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white font-black rounded-xl text-xs uppercase tracking-wide shadow-lg transition disabled:bg-slate-400"
                                 >
                                     {isSubmittingDamage ? "Zapisywanie..." : "Zapisz Zgłoszenie 💾"}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL DODAWANIA DROBNEGO WYDATKU / NAPRAWY */}
+            {isExpenseModalOpen && (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-200 animate-fade-in space-y-6">
+                        <div className="flex justify-between items-center border-b pb-4">
+                            <div>
+                                <h3 className="text-xl font-black text-slate-800">💰 Dodaj wydatek / drobną naprawę</h3>
+                                <p className="text-xs text-slate-500 mt-0.5">Wpis trafi do kosztów bieżących tej budowy i raportu końcowego</p>
+                            </div>
+                            <button
+                                onClick={() => setIsExpenseModalOpen(false)}
+                                className="w-8 h-8 rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 flex items-center justify-center font-bold"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSaveExpense} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                    Czego dotyczy wydatek / naprawa:
+                                </label>
+                                <input
+                                    type="text"
+                                    placeholder="np. Wymiana wtyczki w przedłużaczu, zakup tarcz 125mm, wymiana bezpiecznika..."
+                                    value={expenseTitle}
+                                    onChange={e => setExpenseTitle(e.target.value)}
+                                    className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500"
+                                    required
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                        Kwota (PLN):
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        placeholder="np. 35.00"
+                                        value={expenseAmount}
+                                        onChange={e => setExpenseAmount(e.target.value === "" ? "" : parseFloat(e.target.value))}
+                                        className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500"
+                                        required
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                        Kategoria:
+                                    </label>
+                                    <select
+                                        value={expenseCategory}
+                                        onChange={e => setExpenseCategory(e.target.value)}
+                                        className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+                                    >
+                                        <option value="NAPRAWA">🛠️ Naprawa na placu</option>
+                                        <option value="MATERIAŁY">📦 Drobne materiały</option>
+                                        <option value="PALIWO">⛽ Paliwo / Agregat</option>
+                                        <option value="BHP">🦺 Sprzęt BHP</option>
+                                        <option value="INNE">📌 Inne wydatki</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                    Data wydatku:
+                                </label>
+                                <input
+                                    type="date"
+                                    value={expenseDate}
+                                    onChange={e => setExpenseDate(e.target.value)}
+                                    className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500"
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                    Notatka / Numer paragonu / Sklep (opcjonalnie):
+                                </label>
+                                <textarea
+                                    rows={2}
+                                    placeholder="np. Kupiono w Castoramie, paragon nr 1234, wymienił elektryk Jan Kowalski..."
+                                    value={expenseNotes}
+                                    onChange={e => setExpenseNotes(e.target.value)}
+                                    className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-medium outline-none focus:ring-2 focus:ring-emerald-500"
+                                />
+                            </div>
+
+                            <div className="pt-2 flex gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsExpenseModalOpen(false)}
+                                    className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs uppercase"
+                                >
+                                    Anuluj
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={isSubmittingExpense}
+                                    className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-xs uppercase tracking-wide shadow-lg transition disabled:bg-slate-400"
+                                >
+                                    {isSubmittingExpense ? "Zapisywanie..." : "Zapisz Wydatek 💾"}
                                 </button>
                             </div>
                         </form>

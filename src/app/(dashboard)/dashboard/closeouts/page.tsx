@@ -40,7 +40,7 @@ interface ManualCloseoutItem {
     estimatedUnitCost: number;
 }
 
-type TabType = "TOOLS" | "SCAFFOLDING" | "OTHER" | "DAMAGES" | "MANUAL" | "CLAIMS" | "DETECTIVE" | "HISTORY";
+type TabType = "TOOLS" | "SCAFFOLDING" | "OTHER" | "DAMAGES" | "EXPENSES" | "MANUAL" | "CLAIMS" | "DETECTIVE" | "HISTORY";
 
 export default function ProjectCloseoutsPage() {
     const { user } = useAuth();
@@ -62,6 +62,8 @@ export default function ProjectCloseoutsPage() {
     const [siteDamages, setSiteDamages] = useState<SiteDamage[]>([]);
     const [siteClaims, setSiteClaims] = useState<Claim[]>([]);
     const [suspiciousItems, setSuspiciousItems] = useState<any[]>([]);
+    const [siteExpenses, setSiteExpenses] = useState<any[]>([]);
+    const [repairCostOverrides, setRepairCostOverrides] = useState<Record<string, number>>({});
     const [siteProtocols, setSiteProtocols] = useState<Protocol[]>([]);
 
     // Decyzje dyspozycji (LOSS, CONSUMED, DISPUTED_INVESTOR, SCRAPPED, EXCLUDED)
@@ -181,48 +183,127 @@ export default function ProjectCloseoutsPage() {
                 console.warn("Błąd pobierania site_damages:", err);
             }
 
+            // Drobne wydatki i naprawy bieżące z budowy (site_expenses)
+            try {
+                const expensesQ = query(collection(db, "site_expenses"), where("siteId", "==", site.id));
+                const expensesSnap = await getDocs(expensesQ);
+                const expList = expensesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                expList.sort((a: any, b: any) => (b.date || "").localeCompare(a.date || ""));
+                setSiteExpenses(expList);
+            } catch (err) {
+                console.warn("Błąd pobierania site_expenses:", err);
+            }
+
             // Sprawy sądowe
             const claimsQ = query(collection(db, "claims"), where("siteId", "==", site.id));
             const claimsSnap = await getDocs(claimsQ);
             setSiteClaims(claimsSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Claim[]);
 
-            // Detektyw
+            // Detektyw & Naprawy Serwisowe (w tym sprzęt naprawiony po zwrocie z tej budowy)
             const protoQ = query(collection(db, "protocols"), where("sourceId", "==", site.id), where("type", "==", "ZWROT"));
             const protoSnap = await getDocs(protoQ);
-            const returnedItemsIds = new Set<string>();
+            
+            const returnedItemsMap = new Map<string, {
+                protocolDate: string;
+                protocolId: string;
+                declaredStatus?: string;
+                finalStatus?: string;
+                warehouseNotes?: string;
+            }>();
 
             protoSnap.docs.forEach(doc => {
                 const data = doc.data();
                 data.items?.forEach((item: any) => {
-                    if (item.inventoryId && item.type === "UNIQUE") returnedItemsIds.add(item.inventoryId);
+                    if (item.inventoryId) {
+                        returnedItemsMap.set(item.inventoryId, {
+                            protocolDate: data.createdAt || "",
+                            protocolId: data.protocolId || doc.id,
+                            declaredStatus: item.declaredStatus,
+                            finalStatus: item.finalStatus,
+                            warehouseNotes: item.warehouseNotes
+                        });
+                    }
                 });
             });
 
-            const suspicious = allInventory.filter(item =>
-                returnedItemsIds.has(item.id) &&
-                (item.status === "uszkodzone" || item.status === "do przeglądu") &&
-                (!item.allocations?.[site.id] || item.allocations?.[site.id] === 0)
-            );
+            const detectedItems: any[] = [];
+            const initialRepairCosts: Record<string, number> = {};
 
-            const suspiciousWithDescriptions = [];
-            for (const item of suspicious) {
-                const historySnap = await getDocs(collection(db, "inventory", item.id, "history"));
-                let failureText = "Brak szczegółowego opisu usterki w historii urządzenia.";
+            for (const [invId, returnInfo] of returnedItemsMap.entries()) {
+                const invItem = allInventory.find(i => i.id === invId);
+                if (!invItem) continue;
 
-                if (!historySnap.empty) {
-                    const sortedHistory = historySnap.docs
-                        .map(d => d.data())
-                        .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-
-                    const firstIncident = sortedHistory.find(h => h.type === "ZWROT" || h.type === "SERWIS" || h.status === "uszkodzone");
-                    if (firstIncident) {
-                        failureText = firstIncident.description || failureText;
+                // Sprawdzamy historię tego urządzenia w poszukiwaniu zgłoszeń awarii, serwisu lub napraw
+                let historyDocs: any[] = [];
+                try {
+                    const hSnap = await getDocs(collection(db, "inventory", invId, "history"));
+                    if (!hSnap.empty) {
+                        historyDocs = hSnap.docs.map(d => d.data());
                     }
+                } catch (hErr) {
+                    console.warn(`Błąd historii dla ${invId}:`, hErr);
                 }
 
-                suspiciousWithDescriptions.push({ ...item, failureDescription: failureText });
+                // Znajdź wpisy serwisowe / awarii
+                const serviceEvents = historyDocs.filter(h => 
+                    h.type === "SERWIS" || 
+                    h.type === "NAPRAWA" || 
+                    h.status === "uszkodzone" || 
+                    h.status === "do przeglądu" ||
+                    (h.description && /(naprawa|programator|uszkodz|usterk|serwis|koszt)/i.test(h.description))
+                );
+
+                const isReturnedDamaged = returnInfo.declaredStatus === "uszkodzone" || 
+                                          returnInfo.finalStatus === "uszkodzone" ||
+                                          returnInfo.declaredStatus === "do przeglądu" || 
+                                          returnInfo.finalStatus === "do przeglądu" ||
+                                          historyDocs.some(h => h.type === "ZWROT" && (h.description?.includes(site.name) || h.description?.includes(site.id)) && (h.description?.includes("uszkodzone") || h.description?.includes("do przeglądu")));
+
+                const isCurrentlyDamaged = invItem.status === "uszkodzone" || invItem.status === "do przeglądu";
+                const hasServiceAfterReturn = serviceEvents.length > 0;
+
+                // Jeśli sprzęt wrócił uszkodzony, jest obecnie uszkodzony, albo przeszedł serwis po zwrocie z tej budowy
+                if (isReturnedDamaged || isCurrentlyDamaged || hasServiceAfterReturn) {
+                    let failureText = returnInfo.warehouseNotes || "";
+                    let parsedCost = 0;
+                    let serviceEventDesc = "";
+
+                    const latestService = serviceEvents.find(h => h.type === "SERWIS" || h.type === "NAPRAWA") || serviceEvents[0];
+                    if (latestService) {
+                        serviceEventDesc = latestService.description || "";
+                    }
+
+                    const allText = `${serviceEventDesc} ${failureText} ${returnInfo.warehouseNotes || ""}`;
+                    const costMatch = allText.match(/(?:koszt(?:\s*naprawy)?[:\s]*)?(\d+(?:[.,]\d+)?)\s*(?:pln|zł)/i)
+                        || allText.match(/(\d+(?:[.,]\d+)?)\s*(?:pln|zł)/i);
+                    if (costMatch) {
+                        parsedCost = parseFloat(costMatch[1].replace(",", "."));
+                    }
+
+                    if (serviceEventDesc) {
+                        failureText = failureText ? `${serviceEventDesc} (Notatka ze zwrotu: ${failureText})` : serviceEventDesc;
+                    } else if (!failureText) {
+                        const returnHistory = historyDocs.find(h => h.type === "ZWROT");
+                        failureText = returnHistory?.description || `Zwrócono z budowy ${site.name} ze statusem: ${returnInfo.finalStatus || returnInfo.declaredStatus || invItem.status}`;
+                    }
+
+                    const isRepaired = invItem.status === "sprawne" || (latestService && latestService.status === "sprawne");
+
+                    initialRepairCosts[invItem.id] = parsedCost;
+
+                    detectedItems.push({
+                        ...invItem,
+                        failureDescription: failureText,
+                        repairCost: parsedCost,
+                        isRepaired: isRepaired,
+                        returnProtocolId: returnInfo.protocolId,
+                        returnProtocolDate: returnInfo.protocolDate
+                    });
+                }
             }
-            setSuspiciousItems(suspiciousWithDescriptions);
+
+            setSuspiciousItems(detectedItems);
+            setRepairCostOverrides(initialRepairCosts);
 
             // Historia protokołów
             const qIn = query(collection(db, "protocols"), where("destinationId", "==", site.id));
@@ -341,8 +422,10 @@ export default function ProjectCloseoutsPage() {
         let totalLoss = 0;
         let totalDisputed = 0;
         let totalScrapped = 0;
+        let totalRepairs = 0;
+        let totalExpenses = 0;
 
-        if (!selectedSite) return { totalLoss, totalDisputed, totalScrapped };
+        if (!selectedSite) return { totalLoss, totalDisputed, totalScrapped, totalRepairs, totalExpenses };
 
         const allItems = [...toolsItems, ...scaffoldingItems, ...otherItems];
         allItems.forEach(i => {
@@ -366,7 +449,18 @@ export default function ProjectCloseoutsPage() {
             else if (m.resolution === "SCRAPPED") totalScrapped += itemTotal;
         });
 
-        return { totalLoss, totalDisputed, totalScrapped };
+        // Suma kosztów napraw sprzętu
+        suspiciousItems.forEach(item => {
+            const cost = repairCostOverrides[item.id] !== undefined ? repairCostOverrides[item.id] : (item.repairCost || 0);
+            totalRepairs += (Number(cost) || 0);
+        });
+
+        // Suma drobnych bieżących wydatków i napraw na budowie
+        siteExpenses.forEach(exp => {
+            totalExpenses += (Number(exp.amount) || 0);
+        });
+
+        return { totalLoss, totalDisputed, totalScrapped, totalRepairs, totalExpenses };
     };
 
     const handleInitiateCloseout = async () => {
@@ -444,6 +538,16 @@ export default function ProjectCloseoutsPage() {
 
             const financials = calculateFinancials();
 
+            const detectivePayload = suspiciousItems.map(i => ({
+                id: i.id,
+                name: i.name,
+                inventoryNumber: i.inventoryNumber || "-",
+                failureDescription: i.failureDescription,
+                repairCost: repairCostOverrides[i.id] !== undefined ? repairCostOverrides[i.id] : (i.repairCost || 0),
+                isRepaired: i.isRepaired || i.status === "sprawne",
+                status: i.status
+            }));
+
             // Utwórz szkic rozliczenia
             await setDoc(closeoutRef, {
                 siteId: selectedSite.id,
@@ -459,13 +563,16 @@ export default function ProjectCloseoutsPage() {
                 financialSummary: {
                     totalLossCost: financials.totalLoss,
                     totalDisputedCost: financials.totalDisputed,
-                    totalScrappedCost: financials.totalScrapped
+                    totalScrappedCost: financials.totalScrapped,
+                    totalRepairsCost: financials.totalRepairs,
+                    totalExpensesCost: financials.totalExpenses
                 },
                 debtsList: debtsList,
                 excludedItems: excludedItems,
                 siteDamagesList: siteDamages,
+                siteExpensesList: siteExpenses,
                 claimsList: siteClaims,
-                detectiveList: suspiciousItems.map(i => ({ id: i.id, name: i.name, inventoryNumber: i.inventoryNumber, failureDescription: i.failureDescription })),
+                detectiveList: detectivePayload,
                 managerSignedAt: null,
                 directorSignedAt: null
             });
@@ -485,13 +592,16 @@ export default function ProjectCloseoutsPage() {
                         managerEmail: chosenManager?.email || "",
                         warehousemanName: `${user.firstName} ${user.lastName}`,
                         debtsList: debtsList,
-                        detectiveList: suspiciousItems.map(i => ({ id: i.id, name: i.name, inventoryNumber: i.inventoryNumber, failureDescription: i.failureDescription })),
+                        detectiveList: detectivePayload,
                         siteDamagesList: siteDamages,
+                        siteExpensesList: siteExpenses,
                         generalNotes: generalNotes.trim(),
                         financialSummary: {
                             totalLossCost: financials.totalLoss,
                             totalDisputedCost: financials.totalDisputed,
-                            totalScrappedCost: financials.totalScrapped
+                            totalScrappedCost: financials.totalScrapped,
+                            totalRepairsCost: financials.totalRepairs,
+                            totalExpensesCost: financials.totalExpenses
                         }
                     })
                 });
@@ -723,6 +833,57 @@ export default function ProjectCloseoutsPage() {
                                     </div>
                                 )}
 
+                                {selectedArchived.financialSummary && (
+                                    <div className="p-4 bg-slate-100 border border-slate-200 rounded-2xl flex flex-wrap justify-between gap-3 text-xs">
+                                        <div><span className="text-slate-500 font-bold uppercase text-[9px] block">Straty:</span><b className="text-red-600">{selectedArchived.financialSummary.totalLossCost || 0} zł</b></div>
+                                        <div><span className="text-slate-500 font-bold uppercase text-[9px] block">U Inwestora:</span><b className="text-amber-700">{selectedArchived.financialSummary.totalDisputedCost || 0} zł</b></div>
+                                        <div><span className="text-slate-500 font-bold uppercase text-[9px] block">Złomowane:</span><b className="text-slate-700">{selectedArchived.financialSummary.totalScrappedCost || 0} zł</b></div>
+                                        {selectedArchived.financialSummary.totalRepairsCost ? (
+                                            <div><span className="text-slate-500 font-bold uppercase text-[9px] block">Naprawy sprzętu:</span><b className="text-blue-700">{selectedArchived.financialSummary.totalRepairsCost} zł</b></div>
+                                        ) : null}
+                                        {selectedArchived.financialSummary.totalExpensesCost ? (
+                                            <div><span className="text-slate-500 font-bold uppercase text-[9px] block">Drobne wydatki:</span><b className="text-emerald-700">{selectedArchived.financialSummary.totalExpensesCost} zł</b></div>
+                                        ) : null}
+                                    </div>
+                                )}
+
+                                {selectedArchived.siteExpensesList && selectedArchived.siteExpensesList.length > 0 && (
+                                    <div className="space-y-2">
+                                        <h4 className="font-black text-xs uppercase tracking-wider text-emerald-800">Drobne wydatki budowy ({selectedArchived.siteExpensesList.length}):</h4>
+                                        <div className="space-y-1.5">
+                                            {selectedArchived.siteExpensesList.map((exp: any, idx: number) => (
+                                                <div key={idx} className="p-2.5 bg-emerald-50/50 border border-emerald-200 rounded-xl flex justify-between items-center text-xs">
+                                                    <div>
+                                                        <b>{exp.title}</b> <span className="text-[9px] text-slate-500">({exp.date || "-"})</span>
+                                                        {exp.notes && <p className="text-[10px] text-slate-500 italic">💬 {exp.notes}</p>}
+                                                    </div>
+                                                    <b className="text-emerald-700">{exp.amount} zł</b>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {selectedArchived.detectiveList && selectedArchived.detectiveList.length > 0 && (
+                                    <div className="space-y-2">
+                                        <h4 className="font-black text-xs uppercase tracking-wider text-orange-800">Ujawnione usterki i naprawy po zwrocie ({selectedArchived.detectiveList.length}):</h4>
+                                        <div className="space-y-1.5">
+                                            {selectedArchived.detectiveList.map((det: any, idx: number) => (
+                                                <div key={idx} className="p-2.5 bg-orange-50/50 border border-orange-200 rounded-xl text-xs space-y-1">
+                                                    <div className="flex justify-between items-center">
+                                                        <b>{det.name}</b>
+                                                        <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded ${det.isRepaired || det.status === 'sprawne' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                                            {det.isRepaired || det.status === 'sprawne' ? 'Naprawione' : 'Uszkodzone'}
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-[11px] text-slate-600">{det.failureDescription}</p>
+                                                    {det.repairCost ? <p className="text-[11px] font-bold text-blue-700">Koszt naprawy: {det.repairCost} zł</p> : null}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="space-y-3">
                                     <h4 className="font-black text-xs uppercase tracking-wider text-slate-600">Rozliczone pozycje ({selectedArchived.debtsList?.length || 0}):</h4>
                                     <div className="space-y-2">
@@ -821,10 +982,12 @@ export default function ProjectCloseoutsPage() {
                                 {/* PASEK BILANSU FINANSOWEGO NA ŻYWO DLA SZEFA */}
                                 <div className="bg-slate-800 text-white px-6 py-2.5 flex flex-wrap justify-between items-center text-xs border-b border-slate-700 gap-2">
                                     <span className="font-black text-slate-300 uppercase tracking-wide">Podsumowanie finansowe:</span>
-                                    <div className="flex gap-4 font-bold">
+                                    <div className="flex flex-wrap gap-4 font-bold">
                                         <span className="text-red-400">❌ Straty: <b>{financials.totalLoss} zł</b></span>
                                         <span className="text-amber-400">🚧 U Inwestora: <b>{financials.totalDisputed} zł</b></span>
                                         <span className="text-slate-400">♻️ Do Złomowania: <b>{financials.totalScrapped} zł</b></span>
+                                        <span className="text-blue-400">🔧 Naprawy sprzętu: <b>{financials.totalRepairs} zł</b></span>
+                                        <span className="text-emerald-400">💰 Drobne wydatki: <b>{financials.totalExpenses} zł</b></span>
                                     </div>
                                 </div>
 
@@ -842,6 +1005,9 @@ export default function ProjectCloseoutsPage() {
                                     <button onClick={() => setActiveTab("DAMAGES")} className={`px-3.5 py-2 text-xs font-black rounded-lg transition-all flex items-center gap-2 ${activeTab === "DAMAGES" ? "bg-blue-600 text-white shadow" : "bg-white hover:bg-slate-50 text-slate-700 border"}`}>
                                         💥 Uszkodzenia Budowy <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "DAMAGES" ? "bg-white text-blue-600" : "bg-slate-100 text-slate-600"}`}>{siteDamages.length}</span>
                                     </button>
+                                    <button onClick={() => setActiveTab("EXPENSES")} className={`px-3.5 py-2 text-xs font-black rounded-lg transition-all flex items-center gap-2 ${activeTab === "EXPENSES" ? "bg-emerald-600 text-white shadow" : "bg-white hover:bg-slate-50 text-slate-700 border"}`}>
+                                        💰 Drobne Wydatki <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "EXPENSES" ? "bg-white text-emerald-700" : "bg-emerald-100 text-emerald-800"}`}>{siteExpenses.length}</span>
+                                    </button>
                                     <button onClick={() => setActiveTab("MANUAL")} className={`px-3.5 py-2 text-xs font-black rounded-lg transition-all flex items-center gap-2 ${activeTab === "MANUAL" ? "bg-blue-600 text-white shadow" : "bg-white hover:bg-slate-50 text-slate-700 border"}`}>
                                         ✍️ Wpisy Ręczne <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "MANUAL" ? "bg-white text-blue-600" : "bg-slate-100 text-slate-600"}`}>{manualItems.length}</span>
                                     </button>
@@ -849,7 +1015,7 @@ export default function ProjectCloseoutsPage() {
                                         ⚖️ Sąd PESAM <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "CLAIMS" ? "bg-white text-blue-600" : "bg-slate-100 text-slate-600"}`}>{siteClaims.length}</span>
                                     </button>
                                     <button onClick={() => setActiveTab("DETECTIVE")} className={`px-3.5 py-2 text-xs font-black rounded-lg transition-all flex items-center gap-2 ${activeTab === "DETECTIVE" ? "bg-blue-600 text-white shadow" : "bg-white hover:bg-slate-50 text-slate-700 border"}`}>
-                                        🕵️ Detektyw <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "DETECTIVE" ? "bg-white text-blue-600" : "bg-slate-100 text-slate-600"}`}>{suspiciousItems.length}</span>
+                                        🕵️ Detektyw & Naprawy <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "DETECTIVE" ? "bg-white text-blue-600" : "bg-slate-100 text-slate-600"}`}>{suspiciousItems.length}</span>
                                     </button>
                                     <button onClick={() => setActiveTab("HISTORY")} className={`px-3.5 py-2 text-xs font-black rounded-lg transition-all flex items-center gap-2 ${activeTab === "HISTORY" ? "bg-blue-600 text-white shadow" : "bg-white hover:bg-slate-50 text-slate-700 border"}`}>
                                         📋 Protokoły <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${activeTab === "HISTORY" ? "bg-white text-blue-600" : "bg-slate-100 text-slate-600"}`}>{siteProtocols.length}</span>
@@ -939,6 +1105,51 @@ export default function ProjectCloseoutsPage() {
                                         </div>
                                     )}
 
+                                    {activeTab === "EXPENSES" && (
+                                        <div className="space-y-4">
+                                            <div className="border-b pb-2 flex justify-between items-center">
+                                                <div>
+                                                    <h4 className="font-black text-sm text-slate-800">Drobne wydatki i naprawy bieżące z placu budowy:</h4>
+                                                    <p className="text-xs text-slate-500">Zarejestrowane przez kierowników i brygadzistów w module Twoja Budowa</p>
+                                                </div>
+                                                <div className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-right">
+                                                    <span className="text-[10px] uppercase font-bold text-emerald-800 block">Suma wydatków:</span>
+                                                    <span className="text-sm font-black text-emerald-900">{financials.totalExpenses} zł</span>
+                                                </div>
+                                            </div>
+
+                                            {siteExpenses.length === 0 ? (
+                                                <div className="p-8 text-center bg-white border border-dashed rounded-xl text-slate-400 text-sm">
+                                                    Brak zarejestrowanych drobnych wydatków dla tej budowy.
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-2.5">
+                                                    {siteExpenses.map((exp: any) => (
+                                                        <div key={exp.id} className="p-4 bg-white border rounded-2xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                                                            <div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <p className="font-bold text-slate-800 text-sm">{exp.title}</p>
+                                                                    <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                                                                        {exp.category || "OGÓLNE"}
+                                                                    </span>
+                                                                </div>
+                                                                <p className="text-xs text-slate-500 mt-1">
+                                                                    📅 Data: <b>{exp.date || "-"}</b> • Wprowadził: <b>{exp.reportedByName || "Pracownik"}</b>
+                                                                </p>
+                                                                {exp.notes && <p className="text-xs text-slate-600 italic mt-1 bg-slate-50 p-2 rounded-lg border">💬 {exp.notes}</p>}
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <span className="text-base font-black text-emerald-600 bg-emerald-50 px-3 py-1 rounded-xl border border-emerald-100">
+                                                                    {exp.amount} zł
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
                                     {activeTab === "MANUAL" && (
                                         <div className="space-y-3">
                                             <div className="border-b pb-2 mb-2 flex justify-between items-center">
@@ -1007,26 +1218,69 @@ export default function ProjectCloseoutsPage() {
                                     )}
 
                                     {activeTab === "DETECTIVE" && (
-                                        <div className="space-y-3">
-                                            <div className="border-b pb-2 mb-2"><h4 className="font-black text-sm text-slate-800">Ujawnione uszkodzenia urządzeń po powrocie z budowy:</h4></div>
+                                        <div className="space-y-4">
+                                            <div className="border-b pb-2 flex justify-between items-center">
+                                                <div>
+                                                    <h4 className="font-black text-sm text-slate-800">Ujawnione uszkodzenia i naprawy serwisowe po zwrocie:</h4>
+                                                    <p className="text-xs text-slate-500">Sprzęt zwrócony jako uszkodzony, wymagający serwisu lub już naprawiony na koszt firmy</p>
+                                                </div>
+                                                <div className="bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-xl text-right">
+                                                    <span className="text-[10px] uppercase font-bold text-blue-800 block">Suma napraw:</span>
+                                                    <span className="text-sm font-black text-blue-900">{financials.totalRepairs} zł</span>
+                                                </div>
+                                            </div>
+
                                             {suspiciousItems.length === 0 ? (
-                                                <p className="text-sm text-slate-500 italic p-4 text-center">Brak urządzeń, które uległy awarii bezpośrednio po zwrocie z tej budowy.</p>
+                                                <div className="p-8 text-center bg-white border border-dashed rounded-xl text-slate-400 text-sm">
+                                                    Brak urządzeń ze zgłoszonymi awariami lub naprawami powiązanymi z tą budową.
+                                                </div>
                                             ) : (
                                                 <div className="space-y-3">
-                                                    {suspiciousItems.map(item => (
-                                                        <div key={item.id} className="p-3 bg-orange-50 border border-orange-200 rounded-xl shadow-sm text-sm space-y-2.5">
-                                                            <div className="flex justify-between items-center">
-                                                                <div>
-                                                                    <p className="font-bold text-slate-800">{item.name}</p>
-                                                                    <p className="text-[10px] text-slate-500 font-mono">Nr Mag: {item.inventoryNumber}</p>
+                                                    {suspiciousItems.map(item => {
+                                                        const currentRepairCost = repairCostOverrides[item.id] !== undefined ? repairCostOverrides[item.id] : (item.repairCost || 0);
+                                                        const isRepaired = item.isRepaired || item.status === "sprawne";
+
+                                                        return (
+                                                            <div key={item.id} className="p-4 bg-orange-50/70 border border-orange-200 rounded-2xl shadow-sm text-sm space-y-3">
+                                                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                                                                    <div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <p className="font-bold text-slate-900 text-base">{item.name}</p>
+                                                                            <span className={`text-[10px] font-black px-2.5 py-0.5 rounded-lg uppercase ${
+                                                                                isRepaired
+                                                                                    ? "bg-green-100 text-green-800 border border-green-200"
+                                                                                    : "bg-red-100 text-red-800 border border-red-200"
+                                                                            }`}>
+                                                                                {isRepaired ? "✅ Naprawione w serwisie" : `⚠️ W bazie: ${item.status}`}
+                                                                            </span>
+                                                                        </div>
+                                                                        <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                                                                            Nr Mag: <b>{item.inventoryNumber || "-"}</b>
+                                                                            {item.returnProtocolId ? ` • Protokół zwrotu: ${item.returnProtocolId}` : ""}
+                                                                        </p>
+                                                                    </div>
+
+                                                                    {/* KOSZT NAPRAWY (EDYTOWALNY Z WYKRYTEJ WARTOŚCI) */}
+                                                                    <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-orange-200 shadow-sm">
+                                                                        <span className="text-xs font-bold text-slate-600">Koszt naprawy:</span>
+                                                                        <input
+                                                                            type="number"
+                                                                            min="0"
+                                                                            value={currentRepairCost || ""}
+                                                                            placeholder="0"
+                                                                            onChange={e => setRepairCostOverrides({ ...repairCostOverrides, [item.id]: Math.max(0, parseInt(e.target.value) || 0) })}
+                                                                            className="w-16 text-center font-black text-blue-700 outline-none border-b border-slate-300 focus:border-blue-500"
+                                                                        />
+                                                                        <span className="text-xs font-bold text-slate-500">zł</span>
+                                                                    </div>
                                                                 </div>
-                                                                <span className="text-[10px] font-black text-orange-800 bg-orange-100 px-2.5 py-1 rounded-lg uppercase">Status w bazie: {item.status}</span>
+
+                                                                <div className="p-3 bg-white border border-orange-100 rounded-xl text-xs leading-relaxed text-slate-700 shadow-inner">
+                                                                    <b>Zapis z kartoteki / usterka:</b> {item.failureDescription}
+                                                                </div>
                                                             </div>
-                                                            <div className="p-3 bg-white border border-orange-100 rounded-lg text-xs leading-relaxed italic text-slate-600 shadow-inner">
-                                                                <b>Opis zdarzenia / usterki z bazy:</b> {item.failureDescription}
-                                                            </div>
-                                                        </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </div>
                                             )}
                                         </div>

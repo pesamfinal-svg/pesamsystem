@@ -23,6 +23,26 @@ interface SiteDamagePayload {
     reportedByName?: string;
 }
 
+interface SiteExpensePayload {
+    id?: string;
+    title: string;
+    category?: string;
+    amount: number;
+    date?: string;
+    notes?: string;
+    reportedByName?: string;
+}
+
+interface DetectiveItemPayload {
+    id?: string;
+    name: string;
+    inventoryNumber: string;
+    failureDescription: string;
+    repairCost?: number;
+    isRepaired?: boolean;
+    status?: string;
+}
+
 interface CloseoutEmailPayload {
     type: "CLOSEOUT_INITIATED" | "CLOSEOUT_SIGNED_BY_MANAGER" | "CLOSEOUT_FINALIZED";
     siteName: string;
@@ -30,13 +50,16 @@ interface CloseoutEmailPayload {
     managerEmail: string;
     warehousemanName: string;
     debtsList: DebtItemPayload[];
-    detectiveList?: { name: string; inventoryNumber: string; failureDescription: string; }[];
+    detectiveList?: DetectiveItemPayload[];
     siteDamagesList?: SiteDamagePayload[];
+    siteExpensesList?: SiteExpensePayload[];
     generalNotes?: string;
     financialSummary?: {
         totalLossCost: number;
         totalDisputedCost: number;
         totalScrappedCost: number;
+        totalRepairsCost?: number;
+        totalExpensesCost?: number;
     };
 }
 
@@ -52,6 +75,7 @@ export async function POST(req: Request) {
             debtsList = [],
             detectiveList = [],
             siteDamagesList = [],
+            siteExpensesList = [],
             generalNotes = "",
             financialSummary
         } = body;
@@ -193,40 +217,99 @@ export async function POST(req: Request) {
             `;
         }
 
-        // 6. Detektyw
+        // 6. Detektyw & Naprawy Serwisowe (w tym sprzęt naprawiony po zwrocie)
         let detectiveHtml = "";
         if (detectiveList && detectiveList.length > 0) {
             const detRows = detectiveList.map(item => `
-                <div style="background:#fef2f2;border-left:4px solid #ef4444;padding:10px 14px;margin-bottom:8px;border-radius:0 8px 8px 0;font-size:12px;color:#7f1d1d">
-                    <b>${item.name}</b> (Nr: ${item.inventoryNumber || '-'})<br/>
-                    <i>Usterka z bazy magazynowej: ${item.failureDescription}</i>
+                <div style="background:#fff7ed;border-left:4px solid #f97316;padding:12px 14px;margin-bottom:8px;border-radius:0 8px 8px 0;font-size:12px;color:#7c2d12">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <b>${item.name}</b> (Nr: ${item.inventoryNumber || '-'})
+                        <span style="font-size:10px;font-weight:bold;padding:2px 8px;border-radius:4px;text-transform:uppercase;${
+                            item.isRepaired || item.status === 'sprawne'
+                                ? 'background:#dcfce7;color:#15803d;border:1px solid #86efac'
+                                : 'background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5'
+                        }">
+                            ${item.isRepaired || item.status === 'sprawne' ? 'Naprawione w serwisie' : (item.status ? `Status: ${item.status}` : 'Uszkodzone')}
+                        </span>
+                    </div>
+                    <div style="margin-top:6px;color:#431407;font-size:11px;line-height:1.4">
+                        <b>Zapis z historii / usterka:</b> ${item.failureDescription}
+                    </div>
+                    ${item.repairCost ? `
+                        <div style="margin-top:4px;font-weight:bold;color:#b45309;font-size:11px">
+                            🔧 Koszt naprawy serwisowej: ${item.repairCost} zł
+                        </div>
+                    ` : ''}
                 </div>
             `).join("");
 
             detectiveHtml = `
-                <h4 style="font-size:12px;color:#dc2626;text-transform:uppercase;letter-spacing:1px;margin:25px 0 8px 0;border-bottom:2px solid #fee2e2;padding-bottom:5px">
-                    🕵️ Detektyw PESAM (Awaria bezpośrednio po zdaniu sprzętu):
+                <h4 style="font-size:12px;color:#ea580c;text-transform:uppercase;letter-spacing:1px;margin:25px 0 8px 0;border-bottom:2px solid #ffedd5;padding-bottom:5px">
+                    🕵️ Ujawnione Usterki & Naprawy Serwisowe Sprzętu po Zwrocie:
                 </h4>
                 ${detRows}
             `;
         }
 
-        // 7. Podsumowanie finansowe (PLN)
+        // 7. Drobne wydatki i naprawy bieżące z budowy (siteExpensesList)
+        let siteExpensesHtml = "";
+        if (siteExpensesList && siteExpensesList.length > 0) {
+            const totalExp = siteExpensesList.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+            const expenseRows = siteExpensesList.map(exp => `
+                <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:8px 0;font-size:12px;color:#334155">
+                        <b>${exp.title}</b> <span style="font-size:9px;background:#f1f5f9;color:#64748b;padding:2px 6px;border-radius:4px;text-transform:uppercase">${exp.category || 'OGÓLNE'}</span>
+                        <div style="font-size:10px;color:#94a3b8;margin-top:2px">
+                            Data: ${exp.date || '-'} • Wprowadził: ${exp.reportedByName || 'Pracownik'}
+                            ${exp.notes ? ` • <i>${exp.notes}</i>` : ''}
+                        </div>
+                    </td>
+                    <td style="padding:8px 0;text-align:right;font-size:12px;color:#059669;font-weight:bold">
+                        ${exp.amount} zł
+                    </td>
+                </tr>
+            `).join("");
+
+            siteExpensesHtml = `
+                <h4 style="font-size:12px;color:#059669;text-transform:uppercase;letter-spacing:1px;margin:25px 0 8px 0;border-bottom:2px solid #d1fae5;padding-bottom:5px">
+                    💰 Drobne Wydatki i Naprawy na Budowie (Suma: ${totalExp} zł):
+                </h4>
+                <table style="width:100%;border-collapse:collapse;margin-bottom:15px">
+                    ${expenseRows}
+                </table>
+            `;
+        }
+
+        // 8. Podsumowanie finansowe (PLN) dla Zarządu
         let financeBoxHtml = "";
         if (financialSummary) {
             financeBoxHtml = `
-                <div style="background:#f8fafc;border:2px solid #e2e8f0;border-radius:12px;padding:15px;margin:20px 0;display:flex;justify-content:space-between">
-                    <div>
-                        <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Straty bezpośrednie:</div>
-                        <div style="font-size:16px;font-weight:black;color:#ef4444">${financialSummary.totalLossCost || 0} zł</div>
-                    </div>
-                    <div>
-                        <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Sprzęt u inwestora:</div>
-                        <div style="font-size:16px;font-weight:black;color:#b45309">${financialSummary.totalDisputedCost || 0} zł</div>
-                    </div>
-                    <div>
-                        <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Do złomowania:</div>
-                        <div style="font-size:16px;font-weight:black;color:#475569">${financialSummary.totalScrappedCost || 0} zł</div>
+                <div style="background:#f8fafc;border:2px solid #e2e8f0;border-radius:12px;padding:15px;margin:20px 0">
+                    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px">
+                        <div>
+                            <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Straty bezpośrednie:</div>
+                            <div style="font-size:16px;font-weight:black;color:#ef4444">${financialSummary.totalLossCost || 0} zł</div>
+                        </div>
+                        <div>
+                            <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Sprzęt u inwestora:</div>
+                            <div style="font-size:16px;font-weight:black;color:#b45309">${financialSummary.totalDisputedCost || 0} zł</div>
+                        </div>
+                        <div>
+                            <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Do złomowania:</div>
+                            <div style="font-size:16px;font-weight:black;color:#475569">${financialSummary.totalScrappedCost || 0} zł</div>
+                        </div>
+                        ${financialSummary.totalRepairsCost ? `
+                            <div>
+                                <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Naprawy sprzętu:</div>
+                                <div style="font-size:16px;font-weight:black;color:#2563eb">${financialSummary.totalRepairsCost} zł</div>
+                            </div>
+                        ` : ''}
+                        ${financialSummary.totalExpensesCost ? `
+                            <div>
+                                <div style="font-size:10px;font-weight:bold;color:#64748b;text-transform:uppercase">Drobne wydatki z placu:</div>
+                                <div style="font-size:16px;font-weight:black;color:#059669">${financialSummary.totalExpensesCost} zł</div>
+                            </div>
+                        ` : ''}
                     </div>
                 </div>
             `;
@@ -268,6 +351,7 @@ export async function POST(req: Request) {
                         ${consumedHtml}
                         ${siteDamagesHtml}
                         ${detectiveHtml}
+                        ${siteExpensesHtml}
 
                         <div style="margin-top:25px;background:#fef2f2;border-left:4px solid #ef4444;padding:14px;border-radius:6px">
                             <p style="margin:0;font-size:13px;color:#991b1b;font-weight:bold">
@@ -322,6 +406,7 @@ export async function POST(req: Request) {
                         ${consumedHtml}
                         ${siteDamagesHtml}
                         ${detectiveHtml}
+                        ${siteExpensesHtml}
                     </div>
                     ${isSandbox ? `<div style="text-align:center;font-size:10px;color:#f97316;margin-top:10px;font-weight:bold">🧪 [KOMUNIKAT PIASKOWNICY]: Ten mail w trybie produkcyjnym leciałby do Dyrekcji/Prezesa: ${recipients.join(", ")}</div>` : ""}
                 </div>`;
@@ -351,6 +436,7 @@ export async function POST(req: Request) {
                         ${consumedHtml}
                         ${siteDamagesHtml}
                         ${detectiveHtml}
+                        ${siteExpensesHtml}
 
                         <p style="font-size:12px;color:#64748b;text-align:center;margin-top:20px;border-top:1px dashed #e2e8f0;padding-top:10px">
                             Oficjalny dokument rozliczeniowy został trwale zarchiwizowany w bazie PESAM Cloud. Sprawa zakończona.
