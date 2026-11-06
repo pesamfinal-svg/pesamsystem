@@ -11,8 +11,12 @@ interface SystemSettings {
     orderEmailRecipients: string[]; // Lista maili do sklepu
     clsDirectorEmail: string; // Mail Dyrektora do powiadomień CLS
     clsBossEmail: string; // Mail Szefa do powiadomień CLS
-    closeoutEmailRecipients: string[]; // Lista maili do raportów zamknięcia budów
-    isCloseoutSandboxMode: boolean; // NOWOŚĆ: Przełącznik trybu testowego
+    closeoutEmailRecipients: string[]; // Lista maili do raportów zamknięcia budów w trybie sandbox
+    closeoutDirectorEmail?: string; // Dedykowany mail Dyrektora do zamknięć budów
+    closeoutBossEmail?: string; // Dedykowany mail Szefa/Prezesa do zamknięć budów
+    closeoutAdditionalEmails?: string[]; // Dodatkowi odbiorcy raportu końcowego
+    notifyDirectorOnInitiate?: boolean; // Czy wysyłać raport już przy inicjacji
+    isCloseoutSandboxMode: boolean; // Przełącznik trybu testowego
     residualAlertRecipients: string[]; // Lista maili do alertów o naruszeniu reguł zwrotu AI
     capacityAlertRecipients?: string[]; // Lista maili do alertów o zapełnieniu stref magazynowych (JPP)
 }
@@ -26,12 +30,17 @@ export default function SettingsPage() {
         clsDirectorEmail: "",
         clsBossEmail: "",
         closeoutEmailRecipients: [],
+        closeoutDirectorEmail: "",
+        closeoutBossEmail: "",
+        closeoutAdditionalEmails: [],
+        notifyDirectorOnInitiate: false,
         isCloseoutSandboxMode: true, // Domyślnie włączony dla bezpieczeństwa testów
         residualAlertRecipients: [],
         capacityAlertRecipients: []
     });
     const [newEmail, setNewEmail] = useState("");
     const [newCloseoutEmail, setNewCloseoutEmail] = useState("");
+    const [newCloseoutAdditionalEmail, setNewCloseoutAdditionalEmail] = useState("");
     const [newResidualAlertEmail, setNewResidualAlertEmail] = useState("");
     const [newCapacityAlertEmail, setNewCapacityAlertEmail] = useState("");
     const [loading, setLoading] = useState(true);
@@ -58,6 +67,10 @@ export default function SettingsPage() {
                         clsDirectorEmail: data.clsDirectorEmail || "",
                         clsBossEmail: data.clsBossEmail || "",
                         closeoutEmailRecipients: data.closeoutEmailRecipients || [],
+                        closeoutDirectorEmail: data.closeoutDirectorEmail || "",
+                        closeoutBossEmail: data.closeoutBossEmail || "",
+                        closeoutAdditionalEmails: data.closeoutAdditionalEmails || [],
+                        notifyDirectorOnInitiate: data.notifyDirectorOnInitiate || false,
                         isCloseoutSandboxMode: data.isCloseoutSandboxMode !== undefined ? data.isCloseoutSandboxMode : true,
                         residualAlertRecipients: data.residualAlertRecipients || [],
                         capacityAlertRecipients: data.capacityAlertRecipients || []
@@ -105,6 +118,23 @@ export default function SettingsPage() {
 
     const handleRemoveCloseoutEmail = (emailToRemove: string) => {
         setSettings(prev => ({ ...prev, closeoutEmailRecipients: prev.closeoutEmailRecipients.filter(email => email !== emailToRemove) }));
+    };
+
+    const handleAddCloseoutAdditionalEmail = (e: React.FormEvent) => {
+        e.preventDefault();
+        const email = newCloseoutAdditionalEmail.trim().toLowerCase();
+        if (!email) return;
+
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) return alert("Wprowadź poprawny adres e-mail!");
+        if (settings.closeoutAdditionalEmails?.includes(email)) return alert("Ten e-mail jest już na liście!");
+
+        setSettings(prev => ({ ...prev, closeoutAdditionalEmails: [...(prev.closeoutAdditionalEmails || []), email] }));
+        setNewCloseoutAdditionalEmail("");
+    };
+
+    const handleRemoveCloseoutAdditionalEmail = (emailToRemove: string) => {
+        setSettings(prev => ({ ...prev, closeoutAdditionalEmails: (prev.closeoutAdditionalEmails || []).filter(email => email !== emailToRemove) }));
     };
 
     const handleAddResidualAlertEmail = (e: React.FormEvent) => {
@@ -185,9 +215,100 @@ export default function SettingsPage() {
                         </div>
                     </div>
 
-                    {/* NOWOŚĆ: SEKCJA ROZLICZEŃ BUDÓW */}
-                    <div className="space-y-4 pt-6 border-t">
-                        <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider border-b pb-2">🏁 Raporty Zamknięcia i Rozliczenia Budów</h3>
+                    {/* SEKCJA ROZLICZEŃ BUDÓW */}
+                    <div className="space-y-6 pt-6 border-t">
+                        <div className="border-b pb-2 flex items-center justify-between">
+                            <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                                <span>🏁</span> Raporty Zamknięcia i Rozliczenia Budów
+                            </h3>
+                            <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">
+                                Obieg Zarządu i Dyrekcji
+                            </span>
+                        </div>
+
+                        {/* OSOBY UPRAWNIONE DO ZAMKNIĘCIA: DYREKTOR I PREZES */}
+                        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 space-y-4">
+                            <h4 className="text-xs font-black text-slate-700 uppercase tracking-wide flex items-center gap-2">
+                                <span>👤</span> Uprawnieni do zamykania budów (Dyrektor / Prezes)
+                            </h4>
+                            <p className="text-[11px] text-slate-500 leading-relaxed">
+                                Na te adresy system prześle raport ubytków oraz <b>wezwanie z prośbą o zalogowanie się na swoje konto PESAM</b> w celu ostatecznej autoryzacji i zamknięcia budowy w zakładce <i>Zatwierdzanie Zamknięć</i>.
+                            </p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">
+                                        Adres E-mail Dyrektora (ds. Realizacji)
+                                    </label>
+                                    <input
+                                        type="email"
+                                        placeholder="np. dyrektor@pesam.pl"
+                                        value={settings.closeoutDirectorEmail || ""}
+                                        onChange={e => setSettings({ ...settings, closeoutDirectorEmail: e.target.value })}
+                                        className="w-full p-3 border-2 rounded-xl text-sm font-bold bg-white outline-none focus:border-blue-500 shadow-sm"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">
+                                        Adres E-mail Prezesa Zarządu / Szefa
+                                    </label>
+                                    <input
+                                        type="email"
+                                        placeholder="np. prezes@pesam.pl"
+                                        value={settings.closeoutBossEmail || ""}
+                                        onChange={e => setSettings({ ...settings, closeoutBossEmail: e.target.value })}
+                                        className="w-full p-3 border-2 rounded-xl text-sm font-bold bg-white outline-none focus:border-blue-500 shadow-sm"
+                                    />
+                                </div>
+                            </div>
+
+                            <label className="flex items-center gap-3 cursor-pointer pt-2">
+                                <input
+                                    type="checkbox"
+                                    checked={settings.notifyDirectorOnInitiate || false}
+                                    onChange={e => setSettings({ ...settings, notifyDirectorOnInitiate: e.target.checked })}
+                                    className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer"
+                                />
+                                <span className="text-xs font-bold text-slate-700">
+                                    Wyślij e-mail informacyjny do Dyrekcji/Prezesa już przy <b>zainicjowaniu audytu</b> przez magazyniera (zanim kierownik podpisze)
+                                </span>
+                            </label>
+                        </div>
+
+                        {/* DODATKOWI ODBIORCY RAPORTU KOŃCOWEGO (NP. CONTROLLING / KSIĘGOWOŚĆ) */}
+                        <div className="space-y-3">
+                            <h4 className="text-xs font-black text-slate-700 uppercase tracking-wide">
+                                📋 Dodatkowi odbiorcy raportu rozliczenia (np. Controlling / Księgowość)
+                            </h4>
+                            <p className="text-[11px] text-slate-500">
+                                Osoby z tej listy otrzymają kopię oficjalnego raportu finansowego po zamknięciu budowy.
+                            </p>
+                            <form onSubmit={handleAddCloseoutAdditionalEmail} className="flex gap-3">
+                                <input
+                                    type="text"
+                                    placeholder="np. ksiegowosc@pesam.pl lub controlling@pesam.pl"
+                                    value={newCloseoutAdditionalEmail}
+                                    onChange={e => setNewCloseoutAdditionalEmail(e.target.value)}
+                                    className="flex-1 p-3 border-2 rounded-xl text-sm outline-none focus:border-blue-500 font-bold bg-slate-50"
+                                />
+                                <button
+                                    type="submit"
+                                    className="bg-slate-800 hover:bg-slate-900 text-white font-black text-xs px-6 rounded-xl shadow-md transition"
+                                >
+                                    + Dodaj do raportów
+                                </button>
+                            </form>
+                            <div className="flex flex-wrap gap-2 pt-1">
+                                {(settings.closeoutAdditionalEmails || []).map(email => (
+                                    <span key={email} className="bg-slate-100 text-slate-800 border border-slate-200 text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-2 shadow-sm">
+                                        {email}
+                                        <button type="button" onClick={() => handleRemoveCloseoutAdditionalEmail(email)} className="text-red-500 hover:text-red-700 text-sm font-black">&times;</button>
+                                    </span>
+                                ))}
+                                {(!settings.closeoutAdditionalEmails || settings.closeoutAdditionalEmails.length === 0) && (
+                                    <p className="text-xs text-slate-400 italic">Brak dodatkowych odbiorców raportu.</p>
+                                )}
+                            </div>
+                        </div>
 
                         {/* PRZEŁĄCZNIK TRYBU TESTOWEGO (SANDBOX) */}
                         <div className="bg-orange-50 border border-orange-200 rounded-2xl p-4 space-y-3 shadow-sm">
@@ -203,18 +324,18 @@ export default function SettingsPage() {
                                 </span>
                             </label>
                             <p className="text-[11px] text-orange-800 leading-relaxed">
-                                <b>Aktywny tryb testowy:</b> Wszystkie maile i PDF-y kierowane do konkretnych kierowników i dyrekcji będą bezpiecznie przekierowywane na Twoją listę e-maili testowych poniżej (Twoje skrzynki testowe). Wyłącz ten przełącznik przed oddaniem systemu do produkcji, aby maile leciały do prawdziwych kierowników.
+                                <b>Aktywny tryb testowy:</b> Wszystkie maile i powiadomienia kierowane do Kierowników, Dyrekcji i Prezesa będą bezpiecznie przekierowywane na poniższą listę e-maili testowych. Wyłącz przed oddaniem na produkcję.
                             </p>
                         </div>
 
-                        <p className="text-xs text-slate-500 pt-2">Adresy e-mail do testów, na które system prześle powiadomienia i raporty PDF w trybie piaskownicy:</p>
+                        <p className="text-xs text-slate-500 pt-1">Adresy e-mail do testów (Sandbox):</p>
                         <form onSubmit={handleAddCloseoutEmail} className="flex gap-3">
                             <input type="text" placeholder="np. moj-testowy-email@pesam.pl" value={newCloseoutEmail} onChange={e => setNewCloseoutEmail(e.target.value)} className="flex-1 p-3 border-2 rounded-xl text-sm outline-none focus:border-blue-500 font-bold bg-slate-50" />
-                            <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs px-6 rounded-xl shadow-md transition">+ Dodaj do listy</button>
+                            <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs px-6 rounded-xl shadow-md transition">+ Dodaj do listy testowej</button>
                         </form>
-                        <div className="flex flex-wrap gap-2 pt-2">
+                        <div className="flex flex-wrap gap-2 pt-1">
                             {settings.closeoutEmailRecipients.map(email => (
-                                <span key={email} className="bg-blue-50 text-blue-800 border border-blue-200 text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-2 shadow-sm">
+                                <span key={email} className="bg-orange-50 text-orange-900 border border-orange-200 text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-2 shadow-sm">
                                     {email}
                                     <button type="button" onClick={() => handleRemoveCloseoutEmail(email)} className="text-red-500 hover:text-red-700 text-sm font-black">&times;</button>
                                 </span>

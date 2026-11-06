@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useState, useEffect, Suspense, Fragment } from "react";
-import { collection, getDocs, doc, query, orderBy, where } from "firebase/firestore";
+import { collection, getDocs, doc, query, orderBy, where, addDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -36,6 +36,15 @@ function MySiteHubContent() {
     const [itemsOnSite, setItemsOnSite] = useState<InventoryItem[]>([]);
     const [siteProtocols, setSiteProtocols] = useState<Protocol[]>([]);
     const [damages, setDamages] = useState<any[]>([]);
+    const [reportedSiteDamages, setReportedSiteDamages] = useState<any[]>([]);
+
+    // Stan modala zgłaszania uszkodzenia
+    const [isDamageModalOpen, setIsDamageModalOpen] = useState(false);
+    const [damageSelectedInvId, setDamageSelectedInvId] = useState("");
+    const [damageManualName, setDamageManualName] = useState("");
+    const [damageQty, setDamageQty] = useState(1);
+    const [damageDesc, setDamageDesc] = useState("");
+    const [isSubmittingDamage, setIsSubmittingDamage] = useState(false);
 
     const [inventoryActiveTab, setInventoryActiveTab] = useState<"UNIQUE" | "BULK" | "MANUAL" | "ALL">("ALL");
     const [inventorySearchQuery, setInventorySearchQuery] = useState("");
@@ -118,9 +127,79 @@ function MySiteHubContent() {
                 }
             });
             setDamages(damagesList);
+
+            // Pobieranie zgłoszonych bieżących uszkodzeń z kolekcji site_damages
+            try {
+                const siteDamagesQ = query(collection(db, "site_damages"), where("siteId", "==", selectedSiteId));
+                const sdSnap = await getDocs(siteDamagesQ);
+                const sdList = sdSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                sdList.sort((a: any, b: any) => (b.reportedAt || "").localeCompare(a.reportedAt || ""));
+                setReportedSiteDamages(sdList);
+            } catch (sdErr) {
+                console.error("Błąd pobierania site_damages:", sdErr);
+            }
         };
         fetchDataForSite();
     }, [selectedSiteId, canViewSiteState]);
+
+    const handleSaveDamageReport = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedSiteId || !user) return;
+        if (!damageDesc.trim()) return alert("Podaj dokładny opis uszkodzenia/usterki!");
+
+        let itemName = damageManualName.trim();
+        let invNumber = "-";
+        let unit = "szt.";
+
+        if (damageSelectedInvId && damageSelectedInvId !== "MANUAL") {
+            const found = itemsOnSite.find(i => i.id === damageSelectedInvId);
+            if (found) {
+                itemName = found.name;
+                invNumber = found.inventoryNumber || "-";
+                unit = found.unit || "szt.";
+            }
+        }
+
+        if (!itemName) return alert("Wybierz sprzęt lub wpisz jego nazwę!");
+
+        setIsSubmittingDamage(true);
+        try {
+            const currentSite = mySites.find(s => s.id === selectedSiteId);
+            await addDoc(collection(db, "site_damages"), {
+                siteId: selectedSiteId,
+                siteName: currentSite?.name || "Budowa",
+                inventoryId: damageSelectedInvId === "MANUAL" ? null : damageSelectedInvId,
+                inventoryName: itemName,
+                inventoryNumber: invNumber,
+                quantity: Number(damageQty) || 1,
+                unit: unit,
+                description: damageDesc.trim(),
+                reportedByUid: user.uid,
+                reportedByName: `${user.firstName} ${user.lastName}`,
+                reportedAt: new Date().toISOString(),
+                status: "ZGŁOSZONE"
+            });
+
+            alert("✅ Uszkodzenie zostało pomyślnie zgłoszone! Będzie widoczne na budowie oraz w końcowym raporcie rozliczenia.");
+            setIsDamageModalOpen(false);
+            setDamageSelectedInvId("");
+            setDamageManualName("");
+            setDamageQty(1);
+            setDamageDesc("");
+
+            // Odśwież dane
+            const siteDamagesQ = query(collection(db, "site_damages"), where("siteId", "==", selectedSiteId));
+            const sdSnap = await getDocs(siteDamagesQ);
+            const sdList = sdSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            sdList.sort((a: any, b: any) => (b.reportedAt || "").localeCompare(a.reportedAt || ""));
+            setReportedSiteDamages(sdList);
+        } catch (err: any) {
+            console.error("Błąd zapisu uszkodzenia:", err);
+            alert("Błąd podczas zapisywania: " + err.message);
+        } finally {
+            setIsSubmittingDamage(false);
+        }
+    };
 
     const checkDiscrepancies = (protocol: Protocol) => {
         if (protocol.type !== "ZWROT" || protocol.status === "OCZEKUJACY") return false;
@@ -452,36 +531,80 @@ function MySiteHubContent() {
             case "DAMAGES":
                 return (
                     <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in">
-                        <div className="bg-red-600 text-white p-6 flex justify-between items-center">
+                        <div className="bg-red-600 text-white p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                             <div>
-                                <h3 className="font-bold text-xl">Szkody i Straty Budowy</h3>
-                                <p className="text-red-200 text-xs mt-1">Lista sprzętu, który zjechał uszkodzony lub zaginął.</p>
+                                <h3 className="font-bold text-xl">Szkody i Uszkodzenia Budowy</h3>
+                                <p className="text-red-100 text-xs mt-1">Bieżące zgłoszenia usterek z placu oraz sprzęt uszkodzony w zwrotach.</p>
                             </div>
-                            <button onClick={() => setActiveView("HUB")} className="bg-red-800 hover:bg-red-900 px-4 py-2 rounded-lg font-bold transition">Powrót</button>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => setIsDamageModalOpen(true)}
+                                    className="bg-white text-red-700 hover:bg-red-50 font-black px-4 py-2 rounded-xl text-xs sm:text-sm shadow-md transition flex items-center gap-1.5"
+                                >
+                                    ➕ Zgłoś uszkodzenie sprzętu
+                                </button>
+                                <button onClick={() => setActiveView("HUB")} className="bg-red-800 hover:bg-red-900 px-4 py-2 rounded-xl font-bold transition text-xs sm:text-sm">Powrót</button>
+                            </div>
                         </div>
-                        <div className="p-6">
-                            {damages.length === 0 ? (
-                                <div className="text-center p-10 text-slate-400 border-2 border-dashed rounded-2xl">
-                                    <div className="text-4xl mb-2">🎉</div>
-                                    Brak uszkodzonego sprzętu na koncie tej budowy!
+
+                        <div className="p-6 space-y-6">
+                            {/* SEKCJA 1: USZKODZENIA ZGŁOSZONE NA BUDOWIE W TRAKCIE PRAC */}
+                            <div className="space-y-3">
+                                <div className="flex justify-between items-center border-b pb-2">
+                                    <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-2">
+                                        <span>🛠️</span> Awarie i usterki zgłoszone na placu ({reportedSiteDamages.length})
+                                    </h4>
+                                    <span className="text-[10px] text-slate-400 font-semibold">Trafią automatycznie do raportu zamknięcia budowy</span>
                                 </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    {damages.map((dmg, idx) => (
-                                        <div key={idx} className="flex justify-between items-center p-4 border border-red-200 bg-red-50 rounded-2xl">
-                                            <div>
-                                                <p className="font-bold text-red-900 text-lg">{dmg.name}</p>
-                                                <p className="text-xs text-red-700 font-mono mt-1">Nr Mag: {dmg.inventoryNumber || "Brak"} • Protokół: {dmg.protocolId}</p>
-                                                {dmg.warehouseNotes && <p className="text-xs text-red-600 mt-2 bg-red-100 p-2 rounded"><b>Uwagi magazynu:</b> {dmg.warehouseNotes}</p>}
+
+                                {reportedSiteDamages.length === 0 ? (
+                                    <p className="text-xs text-slate-400 italic p-4 bg-slate-50 rounded-xl text-center">Brak bieżących zgłoszeń usterek z placu budowy.</p>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {reportedSiteDamages.map((dmg: any) => (
+                                            <div key={dmg.id} className="p-4 border border-orange-200 bg-orange-50/70 rounded-2xl shadow-sm space-y-2">
+                                                <div className="flex justify-between items-start">
+                                                    <div>
+                                                        <p className="font-bold text-slate-900 text-base">{dmg.inventoryName}</p>
+                                                        <p className="text-xs text-slate-500 font-mono">Nr Mag: {dmg.inventoryNumber || "-"} • Zgłosił: <b>{dmg.reportedByName}</b> ({dmg.reportedAt ? new Date(dmg.reportedAt).toLocaleDateString("pl-PL") : "-"})</p>
+                                                    </div>
+                                                    <span className="bg-orange-600 text-white px-2.5 py-1 rounded-lg text-xs font-black uppercase">
+                                                        {dmg.quantity} {dmg.unit || "szt."}
+                                                    </span>
+                                                </div>
+                                                <div className="p-3 bg-white border border-orange-200 rounded-xl text-xs text-slate-700 leading-relaxed shadow-inner">
+                                                    <b>Opis usterki / okoliczności:</b> {dmg.description}
+                                                </div>
                                             </div>
-                                            <div className="text-right">
-                                                <p className="text-[10px] uppercase font-black text-red-400 mb-1">Status na magazynie</p>
-                                                <span className="bg-red-600 text-white px-3 py-1 rounded-lg text-sm font-bold uppercase">{dmg.finalStatus || dmg.declaredStatus}</span>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* SEKCJA 2: USZKODZENIA ZE ZWROTÓW PROTOKOŁOWYCH */}
+                            <div className="space-y-3 pt-4 border-t">
+                                <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-2">
+                                    <span>📦</span> Sprzęt zwrócony do magazynu jako uszkodzony ({damages.length})
+                                </h4>
+                                {damages.length === 0 ? (
+                                    <p className="text-xs text-slate-400 italic p-4 bg-slate-50 rounded-xl text-center">Brak sprzętu zwróconego ze statusem uszkodzone.</p>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {damages.map((dmg, idx) => (
+                                            <div key={idx} className="flex justify-between items-center p-4 border border-red-200 bg-red-50 rounded-2xl">
+                                                <div>
+                                                    <p className="font-bold text-red-900 text-base">{dmg.name}</p>
+                                                    <p className="text-xs text-red-700 font-mono mt-0.5">Nr Mag: {dmg.inventoryNumber || "Brak"} • Protokół: {dmg.protocolId}</p>
+                                                    {dmg.warehouseNotes && <p className="text-xs text-red-600 mt-1 bg-red-100 p-2 rounded"><b>Uwagi magazynu:</b> {dmg.warehouseNotes}</p>}
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className="bg-red-600 text-white px-3 py-1 rounded-lg text-xs font-bold uppercase">{dmg.finalStatus || dmg.declaredStatus}</span>
+                                                </div>
                                             </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 );
@@ -512,8 +635,8 @@ function MySiteHubContent() {
                             <p className="text-slate-400 text-[11px] mt-1 font-medium">Wydania, zwroty, oczekujące</p>
                         </div>
                         <div onClick={() => setActiveView("DAMAGES")} className="bg-white hover:bg-red-50 border border-slate-200 p-8 rounded-3xl cursor-pointer transition shadow-sm hover:shadow-md group relative">
-                            {damages.length > 0 && (
-                                <div className="absolute top-4 right-4 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold animate-pulse">{damages.length}</div>
+                            {(damages.length + reportedSiteDamages.length) > 0 && (
+                                <div className="absolute top-4 right-4 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold animate-pulse">{damages.length + reportedSiteDamages.length}</div>
                             )}
                             <div className="text-4xl mb-4 group-hover:scale-110 transition">💥</div>
                             <h3 className="font-black text-slate-800 uppercase text-xs tracking-widest">Szkody / Straty</h3>
@@ -694,6 +817,108 @@ function MySiteHubContent() {
                             <p className="border-b border-slate-400 pb-10"></p>
                             <p className="mt-2 text-center font-bold text-slate-700">Podpis Kierownika Budowy</p>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL ZGŁASZANIA USZKODZENIA NA BUDOWIE */}
+            {isDamageModalOpen && (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-200 animate-fade-in space-y-6">
+                        <div className="flex justify-between items-center border-b pb-4">
+                            <div>
+                                <h3 className="text-xl font-black text-slate-800">🛠️ Zgłoś uszkodzenie sprzętu</h3>
+                                <p className="text-xs text-slate-500 mt-0.5">Zgłoszenie trafi do raportu budowy i audytu zamknięcia</p>
+                            </div>
+                            <button
+                                onClick={() => setIsDamageModalOpen(false)}
+                                className="w-8 h-8 rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 flex items-center justify-center font-bold"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSaveDamageReport} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                    Wybierz sprzęt z budowy:
+                                </label>
+                                <select
+                                    value={damageSelectedInvId}
+                                    onChange={e => setDamageSelectedInvId(e.target.value)}
+                                    className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-red-500 cursor-pointer"
+                                >
+                                    <option value="">-- Wybierz sprzęt z listy --</option>
+                                    {itemsOnSite.map(i => (
+                                        <option key={i.id} value={i.id}>
+                                            {i.name} (Nr: {i.inventoryNumber || "-"} | Na stanie: {i.allocations[selectedSiteId]} {i.unit || "szt."})
+                                        </option>
+                                    ))}
+                                    <option value="MANUAL">✍️ Inny sprzęt / Wpis ręczny</option>
+                                </select>
+                            </div>
+
+                            {damageSelectedInvId === "MANUAL" && (
+                                <div>
+                                    <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                        Nazwa sprzętu:
+                                    </label>
+                                    <input
+                                        type="text"
+                                        placeholder="np. Młot udarowy Bosch / Przewód siłowy"
+                                        value={damageManualName}
+                                        onChange={e => setDamageManualName(e.target.value)}
+                                        className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-red-500"
+                                        required
+                                    />
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                    Ilość uszkodzonych sztuk:
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    value={damageQty}
+                                    onChange={e => setDamageQty(Math.max(1, parseInt(e.target.value) || 1))}
+                                    className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-red-500"
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-black text-slate-700 uppercase tracking-wide mb-1.5">
+                                    Opis uszkodzenia / okoliczności zdarzenia:
+                                </label>
+                                <textarea
+                                    rows={3}
+                                    placeholder="np. Spalony silnik przy wierceniu w betonie, upadek z wysokości, zalanie, wygięta obudowa..."
+                                    value={damageDesc}
+                                    onChange={e => setDamageDesc(e.target.value)}
+                                    className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-medium outline-none focus:ring-2 focus:ring-red-500"
+                                    required
+                                />
+                            </div>
+
+                            <div className="pt-2 flex gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsDamageModalOpen(false)}
+                                    className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs uppercase"
+                                >
+                                    Anuluj
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={isSubmittingDamage}
+                                    className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white font-black rounded-xl text-xs uppercase tracking-wide shadow-lg transition disabled:bg-slate-400"
+                                >
+                                    {isSubmittingDamage ? "Zapisywanie..." : "Zapisz Zgłoszenie 💾"}
+                                </button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}
