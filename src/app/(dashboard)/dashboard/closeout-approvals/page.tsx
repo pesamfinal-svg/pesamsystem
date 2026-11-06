@@ -21,7 +21,15 @@ interface CloseoutDoc {
     directorUid?: string;
     directorName?: string;
     directorSignedAt?: string;
+    generalNotes?: string;
+    financialSummary?: {
+        totalLossCost: number;
+        totalDisputedCost: number;
+        totalScrappedCost: number;
+    };
     debtsList: any[];
+    excludedItems?: any[];
+    siteDamagesList?: any[];
     claimsList: any[];
     detectiveList: any[];
 }
@@ -32,7 +40,7 @@ export default function CloseoutApprovalsPage() {
     const [selectedCloseout, setSelectedCloseout] = useState<CloseoutDoc | null>(null);
     const [loading, setLoading] = useState(true);
     const [isProcessing, setIsProcessing] = useState(false);
-    const [activeTab, setActiveTab] = useState<"DEBTS" | "CLAIMS" | "DETECTIVE">("DEBTS");
+    const [activeTab, setActiveTab] = useState<"DEBTS" | "DISPUTED" | "SCRAPPED" | "DAMAGES" | "CLAIMS" | "DETECTIVE">("DEBTS");
     const [isSandboxActive, setIsSandboxActive] = useState(true);
 
     useEffect(() => {
@@ -94,14 +102,9 @@ export default function CloseoutApprovalsPage() {
     };
 
     const handleSignAsManager = async () => {
-        console.log("Kliknięto przycisk podpisu Kierownika. Wybrany dokument:", selectedCloseout);
-        if (!selectedCloseout || !user) {
-            console.warn("Brak wybranego dokumentu lub użytkownika!", { selectedCloseout, user });
-            return;
-        }
+        if (!selectedCloseout || !user) return;
 
         if (!window.confirm("Czy potwierdzasz zgodność stanu rozliczenia i składasz podpis cyfrowy?")) {
-            console.log("Anulowano podpis przez użytkownika.");
             return;
         }
 
@@ -126,18 +129,21 @@ export default function CloseoutApprovalsPage() {
                         managerEmail: user.email,
                         warehousemanName: selectedCloseout.initiatedByName,
                         debtsList: selectedCloseout.debtsList,
-                        detectiveList: selectedCloseout.detectiveList
+                        detectiveList: selectedCloseout.detectiveList,
+                        siteDamagesList: selectedCloseout.siteDamagesList,
+                        generalNotes: selectedCloseout.generalNotes,
+                        financialSummary: selectedCloseout.financialSummary
                     })
                 });
             } catch (mailError) {
                 console.error("Błąd wysyłki powiadomienia do dyrekcji:", mailError);
             }
 
-            alert(`✍️ Twój podpis został pomyślnie złożony! Sprawa została przekazana do ostatecznego zatwierdzenia przez Dyrekcję.`);
+            alert(`✍️ Twój podpis został pomyślnie złożony! Sprawa została przekazana do ostatecznego zatwierdzenia przez Dyrekcję i Prezesa.`);
             setSelectedCloseout(null);
             fetchCloseouts();
         } catch (error) {
-            console.error("Krytyczny błąd w handleSignAsManager:", error);
+            console.error("Błąd składania podpisu:", error);
             alert("Błąd składania podpisu: " + error);
         } finally {
             setIsProcessing(false);
@@ -146,7 +152,7 @@ export default function CloseoutApprovalsPage() {
 
     const handleSignAsDirector = async () => {
         if (!selectedCloseout || !user) return;
-        if (!window.confirm("⚠️ OSTATECZNA DECYZJA\n\nCzy akceptujesz finansowy raport strat i zamykasz projekt? Ta operacja zaktualizuje inwentarz.")) return;
+        if (!window.confirm("⚠️ OSTATECZNA DECYZJA ZARZĄDU / DYREKCJI\n\nCzy akceptujesz raport finansowy strat i ostatecznie zamykasz projekt? Ta operacja zaktualizuje stany inwentarza.")) return;
 
         setIsProcessing(true);
         try {
@@ -168,23 +174,41 @@ export default function CloseoutApprovalsPage() {
                     const lostItemsList = [];
 
                     for (const debt of selectedCloseout.debtsList) {
+                        if (!debt.id || debt.isManualEntry) continue;
+
                         const itemRef = doc(db, "inventory", debt.id);
                         const itemDoc = await transaction.get(itemRef);
                         if (!itemDoc.exists()) continue;
 
                         const data = itemDoc.data();
-                        const qtyLost = debt.quantity;
+                        const qtyLost = debt.quantity || 0;
 
+                        // W PRZYPADKU SPRZĘTU SPORNEGO U INWESTORA: NIE NISZCZYMY/NIE LIKWIDUJEMY SPRZĘTU!
+                        if (debt.resolution === "DISPUTED_INVESTOR") {
+                            if (data.type === "UNIQUE") {
+                                transaction.update(itemRef, {
+                                    status: "spór_z_inwestorem",
+                                    currentLocation: `SPÓR Z INWESTOREM (${selectedCloseout.siteName})`,
+                                    [`allocations.${selectedCloseout.siteId}`]: 0
+                                });
+                            } else {
+                                transaction.update(itemRef, {
+                                    [`allocations.${selectedCloseout.siteId}`]: 0
+                                });
+                            }
+                            continue;
+                        }
+
+                        // W PRZYPADKU STRATY LUB ZŁOMOWANIA
                         if (data.type === "UNIQUE") {
                             transaction.update(itemRef, {
-                                status: "zagubione",
-                                currentLocation: "STRATY / BRAKI",
+                                status: debt.resolution === "SCRAPPED" ? "złomowane" : "zagubione",
+                                currentLocation: debt.resolution === "SCRAPPED" ? "UTYLIZACJA / ZŁOM" : "STRATY / BRAKI",
                                 availableQuantity: 0,
                                 [`allocations.${selectedCloseout.siteId}`]: 0
                             });
                         } else {
                             const currentTotal = data.totalQuantity || 0;
-                            // Zdejmujemy ze stanu totalQuantity niezależnie czy LOSS czy CONSUMED
                             transaction.update(itemRef, {
                                 totalQuantity: Math.max(0, currentTotal - qtyLost),
                                 [`allocations.${selectedCloseout.siteId}`]: 0
@@ -192,24 +216,36 @@ export default function CloseoutApprovalsPage() {
                         }
 
                         lostItemsList.push({
-                            inventoryId: debt.id, name: debt.name, type: data.type, inventoryNumber: debt.inventoryNumber || "BRAK",
-                            quantity: qtyLost, unit: data.unit || "szt.",
-                            finalStatus: debt.resolution === "CONSUMED" ? "ZUŻYCIE" : "STRATA" // Flaga w protokole
+                            inventoryId: debt.id,
+                            name: debt.name,
+                            type: data.type,
+                            inventoryNumber: debt.inventoryNumber || "BRAK",
+                            quantity: qtyLost,
+                            unit: data.unit || "szt.",
+                            finalStatus: debt.resolution === "CONSUMED" ? "ZUŻYCIE" : debt.resolution === "SCRAPPED" ? "ZŁOMOWANIE" : "STRATA",
+                            notes: debt.notes || ""
                         });
                     }
 
-                    transaction.set(protocolRef, {
-                        protocolId, type: "LIKWIDACJA", sourceId: selectedCloseout.siteId, sourceName: selectedCloseout.siteName, destinationId: "STRATY", destinationName: "Odpis w koszty",
-                        createdBy: user?.uid, createdByName: `${user?.firstName} ${user?.lastName}`, status: "ZAAKCEPTOWANY", createdAt: new Date().toISOString(),
-                        documentDate: new Date().toISOString().split('T')[0], items: lostItemsList,
-                        notes: "Odpis strat na podstawie zamknięcia budowy."
-                    });
+                    if (lostItemsList.length > 0) {
+                        transaction.set(protocolRef, {
+                            protocolId,
+                            type: "LIKWIDACJA",
+                            sourceId: selectedCloseout.siteId,
+                            sourceName: selectedCloseout.siteName,
+                            destinationId: "STRATY",
+                            destinationName: "Odpis w koszty",
+                            createdBy: user?.uid,
+                            createdByName: `${user?.firstName} ${user?.lastName}`,
+                            status: "ZAAKCEPTOWANY",
+                            createdAt: new Date().toISOString(),
+                            documentDate: new Date().toISOString().split('T')[0],
+                            items: lostItemsList,
+                            notes: selectedCloseout.generalNotes || "Odpis strat na podstawie zamknięcia budowy."
+                        });
+                    }
                 }
             });
-
-            const settingsSnap = await getDoc(doc(db, "settings", "system"));
-            const settings = settingsSnap.exists() ? settingsSnap.data() : null;
-            const testEmails = settings?.closeoutEmailRecipients || [];
 
             try {
                 await fetch("/api/closeout-email", {
@@ -222,14 +258,17 @@ export default function CloseoutApprovalsPage() {
                         managerEmail: selectedCloseout.managerEmail || "",
                         warehousemanName: selectedCloseout.initiatedByName,
                         debtsList: selectedCloseout.debtsList,
-                        detectiveList: selectedCloseout.detectiveList
+                        detectiveList: selectedCloseout.detectiveList,
+                        siteDamagesList: selectedCloseout.siteDamagesList,
+                        generalNotes: selectedCloseout.generalNotes,
+                        financialSummary: selectedCloseout.financialSummary
                     })
                 });
             } catch (mailError) {
                 console.error("Błąd wysyłki końcowego maila:", mailError);
             }
 
-            alert(`✅ Projekt został pomyślnie rozliczony i zamknięty!\n\nOficjalny raport końcowy PDF został wygenerowany i przesłany do sygnatariuszy zgodnie z konfiguracją systemu.`);
+            alert(`✅ Projekt został oficjalnie rozliczony i ZAMKNIĘTY!\n\nRaport końcowy został przesłany do sygnatariuszy, a dane zapisano trwale w archiwum.`);
             setSelectedCloseout(null);
             fetchCloseouts();
         } catch (error) {
@@ -240,7 +279,6 @@ export default function CloseoutApprovalsPage() {
     };
 
     const handleSendTestEmail = async (closeout: CloseoutDoc) => {
-        console.log("Kliknięto przycisk testowy e-mail PDF. Dane:", closeout);
         setIsProcessing(true);
         try {
             const emailTypeToTest = closeout.status === "OCZEKUJE_NA_KIEROWNIKA"
@@ -257,19 +295,17 @@ export default function CloseoutApprovalsPage() {
                     managerEmail: closeout.managerEmail || user?.email,
                     warehousemanName: closeout.initiatedByName,
                     debtsList: closeout.debtsList,
-                    detectiveList: closeout.detectiveList
+                    detectiveList: closeout.detectiveList,
+                    siteDamagesList: closeout.siteDamagesList,
+                    generalNotes: closeout.generalNotes,
+                    financialSummary: closeout.financialSummary
                 })
             });
 
             const result = await response.json();
 
             if (result.success) {
-                alert(
-                    `🧪 WYSYŁKA TESTOWA (TRYB SANDBOX)\n\n` +
-                    `System pomyślnie zasymulował e-mail typu:\n[ ${emailTypeToTest} ]\n` +
-                    `Wiadomość została wysłana na Twoje adresy testowe z Ustawień Systemu.\n\n` +
-                    `Sprawdź pocztę!`
-                );
+                alert(`🧪 WYSYŁKA TESTOWA (SANDBOX):\nWiadomość [ ${emailTypeToTest} ] została pomyślnie wysłana na Twoje skrzynki testowe.`);
             } else {
                 throw new Error(result.error || "Nieznany błąd serwera");
             }
@@ -289,17 +325,22 @@ export default function CloseoutApprovalsPage() {
 
     const canManageGlobally = hasPermission("manageProjectCloseouts", user.rolePermissions, user.permissionOverrides);
 
+    // Filtrowanie pozycji wg statusu
+    const lossItems = (selectedCloseout?.debtsList || []).filter(i => i.resolution === "LOSS" || !i.resolution);
+    const disputedItems = (selectedCloseout?.debtsList || []).filter(i => i.resolution === "DISPUTED_INVESTOR");
+    const scrappedItems = (selectedCloseout?.debtsList || []).filter(i => i.resolution === "SCRAPPED");
+
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto animate-fade-in font-sans space-y-6">
 
             {/* BANER SANDBOX */}
             {isSandboxActive && (
-                <div className="bg-orange-50 border-2 border-dashed border-orange-200 p-4 rounded-3xl flex justify-between items-center shadow-sm animate-pulse">
+                <div className="bg-orange-50 border-2 border-dashed border-orange-200 p-4 rounded-3xl flex justify-between items-center shadow-sm">
                     <div className="flex items-center gap-3">
                         <span className="text-2xl">🧪</span>
                         <div>
                             <p className="text-xs font-black text-orange-950 uppercase tracking-wider">Tryb piaskownicy (Sandbox) jest AKTYWNY</p>
-                            <p className="text-[11px] text-orange-800">Wszystkie powiadomienia e-mail i wysyłki PDF są przekierowywane na Twoje adresy testowe z Ustawień Systemu.</p>
+                            <p className="text-[11px] text-orange-800">Wszystkie powiadomienia e-mail i wysyłki raportów są przekierowywane na Twoje adresy testowe z Ustawień Systemu.</p>
                         </div>
                     </div>
                 </div>
@@ -311,7 +352,7 @@ export default function CloseoutApprovalsPage() {
             </div>
 
             <div className="flex flex-col md:flex-row gap-6">
-                {/* LEWA KOLUMNA */}
+                {/* LEWA KOLUMNA: LISTA SPRAW */}
                 <div className="w-full md:w-1/3 space-y-3">
                     <div className="bg-slate-900 text-white p-4 rounded-xl shadow-md">
                         <h3 className="font-black text-xs uppercase tracking-wider">Rozliczenia budów</h3>
@@ -328,7 +369,7 @@ export default function CloseoutApprovalsPage() {
                                 >
                                     <p className={`font-bold text-sm ${selectedCloseout?.id === closeout.id ? 'text-white' : 'text-slate-800'}`}>{closeout.siteName}</p>
                                     <p className={`text-[10px] uppercase mt-2 font-black ${selectedCloseout?.id === closeout.id ? 'text-blue-200' : 'text-orange-600'}`}>
-                                        {closeout.status === "OCZEKUJE_NA_KIEROWNIKA" ? "⏳ Czeka na Kierownika" : "⏳ Czeka na Dyrekcję"}
+                                        {closeout.status === "OCZEKUJE_NA_KIEROWNIKA" ? "⏳ Czeka na Kierownika" : "⏳ Czeka na Dyrekcję / Prezesa"}
                                     </p>
                                 </button>
                             ))
@@ -336,7 +377,7 @@ export default function CloseoutApprovalsPage() {
                     </div>
                 </div>
 
-                {/* PRAWA KOLUMNA */}
+                {/* PRAWA KOLUMNA: SZCZEGÓŁY SPRAWY I DECYZJA */}
                 <div className="w-full md:w-2/3">
                     {!selectedCloseout ? (
                         <div className="h-full flex flex-col items-center justify-center bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl p-12 text-slate-400">
@@ -344,40 +385,135 @@ export default function CloseoutApprovalsPage() {
                             <p className="font-black text-slate-700 text-center">Wybierz budowę, aby zapoznać się ze stanem strat i złożyć podpis.</p>
                         </div>
                     ) : (
-                        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col max-h-[85vh]">
+                        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col max-h-[88vh]">
 
+                            {/* NAGŁÓWEK */}
                             <div className="p-6 bg-slate-900 border-b border-slate-800 text-white flex justify-between items-center">
                                 <div>
                                     <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Szczegóły do podpisu</p>
                                     <h2 className="text-xl font-black">{selectedCloseout.siteName}</h2>
                                 </div>
                                 <span className="bg-orange-500 text-white font-black px-3 py-1 rounded text-[10px] uppercase">
-                                    {selectedCloseout.status === "OCZEKUJE_NA_KIEROWNIKA" ? "Podpis Kierownika" : "Podpis Dyrekcji"}
+                                    {selectedCloseout.status === "OCZEKUJE_NA_KIEROWNIKA" ? "Podpis Kierownika" : "Autoryzacja Zarządu"}
                                 </span>
                             </div>
 
-                            <div className="bg-slate-100 p-2 border-b flex gap-2 text-xs font-bold">
-                                <button onClick={() => setActiveTab("DEBTS")} className={`px-4 py-2 rounded-lg ${activeTab === "DEBTS" ? "bg-blue-600 text-white" : "bg-white text-slate-600 border"}`}>❌ Wykaz Braków ({selectedCloseout.debtsList?.length || 0})</button>
-                                <button onClick={() => setActiveTab("CLAIMS")} className={`px-4 py-2 rounded-lg ${activeTab === "CLAIMS" ? "bg-blue-600 text-white" : "bg-white text-slate-600 border"}`}>⚖️ Sąd PESAM ({selectedCloseout.claimsList?.length || 0})</button>
-                                <button onClick={() => setActiveTab("DETECTIVE")} className={`px-4 py-2 rounded-lg ${activeTab === "DETECTIVE" ? "bg-blue-600 text-white" : "bg-white text-slate-600 border"}`}>🕵️ Detektyw ({selectedCloseout.detectiveList?.length || 0})</button>
+                            {/* BILANS FINANSOWY DLA SZEFA */}
+                            {selectedCloseout.financialSummary && (
+                                <div className="bg-slate-800 text-white px-6 py-2.5 flex justify-between items-center text-xs border-b border-slate-700">
+                                    <span className="font-bold text-slate-300">Wartość strat finansowych:</span>
+                                    <div className="flex gap-4 font-bold">
+                                        <span className="text-red-400">Straty: <b>{selectedCloseout.financialSummary.totalLossCost || 0} zł</b></span>
+                                        <span className="text-amber-400">U Inwestora: <b>{selectedCloseout.financialSummary.totalDisputedCost || 0} zł</b></span>
+                                        <span className="text-slate-400">Złomowane: <b>{selectedCloseout.financialSummary.totalScrappedCost || 0} zł</b></span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* UWAGI AUDYTORA */}
+                            {selectedCloseout.generalNotes && (
+                                <div className="p-4 bg-blue-50 border-b border-blue-100 text-xs text-blue-900">
+                                    <b>Notatka audytora:</b> {selectedCloseout.generalNotes}
+                                </div>
+                            )}
+
+                            {/* ZAKŁADKI POZYCJI */}
+                            <div className="bg-slate-100 p-2 border-b flex flex-wrap gap-2 text-xs font-bold">
+                                <button onClick={() => setActiveTab("DEBTS")} className={`px-3 py-1.5 rounded-lg ${activeTab === "DEBTS" ? "bg-blue-600 text-white" : "bg-white text-slate-600 border"}`}>
+                                    ❌ Straty ({lossItems.length})
+                                </button>
+                                <button onClick={() => setActiveTab("DISPUTED")} className={`px-3 py-1.5 rounded-lg ${activeTab === "DISPUTED" ? "bg-amber-600 text-white" : "bg-white text-slate-600 border"}`}>
+                                    🚧 U Inwestora ({disputedItems.length})
+                                </button>
+                                <button onClick={() => setActiveTab("SCRAPPED")} className={`px-3 py-1.5 rounded-lg ${activeTab === "SCRAPPED" ? "bg-slate-700 text-white" : "bg-white text-slate-600 border"}`}>
+                                    ♻️ Złomowanie ({scrappedItems.length})
+                                </button>
+                                <button onClick={() => setActiveTab("DAMAGES")} className={`px-3 py-1.5 rounded-lg ${activeTab === "DAMAGES" ? "bg-orange-600 text-white" : "bg-white text-slate-600 border"}`}>
+                                    💥 Zgłoszone Usterki ({selectedCloseout.siteDamagesList?.length || 0})
+                                </button>
+                                <button onClick={() => setActiveTab("CLAIMS")} className={`px-3 py-1.5 rounded-lg ${activeTab === "CLAIMS" ? "bg-blue-600 text-white" : "bg-white text-slate-600 border"}`}>
+                                    ⚖️ Sąd ({selectedCloseout.claimsList?.length || 0})
+                                </button>
+                                <button onClick={() => setActiveTab("DETECTIVE")} className={`px-3 py-1.5 rounded-lg ${activeTab === "DETECTIVE" ? "bg-blue-600 text-white" : "bg-white text-slate-600 border"}`}>
+                                    🕵️ Detektyw ({selectedCloseout.detectiveList?.length || 0})
+                                </button>
                             </div>
 
-                            <div className="flex-1 overflow-y-auto p-6 bg-slate-50">
+                            {/* ZAWARTOŚĆ POZYCJI DO PODPISU */}
+                            <div className="flex-1 overflow-y-auto p-6 bg-slate-50 space-y-3">
                                 {activeTab === "DEBTS" && (
                                     <div className="space-y-2">
-                                        <p className="text-xs font-bold text-slate-500 uppercase pb-2 border-b">Ubytki przypisane do rozliczenia finansowego:</p>
-                                        {selectedCloseout.debtsList?.length === 0 ? <p className="text-sm italic text-green-700 font-bold">Brak strat.</p> : selectedCloseout.debtsList.map((item, idx) => (
-                                            <div key={idx} className="p-3 bg-white border rounded-xl flex justify-between items-center text-sm">
+                                        <p className="text-xs font-bold text-slate-500 uppercase pb-1 border-b">Straty bezpośrednie obciążające budowę:</p>
+                                        {lossItems.length === 0 ? <p className="text-sm italic text-green-700 font-bold p-3">Brak bezpośrednich strat.</p> : lossItems.map((item, idx) => (
+                                            <div key={idx} className="p-3.5 bg-white border rounded-xl flex justify-between items-center text-sm shadow-sm">
                                                 <div>
                                                     <p className="font-bold text-slate-800">{item.name}</p>
-                                                    <p className="text-[10px] text-slate-400 font-mono">Nr Mag: {item.inventoryNumber}</p>
+                                                    <p className="text-[10px] text-slate-400 font-mono">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                    {item.notes && <p className="text-xs text-red-700 italic mt-0.5">💬 {item.notes}</p>}
                                                 </div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className={`text-[10px] font-black px-2 py-1 rounded uppercase ${item.resolution === 'CONSUMED' ? 'bg-slate-100 text-slate-600' : 'bg-red-100 text-red-700'}`}>
-                                                        {item.resolution === 'CONSUMED' ? '🧼 Zużycie normalne' : '❌ Strata / Dług'}
+                                                <div className="text-right">
+                                                    <span className="bg-red-50 text-red-700 border border-red-200 text-xs font-black px-2.5 py-1 rounded-lg">
+                                                        {item.quantity} {item.unit || "szt."}
                                                     </span>
-                                                    <span className="bg-red-50 text-red-700 border border-red-200 text-xs font-black px-2.5 py-1 rounded-lg">{item.quantity} {item.unit || "szt."}</span>
+                                                    {item.estimatedTotalCost ? <p className="text-xs font-bold text-slate-700 mt-1">~{item.estimatedTotalCost} zł</p> : null}
                                                 </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {activeTab === "DISPUTED" && (
+                                    <div className="space-y-2">
+                                        <p className="text-xs font-bold text-amber-800 uppercase pb-1 border-b">Sprzęt pozostawiony na budowie (spór z inwestorem / do refakturowania):</p>
+                                        {disputedItems.length === 0 ? <p className="text-sm italic text-slate-500 p-3">Brak sprzętu w toku sporów z inwestorem.</p> : disputedItems.map((item, idx) => (
+                                            <div key={idx} className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl flex justify-between items-center text-sm shadow-sm">
+                                                <div>
+                                                    <p className="font-bold text-amber-950">{item.name}</p>
+                                                    <p className="text-[10px] text-amber-700 font-mono">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                    {item.notes && <p className="text-xs text-amber-800 italic mt-0.5">💬 Sytuacja: {item.notes}</p>}
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className="bg-amber-100 text-amber-900 border border-amber-300 text-xs font-black px-2.5 py-1 rounded-lg">
+                                                        {item.quantity} {item.unit || "szt."}
+                                                    </span>
+                                                    {item.estimatedTotalCost ? <p className="text-xs font-bold text-amber-900 mt-1">Wartość: ~{item.estimatedTotalCost} zł</p> : null}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {activeTab === "SCRAPPED" && (
+                                    <div className="space-y-2">
+                                        <p className="text-xs font-bold text-slate-600 uppercase pb-1 border-b">Sprzęt zutylizowany / zezłomowany:</p>
+                                        {scrappedItems.length === 0 ? <p className="text-sm italic text-slate-500 p-3">Brak sprzętu do złomowania.</p> : scrappedItems.map((item, idx) => (
+                                            <div key={idx} className="p-3.5 bg-white border border-slate-200 rounded-xl flex justify-between items-center text-sm shadow-sm">
+                                                <div>
+                                                    <p className="font-bold text-slate-800">{item.name}</p>
+                                                    <p className="text-[10px] text-slate-400 font-mono">Nr Mag: {item.inventoryNumber || "-"}</p>
+                                                    <p className="text-xs text-slate-600 italic mt-0.5">⚙️ Powód: {item.notes || "Brak możliwości naprawy / części"}</p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className="bg-slate-100 text-slate-700 border text-xs font-black px-2.5 py-1 rounded-lg">
+                                                        {item.quantity} {item.unit || "szt."}
+                                                    </span>
+                                                    {item.estimatedTotalCost ? <p className="text-xs font-bold text-slate-600 mt-1">~{item.estimatedTotalCost} zł</p> : null}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {activeTab === "DAMAGES" && (
+                                    <div className="space-y-2">
+                                        <p className="text-xs font-bold text-slate-600 uppercase pb-1 border-b">Awarie zgłoszone z placu budowy:</p>
+                                        {(selectedCloseout.siteDamagesList || []).length === 0 ? <p className="text-sm italic text-slate-500 p-3">Brak zgłoszeń.</p> : selectedCloseout.siteDamagesList?.map((dmg: any, idx: number) => (
+                                            <div key={idx} className="p-3.5 bg-orange-50 border border-orange-200 rounded-xl text-xs space-y-1">
+                                                <div className="flex justify-between items-center">
+                                                    <p className="font-bold text-slate-800 text-sm">{dmg.inventoryName}</p>
+                                                    <span className="bg-orange-200 text-orange-900 font-bold px-2 py-0.5 rounded">{dmg.quantity} {dmg.unit || "szt."}</span>
+                                                </div>
+                                                <p className="text-slate-600 italic">Opis: {dmg.description}</p>
                                             </div>
                                         ))}
                                     </div>
@@ -385,8 +521,8 @@ export default function CloseoutApprovalsPage() {
 
                                 {activeTab === "CLAIMS" && (
                                     <div className="space-y-2">
-                                        <p className="text-xs font-bold text-slate-500 uppercase pb-2 border-b">Sprawy w CLS prowadzone w trakcie projektu:</p>
-                                        {selectedCloseout.claimsList?.length === 0 ? <p className="text-sm italic text-slate-500">Brak spraw.</p> : selectedCloseout.claimsList.map((claim, idx) => (
+                                        <p className="text-xs font-bold text-slate-500 uppercase pb-1 border-b">Sprawy w Sądzie CLS:</p>
+                                        {(selectedCloseout.claimsList || []).length === 0 ? <p className="text-sm italic text-slate-500 p-3">Brak spraw.</p> : selectedCloseout.claimsList.map((claim, idx) => (
                                             <div key={idx} className="p-3 bg-white border rounded-xl flex justify-between items-center text-sm">
                                                 <span className="font-bold text-slate-800">{claim.inventoryName}</span>
                                                 <span className="text-[10px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-black uppercase">{claim.status}</span>
@@ -396,40 +532,36 @@ export default function CloseoutApprovalsPage() {
                                 )}
 
                                 {activeTab === "DETECTIVE" && (
-                                    <div className="space-y-3">
-                                        <p className="text-xs font-bold text-slate-500 uppercase pb-2 border-b">Awarie wykryte natychmiast po zdaniu urządzeń:</p>
-                                        {selectedCloseout.detectiveList?.length === 0 ? <p className="text-sm italic text-slate-500">Brak awarii.</p> : selectedCloseout.detectiveList.map((item, idx) => (
-                                            <div key={idx} className="p-3 bg-orange-50 border border-orange-200 rounded-xl text-sm space-y-2.5">
+                                    <div className="space-y-2">
+                                        <p className="text-xs font-bold text-slate-500 uppercase pb-1 border-b">Awarie wykryte natychmiast po zdaniu:</p>
+                                        {(selectedCloseout.detectiveList || []).length === 0 ? <p className="text-sm italic text-slate-500 p-3">Brak awarii.</p> : selectedCloseout.detectiveList.map((item, idx) => (
+                                            <div key={idx} className="p-3 bg-orange-50 border border-orange-200 rounded-xl text-xs space-y-1">
                                                 <div className="flex justify-between items-center">
                                                     <p className="font-bold text-slate-800">{item.name}</p>
-                                                    <span className="text-[10px] bg-orange-100 text-orange-800 font-bold px-2 py-0.5 rounded uppercase">USZKODZONE</span>
+                                                    <span className="text-[10px] bg-orange-100 text-orange-800 font-bold px-2 py-0.5 rounded">USZKODZONE</span>
                                                 </div>
-                                                <div className="p-3 bg-white border border-orange-100 rounded-lg text-xs leading-relaxed italic text-slate-600 shadow-inner">
-                                                    <b>Usterka z bazy:</b> {item.failureDescription}
-                                                </div>
+                                                <p className="text-slate-600 italic">{item.failureDescription}</p>
                                             </div>
                                         ))}
                                     </div>
                                 )}
                             </div>
 
+                            {/* STOPKA Z PRZYCISKAMI PODPISU */}
                             <div className="p-5 border-t bg-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
                                 <div className="text-xs space-y-1">
-                                    <p className="font-black text-slate-600 uppercase">Status obiegowy sprawy:</p>
+                                    <p className="font-black text-slate-600 uppercase">Status sprawy:</p>
                                     <p className="text-slate-500">Zgłosił: <b>{selectedCloseout.initiatedByName}</b></p>
-                                    {selectedCloseout.managerName && <p className="text-slate-500">Podpisał Kierownik: <b>{selectedCloseout.managerName}</b></p>}
-                                    {isSandboxActive && <p className="text-orange-600 font-bold mt-1">🧪 TRYB PIASKOWNICY AKTYWNY</p>}
+                                    {selectedCloseout.managerName && <p className="text-slate-500">Kierownik: <b>{selectedCloseout.managerName}</b></p>}
                                 </div>
 
                                 <div className="flex gap-2 w-full sm:w-auto flex-wrap justify-end">
-                                    {/* Opcja anulowania obiegu */}
                                     {canManageGlobally && (
                                         <button onClick={() => handleCancelCloseout(selectedCloseout)} disabled={isProcessing} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold px-4 py-3 rounded-xl transition mr-auto">
-                                            🗑️ Przerwij i anuluj rozliczenie
+                                            🗑️ Anuluj rozliczenie
                                         </button>
                                     )}
 
-                                    {/* Opcja wysyłki próbnej/testowej */}
                                     {isSandboxActive && (
                                         <button onClick={() => handleSendTestEmail(selectedCloseout)} disabled={isProcessing} className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold px-4 py-3 rounded-xl transition">
                                             🧪 Testuj e-mail PDF
@@ -442,7 +574,7 @@ export default function CloseoutApprovalsPage() {
                                             disabled={isProcessing}
                                             className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider"
                                         >
-                                            {isProcessing ? "Podpisywanie..." : "✍️ Podpisz i wyślij do Dyrekcji"}
+                                            {isProcessing ? "Podpisywanie..." : "✍️ Podpisz i wyślij do Zarządu"}
                                         </button>
                                     )}
 
@@ -450,9 +582,9 @@ export default function CloseoutApprovalsPage() {
                                         <button
                                             onClick={handleSignAsDirector}
                                             disabled={isProcessing}
-                                            className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider animate-bounce"
+                                            className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider"
                                         >
-                                            {isProcessing ? "Zamykanie projektu..." : "🔒 Ostatecznie Zamknij Projekt"}
+                                            {isProcessing ? "Zamykanie projektu..." : "🔒 Autoryzuj i Zamknij Projekt"}
                                         </button>
                                     )}
                                 </div>
