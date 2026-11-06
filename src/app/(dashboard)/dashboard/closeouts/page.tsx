@@ -244,26 +244,40 @@ export default function ProjectCloseoutsPage() {
                     console.warn(`Błąd historii dla ${invId}:`, hErr);
                 }
 
-                // Znajdź wpisy serwisowe / awarii
-                const serviceEvents = historyDocs.filter(h => 
-                    h.type === "SERWIS" || 
-                    h.type === "NAPRAWA" || 
-                    h.status === "uszkodzone" || 
-                    h.status === "do przeglądu" ||
-                    (h.description && /(naprawa|programator|uszkodz|usterk|serwis|koszt)/i.test(h.description))
+                // Znajdź WYŁĄCZNIE prawdziwe naprawy (nie zwykłe przeglądy BHP):
+                // - typ SERWIS/NAPRAWA ORAZ opis zawiera słowo kluczowe naprawy lub kwotę pieniężną
+                const serviceEvents = historyDocs.filter(h => {
+                    if (h.type !== "SERWIS" && h.type !== "NAPRAWA") return false;
+                    const desc = (h.description || "").toLowerCase();
+                    // Musi zawierać słowo naprawy lub koszt — samo "wpis serwisowy" / "przegląd" nie wystarczy
+                    const isRealRepair = /(naprawa|programator|uszkodz|usterk|wymian|awari|usterka|koszt)/.test(desc);
+                    const hasCost = /\d+\s*(?:pln|zł)/.test(desc);
+                    return isRealRepair || hasCost;
+                });
+
+                // Znajdź ZWROT z tej konkretnej budowy
+                const returnFromThisSite = historyDocs.find(h =>
+                    h.type === "ZWROT" &&
+                    (h.description?.includes(site.name) || h.description?.includes(site.id))
+                );
+                // Sprzęt wrócił uszkodzony — ZWROT musi zawierać "uszkodzone" lub "do przeglądu"
+                const returnedAsDamaged = !!returnFromThisSite && (
+                    returnFromThisSite.description?.includes("uszkodzone") ||
+                    returnFromThisSite.description?.includes("do przeglądu")
                 );
 
-                const isReturnedDamaged = returnInfo.declaredStatus === "uszkodzone" || 
+                const isReturnedDamaged = returnInfo.declaredStatus === "uszkodzone" ||
                                           returnInfo.finalStatus === "uszkodzone" ||
-                                          returnInfo.declaredStatus === "do przeglądu" || 
+                                          returnInfo.declaredStatus === "do przeglądu" ||
                                           returnInfo.finalStatus === "do przeglądu" ||
-                                          historyDocs.some(h => h.type === "ZWROT" && (h.description?.includes(site.name) || h.description?.includes(site.id)) && (h.description?.includes("uszkodzone") || h.description?.includes("do przeglądu")));
+                                          returnedAsDamaged;
 
                 const isCurrentlyDamaged = invItem.status === "uszkodzone" || invItem.status === "do przeglądu";
-                const hasServiceAfterReturn = serviceEvents.length > 0;
+                // Liczymy serwis jako powód TYLKO gdy jest prawdziwą naprawą (z kosztem lub słowem kluczowym naprawy)
+                const hasRealRepairService = serviceEvents.length > 0;
 
-                // Jeśli sprzęt wrócił uszkodzony, jest obecnie uszkodzony, albo przeszedł serwis po zwrocie z tej budowy
-                if (isReturnedDamaged || isCurrentlyDamaged || hasServiceAfterReturn) {
+                // Wchodzimy do Detektywa TYLKO gdy: wrócił uszkodzony, ALBO nadal uszkodzony, ALBO przeszedł realną naprawę
+                if (isReturnedDamaged || isCurrentlyDamaged || hasRealRepairService) {
                     let failureText = returnInfo.warehouseNotes || "";
                     let parsedCost = 0;
                     let serviceEventDesc = "";
@@ -283,8 +297,8 @@ export default function ProjectCloseoutsPage() {
                     if (serviceEventDesc) {
                         failureText = failureText ? `${serviceEventDesc} (Notatka ze zwrotu: ${failureText})` : serviceEventDesc;
                     } else if (!failureText) {
-                        const returnHistory = historyDocs.find(h => h.type === "ZWROT");
-                        failureText = returnHistory?.description || `Zwrócono z budowy ${site.name} ze statusem: ${returnInfo.finalStatus || returnInfo.declaredStatus || invItem.status}`;
+                        // Użyj tekstu z wpisu ZWROT z tej budowy
+                        failureText = returnFromThisSite?.description || `Zwrócono z budowy ${site.name} ze statusem: ${returnInfo.finalStatus || returnInfo.declaredStatus || invItem.status}`;
                     }
 
                     const isRepaired = invItem.status === "sprawne" || (latestService && latestService.status === "sprawne");
