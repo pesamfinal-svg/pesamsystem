@@ -50,6 +50,12 @@ export default function CloseoutApprovalsPage() {
     const [activeTab, setActiveTab] = useState<"DEBTS" | "DISPUTED" | "SCRAPPED" | "DAMAGES" | "EXPENSES" | "CLAIMS" | "DETECTIVE">("DEBTS");
     const [isSandboxActive, setIsSandboxActive] = useState(true);
 
+    // Stany Modali Podpisu Cyfrowego
+    const [isManagerSignModalOpen, setIsManagerSignModalOpen] = useState(false);
+    const [managerDeclarationChecked, setManagerDeclarationChecked] = useState(false);
+    const [isDirectorSignModalOpen, setIsDirectorSignModalOpen] = useState(false);
+    const [directorDeclarationChecked, setDirectorDeclarationChecked] = useState(false);
+
     useEffect(() => {
         fetchCloseouts();
     }, [user]);
@@ -129,11 +135,6 @@ export default function CloseoutApprovalsPage() {
 
     const handleSignAsManager = async () => {
         if (!selectedCloseout || !user) return;
-
-        if (!window.confirm("Czy potwierdzasz zgodność stanu rozliczenia i składasz podpis cyfrowy? Sprawa trafi do ostatecznej autoryzacji przez Zarząd.")) {
-            return;
-        }
-
         setIsProcessing(true);
         try {
             const closeoutRef = doc(db, "closeouts", selectedCloseout.id);
@@ -168,7 +169,8 @@ export default function CloseoutApprovalsPage() {
                 console.error("Błąd wysyłki powiadomienia do dyrekcji:", mailError);
             }
 
-            alert(`✍️ Twój podpis został pomyślnie złożony! Sprawa została przekazana do ostatecznego zatwierdzenia przez Dyrekcję i Prezesa.`);
+            setIsManagerSignModalOpen(false);
+            alert(`✍️ Twój podpis cyfrowy został złożony pomyślnie!\n\nSprawa została przekazana do ostatecznego zatwierdzenia przez Dyrekcję i Prezesa.`);
             setSelectedCloseout(null);
             fetchCloseouts();
         } catch (error) {
@@ -181,8 +183,6 @@ export default function CloseoutApprovalsPage() {
 
     const handleSignAsDirector = async () => {
         if (!selectedCloseout || !user) return;
-        if (!window.confirm("⚠️ OSTATECZNA DECYZJA ZARZĄDU / DYREKCJI\n\nCzy akceptujesz raport finansowy strat i ostatecznie zamykasz projekt? Ta operacja zaktualizuje stany inwentarza.")) return;
-
         setIsProcessing(true);
         try {
             await runTransaction(db, async (transaction) => {
@@ -299,6 +299,7 @@ export default function CloseoutApprovalsPage() {
                 console.error("Błąd wysyłki końcowego maila:", mailError);
             }
 
+            setIsDirectorSignModalOpen(false);
             alert(`✅ Projekt został oficjalnie rozliczony i ZAMKNIĘTY!\n\nRaport końcowy został przesłany do sygnatariuszy, a dane zapisano trwale w archiwum.`);
             setSelectedCloseout(null);
             fetchCloseouts();
@@ -707,21 +708,27 @@ export default function CloseoutApprovalsPage() {
 
                                     {selectedCloseout.status === "OCZEKUJE_NA_KIEROWNIKA" && !canManageGlobally && (
                                         <button
-                                            onClick={handleSignAsManager}
+                                            onClick={() => {
+                                                setManagerDeclarationChecked(false);
+                                                setIsManagerSignModalOpen(true);
+                                            }}
                                             disabled={isProcessing}
-                                            className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider"
+                                            className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider flex items-center gap-2 justify-center"
                                         >
-                                            {isProcessing ? "Podpisywanie..." : "✍️ Podpisz i wyślij do Zarządu"}
+                                            <span>✍️</span> Podpisz i wyślij do Zarządu
                                         </button>
                                     )}
 
                                     {selectedCloseout.status === "OCZEKUJE_NA_DYREKCJE" && canManageGlobally && (
                                         <button
-                                            onClick={handleSignAsDirector}
+                                            onClick={() => {
+                                                setDirectorDeclarationChecked(false);
+                                                setIsDirectorSignModalOpen(true);
+                                            }}
                                             disabled={isProcessing}
-                                            className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider"
+                                            className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-black px-6 py-3 rounded-xl shadow-lg uppercase text-xs tracking-wider flex items-center gap-2 justify-center"
                                         >
-                                            {isProcessing ? "Zamykanie projektu..." : "🔒 Autoryzuj i Zamknij Projekt"}
+                                            <span>🔒</span> Autoryzuj i Zamknij Projekt
                                         </button>
                                     )}
                                 </div>
@@ -731,6 +738,225 @@ export default function CloseoutApprovalsPage() {
                     )}
                 </div>
             </div>
+
+            {/* MODAL PODPISU CYFROWEGO DLA KIEROWNIKA BUDOWY */}
+            {isManagerSignModalOpen && selectedCloseout && (
+                <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+                    <div className="bg-white max-w-2xl w-full rounded-3xl shadow-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[92vh]">
+                        {/* NAGŁÓWEK MODALA */}
+                        <div className="p-6 bg-slate-900 text-white flex justify-between items-center border-b border-slate-800">
+                            <div className="flex items-center gap-3">
+                                <span className="text-3xl bg-blue-600/30 w-12 h-12 rounded-2xl flex items-center justify-center border border-blue-500/40">✍️</span>
+                                <div>
+                                    <h3 className="text-lg font-black tracking-tight">Złożenie Podpisu Cyfrowego Kierownika</h3>
+                                    <p className="text-xs text-blue-300 font-medium">Projekt: <b>{selectedCloseout.siteName}</b></p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setIsManagerSignModalOpen(false)}
+                                className="text-slate-400 hover:text-white text-xl font-bold p-2"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        {/* TREŚĆ MODALA */}
+                        <div className="p-6 space-y-4 overflow-y-auto text-xs">
+                            {/* BILANS ROZLICZENIA */}
+                            <div className="bg-slate-50 border rounded-2xl p-4 space-y-2">
+                                <p className="font-black text-slate-700 uppercase tracking-wide text-[10px]">Bilans końcowy projektu do zatwierdzenia:</p>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-bold text-slate-800">
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-red-600 block uppercase">Straty (Długi):</span>
+                                        <b className="text-sm text-red-700">{selectedCloseout.financialSummary?.totalLossCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-amber-600 block uppercase">U Inwestora:</span>
+                                        <b className="text-sm text-amber-700">{selectedCloseout.financialSummary?.totalDisputedCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-slate-500 block uppercase">Złomowanie:</span>
+                                        <b className="text-sm text-slate-700">{selectedCloseout.financialSummary?.totalScrappedCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-blue-600 block uppercase">Naprawy serwisowe:</span>
+                                        <b className="text-sm text-blue-700">{selectedCloseout.financialSummary?.totalRepairsCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-emerald-600 block uppercase">Wydatki budowy:</span>
+                                        <b className="text-sm text-emerald-700">{selectedCloseout.financialSummary?.totalExpensesCost || 0} zł</b>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* OŚWIADCZENIE / UWAGI KIEROWNIKA */}
+                            <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl space-y-1">
+                                <p className="font-black text-amber-900 uppercase text-[10px]">Twoje oświadczenie / uwagi kierownika do raportu:</p>
+                                <p className="text-slate-800 italic bg-white p-2.5 rounded-xl border border-amber-200 leading-relaxed">
+                                    {managerNotes || selectedCloseout.managerNotes || "Brak dodatkowych zastrzeżeń — potwierdzam pełną zgodność ze stanem audytu."}
+                                </p>
+                            </div>
+
+                            {/* CERTYFIKAT TOŻSAMOŚCI PODPISU CYFROWEGO */}
+                            <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-2xl space-y-2">
+                                <p className="font-black text-blue-950 uppercase text-[10px] tracking-wider flex items-center gap-1.5">
+                                    <span>🔒</span> Certyfikat Tożsamości Podpisu Cyfrowego (PESAM ID):
+                                </p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-700">
+                                    <p>Sygnatariusz: <b className="text-slate-900">{user?.firstName} {user?.lastName}</b></p>
+                                    <p>Adres e-mail: <b className="text-slate-900">{user?.email}</b></p>
+                                    <p>Rola: <b className="text-blue-800">Kierownik Budowy</b></p>
+                                    <p>Data podpisu: <b className="text-slate-900">{new Date().toLocaleDateString("pl-PL")} {new Date().toLocaleTimeString("pl-PL")}</b></p>
+                                </div>
+                            </div>
+
+                            {/* KLAUZULA OŚWIADCZENIA WOLI - CHECKBOX */}
+                            <label className="flex items-start gap-3 p-4 bg-slate-100 hover:bg-slate-200/70 border border-slate-300 rounded-2xl cursor-pointer transition select-none">
+                                <input
+                                    type="checkbox"
+                                    checked={managerDeclarationChecked}
+                                    onChange={(e) => setManagerDeclarationChecked(e.target.checked)}
+                                    className="w-5 h-5 mt-0.5 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer"
+                                />
+                                <span className="text-xs text-slate-800 font-semibold leading-relaxed">
+                                    Oświadczam, że zapoznałem się z audytem sprzętu budowy <b>{selectedCloseout.siteName}</b>, potwierdzam zgodność rozliczenia i składam niniejszy podpis cyfrowy w celu przekazania sprawy do ostatecznej autoryzacji przez Zarząd i Dyrekcję.
+                                </span>
+                            </label>
+                        </div>
+
+                        {/* STOPKA MODALA */}
+                        <div className="p-5 border-t bg-slate-100 flex justify-end gap-3 items-center">
+                            <button
+                                type="button"
+                                onClick={() => setIsManagerSignModalOpen(false)}
+                                className="px-5 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-900 transition"
+                            >
+                                Anuluj / Wróć
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleSignAsManager}
+                                disabled={!managerDeclarationChecked || isProcessing}
+                                className={`px-6 py-3 rounded-xl text-xs font-black uppercase tracking-wider shadow-lg transition flex items-center gap-2 ${
+                                    managerDeclarationChecked && !isProcessing
+                                        ? "bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30"
+                                        : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                                }`}
+                            >
+                                {isProcessing ? "Rejestracja podpisu..." : "✍️ Złóż Podpis Cyfrowy"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL OSTATECZNEJ AUTORYZACJI DLA DYREKCJI / ZARZĄDU */}
+            {isDirectorSignModalOpen && selectedCloseout && (
+                <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+                    <div className="bg-white max-w-2xl w-full rounded-3xl shadow-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[92vh]">
+                        {/* NAGŁÓWEK MODALA */}
+                        <div className="p-6 bg-slate-900 text-white flex justify-between items-center border-b border-slate-800">
+                            <div className="flex items-center gap-3">
+                                <span className="text-3xl bg-green-600/30 w-12 h-12 rounded-2xl flex items-center justify-center border border-green-500/40">🔒</span>
+                                <div>
+                                    <h3 className="text-lg font-black tracking-tight">Ostateczna Autoryzacja i Zamknięcie Projektu</h3>
+                                    <p className="text-xs text-green-300 font-medium">Budowa: <b>{selectedCloseout.siteName}</b></p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setIsDirectorSignModalOpen(false)}
+                                className="text-slate-400 hover:text-white text-xl font-bold p-2"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        {/* TREŚĆ MODALA */}
+                        <div className="p-6 space-y-4 overflow-y-auto text-xs">
+                            <div className="bg-slate-50 border rounded-2xl p-4 space-y-2">
+                                <p className="font-black text-slate-700 uppercase tracking-wide text-[10px]">Podsumowanie bilansu finansowego:</p>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-bold text-slate-800">
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-red-600 block uppercase">Straty (Odpis):</span>
+                                        <b className="text-sm text-red-700">{selectedCloseout.financialSummary?.totalLossCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-amber-600 block uppercase">U Inwestora:</span>
+                                        <b className="text-sm text-amber-700">{selectedCloseout.financialSummary?.totalDisputedCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-slate-500 block uppercase">Złomowane:</span>
+                                        <b className="text-sm text-slate-700">{selectedCloseout.financialSummary?.totalScrappedCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-blue-600 block uppercase">Naprawy serwisowe:</span>
+                                        <b className="text-sm text-blue-700">{selectedCloseout.financialSummary?.totalRepairsCost || 0} zł</b>
+                                    </div>
+                                    <div className="p-2.5 bg-white border rounded-xl">
+                                        <span className="text-[10px] text-emerald-600 block uppercase">Wydatki budowy:</span>
+                                        <b className="text-sm text-emerald-700">{selectedCloseout.financialSummary?.totalExpensesCost || 0} zł</b>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-2xl space-y-1">
+                                <p className="font-black text-blue-950 uppercase text-[10px]">Podpis i oświadczenie Kierownika Budowy:</p>
+                                <p className="text-slate-800 font-bold">Kierownik: {selectedCloseout.managerName || "Brak"}</p>
+                                <p className="text-slate-700 italic bg-white p-2.5 rounded-xl border border-blue-200 leading-relaxed">
+                                    {selectedCloseout.managerNotes || "Kierownik złożył podpis bez dodatkowych zastrzeżeń."}
+                                </p>
+                            </div>
+
+                            <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-2xl space-y-2">
+                                <p className="font-black text-emerald-950 uppercase text-[10px] tracking-wider flex items-center gap-1.5">
+                                    <span>🔒</span> Sygnatura Autoryzacji Zarządu (Zamykający):
+                                </p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-700">
+                                    <p>Osoba autoryzująca: <b className="text-slate-900">{user?.firstName} {user?.lastName}</b></p>
+                                    <p>Adres e-mail: <b className="text-slate-900">{user?.email}</b></p>
+                                    <p>Rola: <b className="text-emerald-800">Dyrekcja / Prezes Zarządu</b></p>
+                                    <p>Data autoryzacji: <b className="text-slate-900">{new Date().toLocaleDateString("pl-PL")} {new Date().toLocaleTimeString("pl-PL")}</b></p>
+                                </div>
+                            </div>
+
+                            <label className="flex items-start gap-3 p-4 bg-slate-100 hover:bg-slate-200/70 border border-slate-300 rounded-2xl cursor-pointer transition select-none">
+                                <input
+                                    type="checkbox"
+                                    checked={directorDeclarationChecked}
+                                    onChange={(e) => setDirectorDeclarationChecked(e.target.checked)}
+                                    className="w-5 h-5 mt-0.5 text-green-600 rounded border-slate-300 focus:ring-green-500 cursor-pointer"
+                                />
+                                <span className="text-xs text-slate-800 font-semibold leading-relaxed">
+                                    Jako Dyrekcja / Zarząd oświadczam, że akceptuję niniejszy raport rozliczenia końcowego, autoryzuję oficjalne zamknięcie budowy <b>{selectedCloseout.siteName}</b> w PESAM Cloud, zatwierdzam spisanie strat w koszty oraz zlecam wysyłkę protokołu do druku dla biura.
+                                </span>
+                            </label>
+                        </div>
+
+                        {/* STOPKA MODALA */}
+                        <div className="p-5 border-t bg-slate-100 flex justify-end gap-3 items-center">
+                            <button
+                                type="button"
+                                onClick={() => setIsDirectorSignModalOpen(false)}
+                                className="px-5 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-900 transition"
+                            >
+                                Anuluj / Wróć
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleSignAsDirector}
+                                disabled={!directorDeclarationChecked || isProcessing}
+                                className={`px-6 py-3 rounded-xl text-xs font-black uppercase tracking-wider shadow-lg transition flex items-center gap-2 ${
+                                    directorDeclarationChecked && !isProcessing
+                                        ? "bg-green-600 hover:bg-green-700 text-white shadow-green-500/30"
+                                        : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                                }`}
+                            >
+                                {isProcessing ? "Zamykanie projektu..." : "🔒 Autoryzuj i Zamknij Projekt"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

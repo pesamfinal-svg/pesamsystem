@@ -25,6 +25,8 @@ interface SiteDamage {
     description: string;
     reportedByName?: string;
     reportedAt?: string;
+    estimatedRepairCost?: number;
+    isManual?: boolean;
 }
 
 export type ResolutionType = "LOSS" | "CONSUMED" | "DISPUTED_INVESTOR" | "SCRAPPED" | "EXCLUDED";
@@ -85,6 +87,22 @@ export default function ProjectCloseoutsPage() {
     const [newManualRes, setNewManualRes] = useState<ResolutionType>("LOSS");
     const [newManualNotes, setNewManualNotes] = useState("");
     const [newManualCost, setNewManualCost] = useState(0);
+
+    // Drobne wydatki z ręki ("z głowy") w trakcie audytu
+    const [isAddExpenseModalOpen, setIsAddExpenseModalOpen] = useState(false);
+    const [newExpenseTitle, setNewExpenseTitle] = useState("");
+    const [newExpenseCategory, setNewExpenseCategory] = useState("Naprawa bieżąca");
+    const [newExpenseAmount, setNewExpenseAmount] = useState<number>(0);
+    const [newExpenseNotes, setNewExpenseNotes] = useState("");
+
+    // Uszkodzenia budowy z ręki ("z głowy") w trakcie audytu
+    const [isAddDamageModalOpen, setIsAddDamageModalOpen] = useState(false);
+    const [newDamageName, setNewDamageName] = useState("");
+    const [newDamageInvNumber, setNewDamageInvNumber] = useState("");
+    const [newDamageQty, setNewDamageQty] = useState(1);
+    const [newDamageUnit, setNewDamageUnit] = useState("szt.");
+    const [newDamageDesc, setNewDamageDesc] = useState("");
+    const [newDamageCost, setNewDamageCost] = useState<number>(0);
 
     // Ogólne uwagi audytora
     const [generalNotes, setGeneralNotes] = useState("");
@@ -355,6 +373,12 @@ export default function ProjectCloseoutsPage() {
                         if (draftData.manualItems && Array.isArray(draftData.manualItems)) {
                             setManualItems(draftData.manualItems);
                         }
+                        if (draftData.siteExpenses && Array.isArray(draftData.siteExpenses)) {
+                            setSiteExpenses(draftData.siteExpenses);
+                        }
+                        if (draftData.siteDamages && Array.isArray(draftData.siteDamages)) {
+                            setSiteDamages(draftData.siteDamages);
+                        }
                         if (draftData.repairCostOverrides) {
                             setRepairCostOverrides(prev => ({ ...prev, ...draftData.repairCostOverrides }));
                         }
@@ -411,6 +435,28 @@ export default function ProjectCloseoutsPage() {
             }
         });
 
+        // Dołączamy uszkodzenia budowy do oszacowania kosztu naprawy przez AI
+        siteDamages.forEach(dmg => {
+            activeItemsToPrice.push({
+                id: dmg.id,
+                name: `Naprawa usterki: ${dmg.inventoryName} (${dmg.description})`,
+                quantity: dmg.quantity || 1,
+                unit: dmg.unit || "szt."
+            });
+        });
+
+        // Dołączamy drobne wydatki budowy bez kwoty
+        siteExpenses.forEach(exp => {
+            if (!exp.amount || exp.amount === 0) {
+                activeItemsToPrice.push({
+                    id: exp.id,
+                    name: `Wydatek / naprawa budowy: ${exp.title} (${exp.category || "ogólne"})`,
+                    quantity: 1,
+                    unit: "usł."
+                });
+            }
+        });
+
         if (activeItemsToPrice.length === 0) {
             alert("Brak aktywnych pozycji do wyceny (wszystkie wykluczone lub brak sprzętu).");
             setIsEstimatingCosts(false);
@@ -439,7 +485,23 @@ export default function ProjectCloseoutsPage() {
                     return m;
                 }));
 
-                alert("✨ Wycena rynkowa AI została pobrana! Możesz sprawdzić lub ręcznie skorygować każdą kwotę w PLN.");
+                // Aktualizacja szacunkowych kosztów naprawy uszkodzeń z budowy
+                setSiteDamages(prev => prev.map(dmg => {
+                    if (data.estimates[dmg.id] && (!dmg.estimatedRepairCost || dmg.estimatedRepairCost === 0)) {
+                        return { ...dmg, estimatedRepairCost: data.estimates[dmg.id].estimatedUnitCost };
+                    }
+                    return dmg;
+                }));
+
+                // Aktualizacja kwot drobnych wydatków (jeśli były puste)
+                setSiteExpenses(prev => prev.map(exp => {
+                    if (data.estimates[exp.id] && (!exp.amount || exp.amount === 0)) {
+                        return { ...exp, amount: data.estimates[exp.id].estimatedUnitCost };
+                    }
+                    return exp;
+                }));
+
+                alert("✨ Wycena rynkowa AI została pobrana dla braków, uszkodzeń oraz wydatków! Możesz sprawdzić lub ręcznie skorygować każdą kwotę w PLN.");
             } else {
                 throw new Error(data.error || "Błąd pobierania wyceny");
             }
@@ -451,7 +513,18 @@ export default function ProjectCloseoutsPage() {
         }
     };
 
-    // Dodanie pozycji "z głowy" / z ręki
+    // Inteligentne otwieranie okna dopisywania z ręki w zależności od aktywnej zakładki
+    const handleOpenSmartManualModal = () => {
+        if (activeTab === "EXPENSES") {
+            setIsAddExpenseModalOpen(true);
+        } else if (activeTab === "DAMAGES") {
+            setIsAddDamageModalOpen(true);
+        } else {
+            setIsAddManualOpen(true);
+        }
+    };
+
+    // Dodanie pozycji sprzętowej "z głowy" / z ręki
     const handleAddManualItem = (e: React.FormEvent) => {
         e.preventDefault();
         if (!newManualName.trim()) return alert("Wpisz nazwę przedmiotu!");
@@ -477,6 +550,65 @@ export default function ProjectCloseoutsPage() {
 
     const handleRemoveManualItem = (id: string) => {
         setManualItems(prev => prev.filter(m => m.id !== id));
+    };
+
+    // Dodanie drobnego wydatku z ręki ("z głowy") w trakcie audytu
+    const handleAddExpenseItem = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newExpenseTitle.trim()) return alert("Wpisz tytuł wydatku lub naprawy!");
+
+        const newExp = {
+            id: `exp_manual_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+            title: newExpenseTitle.trim(),
+            category: newExpenseCategory,
+            amount: Number(newExpenseAmount) || 0,
+            notes: newExpenseNotes.trim(),
+            date: new Date().toISOString().split('T')[0],
+            reportedByName: user ? `${user.firstName} ${user.lastName} (Magazyn)` : "Audytor Magazynu",
+            isManual: true
+        };
+
+        setSiteExpenses(prev => [newExp, ...prev]);
+        setNewExpenseTitle("");
+        setNewExpenseAmount(0);
+        setNewExpenseNotes("");
+        setIsAddExpenseModalOpen(false);
+    };
+
+    const handleRemoveExpenseItem = (id: string) => {
+        setSiteExpenses(prev => prev.filter(e => e.id !== id));
+    };
+
+    // Dodanie zgłoszenia uszkodzenia sprzętu z ręki ("z głowy") w trakcie audytu
+    const handleAddDamageItem = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newDamageName.trim()) return alert("Wpisz nazwę uszkodzonego sprzętu!");
+
+        const newDmg: SiteDamage = {
+            id: `dmg_manual_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+            siteId: selectedSite?.id || "",
+            inventoryName: newDamageName.trim(),
+            inventoryNumber: newDamageInvNumber.trim() || "-",
+            quantity: Number(newDamageQty) || 1,
+            unit: newDamageUnit || "szt.",
+            description: newDamageDesc.trim() || "Zgłoszono usterkę podczas audytu",
+            estimatedRepairCost: Number(newDamageCost) || 0,
+            reportedByName: user ? `${user.firstName} ${user.lastName} (Magazyn)` : "Audytor Magazynu",
+            reportedAt: new Date().toISOString(),
+            isManual: true
+        };
+
+        setSiteDamages(prev => [newDmg, ...prev]);
+        setNewDamageName("");
+        setNewDamageInvNumber("");
+        setNewDamageQty(1);
+        setNewDamageDesc("");
+        setNewDamageCost(0);
+        setIsAddDamageModalOpen(false);
+    };
+
+    const handleRemoveDamageItem = (id: string) => {
+        setSiteDamages(prev => prev.filter(d => d.id !== id));
     };
 
     // Podsumowanie finansowe na żywo
@@ -511,10 +643,17 @@ export default function ProjectCloseoutsPage() {
             else if (m.resolution === "SCRAPPED") totalScrapped += itemTotal;
         });
 
-        // Suma kosztów napraw sprzętu
+        // Suma kosztów napraw sprzętu z Detektywa
         suspiciousItems.forEach(item => {
             const cost = repairCostOverrides[item.id] !== undefined ? repairCostOverrides[item.id] : (item.repairCost || 0);
             totalRepairs += (Number(cost) || 0);
+        });
+
+        // Suma szacunkowych kosztów naprawy uszkodzeń z placu budowy
+        siteDamages.forEach(dmg => {
+            if (dmg.estimatedRepairCost) {
+                totalRepairs += (Number(dmg.estimatedRepairCost) || 0);
+            }
         });
 
         // Suma drobnych bieżących wydatków i napraw na budowie
@@ -552,6 +691,8 @@ export default function ProjectCloseoutsPage() {
                 itemCosts,
                 itemNotes,
                 manualItems,
+                siteExpenses,
+                siteDamages,
                 repairCostOverrides,
                 financialSummary: {
                     totalLossCost: financials.totalLoss,
@@ -943,7 +1084,13 @@ export default function ProjectCloseoutsPage() {
 
                                 {selectedArchived.generalNotes && (
                                     <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-900">
-                                        <b>Uwagi audytora:</b> {selectedArchived.generalNotes}
+                                        <b>Uwagi audytora (magazyn):</b> {selectedArchived.generalNotes}
+                                    </div>
+                                )}
+
+                                {selectedArchived.managerNotes && (
+                                    <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-900">
+                                        <b>✍️ Oświadczenie / Uwagi Kierownika Budowy ({selectedArchived.managerName}):</b> {selectedArchived.managerNotes}
                                     </div>
                                 )}
 
@@ -1086,10 +1233,12 @@ export default function ProjectCloseoutsPage() {
                                             {isSavingDraft ? "Zapisuję..." : "💾 Zapisz szkic roboczy"}
                                         </button>
                                         <button
-                                            onClick={() => setIsAddManualOpen(true)}
-                                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-3 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1"
+                                            onClick={handleOpenSmartManualModal}
+                                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-3.5 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1.5"
+                                            title="Dodaj wpis z głowy dla bieżącej zakładki"
                                         >
-                                            ➕ Dopisz z ręki
+                                            <span>➕</span>
+                                            {activeTab === "EXPENSES" ? "Dopisz wydatek z ręki" : activeTab === "DAMAGES" ? "Dopisz uszkodzenie z ręki" : "Dopisz z ręki"}
                                         </button>
                                         <button
                                             onClick={handleEstimateCostsAI}
@@ -1209,13 +1358,21 @@ export default function ProjectCloseoutsPage() {
 
                                     {activeTab === "DAMAGES" && (
                                         <div className="space-y-3">
-                                            <div className="border-b pb-2 mb-2 flex justify-between items-center">
-                                                <h4 className="font-black text-sm text-slate-800">Uszkodzenia zarejestrowane na budowie w trakcie prac:</h4>
-                                                <span className="text-xs text-slate-500">Zgłoszenia kierownika z modułu Twoja Budowa</span>
+                                            <div className="border-b pb-2 mb-2 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                                                <div>
+                                                    <h4 className="font-black text-sm text-slate-800">Uszkodzenia zarejestrowane na budowie w trakcie prac:</h4>
+                                                    <span className="text-xs text-slate-500">Zgłoszenia z budowy oraz uszkodzenia dopisane przez audytora z ręki</span>
+                                                </div>
+                                                <button
+                                                    onClick={() => setIsAddDamageModalOpen(true)}
+                                                    className="bg-orange-600 hover:bg-orange-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1"
+                                                >
+                                                    ➕ Zgłoś uszkodzenie z ręki
+                                                </button>
                                             </div>
                                             {siteDamages.length === 0 ? (
                                                 <div className="p-8 text-center bg-white border border-dashed rounded-xl text-slate-400 text-sm">
-                                                    Brak zarejestrowanych uszkodzeń podczas trwania tej budowy.
+                                                    Brak zarejestrowanych uszkodzeń dla tej budowy. Kliknij przycisk powyżej, aby dopisać uszkodzenie z głowy.
                                                 </div>
                                             ) : (
                                                 <div className="space-y-2.5">
@@ -1223,15 +1380,50 @@ export default function ProjectCloseoutsPage() {
                                                         <div key={dmg.id || idx} className="p-4 bg-orange-50/80 border border-orange-200 rounded-2xl shadow-sm space-y-2">
                                                             <div className="flex justify-between items-start">
                                                                 <div>
-                                                                    <p className="font-bold text-slate-900 text-sm">{dmg.inventoryName}</p>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <p className="font-bold text-slate-900 text-sm">{dmg.inventoryName}</p>
+                                                                        {dmg.isManual && (
+                                                                            <span className="text-[9px] bg-orange-200 text-orange-950 px-2 py-0.5 rounded font-black uppercase">
+                                                                                Wpis ręczny
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
                                                                     <p className="text-[10px] text-slate-500 font-mono">Nr Mag: {dmg.inventoryNumber || "-"} • Zgłosił: <b>{dmg.reportedByName || "Kierownik"}</b></p>
                                                                 </div>
-                                                                <span className="bg-orange-600 text-white font-black text-xs px-2.5 py-1 rounded-lg">
-                                                                    {dmg.quantity} {dmg.unit || "szt."}
-                                                                </span>
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="bg-orange-600 text-white font-black text-xs px-2.5 py-1 rounded-lg">
+                                                                        {dmg.quantity} {dmg.unit || "szt."}
+                                                                    </span>
+                                                                    {dmg.isManual && (
+                                                                        <button
+                                                                            onClick={() => handleRemoveDamageItem(dmg.id)}
+                                                                            className="text-red-500 hover:text-red-700 text-xs font-bold p-1"
+                                                                            title="Usuń wpis ręczny"
+                                                                        >
+                                                                            🗑️
+                                                                        </button>
+                                                                    )}
+                                                                </div>
                                                             </div>
                                                             <div className="p-3 bg-white border border-orange-200 rounded-xl text-xs text-slate-700 leading-relaxed shadow-inner">
-                                                                <b>Opis usterki z placu:</b> {dmg.description}
+                                                                <b>Opis usterki / awarii:</b> {dmg.description}
+                                                            </div>
+                                                            <div className="flex items-center justify-between pt-1 border-t border-orange-200/60 text-xs">
+                                                                <span className="font-bold text-slate-600">Szacunkowy koszt naprawy / szkody:</span>
+                                                                <div className="flex items-center gap-1.5 bg-white border border-orange-300 rounded-lg px-2.5 py-1">
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        placeholder="0"
+                                                                        value={dmg.estimatedRepairCost || ""}
+                                                                        onChange={(e) => {
+                                                                            const val = Math.max(0, parseInt(e.target.value) || 0);
+                                                                            setSiteDamages(prev => prev.map(d => d.id === dmg.id ? { ...d, estimatedRepairCost: val } : d));
+                                                                        }}
+                                                                        className="w-16 text-xs font-black text-slate-800 text-center outline-none bg-transparent"
+                                                                    />
+                                                                    <span className="text-[10px] text-slate-400 font-bold">zł</span>
+                                                                </div>
                                                             </div>
                                                         </div>
                                                     ))}
@@ -1242,41 +1434,74 @@ export default function ProjectCloseoutsPage() {
 
                                     {activeTab === "EXPENSES" && (
                                         <div className="space-y-4">
-                                            <div className="border-b pb-2 flex justify-between items-center">
+                                            <div className="border-b pb-2 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                                                 <div>
                                                     <h4 className="font-black text-sm text-slate-800">Drobne wydatki i naprawy bieżące z placu budowy:</h4>
-                                                    <p className="text-xs text-slate-500">Zarejestrowane przez kierowników i brygadzistów w module Twoja Budowa</p>
+                                                    <p className="text-xs text-slate-500">Zarejestrowane przez kierowników z budowy oraz dopisane przez audytora z ręki</p>
                                                 </div>
-                                                <div className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-right">
-                                                    <span className="text-[10px] uppercase font-bold text-emerald-800 block">Suma wydatków:</span>
-                                                    <span className="text-sm font-black text-emerald-900">{financials.totalExpenses} zł</span>
+                                                <div className="flex items-center gap-3">
+                                                    <div className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-right">
+                                                        <span className="text-[10px] uppercase font-bold text-emerald-800 block">Suma wydatków:</span>
+                                                        <span className="text-sm font-black text-emerald-900">{financials.totalExpenses} zł</span>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => setIsAddExpenseModalOpen(true)}
+                                                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1"
+                                                    >
+                                                        ➕ Dopisz wydatek z ręki
+                                                    </button>
                                                 </div>
                                             </div>
 
                                             {siteExpenses.length === 0 ? (
                                                 <div className="p-8 text-center bg-white border border-dashed rounded-xl text-slate-400 text-sm">
-                                                    Brak zarejestrowanych drobnych wydatków dla tej budowy.
+                                                    Brak zarejestrowanych drobnych wydatków dla tej budowy. Kliknij przycisk powyżej, aby dopisać wydatek z głowy.
                                                 </div>
                                             ) : (
                                                 <div className="space-y-2.5">
                                                     {siteExpenses.map((exp: any) => (
                                                         <div key={exp.id} className="p-4 bg-white border rounded-2xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                                                            <div>
+                                                            <div className="flex-1">
                                                                 <div className="flex items-center gap-2">
                                                                     <p className="font-bold text-slate-800 text-sm">{exp.title}</p>
                                                                     <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-slate-100 text-slate-600">
                                                                         {exp.category || "OGÓLNE"}
                                                                     </span>
+                                                                    {exp.isManual && (
+                                                                        <span className="text-[9px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-black uppercase">
+                                                                            Wpis ręczny
+                                                                        </span>
+                                                                    )}
                                                                 </div>
                                                                 <p className="text-xs text-slate-500 mt-1">
                                                                     📅 Data: <b>{exp.date || "-"}</b> • Wprowadził: <b>{exp.reportedByName || "Pracownik"}</b>
                                                                 </p>
                                                                 {exp.notes && <p className="text-xs text-slate-600 italic mt-1 bg-slate-50 p-2 rounded-lg border">💬 {exp.notes}</p>}
                                                             </div>
-                                                            <div className="text-right">
-                                                                <span className="text-base font-black text-emerald-600 bg-emerald-50 px-3 py-1 rounded-xl border border-emerald-100">
-                                                                    {exp.amount} zł
-                                                                </span>
+                                                            <div className="flex items-center gap-3">
+                                                                <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-1.5">
+                                                                    <span className="text-[10px] text-emerald-800 font-bold">Kwota:</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        value={exp.amount !== undefined ? exp.amount : ""}
+                                                                        onChange={(e) => {
+                                                                            const val = Math.max(0, parseInt(e.target.value) || 0);
+                                                                            setSiteExpenses(prev => prev.map(item => item.id === exp.id ? { ...item, amount: val } : item));
+                                                                        }}
+                                                                        className="w-16 text-xs font-black text-emerald-900 text-center outline-none bg-transparent"
+                                                                    />
+                                                                    <span className="text-[10px] text-emerald-700 font-bold">zł</span>
+                                                                </div>
+                                                                {exp.isManual && (
+                                                                    <button
+                                                                        onClick={() => handleRemoveExpenseItem(exp.id)}
+                                                                        className="text-red-500 hover:text-red-700 text-xs font-bold p-1"
+                                                                        title="Usuń wydatek"
+                                                                    >
+                                                                        🗑️
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     ))}
@@ -1580,6 +1805,183 @@ export default function ProjectCloseoutsPage() {
                                     className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl uppercase text-[10px] shadow-md"
                                 >
                                     Dodaj do audytu
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL DODAWANIA DROBNEGO WYDATKU Z RĘKI */}
+            {isAddExpenseModalOpen && (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+                    <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+                        <div className="flex justify-between items-center border-b pb-3">
+                            <h3 className="font-black text-slate-800 text-lg">💰 Dopisz drobny wydatek z ręki</h3>
+                            <button onClick={() => setIsAddExpenseModalOpen(false)} className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 font-bold text-slate-500">&times;</button>
+                        </div>
+                        <form onSubmit={handleAddExpenseItem} className="space-y-3 text-xs">
+                            <div>
+                                <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Tytuł wydatku / naprawy:</label>
+                                <input
+                                    type="text"
+                                    placeholder="np. Wymiana wtyczki w przedłużaczu, zakup kołków i taśmy"
+                                    value={newExpenseTitle}
+                                    onChange={e => setNewExpenseTitle(e.target.value)}
+                                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-emerald-500"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Kategoria:</label>
+                                    <select
+                                        value={newExpenseCategory}
+                                        onChange={e => setNewExpenseCategory(e.target.value)}
+                                        className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-emerald-500 cursor-pointer"
+                                    >
+                                        <option value="Naprawa bieżąca">🔧 Naprawa bieżąca</option>
+                                        <option value="Narzędzia i osprzęt">🛠️ Narzędzia i osprzęt</option>
+                                        <option value="Materiały drobne">📦 Materiały drobne</option>
+                                        <option value="Paliwo / Transport">⛽ Paliwo / Transport</option>
+                                        <option value="BHP">🦺 BHP i ochrona</option>
+                                        <option value="Inne">📝 Inne wydatki</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Kwota (zł):</label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        placeholder="0"
+                                        value={newExpenseAmount || ""}
+                                        onChange={e => setNewExpenseAmount(Math.max(0, parseInt(e.target.value) || 0))}
+                                        className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-emerald-500 text-center"
+                                    />
+                                </div>
+                            </div>
+                            <p className="text-[10px] text-slate-400 italic">Jeśli zostawisz kwotę 0 zł, model AI może oszacować koszt po kliknięciu „Wycena Kosztów AI”.</p>
+
+                            <div>
+                                <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Notatka / Szczegóły:</label>
+                                <textarea
+                                    rows={2}
+                                    placeholder="np. Zakup w lokalnym markecie budowlanym, faktura u kierownika..."
+                                    value={newExpenseNotes}
+                                    onChange={e => setNewExpenseNotes(e.target.value)}
+                                    className="w-full p-2.5 border rounded-xl font-medium bg-slate-50 outline-none focus:bg-white focus:border-emerald-500"
+                                />
+                            </div>
+
+                            <div className="pt-2 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsAddExpenseModalOpen(false)}
+                                    className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl uppercase text-[10px]"
+                                >
+                                    Anuluj
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl uppercase text-[10px] shadow-md"
+                                >
+                                    ➕ Dodaj do wydatków
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL ZGŁASZANIA USZKODZENIA BUDOWY Z RĘKI */}
+            {isAddDamageModalOpen && (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+                    <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+                        <div className="flex justify-between items-center border-b pb-3">
+                            <h3 className="font-black text-slate-800 text-lg">💥 Zgłoś uszkodzenie sprzętu</h3>
+                            <button onClick={() => setIsAddDamageModalOpen(false)} className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 font-bold text-slate-500">&times;</button>
+                        </div>
+                        <form onSubmit={handleAddDamageItem} className="space-y-3 text-xs">
+                            <div>
+                                <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Nazwa uszkodzonego sprzętu:</label>
+                                <input
+                                    type="text"
+                                    placeholder="np. Młot wyburzeniowy Hilti, Rusztowanie warszawskie rama"
+                                    value={newDamageName}
+                                    onChange={e => setNewDamageName(e.target.value)}
+                                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-orange-500"
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2">
+                                <div>
+                                    <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Nr Mag:</label>
+                                    <input
+                                        type="text"
+                                        placeholder="np. 210"
+                                        value={newDamageInvNumber}
+                                        onChange={e => setNewDamageInvNumber(e.target.value)}
+                                        className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-orange-500 text-center"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Ilość:</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        value={newDamageQty}
+                                        onChange={e => setNewDamageQty(Math.max(1, parseInt(e.target.value) || 1))}
+                                        className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-orange-500 text-center"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Jedn.:</label>
+                                    <input
+                                        type="text"
+                                        value={newDamageUnit}
+                                        onChange={e => setNewDamageUnit(e.target.value)}
+                                        className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-orange-500 text-center"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Opis uszkodzenia / usterki:</label>
+                                <textarea
+                                    rows={2}
+                                    placeholder="np. Spalony silnik, urwany kabel, wygięty profil..."
+                                    value={newDamageDesc}
+                                    onChange={e => setNewDamageDesc(e.target.value)}
+                                    className="w-full p-2.5 border rounded-xl font-medium bg-slate-50 outline-none focus:bg-white focus:border-orange-500"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block font-bold text-slate-700 mb-1 uppercase text-[10px]">Szacunkowy koszt naprawy / szkody (zł):</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    placeholder="np. 450 (lub 0 - oszacuje AI)"
+                                    value={newDamageCost || ""}
+                                    onChange={e => setNewDamageCost(Math.max(0, parseInt(e.target.value) || 0))}
+                                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 outline-none focus:bg-white focus:border-orange-500"
+                                />
+                                <p className="text-[10px] text-slate-400 italic mt-1">Możesz wpisać koszt naprawy ręcznie lub pobrać szacunek przyciskiem „Wycena Kosztów AI”.</p>
+                            </div>
+
+                            <div className="pt-2 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsAddDamageModalOpen(false)}
+                                    className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl uppercase text-[10px]"
+                                >
+                                    Anuluj
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="flex-1 py-2.5 bg-orange-600 hover:bg-orange-700 text-white font-black rounded-xl uppercase text-[10px] shadow-md"
+                                >
+                                    ➕ Zgłoś uszkodzenie
                                 </button>
                             </div>
                         </form>
