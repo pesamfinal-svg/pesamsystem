@@ -11,6 +11,7 @@ interface InventoryItem {
     id: string; name: string; type: string; subType?: string;
     category: string; inventoryNumber: string; allocations: Record<string, number>;
     status: string; unit?: string; failureDescription?: string;
+    purchasePrice?: number; // Rzeczywista cena zakupu z bazy – priorytet nad wyceną AI
 }
 interface Claim { id: string; siteId: string; inventoryName: string; status: string; penaltyAmount?: number; }
 interface Protocol { id: string; protocolId: string; type: string; createdAt: string; createdByName?: string; items?: any[]; }
@@ -117,6 +118,12 @@ export default function ProjectCloseoutsPage() {
     const [selectedArchived, setSelectedArchived] = useState<any | null>(null);
     const [archiveSearch, setArchiveSearch] = useState("");
     const [archiveLoading, setArchiveLoading] = useState(false);
+
+    // Modal doprecyzowania AI: przed wywołaniem wyceny, pokaż pozycje bez cen
+    // i pozwól użytkownikowi wpisać markę/model lub zapamiętaną cenę
+    const [isAIHintModalOpen, setIsAIHintModalOpen] = useState(false);
+    // itemsWithoutPrice: id -> { name, brandHint, userPriceHint }
+    const [aiHints, setAiHints] = useState<Record<string, { name: string; brandHint: string; userPriceHint: string }>>({});
 
     useEffect(() => {
         fetchSitesAndUsers();
@@ -409,8 +416,37 @@ export default function ProjectCloseoutsPage() {
         }
     };
 
-    // Wycena orientacyjnych kosztów przez AI dla wszystkich nie-wykluczonych pozycji
-    const handleEstimateCostsAI = async () => {
+    // Krok 1: Otwórz modal podpowiedzi AI dla pozycji bez ceny zakupu w bazie
+    const handleOpenAIEstimateModal = () => {
+        if (!selectedSite) return;
+        const allItems = [...toolsItems, ...scaffoldingItems, ...otherItems];
+
+        const withoutPrice = allItems.filter(i =>
+            (resolutions[i.id] || "LOSS") !== "EXCLUDED" &&
+            (!i.purchasePrice || i.purchasePrice === 0) &&
+            (!itemCosts[i.id] || itemCosts[i.id] === 0)
+        );
+
+        // Dodaj manuale bez ceny
+        manualItems.filter(m => m.resolution !== "EXCLUDED" && m.estimatedUnitCost === 0)
+            .forEach(m => withoutPrice.push({ id: m.id, name: m.name } as any));
+
+        if (withoutPrice.length === 0) {
+            // Wszystkie pozycje mają już ceny – uruchom od razu bez modalu
+            handleEstimateCostsAI({});
+            return;
+        }
+
+        const hints: Record<string, { name: string; brandHint: string; userPriceHint: string }> = {};
+        withoutPrice.forEach(item => {
+            hints[item.id] = { name: item.name, brandHint: "", userPriceHint: "" };
+        });
+        setAiHints(hints);
+        setIsAIHintModalOpen(true);
+    };
+
+    // Krok 2: Rzeczywiste wywołanie API wyceny (wywołane po zamknięciu modalu podpowiedzi lub bezpośrednio)
+    const handleEstimateCostsAI = async (hints: Record<string, { name: string; brandHint: string; userPriceHint: string }>) => {
         if (!selectedSite) return;
         setIsEstimatingCosts(true);
 
@@ -421,7 +457,12 @@ export default function ProjectCloseoutsPage() {
                 id: i.id,
                 name: i.name,
                 quantity: itemQuantities[i.id] !== undefined ? itemQuantities[i.id] : (i.allocations[selectedSite.id] || 1),
-                unit: i.unit || "szt."
+                unit: i.unit || "szt.",
+                // Priorytet 1: realna cena zakupu z bazy PESAM
+                purchasePrice: i.purchasePrice && i.purchasePrice > 0 ? i.purchasePrice : undefined,
+                // Priorytet 2: podpowiedź użytkownika z modalu (marka / zapamiętana cena)
+                brandHint: hints[i.id]?.brandHint || undefined,
+                userPriceHint: hints[i.id]?.userPriceHint ? parseFloat(hints[i.id].userPriceHint) || undefined : undefined,
             }));
 
         manualItems.forEach(m => {
@@ -430,29 +471,39 @@ export default function ProjectCloseoutsPage() {
                     id: m.id,
                     name: m.name,
                     quantity: m.quantity,
-                    unit: m.unit
+                    unit: m.unit,
+                    purchasePrice: m.estimatedUnitCost > 0 ? m.estimatedUnitCost : undefined,
+                    brandHint: hints[m.id]?.brandHint || undefined,
+                    userPriceHint: hints[m.id]?.userPriceHint ? parseFloat(hints[m.id].userPriceHint) || undefined : undefined,
                 });
             }
         });
 
         // Dołączamy uszkodzenia budowy do oszacowania kosztu naprawy przez AI
+        // (dla napraw nie ma ceny zakupu – AI musi oszacować koszt usługi naprawczej)
         siteDamages.forEach(dmg => {
             activeItemsToPrice.push({
                 id: dmg.id,
                 name: `Naprawa usterki: ${dmg.inventoryName} (${dmg.description})`,
                 quantity: dmg.quantity || 1,
-                unit: dmg.unit || "szt."
+                unit: dmg.unit || "szt.",
+                purchasePrice: dmg.estimatedRepairCost && dmg.estimatedRepairCost > 0 ? dmg.estimatedRepairCost : undefined,
+                brandHint: undefined,
+                userPriceHint: undefined,
             });
         });
 
-        // Dołączamy drobne wydatki budowy bez kwoty
+        // Dołączamy drobne wydatki budowy bez kwoty (AI oszacuje cenę usługi/materiału)
         siteExpenses.forEach(exp => {
             if (!exp.amount || exp.amount === 0) {
                 activeItemsToPrice.push({
                     id: exp.id,
                     name: `Wydatek / naprawa budowy: ${exp.title} (${exp.category || "ogólne"})`,
                     quantity: 1,
-                    unit: "usł."
+                    unit: "usł.",
+                    purchasePrice: undefined,
+                    brandHint: undefined,
+                    userPriceHint: undefined,
                 });
             }
         });
@@ -501,7 +552,12 @@ export default function ProjectCloseoutsPage() {
                     return exp;
                 }));
 
-                alert("✨ Wycena rynkowa AI została pobrana dla braków, uszkodzeń oraz wydatków! Możesz sprawdzić lub ręcznie skorygować każdą kwotę w PLN.");
+                // Policz ile pozycji wzięło cenę z bazy vs ile z AI
+                const fromDB = Object.values(data.estimates as Record<string, { reasoning: string }>)
+                    .filter(e => e.reasoning.startsWith("Cena zakupu z bazy")).length;
+                const fromAI = Object.keys(data.estimates).length - fromDB;
+                const aiMsg = fromAI > 0 ? `\n⚠️ ${fromAI} pozycji wyceniono szacunkowo przez AI (brak ceny w bazie) – sprawdź i popraw ręcznie!` : "";
+                alert(`✅ Wycena zakończona!\n\n📋 ${fromDB} pozycji: cena z bazy PESAM (dokładna)${aiMsg}`);
             } else {
                 throw new Error(data.error || "Błąd pobierania wyceny");
             }
@@ -1241,11 +1297,11 @@ export default function ProjectCloseoutsPage() {
                                             {activeTab === "EXPENSES" ? "Dopisz wydatek z ręki" : activeTab === "DAMAGES" ? "Dopisz uszkodzenie z ręki" : "Dopisz z ręki"}
                                         </button>
                                         <button
-                                            onClick={handleEstimateCostsAI}
+                                            onClick={handleOpenAIEstimateModal}
                                             disabled={isEstimatingCosts}
                                             className="bg-indigo-600 hover:bg-indigo-700 text-white font-black px-3.5 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1.5 disabled:opacity-50"
                                         >
-                                            {isEstimatingCosts ? "Wyceniam AI..." : "✨ Wycena Kosztów AI"}
+                                            {isEstimatingCosts ? "⏳ Wyceniam AI..." : "✨ Wycena Kosztów AI"}
                                         </button>
                                     </div>
                                 </div>
@@ -1985,6 +2041,81 @@ export default function ProjectCloseoutsPage() {
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+            {/* MODAL: PODPOWIEDZI DO WYCENY AI (marka / zapamiętana cena)              */}
+            {/* Wyświetla tylko pozycje bez ceny zakupu w bazie PESAM                    */}
+            {/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+            {isAIHintModalOpen && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setIsAIHintModalOpen(false)}>
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                        {/* Nagłówek */}
+                        <div className="p-5 border-b bg-indigo-50 rounded-t-3xl">
+                            <div className="flex items-center gap-3">
+                                <span className="text-3xl">✨</span>
+                                <div>
+                                    <h3 className="font-black text-indigo-900 text-base">Wycena Kosztów AI</h3>
+                                    <p className="text-xs text-indigo-600 mt-0.5">
+                                        Poniższe pozycje nie mają ceny zakupu w bazie PESAM. Podaj markę lub zapamiętaną cenę – AI przeszuka internet i wyliczy wartość dokładniej.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Lista pozycji bez ceny */}
+                        <div className="overflow-y-auto flex-1 p-4 space-y-3">
+                            {Object.entries(aiHints).map(([id, hint]) => (
+                                <div key={id} className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                                    <p className="font-bold text-slate-800 text-sm">{hint.name}</p>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Marka / Model (opcjonalnie)</label>
+                                            <input
+                                                type="text"
+                                                placeholder="np. Stabila, Hilti, Leica..."
+                                                value={hint.brandHint}
+                                                onChange={e => setAiHints(prev => ({ ...prev, [id]: { ...prev[id], brandHint: e.target.value } }))}
+                                                className="w-full p-2 border rounded-xl text-xs outline-none focus:border-indigo-400 bg-white"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Zapamiętana cena (zł)</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                placeholder="np. 150"
+                                                value={hint.userPriceHint}
+                                                onChange={e => setAiHints(prev => ({ ...prev, [id]: { ...prev[id], userPriceHint: e.target.value } }))}
+                                                className="w-full p-2 border rounded-xl text-xs font-bold outline-none focus:border-indigo-400 bg-white"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Stopka */}
+                        <div className="p-4 border-t flex gap-3">
+                            <button
+                                onClick={() => setIsAIHintModalOpen(false)}
+                                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs uppercase"
+                            >
+                                Anuluj
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setIsAIHintModalOpen(false);
+                                    handleEstimateCostsAI(aiHints);
+                                }}
+                                disabled={isEstimatingCosts}
+                                className="flex-2 flex-grow py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl text-xs uppercase shadow-md disabled:opacity-50"
+                            >
+                                {isEstimatingCosts ? "⏳ Wyceniam..." : "✨ Uruchom wycenę AI z Google"}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
