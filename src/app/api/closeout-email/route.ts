@@ -54,6 +54,7 @@ interface CloseoutEmailPayload {
     siteDamagesList?: SiteDamagePayload[];
     siteExpensesList?: SiteExpensePayload[];
     generalNotes?: string;
+    managerNotes?: string;
     financialSummary?: {
         totalLossCost: number;
         totalDisputedCost: number;
@@ -77,6 +78,7 @@ export async function POST(req: Request) {
             siteDamagesList = [],
             siteExpensesList = [],
             generalNotes = "",
+            managerNotes = "",
             financialSummary
         } = body;
 
@@ -318,13 +320,20 @@ export async function POST(req: Request) {
         // Ogólne uwagi
         const notesHtml = generalNotes ? `
             <div style="background:#eff6ff;border-left:4px solid #3b82f6;padding:12px;margin:15px 0;border-radius:0 8px 8px 0;font-size:12px;color:#1e3a8a">
-                <b>Notatki i uwagi audytora do zamknięcia budowy:</b><br/>
+                <b>Notatki i uwagi audytora (magazyn):</b><br/>
                 <p style="margin:5px 0 0 0;line-height:1.4">${generalNotes}</p>
             </div>
         ` : '';
 
+        const managerNotesHtml = managerNotes ? `
+            <div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:12px;margin:15px 0;border-radius:0 8px 8px 0;font-size:12px;color:#92400e">
+                <b>✍️ Oświadczenie / Uwagi Kierownika Budowy (${managerName}):</b><br/>
+                <p style="margin:5px 0 0 0;line-height:1.4">${managerNotes}</p>
+            </div>
+        ` : '';
+
         if (type === "CLOSEOUT_INITIATED") {
-            subject = `⏳ [ROZLICZENIE BUDOWY] Audyt końcowy projektu · ${siteName}`;
+            subject = `⏳ [ZAMKNIĘCIE BUDOWY] Audyt końcowy do weryfikacji i podpisu · ${siteName}`;
             recipients = [managerEmail];
             if (notifyOnInitiate && (dyrektorEmail || szefEmail)) {
                 recipients.push(dyrektorEmail, szefEmail);
@@ -355,14 +364,19 @@ export async function POST(req: Request) {
 
                         <div style="margin-top:25px;background:#fef2f2;border-left:4px solid #ef4444;padding:14px;border-radius:6px">
                             <p style="margin:0;font-size:13px;color:#991b1b;font-weight:bold">
-                                ✍️ WYMAGANY PODPIS KIEROWNIKA:
+                                ✍️ DYSPOZYCJA DLA KIEROWNIKA BUDOWY:
                             </p>
                             <p style="margin:6px 0 0 0;font-size:12px;color:#7f1d1d;line-height:1.4">
-                                Zaloguj się do systemu PESAM, przejdź do zakładki <b>"Zatwierdzanie Zamknięć"</b> i złóż podpis cyfrowy pod rozliczeniem, aby sprawa mogła trafić do ostatecznej autoryzacji przez Dyrekcję i Prezesa.
+                                Zaloguj się do systemu PESAM, przejdź do modułu spraw budowy i <b>złóż podpis cyfrowy LUB dopisz swoje uwagi i wyjaśnienia</b> (np. uzasadnienie pozostawienia ogrodzenia u inwestora lub zastrzeżenia do napraw). Dopiero po Twoim zatwierdzeniu sprawa trafi do ostatecznej autoryzacji przez Dyrekcję i Prezesa.
                             </p>
+                            <div style="margin-top:12px;text-align:center">
+                                <a href="https://pesam-magazyn--pesam-system-81165.europe-west4.hosted.app/dashboard/closeout-approvals" style="display:inline-block;background:#ef4444;color:#fff;font-weight:bold;text-decoration:none;font-size:12px;padding:9px 20px;border-radius:6px;text-transform:uppercase;letter-spacing:0.5px">
+                                    Otwórz Rozliczenie Budowy do Podpisu &rarr;
+                                </a>
+                            </div>
                         </div>
                     </div>
-                    ${isSandbox ? `<div style="text-align:center;font-size:10px;color:#f97316;margin-top:10px;font-weight:bold">🧪 [KOMUNIKAT PIASKOWNICY]: Mail w trybie produkcyjnym leciałby do: ${recipients.join(", ")}</div>` : ""}
+                    ${isSandbox ? `<div style="text-align:center;font-size:10px;color:#f97316;margin-top:10px;font-weight:bold">🧪 [KOMUNIKAT PIASKOWNICY]: Mail w trybie produkcyjnym leciałby do Kierownika: ${recipients.join(", ")}</div>` : ""}
                 </div>`;
         }
         else if (type === "CLOSEOUT_SIGNED_BY_MANAGER") {
@@ -378,7 +392,7 @@ export async function POST(req: Request) {
                     <div style="background:#fff;padding:20px;margin-top:15px;border-radius:8px;border:1px solid #e2e8f0">
                         <p style="font-size:14px;color:#334155">Szanowna Dyrekcjo / Prezesie,</p>
                         <p style="font-size:13px;color:#475569;line-height:1.5">
-                            Kierownik Budowy <b>${managerName}</b> zapoznał się z audytem i <b>złożył cyfrowy podpis</b> pod rozliczeniem budowy: <b>${siteName}</b>.
+                            Kierownik Budowy <b>${managerName}</b> zapoznał się z audytem, naniósł swoje uwagi i <b>złożył cyfrowy podpis</b> pod rozliczeniem budowy: <b>${siteName}</b>.
                         </p>
 
                         <!-- CALL TO ACTION DO LOGOWANIA DLA DYREKTORA/PREZESA -->
@@ -397,6 +411,7 @@ export async function POST(req: Request) {
 
                         ${financeBoxHtml}
                         ${notesHtml}
+                        ${managerNotesHtml}
 
                         <h4 style="font-size:12px;color:#ef4444;text-transform:uppercase;letter-spacing:1px;margin:20px 0 8px 0;border-bottom:1px solid #f1f5f9;padding-bottom:5px">Zatwierdzony wykaz ubytków (Długi):</h4>
                         <table style="width:100%;border-collapse:collapse">${lossTableRows}</table>
@@ -412,21 +427,32 @@ export async function POST(req: Request) {
                 </div>`;
         }
         else if (type === "CLOSEOUT_FINALIZED") {
-            subject = `🔒 [PROJEKT ROZLICZONY] Oficjalne zamknięcie budowy · ${siteName}`;
+            subject = `🖨️ [OFICJALNY PROTOKÓŁ DO DRUKU] Budowa rozliczona i zamknięta · ${siteName}`;
             recipients = [managerEmail, dyrektorEmail, szefEmail, ...additionalEmails].filter(Boolean);
 
             htmlContent = `
-                <div style="font-family:sans-serif;max-width:650px;margin:0 auto;background:#f8fafc;padding:20px;border-radius:12px;border:1px solid #e2e8f0">
+                <div style="font-family:sans-serif;max-width:680px;margin:0 auto;background:#f8fafc;padding:20px;border-radius:12px;border:1px solid #e2e8f0">
+                    
+                    <!-- BANER DO DRUKU DLA BIURA / SEKRETARIATU -->
+                    <div style="background:#fef3c7;border:2px dashed #f59e0b;padding:14px;border-radius:8px;margin-bottom:16px;text-align:center">
+                        <b style="color:#92400e;font-size:13px;text-transform:uppercase">🖨️ DYSPOZYCJA DLA BIURA / SEKRETARIATU:</b><br/>
+                        <span style="color:#78350f;font-size:12px;line-height:1.4;display:block;margin-top:4px">
+                            Projekt został oficjalnie zatwierdzony przez Zarząd i zamknięty w systemie PESAM.<br/>
+                            <b>Prosimy o wydrukowanie niniejszego oficjalnego protokołu i wpięcie do segregatora kontraktu budowy.</b>
+                        </span>
+                    </div>
+
                     <div style="background:#15803d;color:#fff;padding:16px;border-radius:8px;text-align:center">
-                        <h2 style="margin:0;font-size:16px;text-transform:uppercase;letter-spacing:1px">🔒 Projekt Został Oficjalnie Zamknięty</h2>
-                        <p style="margin:4px 0 0 0;font-size:12px;color:#bbf7d0">Budowa: <b>${siteName}</b></p>
+                        <h2 style="margin:0;font-size:16px;text-transform:uppercase;letter-spacing:1px">🔒 OFICJALNY PROTOKÓŁ ZAMKNIĘCIA I ROZLICZENIA BUDOWY</h2>
+                        <p style="margin:4px 0 0 0;font-size:12px;color:#bbf7d0">Budowa: <b>${siteName}</b> • Data rozliczenia: ${new Date().toLocaleDateString("pl-PL")}</p>
                     </div>
                     <div style="background:#fff;padding:20px;margin-top:15px;border-radius:8px;border:1px solid #e2e8f0">
-                        <p style="font-size:14px;color:#334155">Dyrektor / Prezes autoryzował podpisem zamknięcie projektu: <b>${siteName}</b>.</p>
+                        <p style="font-size:14px;color:#334155">Zarząd i Dyrekcja autoryzowali podpisem zamknięcie projektu: <b>${siteName}</b>.</p>
                         <p style="font-size:13px;color:#475569;line-height:1.5">Budowa została oznaczona w systemie PESAM jako <b>ZAKOŃCZONA</b>. Alokacje sprzętowe zostały rozliczone, straty spisano w koszty, a pozycje sporne przekazano do ewentualnego refakturowania inwestora.</p>
                         
                         ${financeBoxHtml}
                         ${notesHtml}
+                        ${managerNotesHtml}
 
                         <h4 style="font-size:12px;color:#ef4444;text-transform:uppercase;letter-spacing:1px;margin:20px 0 8px 0;border-bottom:1px solid #f1f5f9;padding-bottom:5px">Ostateczny wykaz spisanych strat (LIKWIDACJA):</h4>
                         <table style="width:100%;border-collapse:collapse">${lossTableRows}</table>
@@ -438,8 +464,31 @@ export async function POST(req: Request) {
                         ${detectiveHtml}
                         ${siteExpensesHtml}
 
-                        <p style="font-size:12px;color:#64748b;text-align:center;margin-top:20px;border-top:1px dashed #e2e8f0;padding-top:10px">
-                            Oficjalny dokument rozliczeniowy został trwale zarchiwizowany w bazie PESAM Cloud. Sprawa zakończona.
+                        <!-- STOPKA Z PODPISAMI CYFROWYMI STRON -->
+                        <div style="margin-top:25px;padding-top:15px;border-top:2px solid #e2e8f0">
+                            <table style="width:100%;text-align:center;font-size:11px;color:#475569">
+                                <tr>
+                                    <td style="width:33%;padding:10px;border-right:1px solid #e2e8f0">
+                                        <b style="color:#0f172a">Audytor / Magazyn:</b><br/>
+                                        <span>${warehousemanName}</span><br/>
+                                        <span style="color:#16a34a;font-weight:bold;font-size:9px">✓ SPORZĄDZONO AUDYT</span>
+                                    </td>
+                                    <td style="width:33%;padding:10px;border-right:1px solid #e2e8f0">
+                                        <b style="color:#0f172a">Kierownik Budowy:</b><br/>
+                                        <span>${managerName}</span><br/>
+                                        <span style="color:#16a34a;font-weight:bold;font-size:9px">✓ ZŁOŻONO PODPIS CYFROWY</span>
+                                    </td>
+                                    <td style="width:34%;padding:10px">
+                                        <b style="color:#0f172a">Zarząd / Dyrekcja:</b><br/>
+                                        <span>Zarząd PESAM</span><br/>
+                                        <span style="color:#16a34a;font-weight:bold;font-size:9px">✓ ZATWIERDZONO I ZAMKNIĘTO</span>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+
+                        <p style="font-size:11px;color:#94a3b8;text-align:center;margin-top:20px;border-top:1px dashed #e2e8f0;padding-top:10px">
+                            Oficjalny dokument rozliczeniowy został trwale zarejestrowany w chmurze PESAM Cloud.
                         </p>
                     </div>
                 </div>`;

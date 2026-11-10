@@ -2,6 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import { collection, getDocs, doc, updateDoc, arrayUnion, query, orderBy, where, limit } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -420,11 +421,24 @@ export default function ClaimsCenter() {
 
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto h-[90vh] flex flex-col animate-fade-in relative">
+            {/* PRZEŁĄCZNIK ZAKŁADEK CENTRUM SPRAW BUDOWY */}
+            <div className="flex bg-slate-200 p-1.5 rounded-2xl w-fit mb-5 shadow-inner">
+                <div className="px-5 py-2 rounded-xl text-xs font-black uppercase tracking-wider bg-white text-blue-700 shadow-sm flex items-center gap-2">
+                    <span>⚖️</span> Uszkodzenia Sprzętu & Postępowania CLS
+                </div>
+                <Link
+                    href="/dashboard/closeout-approvals"
+                    className="px-5 py-2 rounded-xl text-xs font-black uppercase tracking-wider text-slate-600 hover:text-slate-900 transition flex items-center gap-2"
+                >
+                    <span>✍️</span> Zatwierdzanie Zamknięć Budów
+                </Link>
+            </div>
+
             <div className="flex items-center gap-4 mb-6">
                 <div className="text-4xl shadow-lg bg-white w-14 h-14 flex items-center justify-center rounded-full">⚖️</div>
                 <div>
-                    <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Sąd PESAM (CLS)</h1>
-                    <p className="text-slate-500 text-sm font-medium italic">Wydział orzekania o szkodach sprzętowych</p>
+                    <h1 className="text-3xl font-black text-slate-800 tracking-tighter">Centrum Spraw Budowy</h1>
+                    <p className="text-slate-500 text-sm font-medium italic">Postępowania wyjaśniające usterki (CLS) oraz zatwierdzanie rozliczeń i zamknięć budów</p>
                 </div>
             </div>
 

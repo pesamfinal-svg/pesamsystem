@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { collection, getDocs, doc, setDoc, query, where, updateDoc } from "firebase/firestore";
+import { collection, getDocs, getDoc, doc, setDoc, query, where, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
@@ -89,6 +89,10 @@ export default function ProjectCloseoutsPage() {
     // Ogólne uwagi audytora
     const [generalNotes, setGeneralNotes] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
+
+    // Stan wersji roboczej (Szkic rozliczenia bez akceptacji)
+    const [draftInfo, setDraftInfo] = useState<{ savedAt: string; savedByName: string } | null>(null);
+    const [isSavingDraft, setIsSavingDraft] = useState(false);
 
     // Archiwum
     const [archivedCloseouts, setArchivedCloseouts] = useState<any[]>([]);
@@ -330,6 +334,50 @@ export default function ProjectCloseoutsPage() {
             combined.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
             setSiteProtocols(combined);
 
+            // Sprawdzenie i automatyczne wczytanie zapisanego szkicu roboczego (DRAFT)
+            try {
+                const draftSnap = await getDoc(doc(db, "closeouts", site.id));
+                if (draftSnap.exists()) {
+                    const draftData = draftSnap.data();
+                    if (draftData.status === "SZKIC_ROBOCZY" || draftData.isDraft) {
+                        if (draftData.resolutions) {
+                            setResolutions(prev => ({ ...prev, ...draftData.resolutions }));
+                        }
+                        if (draftData.itemQuantities) {
+                            setItemQuantities(prev => ({ ...prev, ...draftData.itemQuantities }));
+                        }
+                        if (draftData.itemCosts) {
+                            setItemCosts(draftData.itemCosts);
+                        }
+                        if (draftData.itemNotes) {
+                            setItemNotes(draftData.itemNotes);
+                        }
+                        if (draftData.manualItems && Array.isArray(draftData.manualItems)) {
+                            setManualItems(draftData.manualItems);
+                        }
+                        if (draftData.repairCostOverrides) {
+                            setRepairCostOverrides(prev => ({ ...prev, ...draftData.repairCostOverrides }));
+                        }
+                        if (draftData.generalNotes) {
+                            setGeneralNotes(draftData.generalNotes);
+                        }
+                        if (draftData.managerUid) {
+                            setSelectedManagerUid(draftData.managerUid);
+                        }
+                        setDraftInfo({
+                            savedAt: draftData.draftSavedAt || draftData.initiatedAt || "",
+                            savedByName: draftData.draftSavedByName || draftData.initiatedByName || "Audytor"
+                        });
+                    } else {
+                        setDraftInfo(null);
+                    }
+                } else {
+                    setDraftInfo(null);
+                }
+            } catch (draftErr) {
+                console.warn("Błąd podczas sprawdzania zapisanego szkicu roboczego:", draftErr);
+            }
+
         } catch (error) {
             console.error("Błąd audytu:", error);
         } finally {
@@ -477,6 +525,57 @@ export default function ProjectCloseoutsPage() {
         return { totalLoss, totalDisputed, totalScrapped, totalRepairs, totalExpenses };
     };
 
+    // Zapisywanie częściowego rozliczenia bez akceptacji (SZKIC ROBOCZY / DRAFT)
+    const handleSaveDraft = async () => {
+        if (!selectedSite || !user) return;
+        setIsSavingDraft(true);
+
+        try {
+            const closeoutRef = doc(db, "closeouts", selectedSite.id);
+            const chosenManager = users.find(u => u.uid === selectedManagerUid);
+            const financials = calculateFinancials();
+
+            await setDoc(closeoutRef, {
+                siteId: selectedSite.id,
+                siteName: selectedSite.name,
+                status: "SZKIC_ROBOCZY",
+                isDraft: true,
+                draftSavedAt: new Date().toISOString(),
+                draftSavedBy: user.uid,
+                draftSavedByName: `${user.firstName} ${user.lastName}`,
+                managerUid: chosenManager?.uid || selectedManagerUid || "",
+                managerName: chosenManager ? `${chosenManager.firstName} ${chosenManager.lastName}` : "",
+                managerEmail: chosenManager?.email || "",
+                generalNotes: generalNotes.trim(),
+                resolutions,
+                itemQuantities,
+                itemCosts,
+                itemNotes,
+                manualItems,
+                repairCostOverrides,
+                financialSummary: {
+                    totalLossCost: financials.totalLoss,
+                    totalDisputedCost: financials.totalDisputed,
+                    totalScrappedCost: financials.totalScrapped,
+                    totalRepairsCost: financials.totalRepairs,
+                    totalExpensesCost: financials.totalExpenses
+                }
+            }, { merge: true });
+
+            setDraftInfo({
+                savedAt: new Date().toISOString(),
+                savedByName: `${user.firstName} ${user.lastName}`
+            });
+
+            alert("💾 Szkic roboczy rozliczenia został pomyślnie zapisany!\n\nTwoje decyzje, notatki, zmienione ilości oraz wyceny zostały zachowane. Możesz bezpiecznie wyjść lub kontynuować później.");
+        } catch (error) {
+            console.error("Błąd zapisu szkicu roboczego:", error);
+            alert("Błąd podczas zapisywania szkicu: " + error);
+        } finally {
+            setIsSavingDraft(false);
+        }
+    };
+
     const handleInitiateCloseout = async () => {
         if (!selectedSite || !user) return;
         if (!selectedManagerUid) return alert("Wybierz kierownika budowy odpowiedzialnego za rozliczenie!");
@@ -562,11 +661,12 @@ export default function ProjectCloseoutsPage() {
                 status: i.status
             }));
 
-            // Utwórz szkic rozliczenia
+            // Utwórz formalne rozliczenie oczekujące na kierownika
             await setDoc(closeoutRef, {
                 siteId: selectedSite.id,
                 siteName: selectedSite.name,
                 status: "OCZEKUJE_NA_KIEROWNIKA",
+                isDraft: false,
                 initiatedBy: user.uid,
                 initiatedByName: `${user.firstName} ${user.lastName}`,
                 initiatedAt: new Date().toISOString(),
@@ -976,7 +1076,15 @@ export default function ProjectCloseoutsPage() {
                                         <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Generowanie szkicu rozliczenia</p>
                                         <h2 className="text-xl font-black">{selectedSite.name}</h2>
                                     </div>
-                                    <div className="flex gap-2">
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            onClick={handleSaveDraft}
+                                            disabled={isSavingDraft}
+                                            className="bg-blue-600 hover:bg-blue-700 text-white font-black px-3.5 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1.5 disabled:opacity-50"
+                                            title="Zapisz aktualny stan i notatki w bazie bez wysyłania do kierownika"
+                                        >
+                                            {isSavingDraft ? "Zapisuję..." : "💾 Zapisz szkic roboczy"}
+                                        </button>
                                         <button
                                             onClick={() => setIsAddManualOpen(true)}
                                             className="bg-emerald-600 hover:bg-emerald-700 text-white font-black px-3 py-1.5 rounded-lg text-xs uppercase shadow transition flex items-center gap-1"
@@ -992,6 +1100,19 @@ export default function ProjectCloseoutsPage() {
                                         </button>
                                     </div>
                                 </div>
+
+                                {/* BANER ZAPISANEGO SZKICU */}
+                                {draftInfo && (
+                                    <div className="bg-emerald-900 text-emerald-100 px-6 py-2 border-b border-emerald-800 flex justify-between items-center text-xs">
+                                        <span className="flex items-center gap-2">
+                                            <span>💾</span>
+                                            <span>Wczytano zapisany szkic roboczy (ostatni zapis: <b>{new Date(draftInfo.savedAt).toLocaleString("pl-PL")}</b> przez <b>{draftInfo.savedByName}</b>)</span>
+                                        </span>
+                                        <span className="bg-emerald-800 text-emerald-200 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                                            SZKIC AKTYWNY
+                                        </span>
+                                    </div>
+                                )}
 
                                 {/* PASEK BILANSU FINANSOWEGO NA ŻYWO DLA SZEFA */}
                                 <div className="bg-slate-800 text-white px-6 py-2.5 flex flex-wrap justify-between items-center text-xs border-b border-slate-700 gap-2">

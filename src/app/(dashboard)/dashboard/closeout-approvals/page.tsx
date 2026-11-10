@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Link from "next/link";
 import { collection, getDocs, doc, setDoc, query, where, getDoc, updateDoc, runTransaction } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -22,6 +23,7 @@ interface CloseoutDoc {
     directorName?: string;
     directorSignedAt?: string;
     generalNotes?: string;
+    managerNotes?: string;
     financialSummary?: {
         totalLossCost: number;
         totalDisputedCost: number;
@@ -43,6 +45,8 @@ export default function CloseoutApprovalsPage() {
     const [selectedCloseout, setSelectedCloseout] = useState<CloseoutDoc | null>(null);
     const [loading, setLoading] = useState(true);
     const [isProcessing, setIsProcessing] = useState(false);
+    const [managerNotes, setManagerNotes] = useState("");
+    const [isSavingNotes, setIsSavingNotes] = useState(false);
     const [activeTab, setActiveTab] = useState<"DEBTS" | "DISPUTED" | "SCRAPPED" | "DAMAGES" | "EXPENSES" | "CLAIMS" | "DETECTIVE">("DEBTS");
     const [isSandboxActive, setIsSandboxActive] = useState(true);
 
@@ -104,10 +108,29 @@ export default function CloseoutApprovalsPage() {
         }
     };
 
+    // Zapisywanie samych uwag kierownika bez konieczności natychmiastowego podpisu
+    const handleSaveManagerNotes = async () => {
+        if (!selectedCloseout) return;
+        setIsSavingNotes(true);
+        try {
+            const closeoutRef = doc(db, "closeouts", selectedCloseout.id);
+            await updateDoc(closeoutRef, {
+                managerNotes: managerNotes.trim()
+            });
+            setSelectedCloseout({ ...selectedCloseout, managerNotes: managerNotes.trim() });
+            alert("💾 Twoje uwagi / oświadczenie kierownika budowy zostało zapisane!");
+        } catch (err) {
+            console.error("Błąd zapisu uwag kierownika:", err);
+            alert("Błąd zapisu uwag: " + err);
+        } finally {
+            setIsSavingNotes(false);
+        }
+    };
+
     const handleSignAsManager = async () => {
         if (!selectedCloseout || !user) return;
 
-        if (!window.confirm("Czy potwierdzasz zgodność stanu rozliczenia i składasz podpis cyfrowy?")) {
+        if (!window.confirm("Czy potwierdzasz zgodność stanu rozliczenia i składasz podpis cyfrowy? Sprawa trafi do ostatecznej autoryzacji przez Zarząd.")) {
             return;
         }
 
@@ -118,7 +141,8 @@ export default function CloseoutApprovalsPage() {
             await updateDoc(closeoutRef, {
                 status: "OCZEKUJE_NA_DYREKCJE",
                 managerSignedAt: new Date().toISOString(),
-                managerName: `${user.firstName} ${user.lastName}`
+                managerName: `${user.firstName} ${user.lastName}`,
+                managerNotes: managerNotes.trim()
             });
 
             try {
@@ -136,6 +160,7 @@ export default function CloseoutApprovalsPage() {
                         siteDamagesList: selectedCloseout.siteDamagesList,
                         siteExpensesList: selectedCloseout.siteExpensesList,
                         generalNotes: selectedCloseout.generalNotes,
+                        managerNotes: managerNotes.trim(),
                         financialSummary: selectedCloseout.financialSummary
                     })
                 });
@@ -266,6 +291,7 @@ export default function CloseoutApprovalsPage() {
                         siteDamagesList: selectedCloseout.siteDamagesList,
                         siteExpensesList: selectedCloseout.siteExpensesList,
                         generalNotes: selectedCloseout.generalNotes,
+                        managerNotes: selectedCloseout.managerNotes || managerNotes || "",
                         financialSummary: selectedCloseout.financialSummary
                     })
                 });
@@ -352,9 +378,22 @@ export default function CloseoutApprovalsPage() {
                 </div>
             )}
 
+            {/* PRZEŁĄCZNIK ZAKŁADEK CENTRUM SPRAW BUDOWY */}
+            <div className="flex bg-slate-200 p-1.5 rounded-2xl w-fit shadow-inner">
+                <Link
+                    href="/dashboard/claims"
+                    className="px-5 py-2 rounded-xl text-xs font-black uppercase tracking-wider text-slate-600 hover:text-slate-900 transition flex items-center gap-2"
+                >
+                    <span>⚖️</span> Uszkodzenia Sprzętu & Postępowania CLS
+                </Link>
+                <div className="px-5 py-2 rounded-xl text-xs font-black uppercase tracking-wider bg-white text-blue-700 shadow-sm flex items-center gap-2">
+                    <span>✍️</span> Zatwierdzanie Zamknięć Budów
+                </div>
+            </div>
+
             <div>
-                <h1 className="text-3xl font-black text-slate-800 tracking-tight">✍️ Zatwierdzanie Zamknięć</h1>
-                <p className="text-slate-500 text-sm mt-1">Złóż cyfrowy podpis pod audytem końcowym budowy, aby zakończyć projekt.</p>
+                <h1 className="text-3xl font-black text-slate-800 tracking-tight">Centrum Spraw Budowy — Zatwierdzanie Zamknięć</h1>
+                <p className="text-slate-500 text-sm mt-1">Złóż cyfrowy podpis lub nanieś swoje oświadczenie pod audytem końcowym budowy, aby zakończyć projekt.</p>
             </div>
 
             <div className="flex flex-col md:flex-row gap-6">
@@ -370,7 +409,10 @@ export default function CloseoutApprovalsPage() {
                             closeouts.map(closeout => (
                                 <button
                                     key={closeout.id}
-                                    onClick={() => setSelectedCloseout(closeout)}
+                                    onClick={() => {
+                                        setSelectedCloseout(closeout);
+                                        setManagerNotes(closeout.managerNotes || "");
+                                    }}
                                     className={`w-full text-left p-4 rounded-lg border transition ${selectedCloseout?.id === closeout.id ? 'bg-blue-600 border-blue-600 text-white shadow-md' : 'bg-white border-slate-100 hover:border-blue-200 hover:bg-slate-50'}`}
                                 >
                                     <p className={`font-bold text-sm ${selectedCloseout?.id === closeout.id ? 'text-white' : 'text-slate-800'}`}>{closeout.siteName}</p>
@@ -599,6 +641,43 @@ export default function CloseoutApprovalsPage() {
                                 )}
                             </div>
 
+                            {/* SEKCJA UWAG I OŚWIADCZENIA KIEROWNIKA BUDOWY */}
+                            <div className="p-4 bg-amber-50 border-t border-amber-200">
+                                {selectedCloseout.status === "OCZEKUJE_NA_KIEROWNIKA" && !canManageGlobally ? (
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between items-center">
+                                            <label className="text-xs font-black uppercase text-amber-900 tracking-wider flex items-center gap-1.5">
+                                                <span>✍️</span> Twoje uwagi i wyjaśnienia do rozliczenia (Kierownik Budowy):
+                                            </label>
+                                            <button
+                                                onClick={handleSaveManagerNotes}
+                                                disabled={isSavingNotes}
+                                                className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-3 py-1 rounded-lg text-[10px] uppercase transition shadow-sm"
+                                            >
+                                                {isSavingNotes ? "Zapisuję..." : "💾 Zapisz same uwagi"}
+                                            </button>
+                                        </div>
+                                        <textarea
+                                            rows={3}
+                                            value={managerNotes}
+                                            onChange={(e) => setManagerNotes(e.target.value)}
+                                            placeholder="Możesz tutaj dopisać swoje uwagi, uzasadnienie pozostawienia sprzętu u inwestora, odniesienie do kosztów napraw lub zastrzeżenia przed złożeniem podpisu..."
+                                            className="w-full text-xs font-medium text-slate-800 bg-white border border-amber-300 rounded-xl p-3 outline-none focus:ring-2 focus:ring-amber-500 transition shadow-inner"
+                                        />
+                                        <p className="text-[10px] text-amber-700 italic">Twoje uwagi zostaną dołączone do oficjalnego raportu i przesłane do Dyrekcji oraz Prezesa.</p>
+                                    </div>
+                                ) : (
+                                    <div className="text-xs space-y-1">
+                                        <p className="font-bold text-amber-900 flex items-center gap-1.5">
+                                            <span>✍️</span> Uwagi / Oświadczenie Kierownika Budowy ({selectedCloseout.managerName || "Kierownik"}):
+                                        </p>
+                                        <p className="text-slate-700 italic bg-white p-3 rounded-lg border border-amber-200 leading-relaxed">
+                                            {selectedCloseout.managerNotes || managerNotes || "Kierownik nie wniósł dodatkowych zastrzeżeń do audytu (zgodność pełna)."}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+
                             {/* STOPKA Z PRZYCISKAMI PODPISU */}
                             <div className="p-5 border-t bg-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
                                 <div className="text-xs space-y-1">
@@ -608,6 +687,12 @@ export default function CloseoutApprovalsPage() {
                                 </div>
 
                                 <div className="flex gap-2 w-full sm:w-auto flex-wrap justify-end">
+                                    <button
+                                        onClick={() => window.print()}
+                                        className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold px-4 py-3 rounded-xl transition flex items-center gap-1.5 shadow-sm"
+                                    >
+                                        🖨️ Drukuj Raport (PDF)
+                                    </button>
                                     {canManageGlobally && (
                                         <button onClick={() => handleCancelCloseout(selectedCloseout)} disabled={isProcessing} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold px-4 py-3 rounded-xl transition mr-auto">
                                             🗑️ Anuluj rozliczenie

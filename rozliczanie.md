@@ -177,14 +177,18 @@ interface CloseoutDocument {
   id: string;
   siteId: string;
   siteName: string;
-  status: "OCZEKUJE_NA_KIEROWNIKA" | "OCZEKUJE_NA_DYREKCJE" | "ROZLICZONA";
-  initiatedBy: string;
-  initiatedByName: string;
-  initiatedAt: string;
+  status: "SZKIC_ROBOCZY" | "OCZEKUJE_NA_KIEROWNIKA" | "OCZEKUJE_NA_DYREKCJE" | "ROZLICZONA";
+  isDraft?: boolean;
+  draftSavedAt?: string;
+  draftSavedByName?: string;
+  initiatedBy?: string;
+  initiatedByName?: string;
+  initiatedAt?: string;
   managerUid?: string;
   managerName?: string;
   managerEmail?: string;
   managerSignedAt?: string;
+  managerNotes?: string; // Oświadczenie / uwagi kierownika budowy do rozliczenia
   directorUid?: string;
   directorName?: string;
   directorSignedAt?: string;
@@ -194,11 +198,14 @@ interface CloseoutDocument {
     totalLossCost: number; // Suma strat w PLN
     totalDisputedCost: number; // Suma sprzętu u inwestora w PLN
     totalScrappedCost: number; // Suma złomowania w PLN
+    totalRepairsCost?: number; // Koszty napraw serwisowych sprzętu
+    totalExpensesCost?: number; // Suma drobnych bieżących wydatków budowy
   };
 
   debtsList: CloseoutDebtItem[];
   excludedItems: Array<{ id: string; name: string; quantity: number; unit: string; reason: string; }>;
   siteDamagesList: SiteDamage[];
+  siteExpensesList?: any[];
   claimsList: any[];
   detectiveList: any[];
   generalNotes?: string;
@@ -207,21 +214,40 @@ interface CloseoutDocument {
 
 ---
 
-## 6. Plan Weryfikacji i Testów
+## 6. Nowe Kluczowe Usprawnienia Procesu (Aktualizacja)
 
-1. **Test pozycji spornej (ogrodzenie u inwestora):**
-   - Wybór ogrodzenia w zakładce Rusztowania -> zmiana statusu na `🚧 Pozostawiono u Inwestora / Spór`.
-   - Wpisanie notatki o sporze z inwestorem. Sprawdzenie wyliczenia kwoty.
-2. **Test pozycji utylizowanej (łata do niwelatora):**
-   - Wybór łaty w Osprzęt -> zmiana statusu na `♻️ Złomowanie / Utylizacja`.
-   - Wpisanie notatki: „Brak możliwości dokupienia części zamiennych, wygięta, do wyrzucenia”.
-3. **Test pozycji dopisanej z głowy:**
-   - Kliknięcie „➕ Dopisz pozycję z ręki”, wprowadzenie nazwy, ilości, notatki.
-   - Weryfikacja, czy pozycja pojawia się na liście z oznaczeniem [Wpis ręczny].
-4. **Test wyceny AI i ręcznej korekty cen:**
-   - Kliknięcie „✨ Oszacuj koszty AI”. Weryfikacja pobrania orientacyjnych cen w PLN.
-   - Zmiana ceny z palca (np. z 150 zł na 180 zł) – sprawdzenie przeliczenia sumy całego raportu.
-5. **Test wysyłki powiadomień:**
-   - Wysłanie raportu do podpisu kierownika, a po jego podpisaniu – wysyłka do Dyrektora i Prezesa ze wszystkimi kwotami PLN, notatkami i wezwaniem do logowania.
-6. **Test Archiwum:**
-   - Po ostatecznym zamknięciu budowy sprawdzenie, czy raport jest natychmiast dostępny w zakładce „📜 Historia i Archiwum Zamknięć”.
+1. **Zapisywanie wersji roboczej (Szkic roboczy / DRAFT):**
+   - Audytor nie musi zatwierdzać całego audytu na raz – może kliknąć **„💾 Zapisz szkic roboczy”**.
+   - Zapisywane są wszystkie decyzje (`resolutions`), ilości, ceny jednostkowe, notatki do pozycji, wpisy ręczne oraz koszty napraw.
+   - Po ponownym wejściu na budowę system automatycznie wczytuje zapisany szkic i wyświetla zielony baner: *„💾 Wczytano zapisany szkic roboczy z dnia ... przez ...”*.
+
+2. **Obieg mailowy z oświadczeniem Kierownika:**
+   - Magazynier inicjuje audyt -> e-mail leci **do Kierownika** z prośbą o akceptację (podpis) LUB dopisanie swoich uwag/wyjaśnień.
+   - Kierownik wchodzi do modułu, może nanieść swoje uwagi w polu *„Twoje uwagi i wyjaśnienia do rozliczenia”* i dopiero wtedy składa podpis.
+   - Dopiero po podpisaniu przez Kierownika sprawa i e-mail trafiają do Dyrekcji i Prezesa z kompletem uwag obu stron.
+
+3. **Oficjalny Raport do Druku dla Biura / Sekretariatu:**
+   - Po zatwierdzeniu przez Dyrekcję/Prezesa generowany jest oficjalny protokół do druku.
+   - E-mail leci do stron oraz **do Biura / Sekretariatu** z dyspozycją: *„🖨️ Prosimy o wydrukowanie niniejszego oficjalnego protokołu i wpięcie do segregatora kontraktu budowy”*.
+   - W aplikacji dostępny jest przycisk **„🖨️ Drukuj Raport (PDF)”** z czytelnym formatem A4.
+
+4. **Rebranding: Centrum Spraw Budowy:**
+   - Moduł dawnego „Sądu PESAM” został zintegrowany z modułem zatwierdzania zamknięć pod wspólną nazwą: **Centrum Spraw Budowy**.
+   - Kierownik i zarząd mają w jednym miejscu przełącznik zakładek:
+     - `[ ⚖️ Uszkodzenia Sprzętu & Postępowania CLS ]`
+     - `[ ✍️ Zatwierdzanie Zamknięć Budów ]`
+
+---
+
+## 7. Plan Weryfikacji i Testów
+
+1. **Test szkicu roboczego:**
+   - Zmiana statusu ogrodzenia na „Pozostawiono u Inwestora”, wpisanie notatki, kliknięcie „Zapisz szkic roboczy”.
+   - Przeładowanie strony / ponowne kliknięcie budowy — sprawdzenie czy status, ilości i notatki zostały automatycznie przywrócone.
+2. **Test uwag kierownika:**
+   - Zalogowanie jako kierownik, otwarcie sprawy do zatwierdzenia, wpisanie oświadczenia w polu uwag.
+   - Podpisanie i weryfikacja czy uwagi są widoczne w mailu do Zarządu.
+3. **Test wydruku protokołu:**
+   - Kliknięcie „Drukuj Raport (PDF)” i weryfikacja podglądu wydruku A4.
+4. **Test nawigacji Centrum Spraw Budowy:**
+   - Sprawdzenie nowego elementu w menu oraz płynnego przełącznika zakładek między szkodami CLS a zamknięciami budów.
