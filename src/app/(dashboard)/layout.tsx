@@ -83,6 +83,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Ustawienia Systemu", path: "/dashboard/admin/settings", icon: "⚙️", requiredPermission: "manageSettings" },
         { name: "Role i Uprawnienia", path: "/dashboard/admin/roles", icon: "🔑", requiredPermission: "manageRoles" },
         { name: "Centrum Spraw Budowy", path: "/dashboard/claims", icon: "⚖️", requiredPermission: ["viewClaims", "approveProjectCloseouts"] },
+        { name: "🗂️ Archiwum Tarnów", path: "/dashboard/tarnow-archive", icon: "🗂️", requiredPermission: "tarnowArchive" },
     ];
 
     // Funkcja filtrująca menu - CZYSTA LOGIKA UPRAWNIEŃ (obsługuje tablice)

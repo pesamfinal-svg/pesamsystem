@@ -57,6 +57,10 @@ export const ALL_PERMISSIONS = {
 
     // --- CHAT AI AGENT ---
     useChatAI: "Chat z AI: Dostęp do Asystenta Magazynowego (Analiza danych głosem/tekstem)",
+
+    // --- ARCHIWUM TARNÓW ---
+    tarnowArchive: "Tarnów: Archiwum dokumentów (Nagrywanie + generowanie DOCX)",
+    tarnowDokumenty: "Tarnów: Dokumenty archiwalne (przeglądanie i zarządzanie)",
 };
 
 export type PermissionKey = keyof typeof ALL_PERMISSIONS;

@@ -201,6 +201,26 @@ export default function PlacPage() {
               <span>→</span>
             </div>
           </Link>
+
+          {/* Kafelek 5: Archiwum Tarnów */}
+          <Link
+            href="/plac/tarnow"
+            className="group relative block rounded-3xl border border-rose-500/40 bg-gradient-to-br from-rose-500/15 via-slate-900 to-slate-950 p-5 min-h-[170px] shadow-lg hover:border-rose-400 active:scale-[0.98] transition flex flex-col justify-between sm:col-span-2"
+          >
+            <div>
+              <div className="text-4xl mb-2" aria-hidden="true">🗂️</div>
+              <h3 className="text-lg font-black text-rose-400 group-hover:text-rose-300 transition">
+                Nagraj Teczkę — Archiwum Tarnów
+              </h3>
+              <p className="mt-1 text-xs text-slate-300 leading-relaxed">
+                Nagraj filmik teczki telefonem → AI uzupełni wykaz dokumentów → pobierz gotowy Word
+              </p>
+            </div>
+            <div className="mt-4 inline-flex items-center gap-1.5 self-start rounded-xl bg-rose-600 hover:bg-rose-500 px-3.5 py-2 text-xs font-black text-white shadow">
+              <span>🎥 Nagraj teczkę</span>
+              <span>→</span>
+            </div>
+          </Link>
         </div>
       </main>
 
