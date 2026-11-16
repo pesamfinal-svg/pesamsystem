@@ -6,6 +6,8 @@ import { collection, getDocs, doc, setDoc, query, where, getDoc, updateDoc, runT
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
+import PrintableCloseoutReport from "@/components/closeouts/PrintableCloseoutReport";
+import LiquidationModal from "@/components/closeouts/LiquidationModal";
 
 interface CloseoutDoc {
     id: string;
@@ -55,6 +57,8 @@ export default function CloseoutApprovalsPage() {
     const [managerDeclarationChecked, setManagerDeclarationChecked] = useState(false);
     const [isDirectorSignModalOpen, setIsDirectorSignModalOpen] = useState(false);
     const [directorDeclarationChecked, setDirectorDeclarationChecked] = useState(false);
+    const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+    const [isLiquidationModalOpen, setIsLiquidationModalOpen] = useState(false);
 
     useEffect(() => {
         fetchCloseouts();
@@ -109,6 +113,36 @@ export default function CloseoutApprovalsPage() {
         } catch (error) {
             console.error("Błąd anulowania rozliczenia:", error);
             alert("Wystąpił błąd podczas anulowania: " + error);
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    // Cofnięcie rozliczenia do stanu szkicu roboczego (np. gdy za parę dni ma zjechać zaległy sprzęt)
+    const handleRevertToDraft = async (closeout: CloseoutDoc) => {
+        if (!window.confirm("↩️ COFNIĘCIE ROZLICZENIA DO EDYCJI\n\nCzy chcesz wycofać to rozliczenie z kolejki Zatwierdzeń do stanu szkicu roboczego?\n\nPozwoli to magazynierowi na przyjęcie zjeżdżającego sprzętu (np. ogrodzenia) i zaktualizowanie ilości w audycie bez utraty dotychczasowych notatek i wycen.")) return;
+
+        setIsProcessing(true);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const closeoutRef = doc(db, "closeouts", closeout.id);
+                transaction.update(closeoutRef, {
+                    status: "SZKIC_ROBOCZY",
+                    isDraft: true,
+                    draftSavedAt: new Date().toISOString(),
+                    draftSavedByName: user?.firstName ? `${user.firstName} ${user.lastName} (Cofnięto z kolejki Zatwierdzeń)` : "Audytor"
+                });
+
+                const siteRef = doc(db, "sites", closeout.siteId);
+                transaction.update(siteRef, { status: "aktywna" });
+            });
+
+            alert("↩️ Rozliczenie zostało pomyślnie cofnięte do edycji (Szkic roboczy)!\n\nBudowa pojawi się ponownie jako aktywna w module 'Rozliczenia Projektów'. Po przyjęciu sprzętu magazynier może zaktualizować audyt i wysłać czyste rozliczenie.");
+            setSelectedCloseout(null);
+            fetchCloseouts();
+        } catch (error) {
+            console.error("Błąd cofania rozliczenia:", error);
+            alert("Wystąpił błąd podczas cofania: " + error);
         } finally {
             setIsProcessing(false);
         }
@@ -620,11 +654,10 @@ export default function CloseoutApprovalsPage() {
                                                         <p className="font-bold text-slate-900 text-sm">{item.name}</p>
                                                         <p className="text-[10px] text-slate-500 font-mono">Nr Mag: {item.inventoryNumber || "-"}</p>
                                                     </div>
-                                                    <span className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${
-                                                        item.isRepaired || item.status === "sprawne"
+                                                    <span className={`text-[10px] font-black px-2 py-0.5 rounded uppercase ${item.isRepaired || item.status === "sprawne"
                                                             ? "bg-green-100 text-green-800 border border-green-200"
                                                             : "bg-red-100 text-red-800 border border-red-200"
-                                                    }`}>
+                                                        }`}>
                                                         {item.isRepaired || item.status === "sprawne" ? "✅ Naprawione w serwisie" : `⚠️ W bazie: ${item.status || "Uszkodzone"}`}
                                                     </span>
                                                 </div>
@@ -689,15 +722,41 @@ export default function CloseoutApprovalsPage() {
 
                                 <div className="flex gap-2 w-full sm:w-auto flex-wrap justify-end">
                                     <button
-                                        onClick={() => window.print()}
-                                        className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold px-4 py-3 rounded-xl transition flex items-center gap-1.5 shadow-sm"
+                                        onClick={() => setIsPrintModalOpen(true)}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-4 py-3 rounded-xl transition flex items-center gap-1.5 shadow-md cursor-pointer"
+                                        title="Otwórz oficjalny podgląd arkusza A4 i wydrukuj do PDF bez pasków bocznych"
                                     >
-                                        🖨️ Drukuj Raport (PDF)
+                                        <span>👁️</span> Podgląd Raportu (PDF)
                                     </button>
+
+                                    {/* PRZYCISK WERYFIKACJI LIKWIDACJI DLA MAGAZYNIERA */}
+                                    <button
+                                        onClick={() => setIsLiquidationModalOpen(true)}
+                                        className="bg-red-700 hover:bg-red-600 text-white text-xs font-bold px-4 py-3 rounded-xl transition flex items-center gap-1.5 shadow-md cursor-pointer"
+                                        title="Weryfikacja stanów magazynowych przed zdjęciem strat i wydruk Protokołu Likwidacji (PL)"
+                                    >
+                                        <span>⚖️</span> Weryfikacja Likwidacji (PL)
+                                    </button>
+
                                     {canManageGlobally && (
-                                        <button onClick={() => handleCancelCloseout(selectedCloseout)} disabled={isProcessing} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold px-4 py-3 rounded-xl transition mr-auto">
-                                            🗑️ Anuluj rozliczenie
-                                        </button>
+                                        <>
+                                            <button
+                                                onClick={() => handleRevertToDraft(selectedCloseout)}
+                                                disabled={isProcessing}
+                                                className="bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 text-xs font-bold px-3 py-3 rounded-xl transition flex items-center gap-1"
+                                                title="Cofnij do szkicu roboczego, jeśli za parę dni ma zjechać zaległy sprzęt"
+                                            >
+                                                <span>↩️</span> Cofnij do edycji (Czeka na sprzęt)
+                                            </button>
+                                            <button
+                                                onClick={() => handleCancelCloseout(selectedCloseout)}
+                                                disabled={isProcessing}
+                                                className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-bold px-3 py-3 rounded-xl transition flex items-center gap-1"
+                                                title="Całkowicie skasuj rozliczenie i przywróć budowę"
+                                            >
+                                                <span>🗑️</span> Anuluj
+                                            </button>
+                                        </>
                                     )}
 
                                     {isSandboxActive && (
@@ -837,11 +896,10 @@ export default function CloseoutApprovalsPage() {
                                 type="button"
                                 onClick={handleSignAsManager}
                                 disabled={!managerDeclarationChecked || isProcessing}
-                                className={`px-6 py-3 rounded-xl text-xs font-black uppercase tracking-wider shadow-lg transition flex items-center gap-2 ${
-                                    managerDeclarationChecked && !isProcessing
+                                className={`px-6 py-3 rounded-xl text-xs font-black uppercase tracking-wider shadow-lg transition flex items-center gap-2 ${managerDeclarationChecked && !isProcessing
                                         ? "bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30"
                                         : "bg-slate-300 text-slate-500 cursor-not-allowed"
-                                }`}
+                                    }`}
                             >
                                 {isProcessing ? "Rejestracja podpisu..." : "✍️ Złóż Podpis Cyfrowy"}
                             </button>
@@ -945,17 +1003,42 @@ export default function CloseoutApprovalsPage() {
                                 type="button"
                                 onClick={handleSignAsDirector}
                                 disabled={!directorDeclarationChecked || isProcessing}
-                                className={`px-6 py-3 rounded-xl text-xs font-black uppercase tracking-wider shadow-lg transition flex items-center gap-2 ${
-                                    directorDeclarationChecked && !isProcessing
+                                className={`px-6 py-3 rounded-xl text-xs font-black uppercase tracking-wider shadow-lg transition flex items-center gap-2 ${directorDeclarationChecked && !isProcessing
                                         ? "bg-green-600 hover:bg-green-700 text-white shadow-green-500/30"
                                         : "bg-slate-300 text-slate-500 cursor-not-allowed"
-                                }`}
+                                    }`}
                             >
                                 {isProcessing ? "Zamykanie projektu..." : "🔒 Autoryzuj i Zamknij Projekt"}
                             </button>
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* DEDYKOWANY PODGLĄD I WYDRUK CZYSTEGO RAPORTU A4 (BEZ SIDEBARA) */}
+            {selectedCloseout && (
+                <PrintableCloseoutReport
+                    closeout={selectedCloseout}
+                    isOpen={isPrintModalOpen}
+                    onClose={() => setIsPrintModalOpen(false)}
+                />
+            )}
+
+            {/* OKNO WERYFIKACJI LIKWIDACJI DLA MAGAZYNIERA + WYDRUK PROTOKOŁU PL */}
+            {selectedCloseout && (
+                <LiquidationModal
+                    isOpen={isLiquidationModalOpen}
+                    onClose={() => setIsLiquidationModalOpen(false)}
+                    siteId={selectedCloseout.siteId}
+                    siteName={selectedCloseout.siteName}
+                    closeoutId={selectedCloseout.id}
+                    managerName={selectedCloseout.managerName}
+                    directorName={selectedCloseout.directorName}
+                    initialDebts={selectedCloseout.debtsList || []}
+                    onLiquidationComplete={() => {
+                        fetchCloseouts();
+                    }}
+                />
             )}
         </div>
     );

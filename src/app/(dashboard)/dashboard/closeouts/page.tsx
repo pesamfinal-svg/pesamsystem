@@ -5,6 +5,7 @@ import { collection, getDocs, getDoc, doc, setDoc, query, where, updateDoc } fro
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
+import PrintableCloseoutReport from "@/components/closeouts/PrintableCloseoutReport";
 
 interface Site { id: string; name: string; status?: string; location?: string; }
 interface InventoryItem {
@@ -118,6 +119,7 @@ export default function ProjectCloseoutsPage() {
     const [selectedArchived, setSelectedArchived] = useState<any | null>(null);
     const [archiveSearch, setArchiveSearch] = useState("");
     const [archiveLoading, setArchiveLoading] = useState(false);
+    const [isArchivePrintOpen, setIsArchivePrintOpen] = useState(false);
 
     // Modal doprecyzowania AI: przed wywołaniem wyceny, pokaż pozycje bez cen
     // i pozwól użytkownikowi wpisać markę/model lub zapamiętaną cenę
@@ -1228,8 +1230,11 @@ export default function ProjectCloseoutsPage() {
                                 </div>
 
                                 <div className="pt-4 border-t flex justify-end">
-                                    <button onClick={() => window.print()} className="bg-slate-900 hover:bg-slate-800 text-white font-black px-6 py-2.5 rounded-xl text-xs uppercase">
-                                        🖨️ Drukuj Raport (PDF)
+                                    <button
+                                        onClick={() => setIsArchivePrintOpen(true)}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-black px-6 py-2.5 rounded-xl text-xs uppercase shadow transition flex items-center gap-2 cursor-pointer"
+                                    >
+                                        <span>👁️</span> Podgląd / Drukuj Raport (PDF)
                                     </button>
                                 </div>
                             </div>
@@ -2118,6 +2123,15 @@ export default function ProjectCloseoutsPage() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* DEDYKOWANY PODGLĄD I WYDRUK RAPORTU Z ARCHIWUM */}
+            {selectedArchived && (
+                <PrintableCloseoutReport
+                    closeout={selectedArchived}
+                    isOpen={isArchivePrintOpen}
+                    onClose={() => setIsArchivePrintOpen(false)}
+                />
             )}
         </div>
     );
