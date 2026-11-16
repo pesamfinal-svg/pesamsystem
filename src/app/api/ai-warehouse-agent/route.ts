@@ -179,12 +179,21 @@ export async function POST(req: Request) {
         const systemInstruction = `
 Jesteś Głównym Analitykiem i Doradcą Systemu Magazynowo-Flotowego PESAM.
 Masz dostęp do deterministycznych narzędzi agregujących dane w czasie rzeczywistym.
-Jeśli użytkownik zadaje pytanie o:
-- naprawy, serwisy, koszty, wydatki na auta, porównanie marek -> wywołaj getRepairsSummary
-- stany magazynowe, resztki w strefach, braki materiałowe -> wywołaj getInventorySummary
-- flotę, liczbę pojazdów, badania techniczne, rejestracje -> wywołaj getFleetOverview
-- budowy i kierowników -> wywołaj getSitesOverview
-- spory (CLS), kary i rozliczenia zamknięć -> wywołaj getClaimsAndCloseoutsSummary
+
+ZASADY DOBORU NARZĘDZI:
+1. Pytania o konkretny pojazd, numer rejestracyjny lub historię napraw (np. "pokaż naprawy dla RDE 04057", "historia serwisu rde...", "co było naprawiane w Iveco")
+   -> OBOWIĄZKOWO wywołaj: getVehicleRepairsHistory({ registration: "..." })
+2. Pytania o łączne koszty napraw, wydatki serwisowe, sumy wg kategorii lub marek (np. "ile kosztowały naprawy Iveco", "łączne koszty napraw", "wykres napraw")
+   -> wywołaj: getRepairsSummary
+3. Pytania o stany magazynowe, resztki w strefach, braki materiałowe
+   -> wywołaj: getInventorySummary
+4. Pytania o stan floty, liczbę aut, terminy badań technicznych, rejestracje
+   -> wywołaj: getFleetOverview
+5. Pytania o budowy i kierowników
+   -> wywołaj: getSitesOverview
+6. Pytania o spory (CLS), kary i rozliczenia zamknięć
+   -> wywołaj: getClaimsAndCloseoutsSummary
+
 Jeśli to zwykłe powitanie (np. "Cześć", "Dzień dobry") lub rozmowa ogólna -> odpowiedz krótko i uprzejmie po polsku bez wywoływania narzędzi.
 `;
 
@@ -252,16 +261,17 @@ Jeśli to zwykłe powitanie (np. "Cześć", "Dzień dobry") lub rozmowa ogólna 
         const presenterPrompt = `
 Pytanie użytkownika: "${latestQuestion}"
 Użyte narzędzie: ${executedToolName}
-Dane zagregowane z bazy PESAM (JSON):
+Dane pobrane z bazy PESAM (JSON):
 ${JSON.stringify(toolData)}
 
 ZADANIE:
-1. Przygotuj zwięzłą, konkretną odpowiedź w języku polskim z podsumowaniem kluczowych liczb (w polu 'reply').
-2. Jeśli dane nadają się do wizualizacji, stwórz widget w obiekcie 'widget':
-   - 'chart' (bar/pie/line): jeśli mamy podział na kategorie, strefy, marki lub miesiące.
-   - 'table': jeśli to lista pozycji (np. lista aut, budów).
-   - 'kpi': jeśli to 1-4 kluczowe liczby podsumowujące (np. łączny koszt, ilość napraw, średnia).
-3. Etykiety i tytuły muszą być po polsku. Kwoty w PLN.
+1. Przygotuj zwięzłą, konkretną odpowiedź w języku polskim z podsumowaniem (w polu 'reply').
+2. Dobierz optymalny widget w obiekcie 'widget':
+   - Dla historii napraw konkretnego pojazdu (getVehicleRepairsHistory): preferuj 'table' z kolumnami ["Data", "Kategoria", "Koszt PLN", "Przebieg", "Opis / Warsztat"] oraz wierszami z danymi napraw. Jeśli napraw jest 0, ustaw widget: null.
+   - Dla podsumowań i agregacji kosztów (getRepairsSummary): 'chart' (bar/pie/line) lub 'kpi'.
+   - Dla stanów magazynowych (getInventorySummary): 'chart' (bar) lub 'table'.
+   - Dla floty (getFleetOverview): 'table' lub 'kpi'.
+3. Etykiety i tytuły muszą być po polsku. Kwoty w PLN z separatorem.
 `;
 
         const presenterRes = await ai.models.generateContent({

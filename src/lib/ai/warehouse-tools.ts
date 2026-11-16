@@ -12,11 +12,36 @@ import { Type, FunctionDeclaration } from '@google/genai';
 
 export const WAREHOUSE_TOOL_DECLARATIONS: FunctionDeclaration[] = [
     {
-        name: 'getRepairsSummary',
-        description: 'Zwraca zagregowane koszty napraw i serwisów pojazdów floty PESAM (sumy, ilości, średnie). Użyj, gdy użytkownik pyta o koszty napraw, wydatki serwisowe, awarie lub porównanie marek pojazdów.',
+        name: 'getVehicleRepairsHistory',
+        description: 'Zwraca szczegółową historię napraw i serwisów dla KONKRETNEGO pojazdu lub numeru rejestracyjnego (np. "RDE 04057", "rde04057", "04057", "Iveco"). Zwraca daty, koszty, kategorie, przebiegi i opisy wykonanych prac.',
         parameters: {
             type: Type.OBJECT,
             properties: {
+                registration: {
+                    type: Type.STRING,
+                    description: 'Numer rejestracyjny pojazdu (np. "RDE 04057", "RDE04057", "04057").'
+                },
+                brand: {
+                    type: Type.STRING,
+                    description: 'Marka lub model jeśli numer nie jest podany (np. "Iveco Daily").'
+                },
+                limit: {
+                    type: Type.NUMBER,
+                    description: 'Maksymalna liczba napraw do zwrócenia (domyślnie 50).'
+                }
+            }
+        }
+    },
+    {
+        name: 'getRepairsSummary',
+        description: 'Zwraca zagregowane koszty napraw i serwisów pojazdów floty PESAM (sumy, ilości, średnie). Użyj, gdy użytkownik pyta o łączne koszty napraw, wydatki serwisowe, awarie lub porównanie marek pojazdów.',
+        parameters: {
+            type: Type.OBJECT,
+            properties: {
+                registration: {
+                    type: Type.STRING,
+                    description: 'Filtruj po numerze rejestracyjnym (np. "RDE 04057").'
+                },
                 brand: {
                     type: Type.STRING,
                     description: 'Filtruj po marce pojazdu (np. "Iveco", "Ford", "Renault"). Pozostaw puste dla całej floty.'
@@ -65,13 +90,17 @@ export const WAREHOUSE_TOOL_DECLARATIONS: FunctionDeclaration[] = [
     },
     {
         name: 'getFleetOverview',
-        description: 'Zwraca zestawienie floty pojazdów PESAM: łączną liczbę aut, podział na marki, modele oraz pojazdy wymagające pilnego badania technicznego.',
+        description: 'Zwraca zestawienie floty pojazdów PESAM: łączną liczbę aut, podział na marki, modele, numery rejestracyjne oraz pojazdy wymagające pilnego badania technicznego.',
         parameters: {
             type: Type.OBJECT,
             properties: {
                 brand: {
                     type: Type.STRING,
                     description: 'Filtruj wg marki (np. "Iveco", "Ford"). Pozostaw puste dla całej floty.'
+                },
+                registration: {
+                    type: Type.STRING,
+                    description: 'Szukaj konkretnego numeru rejestracyjnego.'
                 },
                 needsInspectionOnly: {
                     type: Type.BOOLEAN,
@@ -110,13 +139,114 @@ export const WAREHOUSE_TOOL_DECLARATIONS: FunctionDeclaration[] = [
 
 // ─── IMPLEMENTACJE WYKONAWCZE W TYPESCRIPT ───────────────────────────────────
 
+function normalizePlate(val?: string): string {
+    return (val || '').replace(/[\s\-_]/g, '').toLowerCase();
+}
+
+/**
+ * Pobiera szczegółową historię napraw dla konkretnego pojazdu po rejestracji lub marce
+ */
+export async function executeVehicleRepairsHistory(args: {
+    registration?: string;
+    brand?: string;
+    limit?: number;
+}) {
+    const cleanReg = normalizePlate(args.registration);
+    const limitVal = args.limit || 50;
+
+    // 1. Pobierz pojazdy i znajdź pasujący
+    const vehiclesSnap = await adminDb.collection('vehicles').get();
+    let matchedVehicle: { id: string; brand: string; model: string; reg: string; initialMileage: number } | null = null;
+    const allRegistrations: string[] = [];
+
+    vehiclesSnap.docs.forEach(doc => {
+        const d = doc.data();
+        const reg = d.registration || '';
+        const vBrand = d.brand || '';
+        const vModel = d.model || '';
+        allRegistrations.push(reg);
+
+        const normalizedDocReg = normalizePlate(reg);
+
+        if (cleanReg && (normalizedDocReg === cleanReg || normalizedDocReg.includes(cleanReg) || cleanReg.includes(normalizedDocReg))) {
+            matchedVehicle = {
+                id: doc.id,
+                brand: vBrand,
+                model: vModel,
+                reg,
+                initialMileage: Number(d.initialMileage) || 0
+            };
+        } else if (!matchedVehicle && args.brand && `${vBrand} ${vModel}`.toLowerCase().includes(args.brand.toLowerCase())) {
+            matchedVehicle = {
+                id: doc.id,
+                brand: vBrand,
+                model: vModel,
+                reg,
+                initialMileage: Number(d.initialMileage) || 0
+            };
+        }
+    });
+
+    if (!matchedVehicle) {
+        return {
+            found: false,
+            message: `Nie znaleziono pojazdu o rejestracji "${args.registration || args.brand}".`,
+            availableVehiclesSample: allRegistrations.filter(Boolean).slice(0, 10)
+        };
+    }
+
+    const targetVehicle = matchedVehicle as { id: string; brand: string; model: string; reg: string; initialMileage: number };
+
+    // 2. Pobierz naprawy powiązane z tym pojazdem
+    const repairsSnap = await adminDb.collection('repairs')
+        .where('vehicleId', '==', targetVehicle.id)
+        .limit(200)
+        .get();
+
+    let totalCost = 0;
+    const repairsList = repairsSnap.docs.map(doc => {
+        const d = doc.data();
+        const cost = Number(d.cost) || 0;
+        totalCost += cost;
+        return {
+            id: doc.id,
+            date: d.date || 'Brak daty',
+            cost: Math.round(cost * 100) / 100,
+            category: d.category || 'Ogólna',
+            mileage: d.mileage ? `${d.mileage} km` : '—',
+            comments: d.comments || 'Brak opisu',
+            location: d.location || '—',
+            partsList: Array.isArray(d.partsList) ? d.partsList.join(', ') : (d.partsList || '')
+        };
+    });
+
+    // Sortuj naprawy od najnowszej do najstarszej
+    repairsList.sort((a, b) => b.date.localeCompare(a.date));
+
+    return {
+        found: true,
+        vehicle: {
+            brand: targetVehicle.brand,
+            model: targetVehicle.model,
+            registration: targetVehicle.reg,
+            initialMileage: targetVehicle.initialMileage
+        },
+        repairsCount: repairsList.length,
+        totalCostPLN: Math.round(totalCost * 100) / 100,
+        averageCostPLN: repairsList.length > 0 ? Math.round((totalCost / repairsList.length) * 100) / 100 : 0,
+        repairs: repairsList.slice(0, limitVal)
+    };
+}
+
 export async function executeRepairsSummary(args: {
+    registration?: string;
     brand?: string;
     year?: number;
     category?: string;
     groupBy?: 'category' | 'vehicle' | 'month' | 'year';
 }) {
     const groupBy = args.groupBy || 'category';
+    const cleanReg = normalizePlate(args.registration);
 
     // 1. Pobierz pojazdy, by powiązać vehicleId -> marka / model / rejestracja
     const vehiclesSnap = await adminDb.collection('vehicles').get();
@@ -148,6 +278,14 @@ export async function executeRepairsSummary(args: {
     repairsSnap.docs.forEach(doc => {
         const rep = doc.data();
         const vInfo = vehicleMap.get(rep.vehicleId) || { brand: 'Inne', model: '', reg: 'Brak' };
+
+        // Filtr rejestracji
+        if (cleanReg) {
+            const vRegClean = normalizePlate(vInfo.reg);
+            if (!vRegClean.includes(cleanReg) && !cleanReg.includes(vRegClean)) {
+                return;
+            }
+        }
 
         // Filtr marki
         if (args.brand && !vInfo.brand.toLowerCase().includes(args.brand.toLowerCase())) {
@@ -190,10 +328,11 @@ export async function executeRepairsSummary(args: {
             avgCost: Math.round((val.totalCost / (val.count || 1)) * 100) / 100
         }))
         .sort((a, b) => b.totalCost - a.totalCost)
-        .slice(0, 15); // max 15 najważniejszych kategorii/aut dla czytelności
+        .slice(0, 15);
 
     return {
         filterApplied: {
+            registration: args.registration || 'Wszystkie',
             brand: args.brand || 'Wszystkie',
             year: args.year || 'Wszystkie',
             category: args.category || 'Wszystkie',
@@ -263,10 +402,12 @@ export async function executeInventorySummary(args: {
 
 export async function executeFleetOverview(args: {
     brand?: string;
+    registration?: string;
     needsInspectionOnly?: boolean;
 }) {
     const snap = await adminDb.collection('vehicles').get();
     const today = new Date().toISOString().split('T')[0];
+    const cleanReg = normalizePlate(args.registration);
 
     const vehicles: any[] = [];
     const brandCounts = new Map<string, number>();
@@ -274,8 +415,13 @@ export async function executeFleetOverview(args: {
     snap.docs.forEach(doc => {
         const v = doc.data();
         const brand = v.brand || 'Inne';
+        const reg = v.registration || '';
 
         if (args.brand && !brand.toLowerCase().includes(args.brand.toLowerCase())) {
+            return;
+        }
+
+        if (cleanReg && !normalizePlate(reg).includes(cleanReg)) {
             return;
         }
 
@@ -302,7 +448,7 @@ export async function executeFleetOverview(args: {
     return {
         totalVehicles: vehicles.length,
         brandsBreakdown: Array.from(brandCounts.entries()).map(([brand, count]) => ({ brand, count })),
-        vehiclesSample: vehicles.slice(0, 10),
+        vehiclesSample: vehicles.slice(0, 15),
         urgentInspectionsCount: vehicles.filter(v => v.isUrgentInspection).length
     };
 }
@@ -349,6 +495,8 @@ export async function executeClaimsAndCloseoutsSummary(args: { status?: string }
 
 export async function dispatchWarehouseTool(toolName: string, args: any) {
     switch (toolName) {
+        case 'getVehicleRepairsHistory':
+            return await executeVehicleRepairsHistory(args || {});
         case 'getRepairsSummary':
             return await executeRepairsSummary(args || {});
         case 'getInventorySummary':
