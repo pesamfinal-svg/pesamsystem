@@ -1,11 +1,14 @@
 'use client';
 // src/app/plac/tarnow/page.tsx
-// Mobilny moduł Archiwum Tarnów — nagrywanie teczki telefonem lub bezpośrednio w przeglądarce
+// Mobilny moduł Archiwum Tarnów — nagrywanie telefonem i natychmiastowy zapis do bazy dla komputera
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import Link from 'next/link';
+import { useAuth } from '@/lib/auth/AuthContext';
+import { db } from '@/lib/firebase/config';
+import { collection, addDoc } from 'firebase/firestore';
 
-type Step = 'idle' | 'recording' | 'preview' | 'analyzing' | 'form' | 'downloading' | 'done';
+type Step = 'idle' | 'recording' | 'preview' | 'analyzing' | 'form' | 'saving' | 'downloading' | 'done';
 
 interface DokumentRow {
     nazwa: string;
@@ -24,6 +27,7 @@ interface FormData {
 }
 
 export default function TarnowMobilePage() {
+    const { user } = useAuth();
     const [step, setStep] = useState<Step>('idle');
     const [error, setError] = useState<string | null>(null);
     const [recordingTime, setRecordingTime] = useState(0);
@@ -218,7 +222,37 @@ export default function TarnowMobilePage() {
         }
     }, []);
 
-    // Pobranie pliku DOCX
+    // ZAPIS DO FIRESTORE (dla komputera w biurze)
+    const saveToArchive = async () => {
+        setStep('saving');
+        setError(null);
+        try {
+            const userFullName = user
+                ? `${user.firstName || ''} ${user.lastName || ''}`.trim()
+                : 'Pracownik';
+
+            await addDoc(collection(db, 'tarnow_archive'), {
+                pracownik: formData.pracownik.trim() || 'Bez nazwiska',
+                teczkaOpis: formData.teczkaOpis.trim() || 'Teczka akt osobowych',
+                dataOd: formData.dataOd || '',
+                dataDo: formData.dataDo || '',
+                dokumenty: formData.dokumenty.filter(d => d.nazwa.trim().length > 0),
+                uwagi: formData.uwagi || '',
+                dataWypelnienia: formData.dataWypelnienia,
+                createdBy: userFullName,
+                createdAt: new Date().toISOString(),
+                status: 'GOTOWE',
+            });
+
+            setStep('done');
+        } catch (err) {
+            console.error('Błąd zapisu w archiwum:', err);
+            setError(err instanceof Error ? err.message : 'Błąd zapisu teczki w systemie');
+            setStep('form');
+        }
+    };
+
+    // Opcjonalne pobranie pliku DOCX bezpośrednio na telefon
     const downloadDocx = async () => {
         setStep('downloading');
         setError(null);
@@ -290,7 +324,7 @@ export default function TarnowMobilePage() {
                             <h1 className="text-base font-black text-rose-400 uppercase tracking-wider leading-tight">
                                 🗂️ Archiwum Tarnów
                             </h1>
-                            <p className="text-[10px] text-slate-400 font-bold">Wykaz dokumentów akt osobowych</p>
+                            <p className="text-[10px] text-slate-400 font-bold">Nagrywanie teczek · Zapis do komputera</p>
                         </div>
                     </div>
                     {step !== 'idle' && (
@@ -345,8 +379,7 @@ export default function TarnowMobilePage() {
                             <div className="text-5xl mb-3">📁</div>
                             <h2 className="text-xl font-black text-white">Nagraj Teczkę Personalną</h2>
                             <p className="mt-2 text-xs text-slate-300 leading-relaxed">
-                                AI rozpozna <b>typy dokumentów</b> (życiorys, ZUS, świadectwa pracy, angaże) 
-                                i przygotuje gotowy do podpisu dokument Word.
+                                Nagraj filmik telefonem. AI uzupełni wykaz i <b>od razu wyśle go na komputer</b> do pobrania w Wordzie!
                             </p>
                         </div>
 
@@ -387,17 +420,18 @@ export default function TarnowMobilePage() {
                         </div>
 
                         <div className="rounded-2xl border border-slate-800/80 bg-slate-900/60 p-4 text-xs text-slate-400 space-y-1.5">
-                            <p className="font-bold text-slate-300">💡 Wskazówka dla archiwisty:</p>
-                            <p>Przekładaj kartki powoli (ok. 2–3 sekundy na dokument). AI skupia się na <b>nagłówkach i rodzajach pism</b>, a nie na drobnej treści.</p>
+                            <p className="font-bold text-slate-300">💡 Jak to działa:</p>
+                            <p>1. Nagrywasz teczkę telefonem.</p>
+                            <p>2. AI rozpoznaje dokumenty (życiorys, świadectwa, ZUS...).</p>
+                            <p>3. Zapisujesz jednym kliknięciem — <b>plik Word czeka na Ciebie w biurze na komputerze</b>.</p>
                         </div>
                     </div>
                 )}
 
-                {/* ══════════ KROK 2: NAGRYWANIE LIVE W PRZEGLĄDARCE ══════════ */}
+                {/* ══════════ KROK 2: NAGRYWANIE LIVE ══════════ */}
                 {step === 'recording' && (
                     <div className="space-y-4">
                         <div className="relative rounded-3xl overflow-hidden bg-black border-2 border-rose-500 shadow-2xl aspect-video flex items-center justify-center">
-                            {/* Podgląd kamery z wymuszonym odtwarzaniem */}
                             <video
                                 ref={(el) => {
                                     videoRef.current = el;
@@ -412,7 +446,6 @@ export default function TarnowMobilePage() {
                                 className="w-full h-full object-cover"
                             />
 
-                            {/* Badge nagrywania */}
                             <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/80 backdrop-blur-md rounded-full px-3 py-1.5 border border-red-500/40">
                                 <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
                                 <span className="text-xs font-black text-white">REC {formatTime(recordingTime)}</span>
@@ -483,21 +516,23 @@ export default function TarnowMobilePage() {
                         <div>
                             <p className="font-black text-white text-lg">AI kategoryzuje dokumenty...</p>
                             <p className="text-xs text-slate-400 mt-1 max-w-xs mx-auto">
-                                Rozpoznajemy typy pism (świadectwa, umowy, ZUS, życiorys) bez przepisywania zbędnej treści.
+                                Rozpoznajemy typy pism bez przepisywania zbędnej treści.
                             </p>
-                        </div>
-                        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-2 text-[11px] text-slate-400">
-                            Zwykle trwa to od 15 do 30 sekund
                         </div>
                     </div>
                 )}
 
-                {/* ══════════ KROK 5: EDYCJA I POBRANIE DOCX ══════════ */}
-                {(step === 'form' || step === 'downloading') && (
+                {/* ══════════ KROK 5: EDYCJA I ZAPIS NA KOMPUTER ══════════ */}
+                {(step === 'form' || step === 'saving' || step === 'downloading') && (
                     <div className="space-y-4">
                         <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-xs text-emerald-300 flex items-start gap-2">
                             <span className="text-base">✅</span>
-                            <span>AI rozpoznało dokumenty w teczce. Możesz poprawić dane i pobrać plik Word.</span>
+                            <div>
+                                <p className="font-bold">AI rozpoznało dokumenty!</p>
+                                <p className="text-[11px] text-emerald-400/90 mt-0.5">
+                                    Sprawdź nazwisko i kliknij poniżej, aby <b>wysłać teczkę do komputera</b>.
+                                </p>
+                            </div>
                         </div>
 
                         {/* Pracownik */}
@@ -617,62 +652,66 @@ export default function TarnowMobilePage() {
                             </button>
                         </div>
 
-                        {/* Uwagi archiwisty */}
-                        <div>
-                            <label className="block text-xs font-bold text-slate-400 uppercase tracking-wide mb-1.5">
-                                Uwagi ogólne (stan teczki)
-                            </label>
-                            <input
-                                type="text"
-                                value={formData.uwagi}
-                                onChange={e => setFormData(f => ({ ...f, uwagi: e.target.value }))}
-                                placeholder="np. Komplet dokumentów, stan dobry..."
-                                className="w-full bg-slate-900 border border-slate-700 rounded-2xl px-4 py-2.5 text-xs text-white focus:outline-none focus:ring-2 focus:ring-rose-500/50"
-                            />
-                        </div>
-
-                        {/* Przycisk pobierania DOCX */}
+                        {/* GŁÓWNY PRZYCISK: ZAPISZ W ARCHIWUM DLA KOMPUTERA */}
                         <button
-                            onClick={downloadDocx}
-                            disabled={step === 'downloading'}
-                            className={`w-full py-5 rounded-3xl font-black text-xl active:scale-95 transition shadow-xl flex items-center justify-center gap-3 ${
-                                step === 'downloading'
+                            onClick={saveToArchive}
+                            disabled={step === 'saving'}
+                            className={`w-full py-5 rounded-3xl font-black text-xl active:scale-95 transition shadow-xl flex items-center justify-center gap-3 border border-emerald-400/40 ${
+                                step === 'saving'
                                     ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
                                     : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/60'
                             }`}
                         >
-                            {step === 'downloading' ? (
+                            {step === 'saving' ? (
                                 <>
                                     <svg className="animate-spin h-6 w-6" viewBox="0 0 24 24" fill="none">
                                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                                     </svg>
-                                    <span>Tworzenie Word...</span>
+                                    <span>Zapisywanie w systemie...</span>
                                 </>
                             ) : (
                                 <>
-                                    <span>📥</span>
-                                    <span>Pobierz dokument Word (.docx)</span>
+                                    <span>💾</span>
+                                    <span>Zapisz w Archiwum Tarnów</span>
                                 </>
                             )}
                         </button>
+                        <p className="text-center text-[11px] text-slate-400 -mt-1">
+                            Teczka od razu pojawi się na Twoim komputerze w biurze
+                        </p>
+
+                        {/* Opcjonalny przycisk pobrania na telefon */}
+                        <div className="pt-2 text-center">
+                            <button
+                                onClick={downloadDocx}
+                                disabled={step === 'downloading'}
+                                className="text-xs text-slate-400 hover:text-slate-200 underline underline-offset-4"
+                            >
+                                {step === 'downloading' ? 'Generowanie...' : 'Pobierz kopię Word (.docx) na ten telefon'}
+                            </button>
+                        </div>
                     </div>
                 )}
 
                 {/* ══════════ KROK 6: SUKCES ══════════ */}
                 {step === 'done' && (
-                    <div className="flex flex-col items-center justify-center py-16 space-y-6 text-center">
-                        <div className="text-6xl animate-bounce">📄</div>
+                    <div className="flex flex-col items-center justify-center py-12 space-y-6 text-center">
+                        <div className="text-6xl animate-bounce">☁️✅</div>
                         <div>
-                            <h2 className="text-2xl font-black text-white">Plik Word pobrany!</h2>
-                            <p className="mt-2 text-xs text-slate-400 max-w-xs mx-auto">
-                                Dokument został zapisany w pamięci Twojego telefonu w folderze <b>Pobrane</b>.
+                            <h2 className="text-2xl font-black text-white">Teczka zapisana w systemie!</h2>
+                            <p className="mt-2 text-xs text-slate-300 max-w-xs mx-auto leading-relaxed">
+                                Wykaz dokumentów dla pracownika <b className="text-rose-400">{formData.pracownik || 'pracownika'}</b> został zapisany w chmurze.
                             </p>
                         </div>
 
-                        <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-xs text-emerald-300 max-w-xs w-full text-center">
-                            Pracownik: <b className="text-white text-sm block mt-0.5">{formData.pracownik || 'Bez nazwy'}</b>
-                            Pozycji w wykazie: <b className="text-white text-sm block mt-0.5">{formData.dokumenty.length}</b>
+                        <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-xs text-emerald-300 max-w-xs w-full text-left space-y-1">
+                            <p className="font-bold text-white flex items-center gap-1.5">
+                                <span>🖥️</span> Jak pobrać na komputerze:
+                            </p>
+                            <p className="text-slate-300">
+                                Wejdź w panelu PESAM na komputerze w <b>Archiwum Tarnów</b> — teczka już tam jest i możesz ją jednym kliknięciem pobrać w Wordzie!
+                            </p>
                         </div>
 
                         <button
