@@ -53,6 +53,7 @@ export const ALL_PERMISSIONS = {
 
     // --- WIDŻETY DASHBOARDU I MIEJSCA SKŁADOWANIA (PLAC / HALE) ---
     widgetStorageLocations: "Dashboard: Widżet Miejsca Składowania & Plac (Zapełnienie JPP)",
+    viewDirectorDashboard: "Dashboard: Dostęp do Kokpitu Zarządczego (Prezes / Dyrekcja)",
 
     // --- CHAT AI AGENT ---
     useChatAI: "Chat z AI: Dostęp do Asystenta Magazynowego (Analiza danych głosem/tekstem)",

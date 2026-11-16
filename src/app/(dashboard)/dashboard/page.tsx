@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 import { hasPermission } from "@/lib/auth/permissions";
 import Link from "next/link";
+import DirectorDashboardView from "@/components/dashboard/DirectorDashboardView";
 
 // --- INTERFEJSY ---
 interface HistoryEntry {
@@ -49,6 +50,9 @@ export default function DashboardPage() {
     const [pendingProtocolsCount, setPendingProtocolsCount] = useState(0);
     const [pendingWzCount, setPendingWzCount] = useState(0);
     const [loading, setLoading] = useState(true);
+
+    // Stan widoku Pulpitu: Kokpit Dyrekcji vs Widok Operacyjny Magazynu
+    const [dashboardView, setDashboardView] = useState<"DIRECTOR" | "OPERATIONAL">("DIRECTOR");
 
     // NOWE STANY DLA WIDŻETU MIEJSC SKŁADOWANIA (PLAC / HALE)
     const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
@@ -336,19 +340,63 @@ export default function DashboardPage() {
         return diffDays >= 0 && diffDays <= 30;
     });
 
+    const isExecutive = Boolean(user && (
+        hasPermission("viewDirectorDashboard", user.rolePermissions, user.permissionOverrides) ||
+        hasPermission("manageProjectCloseouts", user.rolePermissions, user.permissionOverrides) ||
+        user.roleId?.toLowerCase().includes("szef") ||
+        user.roleName?.toLowerCase().includes("szef") ||
+        user.roleId?.toLowerCase().includes("dyrektor") ||
+        user.roleName?.toLowerCase().includes("dyrektor") ||
+        user.email === "d.mytnik@pesam.pl" ||
+        user.email === "m.zaborniak@pesam.pl"
+    ));
+
     return (
         <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-fade-in">
-            {/* Witaj pracowniku (Zawsze widoczne na górze) */}
+            {/* Witaj pracowniku / Dyrektorze (Zawsze widoczne na górze) */}
             <div className="bg-white rounded-3xl p-6 border shadow-sm flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div>
                     <h1 className="text-3xl font-black text-slate-800 tracking-tight">Witaj, {user?.firstName || firebaseUser.email}! 👋</h1>
                     {user && (
-                        <p className="text-sm text-slate-500 mt-1">
-                            Twoja rola w systemie to: <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded text-xs uppercase tracking-wider">{user.roleName || user.roleId}</span>
+                        <p className="text-sm text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                            <span>Twoja rola w systemie:</span>
+                            <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded text-xs uppercase tracking-wider">{user.roleName || user.roleId}</span>
+                            {isExecutive && (
+                                <span className="bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded text-xs uppercase tracking-wider">Konto Zarządcze</span>
+                            )}
                         </p>
                     )}
                 </div>
-                <div className="text-slate-400 font-mono text-xs text-right">PESAM System v1.5 • {new Date().toLocaleDateString("pl-PL")}</div>
+                <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto justify-end">
+                    {/* PRZEŁĄCZNIK WIDOKU DLA ZARZĄDU / DYREKCJI */}
+                    {isExecutive && (
+                        <div className="flex bg-slate-100 p-1 rounded-2xl border border-slate-200 text-xs font-bold w-full sm:w-auto justify-center">
+                            <button
+                                type="button"
+                                onClick={() => setDashboardView("DIRECTOR")}
+                                className={`px-3 py-1.5 rounded-xl transition cursor-pointer ${
+                                    dashboardView === "DIRECTOR"
+                                        ? "bg-slate-900 text-white shadow-sm font-black"
+                                        : "text-slate-600 hover:text-slate-900"
+                                }`}
+                            >
+                                👔 Kokpit Dyrekcji
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setDashboardView("OPERATIONAL")}
+                                className={`px-3 py-1.5 rounded-xl transition cursor-pointer ${
+                                    dashboardView === "OPERATIONAL"
+                                        ? "bg-slate-900 text-white shadow-sm font-black"
+                                        : "text-slate-600 hover:text-slate-900"
+                                }`}
+                            >
+                                📦 Widok Magazynu
+                            </button>
+                        </div>
+                    )}
+                    <div className="text-slate-400 font-mono text-xs text-right hidden sm:block">PESAM System v1.5 • {new Date().toLocaleDateString("pl-PL")}</div>
+                </div>
             </div>
 
             {/* Ostrzeżenie o braku profilu w bazie Firestore */}
@@ -363,9 +411,18 @@ export default function DashboardPage() {
             )}
 
             {/* ========================================================================= */}
-            {/* OPCJA A: UŻYTKOWNIK POSIADA UPRAWNIENIA OPERACYJNE (Magazyn, Biuro, Budowy) */}
+            {/* WARIANT 1: KOKPIT DYREKCJI I PREZESA ZARZĄDU                              */}
             {/* ========================================================================= */}
-            {user && hasAnyOperationalPermission ? (
+            {user && isExecutive && dashboardView === "DIRECTOR" ? (
+                <DirectorDashboardView
+                    inventoryItems={items}
+                    sites={sites}
+                    onSwitchToOperational={() => setDashboardView("OPERATIONAL")}
+                />
+            ) : user && hasAnyOperationalPermission ? (
+                /* ========================================================================= */
+                /* WARIANT 2: WIDOK OPERACYJNY MAGAZYNU I BUDÓW                              */
+                /* ========================================================================= */
                 <div className="space-y-8">
                     {/* BANER ALERTO-NOTYFIKACJA O PRZEGLĄDACH TECHNICZNYCH & BHP */}
                     {(overdueBhpItems.length > 0 || upcomingBhpItems.length > 0) && (
