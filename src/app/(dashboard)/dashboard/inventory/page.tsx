@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth/AuthContext";
 import { hasPermission } from "@/lib/auth/permissions";
 import { RESIDUAL_MAIN_CATEGORIES, ResidualCategoryDef } from "@/lib/constants/residualCategories";
 import ClaimInvestigationModal from "@/components/claims/ClaimInvestigationModal";
+import BulkDetailedHistoryModal, { DetailedProtocolEntry } from "@/components/inventory/BulkDetailedHistoryModal";
 
 // --- INTERFEJSY ---
 interface HistoryEntry {
@@ -256,6 +257,13 @@ export default function InventoryPage() {
         warehouseNotes: string;
         declaredStatus: string;
     } | null>(null);
+
+    // SZCZEGÓŁOWA HISTORIA DLA PRZEDMIOTÓW BULK (PROTOKOŁY + BUDOWY)
+    const [isDetailedHistoryModalOpen, setIsDetailedHistoryModalOpen] = useState(false);
+    const [detailedHistoryItem, setDetailedHistoryItem] = useState<InventoryItem | null>(null);
+    const [detailedProtocols, setDetailedProtocols] = useState<DetailedProtocolEntry[]>([]);
+    const [detailedLoading, setDetailedLoading] = useState(false);
+    const [sitesDictionary, setSitesDictionary] = useState<Record<string, string>>({});
 
     const [imageFile, setImageFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
@@ -1422,12 +1430,13 @@ export default function InventoryPage() {
             const historySnap = await getDocs(query(collection(db, `inventory/${item.id}/history`), orderBy("date", "desc")));
             let rawHistory = historySnap.docs.map(d => d.data() as HistoryEntry);
 
-            // Jeśli to pozycja resztek budowlanych lub nie ma jeszcze wpisów w subkolekcji history:
-            // Skanujemy kolekcję protocols, aby odnaleźć z jakiej budowy przyszedł ten materiał i ile dokładnie
+            // Jeśli to pozycja resztek budowlanych, sprzęt BULK, lub nie ma jeszcze wpisów w subkolekcji history:
+            // Skanujemy kolekcję protocols, aby odnaleźć historię wydań i zwrotów
             const isResidual = item.category === "Pozostałości budowlane" || item.inventoryNumber === "RESZTKI" || (item as any).isResidual;
-            if (isResidual || rawHistory.length === 0) {
+            const isBulk = item.type === "BULK";
+            if (isResidual || isBulk || rawHistory.length === 0) {
                 try {
-                    const protocolsQ = query(collection(db, "protocols"), orderBy("createdAt", "desc"), limit(150));
+                    const protocolsQ = query(collection(db, "protocols"), orderBy("createdAt", "desc"), limit(250));
                     const protocolsSnap = await getDocs(protocolsQ);
                     const protocolHistories: HistoryEntry[] = [];
 
@@ -1438,16 +1447,18 @@ export default function InventoryPage() {
                         const cleanItemName = item.name.trim().toLowerCase();
                         const matchingItem = p.items.find((it: any) =>
                             it.inventoryId === item.id ||
+                            (item.inventoryNumber && it.inventoryNumber && String(it.inventoryNumber).trim().toLowerCase() === String(item.inventoryNumber).trim().toLowerCase()) ||
                             (it.name && it.name.trim().toLowerCase() === cleanItemName) ||
                             (it.name && cleanItemName.length >= 6 && (it.name.trim().toLowerCase().includes(cleanItemName) || cleanItemName.includes(it.name.trim().toLowerCase())))
                         );
 
                         if (matchingItem) {
-                            const qty = matchingItem.receivedQty ?? matchingItem.declaredQty ?? (item as any).availableQuantity ?? 1;
+                            const qty = Number(matchingItem.quantity ?? matchingItem.receivedQty ?? matchingItem.declaredQty ?? (item as any).availableQuantity ?? 1);
                             const unit = matchingItem.unit || item.unit || "szt.";
                             const docDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
                             const pId = p.protocolId || docSnap.id;
-                            const site = p.sourceName || (p.type === "WYDANIE" ? p.destinationName : "Magazyn");
+                            const isIssue = p.type === "WYDANIE";
+                            const site = isIssue ? (p.destinationName || "Budowa") : (p.sourceName || "Magazyn");
 
                             const alreadyInRaw = rawHistory.some(h =>
                                 (h.protocolId && h.protocolId === pId) ||
@@ -1458,13 +1469,15 @@ export default function InventoryPage() {
                                 protocolHistories.push({
                                     date: p.createdAt || new Date().toISOString(),
                                     documentDate: docDate,
-                                    type: p.documentSource === "PAPER" ? "ZWROT PAPIEROWY" : (p.type === "WYDANIE" ? "WYDANIE" : "ZWROT Z BUDOWY"),
+                                    type: p.documentSource === "PAPER" ? (isIssue ? "WYDANIE PAPIEROWE" : "ZWROT PAPIEROWY") : (isIssue ? "WYDANIE" : "ZWROT Z BUDOWY"),
                                     siteName: site,
                                     quantity: qty,
                                     unit: unit,
                                     protocolId: pId,
                                     residualNotes: p.residualNotes || matchingItem.warehouseNotes || "",
-                                    description: `Zwrócono ${qty} ${unit} z: ${site}. Protokół: ${pId}.${matchingItem.warehouseNotes ? ' Uwagi: ' + matchingItem.warehouseNotes : ''}`,
+                                    description: isIssue
+                                        ? `Wydano ${qty} ${unit} na budowę: ${site}. Protokół: ${pId}.${matchingItem.warehouseNotes ? ' Uwagi: ' + matchingItem.warehouseNotes : ''}`
+                                        : `Zwrócono ${qty} ${unit} z budowy: ${site}. Protokół: ${pId}.${matchingItem.warehouseNotes ? ' Uwagi: ' + matchingItem.warehouseNotes : ''}`,
                                     status: matchingItem.finalStatus || "sprawne",
                                     user: p.acceptedByName || p.createdByName || "Magazynier"
                                 });
@@ -1504,6 +1517,97 @@ export default function InventoryPage() {
             console.error("Błąd podczas otwierania karty urządzenia:", e);
         } finally {
             setItemHistoryLoading(false);
+        }
+    };
+
+    // =========================================================================
+    // MODUŁ: SZCZEGÓŁOWA HISTORIA DLA SPRZĘTU BULK
+    // =========================================================================
+    const openDetailedHistoryModal = async (item: InventoryItem) => {
+        setDetailedHistoryItem(item);
+        setIsDetailedHistoryModalOpen(true);
+        setDetailedLoading(true);
+
+        try {
+            let currentSites = sitesDictionary;
+            if (Object.keys(currentSites).length === 0) {
+                try {
+                    const sitesSnap = await getDocs(collection(db, "sites"));
+                    const dict: Record<string, string> = {};
+                    sitesSnap.docs.forEach(d => {
+                        const data = d.data();
+                        dict[d.id] = data.name || data.siteName || d.id;
+                    });
+                    currentSites = dict;
+                    setSitesDictionary(dict);
+                } catch (err) {
+                    console.warn("Błąd pobierania listy budów:", err);
+                }
+            }
+
+            const protocolsQ = query(collection(db, "protocols"), orderBy("createdAt", "desc"), limit(500));
+            const protocolsSnap = await getDocs(protocolsQ);
+
+            const matchedProtocols: DetailedProtocolEntry[] = [];
+            const cleanName = (item.name || "").trim().toLowerCase();
+            const cleanCode = (item.inventoryNumber || "").trim().toLowerCase();
+            const itemId = item.id;
+
+            protocolsSnap.docs.forEach(docSnap => {
+                const p = docSnap.data();
+                if (!p.items || !Array.isArray(p.items)) return;
+
+                const matchedItem = p.items.find((it: any) => {
+                    if (it.inventoryId && it.inventoryId === itemId) return true;
+                    if (cleanCode && it.inventoryNumber && String(it.inventoryNumber).trim().toLowerCase() === cleanCode) return true;
+                    if (it.name && it.name.trim().toLowerCase() === cleanName) return true;
+                    if (cleanName.length >= 6 && it.name) {
+                        const itName = it.name.trim().toLowerCase();
+                        if (itName.includes(cleanName) || cleanName.includes(itName)) return true;
+                    }
+                    return false;
+                });
+
+                if (matchedItem) {
+                    const isIssue = p.type === "WYDANIE";
+                    const isReturn = p.type === "ZWROT";
+                    const resolvedSite = isIssue
+                        ? (p.destinationName || currentSites[p.destinationId] || p.destinationId || "Nieznana budowa")
+                        : (p.sourceName || currentSites[p.sourceId] || p.sourceId || "Nieznana budowa");
+
+                    const qty = Number(matchedItem.quantity ?? matchedItem.receivedQty ?? matchedItem.declaredQty ?? 1);
+                    const docDate = p.documentDate || (p.createdAt ? p.createdAt.split("T")[0] : "");
+                    const pId = p.protocolId || docSnap.id;
+
+                    matchedProtocols.push({
+                        id: docSnap.id,
+                        protocolId: pId,
+                        type: p.type || (isReturn ? "ZWROT" : "WYDANIE"),
+                        documentDate: docDate,
+                        createdAt: p.createdAt || "",
+                        siteName: resolvedSite,
+                        siteId: isIssue ? p.destinationId : p.sourceId,
+                        quantity: qty,
+                        unit: matchedItem.unit || item.unit || "szt.",
+                        status: matchedItem.finalStatus || matchedItem.status || p.status || "ZAAKCEPTOWANY",
+                        user: p.acceptedByName || p.createdByName || "Magazynier",
+                        notes: matchedItem.warehouseNotes || p.residualNotes || p.notes || "",
+                        documentSource: p.documentSource || (p.isPaper ? "PAPER" : "APP")
+                    });
+                }
+            });
+
+            matchedProtocols.sort((a, b) => {
+                const dateA = new Date(a.documentDate || a.createdAt || "").getTime();
+                const dateB = new Date(b.documentDate || b.createdAt || "").getTime();
+                return dateB - dateA;
+            });
+
+            setDetailedProtocols(matchedProtocols);
+        } catch (e) {
+            console.error("Błąd podczas pobierania historii protokołów:", e);
+        } finally {
+            setDetailedLoading(false);
         }
     };
 
@@ -1944,6 +2048,9 @@ export default function InventoryPage() {
                                                     >
                                                         ⚙️ Korekta Stanu
                                                     </button>
+                                                    <span className="text-slate-300">|</span>
+                                                    <span className="text-slate-300">|</span>
+                                                    <button onClick={() => openDetailedHistoryModal(sub)} className="text-indigo-600 hover:underline font-bold text-xs" title="Szczegółowa historia protokołów i stanów">📜 Historia</button>
                                                     <span className="text-slate-300">|</span>
                                                     <button onClick={() => { setEditingItem(sub); setFormData({ ...sub }); setIsFormOpen(true); }} className="text-blue-600 hover:underline font-bold text-xs">Edytuj</button>
                                                     <span className="text-slate-300">|</span>
@@ -3223,29 +3330,38 @@ export default function InventoryPage() {
                                 </div>
                             )}
 
-                            <div className="flex flex-wrap gap-3 mb-8">
-                                <button onClick={openServiceModal} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
+                            <div className="mb-8 space-y-2.5">
+                                <div className="flex flex-wrap gap-3">
+                                    <button onClick={openServiceModal} className="flex-1 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs hover:bg-blue-100 transition flex items-center justify-center gap-2">🛠️ Wpis serwisowy / Zmień stan</button>
 
-                                {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
-                                    <button
-                                        onClick={openClaimInvestigation}
-                                        className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black"
-                                    >
-                                        ⚖️ Zgłoś do Sądu (Szkoda)
-                                    </button>
-                                )}
+                                    {selectedItem.status !== 'sprawne' && !hasOpenClaim && (
+                                        <button
+                                            onClick={openClaimInvestigation}
+                                            className="flex-1 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-bold text-xs hover:bg-red-100 transition flex items-center justify-center gap-2 font-black"
+                                        >
+                                            ⚖️ Zgłoś do Sądu (Szkoda)
+                                        </button>
+                                    )}
 
-                                {(hasOpenClaim === 'NOWA' || hasOpenClaim === 'W_TOKU') && (
-                                    <div className="flex-1 py-3 bg-orange-100 text-orange-800 border border-orange-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
-                                        <span>⏳</span> Sprawa w Sądzie w toku
-                                    </div>
-                                )}
+                                    {(hasOpenClaim === 'NOWA' || hasOpenClaim === 'W_TOKU') && (
+                                        <div className="flex-1 py-3 bg-orange-100 text-orange-800 border border-orange-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
+                                            <span>⏳</span> Sprawa w Sądzie w toku
+                                        </div>
+                                    )}
 
-                                {hasOpenClaim === 'ZAMKNIETA' && (
-                                    <div className="flex-1 py-3 bg-slate-100 text-slate-500 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
-                                        <span>📁</span> Sprawa została zamknięta
-                                    </div>
-                                )}
+                                    {hasOpenClaim === 'ZAMKNIETA' && (
+                                        <div className="flex-1 py-3 bg-slate-100 text-slate-500 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-inner">
+                                            <span>📁</span> Sprawa została zamknięta
+                                        </div>
+                                    )}
+                                </div>
+
+                                <button
+                                    onClick={() => openDetailedHistoryModal(selectedItem)}
+                                    className="w-full py-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 hover:from-blue-700 hover:via-indigo-700 hover:to-violet-700 text-white rounded-xl font-black text-xs shadow-md hover:shadow-lg transition flex items-center justify-center gap-2"
+                                >
+                                    📜 Szczegółowa historia
+                                </button>
                             </div>
 
                             <div className="relative mb-8">
@@ -4206,6 +4322,17 @@ export default function InventoryPage() {
                     declaredStatus={investigationData.declaredStatus}
                 />
             )}
+
+            {/* MODAL: SZCZEGÓŁOWA HISTORIA BULK (PROTOKOŁY + BUDOWY) */}
+            <BulkDetailedHistoryModal
+                isOpen={isDetailedHistoryModalOpen}
+                onClose={() => setIsDetailedHistoryModalOpen(false)}
+                item={detailedHistoryItem}
+                protocols={detailedProtocols}
+                loading={detailedLoading}
+                sitesDictionary={sitesDictionary}
+                onRefresh={() => detailedHistoryItem && openDetailedHistoryModal(detailedHistoryItem)}
+            />
 
             {/* MODAL: Weryfikacja i czyszczenie zwróconego osprzętu */}
             {isCleanupModalOpen && (
