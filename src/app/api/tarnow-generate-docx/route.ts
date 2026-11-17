@@ -295,15 +295,27 @@ export async function POST(req: Request) {
         const docxBuffer = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
         const arrayBuffer = docxBuffer.buffer.slice(docxBuffer.byteOffset, docxBuffer.byteOffset + docxBuffer.byteLength) as ArrayBuffer;
 
-        const safeName = pracownik
-            ? `archiwum-${pracownik.replace(/\s+/g, '-').toLowerCase()}.docx`
-            : 'archiwum-tarnow.docx';
+        const cleanPracownik = (pracownik || 'tarnow')
+            .replace(/ł/g, 'l').replace(/Ł/g, 'L')
+            .replace(/ą/g, 'a').replace(/Ą/g, 'A')
+            .replace(/ć/g, 'c').replace(/Ć/g, 'C')
+            .replace(/ę/g, 'e').replace(/Ę/g, 'E')
+            .replace(/ń/g, 'n').replace(/Ń/g, 'N')
+            .replace(/ó/g, 'o').replace(/Ó/g, 'O')
+            .replace(/ś/g, 's').replace(/Ś/g, 'S')
+            .replace(/ź/g, 'z').replace(/Ź/g, 'Z')
+            .replace(/ż/g, 'z').replace(/Ż/g, 'Z')
+            .replace(/[^a-zA-Z0-9_-]/g, '-')
+            .toLowerCase();
+
+        const asciiName = `archiwum-${cleanPracownik}.docx`;
+        const utf8Name = encodeURIComponent(`archiwum-${(pracownik || 'tarnow').replace(/\s+/g, '-').toLowerCase()}.docx`);
 
         return new Response(arrayBuffer, {
             status: 200,
             headers: {
                 'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                'Content-Disposition': `attachment; filename="${safeName}"`,
+                'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`,
                 'Content-Length': String(docxBuffer.length),
             },
         });
