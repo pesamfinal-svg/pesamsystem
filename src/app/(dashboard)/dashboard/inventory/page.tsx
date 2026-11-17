@@ -1421,6 +1421,31 @@ export default function InventoryPage() {
         }
     };
 
+    const isMatchingProtocolItem = (targetItem: InventoryItem, protoItem: any): boolean => {
+        if (!protoItem) return false;
+
+        // 1. Zgodność po ID dokumentu w Firebase
+        if (protoItem.inventoryId && protoItem.inventoryId === targetItem.id) return true;
+
+        const itCode = (protoItem.inventoryNumber || "").trim().toLowerCase();
+        const targetCode = (targetItem.inventoryNumber || "").trim().toLowerCase();
+        const isSpecialCode = (code: string) => !code || code === "ręczny" || code === "jednoraz" || code === "resztki" || code === "zwrócony osprzęt";
+
+        // 2. Jeśli oba elementy mają właściwe kody magazynowe (np. og01-01)
+        if (!isSpecialCode(itCode) && !isSpecialCode(targetCode)) {
+            // Jeśli kody są różne (np. og01-01 dla Ramki i og01-07 dla Ramki Pełnej), to na pewno są to różne przedmioty!
+            if (itCode !== targetCode) return false;
+            // Jeśli kody są identyczne, jest to ten sam przedmiot
+            return true;
+        }
+
+        // 3. Porównanie po nazwie - WYŁĄCZNIE DOKŁADNE (bez substring / includes, aby nie łączyć np. Ramka z Ramka Pełna)
+        const normTarget = (targetItem.name || "").trim().toLowerCase().replace(/\s+/g, " ");
+        const normProto = (protoItem.name || "").trim().toLowerCase().replace(/\s+/g, " ");
+
+        return normTarget !== "" && normTarget === normProto;
+    };
+
     const openItemCard = async (item: InventoryItem) => {
         setSelectedItem(item);
         setShowSpecs(false);
@@ -1444,13 +1469,7 @@ export default function InventoryPage() {
                         const p = docSnap.data();
                         if (!p.items || !Array.isArray(p.items)) return;
 
-                        const cleanItemName = item.name.trim().toLowerCase();
-                        const matchingItem = p.items.find((it: any) =>
-                            it.inventoryId === item.id ||
-                            (item.inventoryNumber && it.inventoryNumber && String(it.inventoryNumber).trim().toLowerCase() === String(item.inventoryNumber).trim().toLowerCase()) ||
-                            (it.name && it.name.trim().toLowerCase() === cleanItemName) ||
-                            (it.name && cleanItemName.length >= 6 && (it.name.trim().toLowerCase().includes(cleanItemName) || cleanItemName.includes(it.name.trim().toLowerCase())))
-                        );
+                        const matchingItem = p.items.find((it: any) => isMatchingProtocolItem(item, it));
 
                         if (matchingItem) {
                             const qty = Number(matchingItem.quantity ?? matchingItem.receivedQty ?? matchingItem.declaredQty ?? (item as any).availableQuantity ?? 1);
@@ -1557,16 +1576,7 @@ export default function InventoryPage() {
                 const p = docSnap.data();
                 if (!p.items || !Array.isArray(p.items)) return;
 
-                const matchedItem = p.items.find((it: any) => {
-                    if (it.inventoryId && it.inventoryId === itemId) return true;
-                    if (cleanCode && it.inventoryNumber && String(it.inventoryNumber).trim().toLowerCase() === cleanCode) return true;
-                    if (it.name && it.name.trim().toLowerCase() === cleanName) return true;
-                    if (cleanName.length >= 6 && it.name) {
-                        const itName = it.name.trim().toLowerCase();
-                        if (itName.includes(cleanName) || cleanName.includes(itName)) return true;
-                    }
-                    return false;
-                });
+                const matchedItem = p.items.find((it: any) => isMatchingProtocolItem(item, it));
 
                 if (matchedItem) {
                     const isIssue = p.type === "WYDANIE";
