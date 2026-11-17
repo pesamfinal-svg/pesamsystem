@@ -219,6 +219,124 @@ export default function TarnowArchivePage() {
         return () => unsub();
     }, []);
 
+    /* ── Drukuj / Otwórz PDF wg wzoru Oświadczenia ── */
+    const printOswiadczeniePdf = (item: TeczkaGotowe) => {
+        const formattedDate = item.dataWypelnienia
+            ? new Date(item.dataWypelnienia).toLocaleDateString('pl-PL')
+            : new Date().toLocaleDateString('pl-PL');
+
+        const docsListHtml = item.dokumenty.map((dok, idx) => {
+            const count = dok.ilosc > 1 ? ` (${dok.ilosc} szt.)` : '';
+            const uwagi = dok.uwagi ? ` <span style="color:#555;">— ${dok.uwagi}</span>` : '';
+            return `<li style="margin-bottom: 5px; padding-left: 4px;"><strong>${dok.nazwa}</strong>${count}${uwagi}</li>`;
+        }).join('');
+
+        const html = `<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <title>Oświadczenie - ${item.pracownik}</title>
+  <style>
+    @page { size: A4; margin: 22mm 22mm 22mm 22mm; }
+    body {
+      font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+      font-size: 11.5pt;
+      line-height: 1.45;
+      color: #000;
+      background: #fff;
+      margin: 0;
+      padding: 0;
+    }
+    .text-right { text-align: right; }
+    .text-center { text-align: center; }
+    .bold { font-weight: bold; }
+    .title-main { font-size: 14pt; font-weight: bold; margin-top: 18px; margin-bottom: 4px; text-transform: uppercase; }
+    .title-sub { font-size: 11.5pt; font-weight: bold; margin-bottom: 24px; }
+    .section-p { margin-bottom: 12px; }
+    ol { margin-top: 8px; margin-bottom: 18px; padding-left: 28px; }
+    .warning-box {
+      margin-top: 24px;
+      margin-bottom: 26px;
+      padding: 10px 14px;
+      border-top: 1px solid #ccc;
+      border-bottom: 1px solid #ccc;
+      color: #b91c1c;
+      font-weight: bold;
+      font-size: 10.5pt;
+      line-height: 1.4;
+    }
+    .signature-box {
+      margin-top: 45px;
+      text-align: right;
+    }
+    .signature-line {
+      display: inline-block;
+      text-align: center;
+      width: 320px;
+    }
+    .dots { letter-spacing: 2px; }
+    .sig-caption { font-size: 9.5pt; color: #333; margin-top: 4px; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <div class="text-right">Dębica, dnia ${formattedDate} r.</div>
+
+  <div class="text-center">
+    <div class="title-main">OŚWIADCZENIE właściciela</div>
+    <div class="title-sub">o przejęciu odpowiedzialności za dokumenty i ich stan</div>
+  </div>
+
+  <div class="section-p">
+    Ja, niżej podpisany/a: <strong>${item.pracownik || '......................................................'}</strong> ur. ..........................................<br>
+    Seria i numer dowodu osobistego / PESEL: ....................................................<br>
+    niniejszym oświadczam, że w dniu .............................2026 r. przyjąłem/am do swojej dyspozycji dokumenty wyszczególnione w poniższym zestawieniu:
+  </div>
+
+  <ol>
+    ${docsListHtml || '<li>Dokumentacja pracownicza</li>'}
+  </ol>
+
+  <div class="section-p bold">W związku z powyższym oświadczam, że:</div>
+  <div style="padding-left: 14px; margin-bottom: 8px;">
+    – w momencie odbioru zapoznałem/am się ze stanem technicznym i wizualnym dokumentów i nie wnoszę do ich stanu żadnych zastrzeżeń
+  </div>
+  <div style="padding-left: 14px; margin-bottom: 8px;">
+    – biorę <strong>pełną odpowiedzialność</strong> za odebrane dokumenty
+  </div>
+  <div style="padding-left: 14px; margin-bottom: 12px;">
+    – akceptuję fakt, iż strona przekazująca nie miała wpływu na sposób, ilość, wady ukryte, ewentualne braki w dokumentacji, błędy w treści ani naturalne zniszczenie i nie będę wnosił/a w przyszłości żadnych roszczeń w związku z powyższym.
+  </div>
+
+  <div class="warning-box">
+    UWAGA: Informujemy, iż dokumentacja pracownicza po PSS SPOŁEM Tarnów została przekazana w całości, a w naszym posiadaniu nie znajdują się już żadne inne materiały dotyczące tej sprawy.
+  </div>
+
+  <div class="signature-box">
+    <div class="signature-line">
+      <div class="dots">.........................................................................</div>
+      <div class="sig-caption">(czytelny podpis osoby składającej oświadczenie)</div>
+    </div>
+  </div>
+
+  <script>
+    window.onload = function() {
+      setTimeout(function() { window.print(); }, 250);
+    };
+  </script>
+</body>
+</html>`;
+
+        const printWindow = window.open('', '_blank');
+        if (printWindow) {
+            printWindow.document.open();
+            printWindow.document.write(html);
+            printWindow.document.close();
+        }
+    };
+
     /* ── Pobierz DOCX ── */
     const downloadDocxForTeczka = async (item: TeczkaGotowe) => {
         setDownloadingId(item.id);
@@ -601,26 +719,35 @@ export default function TarnowArchivePage() {
                                         {item.createdBy && ` przez: ${item.createdBy}`}
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-3 shrink-0">
+                                <div className="flex items-center gap-2 shrink-0 flex-wrap">
                                     <button
                                         onClick={() => setEditingTeczka(item)}
-                                        className="px-4 py-3 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs font-bold text-slate-700 transition"
+                                        className="px-3.5 py-2.5 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs font-bold text-slate-700 transition"
                                     >
                                         ✏️ Edytuj
                                     </button>
                                     <button
+                                        onClick={() => printOswiadczeniePdf(item)}
+                                        className="px-4 py-2.5 rounded-xl text-xs font-black transition shadow-sm bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-1.5"
+                                        title="Drukuj oświadczenie lub zapisz jako PDF"
+                                    >
+                                        <span>🖨️</span>
+                                        <span>Drukuj / PDF</span>
+                                    </button>
+                                    <button
                                         onClick={() => downloadDocxForTeczka(item)}
                                         disabled={downloadingId === item.id}
-                                        className={`px-5 py-3 rounded-xl text-xs font-black transition shadow-md flex items-center gap-2 ${downloadingId === item.id
+                                        className={`px-4 py-2.5 rounded-xl text-xs font-black transition shadow-sm flex items-center gap-1.5 ${downloadingId === item.id
                                             ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                                            : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-200'
+                                            : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                                             }`}
+                                        title="Pobierz edytowalny plik Word"
                                     >
-                                        {downloadingId === item.id ? 'Generowanie...' : <><span>📥</span><span>Pobierz Word</span></>}
+                                        {downloadingId === item.id ? 'Pobieranie...' : <><span>📥</span><span>Word (.docx)</span></>}
                                     </button>
                                     <button
                                         onClick={() => handleDeleteTeczka(item.id, item.pracownik)}
-                                        className="p-3 rounded-xl text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
+                                        className="p-2.5 rounded-xl text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
                                         title="Usuń"
                                     >
                                         🗑️
