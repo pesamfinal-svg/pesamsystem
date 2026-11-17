@@ -14,15 +14,18 @@ export const maxDuration = 120;
 
 export async function POST(req: Request) {
     try {
-        const { videoBase64, mimeType } = await req.json();
+        const body = await req.json();
+        const { frames, videoBase64, mimeType } = body;
 
-        if (!videoBase64) {
-            return NextResponse.json({ error: 'Brak danych wideo' }, { status: 400 });
+        const hasFrames = Array.isArray(frames) && frames.length > 0;
+        if (!hasFrames && !videoBase64) {
+            return NextResponse.json({ error: 'Brak danych wideo ani klatek do analizy' }, { status: 400 });
         }
 
         const systemInstruction = `
 Jesteś doświadczonym archiwistą dokumentacji pracowniczej i akt osobowych (spółdzielnia PSS SPOŁEM Tarnów).
-Oglądasz nagranie wideo z przeglądania teczki personalnej / akt osobowych pracownika.
+Otrzymujesz materiał z przeglądania teczki personalnej / akt osobowych pracownika (sekwencja klatek z nagrania wideo).
+Klatki przedstawiają kolejne dokumenty wyjmowane lub przekładane w teczce.
 
 NAJWAŻNIEJSZA ZASADA:
 NIE CZYTAJ I NIE PRZEPISUJ TREŚCI DOKUMENTÓW! 
@@ -42,6 +45,7 @@ Typowe dokumenty w teczkach PSS SPOŁEM:
 - Oświadczenia pracownika / Pisma pracownicze
 - Kary, nagrody, wyróżnienia
 
+Jeśli dany dokument widać na kilku klatkach z rzędu, to jest to TEN SAM dokument — nie duplikuj go.
 Jeśli dany typ dokumentu występuje wielokrotnie (np. kilka świadectw pracy z różnych lat, kilka angaży), zgrupuj je jako jedną pozycję i wpisz łączną liczbę w 'ilosc', np. "Świadectwa pracy", ilosc: 2.
 
 Zwróć odpowiedź WYŁĄCZNIE jako czysty JSON (bez markdown, bez znaczników \`\`\`json):
@@ -61,6 +65,30 @@ Zwróć odpowiedź WYŁĄCZNIE jako czysty JSON (bez markdown, bez znaczników \
 }
 `;
 
+        const userParts: any[] = [
+            { text: 'Przeanalizuj materiał z teczki pracowniczej i wyciągnij wykaz unikalnych dokumentów archiwalnych.' }
+        ];
+
+        if (hasFrames) {
+            // Ograniczamy do max 60 klatek, żeby nie przeciążyć tokenów
+            const selectedFrames = frames.slice(0, 60);
+            selectedFrames.forEach((frameBase64: string) => {
+                userParts.push({
+                    inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: frameBase64,
+                    }
+                });
+            });
+        } else if (videoBase64) {
+            userParts.push({
+                inlineData: {
+                    mimeType: mimeType || 'video/mp4',
+                    data: videoBase64,
+                }
+            });
+        }
+
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             config: {
@@ -70,15 +98,7 @@ Zwróć odpowiedź WYŁĄCZNIE jako czysty JSON (bez markdown, bez znaczników \
             contents: [
                 {
                     role: 'user',
-                    parts: [
-                        { text: 'Przeanalizuj nagranie i wyciągnij dane do wykazu dokumentów archiwalnych.' },
-                        {
-                            inlineData: {
-                                mimeType: mimeType || 'video/mp4',
-                                data: videoBase64,
-                            }
-                        }
-                    ]
+                    parts: userParts
                 }
             ]
         });
