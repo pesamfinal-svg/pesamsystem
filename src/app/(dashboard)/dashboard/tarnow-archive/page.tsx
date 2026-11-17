@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { db } from '@/lib/firebase/config';
 import {
     collection, onSnapshot, deleteDoc, doc,
-    updateDoc, addDoc, query, orderBy, where
+    updateDoc, addDoc
 } from 'firebase/firestore';
 import { useAuth } from '@/lib/auth/AuthContext';
 
@@ -163,59 +163,59 @@ export default function TarnowArchivePage() {
     const captureInputRef = useRef<HTMLInputElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    /* ══ Firestore: Gotowe ══ */
+    /* ══ Firestore: Wszystkie teczki (bez wymagania indeksów composite) ══ */
     useEffect(() => {
-        const q = query(
-            collection(db, 'tarnow_archive'),
-            where('status', '==', 'GOTOWE'),
-            orderBy('createdAt', 'desc')
-        );
-        const unsub = onSnapshot(q, (snap) => {
-            const items: TeczkaGotowe[] = snap.docs.map((d) => {
-                const data = d.data();
-                return {
-                    id: d.id,
-                    pracownik: data.pracownik || 'Bez nazwiska',
-                    teczkaOpis: data.teczkaOpis || 'Teczka akt osobowych',
-                    dataOd: data.dataOd || '',
-                    dataDo: data.dataDo || '',
-                    dokumenty: data.dokumenty || [],
-                    uwagi: data.uwagi || '',
-                    dataWypelnienia: data.dataWypelnienia || new Date().toISOString().split('T')[0],
-                    createdBy: data.createdBy || '',
-                    createdAt: data.createdAt || '',
-                };
+        const unsub = onSnapshot(collection(db, 'tarnow_archive'), (snap) => {
+            const rawItems = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
+            
+            // Sortujemy po createdAt malejąco
+            rawItems.sort((a, b) => {
+                const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                return timeB - timeA;
             });
-            setTeczki(items);
-            setLoadingTeczki(false);
-        }, () => setLoadingTeczki(false));
-        return () => unsub();
-    }, []);
 
-    /* ══ Firestore: Oczekujące ══ */
-    useEffect(() => {
-        const q = query(
-            collection(db, 'tarnow_archive'),
-            where('status', '==', 'DO_PRZETWORZENIA'),
-            orderBy('createdAt', 'desc')
-        );
-        const unsub = onSnapshot(q, (snap) => {
-            const items: TeczkaPending[] = snap.docs.map((d) => {
-                const data = d.data();
-                return {
-                    id: d.id,
-                    pracownik: data.pracownik || '',
-                    videoUrl: data.videoUrl || '',
-                    videoPath: data.videoPath,
-                    videoSizeMb: data.videoSizeMb,
-                    createdBy: data.createdBy || '',
-                    createdAt: data.createdAt || '',
-                    status: 'DO_PRZETWORZENIA',
-                };
-            });
-            setPendingTeczki(items);
+            const readyList: TeczkaGotowe[] = [];
+            const pendingList: TeczkaPending[] = [];
+
+            for (const data of rawItems) {
+                if (data.status === 'DO_PRZETWORZENIA') {
+                    pendingList.push({
+                        id: data.id,
+                        pracownik: data.pracownik || '',
+                        videoUrl: data.videoUrl || '',
+                        videoPath: data.videoPath,
+                        videoSizeMb: data.videoSizeMb,
+                        createdBy: data.createdBy || '',
+                        createdAt: data.createdAt || '',
+                        status: 'DO_PRZETWORZENIA',
+                    });
+                } else {
+                    readyList.push({
+                        id: data.id,
+                        pracownik: data.pracownik || 'Bez nazwiska',
+                        teczkaOpis: data.teczkaOpis || 'Teczka akt osobowych',
+                        dataOd: data.dataOd || '',
+                        dataDo: data.dataDo || '',
+                        dokumenty: data.dokumenty || [],
+                        uwagi: data.uwagi || '',
+                        dataWypelnienia: data.dataWypelnienia || new Date().toISOString().split('T')[0],
+                        createdBy: data.createdBy || '',
+                        createdAt: data.createdAt || '',
+                    });
+                }
+            }
+
+            setPendingTeczki(pendingList);
+            setTeczki(readyList);
             setLoadingPending(false);
-        }, () => setLoadingPending(false));
+            setLoadingTeczki(false);
+        }, (err) => {
+            console.error('Błąd pobierania bazy teczek:', err);
+            setLoadingPending(false);
+            setLoadingTeczki(false);
+        });
+
         return () => unsub();
     }, []);
 
@@ -293,28 +293,11 @@ export default function TarnowArchivePage() {
         }));
 
         try {
-            // 1. Wyciągnij klatki z wideo
-            let frames: string[] = [];
-            try {
-                frames = await extractFrames(item.videoUrl, 40);
-            } catch {
-                // Jeśli CORS blokuje ekstrakcję klatek, spróbujemy bez klatek
-                frames = [];
-            }
-
-            if (frames.length === 0) {
-                throw new Error(
-                    'Nie udało się załadować wideo do analizy. ' +
-                    'Upewnij się że reguły Firebase Storage pozwalają na odczyt, ' +
-                    'lub użyj zakładki "Dodaj / Wgraj wideo z PC" i wgraj plik lokalnie.'
-                );
-            }
-
-            // 2. Wyślij klatki do API
+            // Przesyłamy videoUrl bezpośrednio do serwera, który pobiera wideo i analizuje w Vertex AI
             const res = await fetch('/api/tarnow-analyze-video', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ frames }),
+                body: JSON.stringify({ videoUrl: item.videoUrl }),
             });
 
             const result = await res.json();

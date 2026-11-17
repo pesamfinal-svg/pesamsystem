@@ -15,10 +15,10 @@ export const maxDuration = 120;
 export async function POST(req: Request) {
     try {
         const body = await req.json();
-        const { frames, videoBase64, mimeType } = body;
+        const { frames, videoBase64, mimeType, videoUrl } = body;
 
         const hasFrames = Array.isArray(frames) && frames.length > 0;
-        if (!hasFrames && !videoBase64) {
+        if (!hasFrames && !videoBase64 && !videoUrl) {
             return NextResponse.json({ error: 'Brak danych wideo ani klatek do analizy' }, { status: 400 });
         }
 
@@ -69,7 +69,21 @@ Zwróć odpowiedź WYŁĄCZNIE jako czysty JSON (bez markdown, bez znaczników \
             { text: 'Przeanalizuj materiał z teczki pracowniczej i wyciągnij wykaz unikalnych dokumentów archiwalnych.' }
         ];
 
-        if (hasFrames) {
+        if (videoUrl) {
+            // Pobieramy wideo bezpośrednio na serwerze z Firebase Storage
+            const vidRes = await fetch(videoUrl);
+            if (!vidRes.ok) throw new Error('Nie udało się pobrać pliku wideo z chmury');
+            const arrayBuf = await vidRes.arrayBuffer();
+            const buf = Buffer.from(arrayBuf);
+            const contentType = vidRes.headers.get('content-type') || 'video/mp4';
+
+            userParts.push({
+                inlineData: {
+                    mimeType: contentType.includes('webm') ? 'video/webm' : 'video/mp4',
+                    data: buf.toString('base64'),
+                }
+            });
+        } else if (hasFrames) {
             // Ograniczamy do max 60 klatek, żeby nie przeciążyć tokenów
             const selectedFrames = frames.slice(0, 60);
             selectedFrames.forEach((frameBase64: string) => {
