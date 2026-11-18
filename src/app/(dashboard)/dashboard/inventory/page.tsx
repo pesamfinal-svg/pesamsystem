@@ -310,9 +310,9 @@ export default function InventoryPage() {
     const [cmNewSubInput, setCmNewSubInput] = useState("");
     const [cmImageUrlInput, setCmImageUrlInput] = useState("");
 
-    // PANEL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA I MAGAZYNU)
+    // PANEL ZARZĄDZANIA REGUŁAMI AI (RULES SZEFA, MAGAZYNU I ZWROTÓW BEZ PROTOKOŁU)
     const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
-    const [rulesTab, setRulesTab] = useState<"BOSS" | "WAREHOUSE" | "CAPACITY">("BOSS");
+    const [rulesTab, setRulesTab] = useState<"BOSS" | "WAREHOUSE" | "CAPACITY" | "NO_PROTOCOL">("BOSS");
     const [selectedRulesDepartment, setSelectedRulesDepartment] = useState<"RESIDUALS" | "EQUIPMENT" | "SCAFFOLDING" | "FLEET">("RESIDUALS");
     const [selectedCategoryId, setSelectedCategoryId] = useState<string>("ALL"); // "ALL" = ogólne wytyczne działu, lub np. "kleje"
     const [bossRulesText, setBossRulesText] = useState("");
@@ -321,6 +321,9 @@ export default function InventoryPage() {
     const [warehouseRulesText, setWarehouseRulesText] = useState("");
     const [warehouseCategoryRules, setWarehouseCategoryRules] = useState<Record<string, string>>({});
     const [warehouseRulesMeta, setWarehouseRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
+    const [noProtocolRulesText, setNoProtocolRulesText] = useState("");
+    const [noProtocolCategoryRules, setNoProtocolCategoryRules] = useState<Record<string, string>>({});
+    const [noProtocolRulesMeta, setNoProtocolRulesMeta] = useState<{ updatedAt?: string; updatedBy?: string }>({});
     const [isLoadingRules, setIsLoadingRules] = useState(false);
     const [isSavingRules, setIsSavingRules] = useState(false);
     const [categoryCapacities, setCategoryCapacities] = useState<Record<string, CategoryCapacity>>({});
@@ -357,7 +360,11 @@ export default function InventoryPage() {
         user.roleName?.toLowerCase().includes("magazyn")
     ));
 
-    const canAccessRules = canManageBossRules || canManageWarehouseRules || isUserAdmin;
+    const canManageNoProtocolRules = Boolean(
+        isUserAdmin || canManageBossRules || canManageWarehouseRules
+    );
+
+    const canAccessRules = canManageBossRules || canManageWarehouseRules || canManageNoProtocolRules || isUserAdmin;
 
     const handleOpenAddLocation = () => {
         setEditingLocation({
@@ -436,6 +443,8 @@ export default function InventoryPage() {
                 setWarehouseRulesText(data.warehouseRules || "");
                 setBossCategoryRules(data.bossCategoryRules || {});
                 setWarehouseCategoryRules(data.warehouseCategoryRules || {});
+                setNoProtocolRulesText(data.noProtocolRules || "");
+                setNoProtocolCategoryRules(data.noProtocolCategoryRules || {});
                 setBossRulesMeta({
                     updatedAt: data.bossUpdatedAt || "",
                     updatedBy: data.bossUpdatedBy || ""
@@ -443,6 +452,10 @@ export default function InventoryPage() {
                 setWarehouseRulesMeta({
                     updatedAt: data.warehouseUpdatedAt || "",
                     updatedBy: data.warehouseUpdatedBy || ""
+                });
+                setNoProtocolRulesMeta({
+                    updatedAt: data.noProtocolUpdatedAt || "",
+                    updatedBy: data.noProtocolUpdatedBy || ""
                 });
             }
 
@@ -498,21 +511,30 @@ export default function InventoryPage() {
     const updateCurrentCategoryRule = (text: string) => {
         if (selectedCategoryId === "ALL") {
             if (rulesTab === "BOSS") setBossRulesText(text);
-            else setWarehouseRulesText(text);
+            else if (rulesTab === "WAREHOUSE") setWarehouseRulesText(text);
+            else if (rulesTab === "NO_PROTOCOL") setNoProtocolRulesText(text);
         } else {
             if (rulesTab === "BOSS") {
                 setBossCategoryRules(prev => ({ ...prev, [selectedCategoryId]: text }));
-            } else {
+            } else if (rulesTab === "WAREHOUSE") {
                 setWarehouseCategoryRules(prev => ({ ...prev, [selectedCategoryId]: text }));
+            } else if (rulesTab === "NO_PROTOCOL") {
+                setNoProtocolCategoryRules(prev => ({ ...prev, [selectedCategoryId]: text }));
             }
         }
     };
 
     const getCurrentRuleValue = () => {
         if (selectedCategoryId === "ALL") {
-            return rulesTab === "BOSS" ? bossRulesText : warehouseRulesText;
+            if (rulesTab === "BOSS") return bossRulesText;
+            if (rulesTab === "WAREHOUSE") return warehouseRulesText;
+            if (rulesTab === "NO_PROTOCOL") return noProtocolRulesText;
+            return "";
         } else {
-            return (rulesTab === "BOSS" ? bossCategoryRules[selectedCategoryId] : warehouseCategoryRules[selectedCategoryId]) || "";
+            if (rulesTab === "BOSS") return bossCategoryRules[selectedCategoryId] || "";
+            if (rulesTab === "WAREHOUSE") return warehouseCategoryRules[selectedCategoryId] || "";
+            if (rulesTab === "NO_PROTOCOL") return noProtocolCategoryRules[selectedCategoryId] || "";
+            return "";
         }
     };
 
@@ -672,7 +694,9 @@ export default function InventoryPage() {
                 bossRules: bossRulesText.trim(),
                 warehouseRules: warehouseRulesText.trim(),
                 bossCategoryRules,
-                warehouseCategoryRules
+                warehouseCategoryRules,
+                noProtocolRules: noProtocolRulesText.trim(),
+                noProtocolCategoryRules
             };
 
             if (canManageBossRules) {
@@ -683,6 +707,11 @@ export default function InventoryPage() {
             if (canManageWarehouseRules) {
                 updatePayload.warehouseUpdatedAt = now;
                 updatePayload.warehouseUpdatedBy = updaterName;
+            }
+
+            if (canManageNoProtocolRules) {
+                updatePayload.noProtocolUpdatedAt = now;
+                updatePayload.noProtocolUpdatedBy = updaterName;
             }
 
             // Aktualizuj metadane dla każdej kategorii w capacities
@@ -4831,6 +4860,24 @@ export default function InventoryPage() {
                                         <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
                                     )}
                                 </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setRulesTab("NO_PROTOCOL")}
+                                    className={`px-5 py-2.5 rounded-t-xl text-xs font-black transition flex items-center gap-2 border-b-2 ${
+                                        rulesTab === "NO_PROTOCOL"
+                                            ? "bg-white text-purple-700 border-purple-600 shadow-sm"
+                                            : "text-slate-500 hover:text-slate-800 border-transparent"
+                                    }`}
+                                >
+                                    <span>🔄</span>
+                                    <span>Reguły Zwrotów Bez Protokołu</span>
+                                    {canManageNoProtocolRules ? (
+                                        <span className="text-[9px] bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded font-bold">Edycja</span>
+                                    ) : (
+                                        <span className="text-[9px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-bold">Odczyt</span>
+                                    )}
+                                </button>
                             </div>
 
                             {/* 3. CIAŁO MODALU: DWUKOLUMNOWY UKŁAD (KATEGORIE + EDYTOR) LUB WIDOK MIEJSC SKŁADOWANIA */}
@@ -5178,7 +5225,7 @@ export default function InventoryPage() {
                                             <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">
                                                 Kategorie materiałów ({categoriesList.length}):
                                             </p>
-                                            {(canManageBossRules || canManageWarehouseRules) && (
+                                            {(canManageBossRules || canManageWarehouseRules || canManageNoProtocolRules) && (
                                                 <button
                                                     type="button"
                                                     onClick={() => setIsAddingCategory(prev => !prev)}
@@ -5251,9 +5298,9 @@ export default function InventoryPage() {
                                         >
                                             <div className="flex items-center gap-2">
                                                 <span className="text-base">📋</span>
-                                                <span className="text-xs">Ogólne zasady działu</span>
+                                                <span className="text-xs">{rulesTab === "NO_PROTOCOL" ? "Ogólne reguły zwrotów" : "Ogólne zasady działu"}</span>
                                             </div>
-                                            {(rulesTab === "BOSS" ? bossRulesText : warehouseRulesText)?.trim() && (
+                                            {(rulesTab === "BOSS" ? bossRulesText : rulesTab === "WAREHOUSE" ? warehouseRulesText : noProtocolRulesText)?.trim() && (
                                                 <span className={`w-2.5 h-2.5 rounded-full ${selectedCategoryId === "ALL" ? "bg-white" : "bg-emerald-500"}`} title="Zdefiniowano regułę ogólną" />
                                             )}
                                         </button>
@@ -5263,7 +5310,9 @@ export default function InventoryPage() {
                                             const hasRule = Boolean(
                                                 rulesTab === "BOSS"
                                                     ? bossCategoryRules[cat.id]?.trim()
-                                                    : warehouseCategoryRules[cat.id]?.trim()
+                                                    : rulesTab === "WAREHOUSE"
+                                                        ? warehouseCategoryRules[cat.id]?.trim()
+                                                        : noProtocolCategoryRules[cat.id]?.trim()
                                             );
                                             const isSelected = selectedCategoryId === cat.id;
 
@@ -5310,7 +5359,7 @@ export default function InventoryPage() {
                                                         <div>
                                                             <div className="flex items-center gap-2">
                                                                 <h3 className="text-base sm:text-lg font-black text-slate-900">{selectedCategoryObj.name}</h3>
-                                                                {(canManageBossRules || canManageWarehouseRules) && (
+                                                                {(canManageBossRules || canManageWarehouseRules || canManageNoProtocolRules) && (
                                                                     <button
                                                                         type="button"
                                                                         onClick={() => handleDeleteCategory(selectedCategoryObj.id, selectedCategoryObj.name)}
@@ -5327,9 +5376,11 @@ export default function InventoryPage() {
                                                     <span className={`text-xs px-3 py-1 rounded-xl font-bold border ${
                                                         rulesTab === "BOSS"
                                                             ? "bg-amber-50 text-amber-800 border-amber-200"
-                                                            : "bg-blue-50 text-blue-800 border-blue-200"
+                                                            : rulesTab === "WAREHOUSE"
+                                                                ? "bg-blue-50 text-blue-800 border-blue-200"
+                                                                : "bg-purple-50 text-purple-800 border-purple-200"
                                                     }`}>
-                                                        {rulesTab === "BOSS" ? "👔 Wytyczna Szefa / Dyrekcji" : "📦 Wytyczna Magazynu"}
+                                                        {rulesTab === "BOSS" ? "👔 Wytyczna Szefa / Dyrekcji" : rulesTab === "WAREHOUSE" ? "📦 Wytyczna Magazynu" : "🔄 Reguła Zwrotów Bez Protokołu"}
                                                     </span>
                                                 </div>
 
@@ -5346,7 +5397,7 @@ export default function InventoryPage() {
                                                         {selectedCategoryObj.subcategories.map(sub => (
                                                             <span key={sub} className="text-xs bg-white text-slate-800 pl-2.5 pr-1.5 py-1 rounded-lg border border-slate-200 font-medium shadow-2xs flex items-center gap-1.5 group hover:border-red-300 transition">
                                                                 <span>• {sub}</span>
-                                                                {(canManageBossRules || canManageWarehouseRules) && (
+                                                                {(canManageBossRules || canManageWarehouseRules || canManageNoProtocolRules) && (
                                                                     <button
                                                                         type="button"
                                                                         onClick={() => handleRemoveSubcategory(selectedCategoryObj.id, sub)}
@@ -5360,7 +5411,7 @@ export default function InventoryPage() {
                                                         ))}
 
                                                         {/* Input dodawania nowej podkategorii */}
-                                                        {(canManageBossRules || canManageWarehouseRules) && (
+                                                        {(canManageBossRules || canManageWarehouseRules || canManageNoProtocolRules) && (
                                                             <div className="flex items-center gap-1">
                                                                 <input
                                                                     type="text"
@@ -5387,7 +5438,9 @@ export default function InventoryPage() {
                                                     </div>
 
                                                     <p className="text-[11px] text-slate-400 italic">
-                                                        Gdy kierowca wymieni w nagraniu którąś z powyższych rzeczy, AI dopasuje ją do tej kategorii i zastosuje poniższą regułę.
+                                                        {rulesTab === "NO_PROTOCOL"
+                                                            ? "Gdy magazynier wymieni którąś z tych rzeczy, asystent głosowy AI zweryfikuje poniższe reguły zwrotu bez protokołu i dopyta o wymagania."
+                                                            : "Gdy kierowca wymieni w nagraniu którąś z powyższych rzeczy, AI dopasuje ją do tej kategorii i zastosuje poniższą regułę."}
                                                     </p>
                                                 </div>
 
@@ -5395,18 +5448,22 @@ export default function InventoryPage() {
                                                 <div className="space-y-1.5">
                                                     <div className="flex items-center justify-between text-xs">
                                                         <label className="font-bold text-slate-800">
-                                                            Treść reguły {rulesTab === "BOSS" ? "Szefa" : "Magazynu"} dla: <span className="text-amber-700">{selectedCategoryObj.name}</span>
+                                                            Treść reguły {rulesTab === "BOSS" ? "Szefa" : rulesTab === "WAREHOUSE" ? "Magazynu" : "Zwrotu Bez Protokołu"} dla: <span className="text-amber-700">{selectedCategoryObj.name}</span>
                                                         </label>
                                                     </div>
 
                                                     <textarea
                                                         value={getCurrentRuleValue()}
                                                         onChange={(e) => updateCurrentCategoryRule(e.target.value)}
-                                                        disabled={rulesTab === "BOSS" ? !canManageBossRules : !canManageWarehouseRules}
+                                                        disabled={rulesTab === "BOSS" ? !canManageBossRules : rulesTab === "WAREHOUSE" ? !canManageWarehouseRules : !canManageNoProtocolRules}
                                                         rows={6}
-                                                        placeholder={`Wpisz szczegółowe wytyczne dla kategorii ${selectedCategoryObj.name}, np.:\n- Warunki przyjęcia na magazyn (np. tylko pełne lub szczelnie zabezpieczone worki)...\n- Dopuszczalny stan (np. max 1 miesiąc od otwarcia, brak zbryleń)...\n- Kiedy traktować jako odpad/złom do utylizacji...`}
+                                                        placeholder={
+                                                            rulesTab === "NO_PROTOCOL"
+                                                                ? `Wpisz wytyczne weryfikacji dla ${selectedCategoryObj.name}, o które AI zapyta magazyniera na placu, np.:\n- Czy deski/drewno są pospinane taśmami i posegregowane wg długości?\n- Czy materiał nie ma niebezpiecznych gwoździ i nadaje się do magazynowania?\n- Magazynier musi potwierdzić stan spięcia przed zatwierdzeniem zwrotu.`
+                                                                : `Wpisz szczegółowe wytyczne dla kategorii ${selectedCategoryObj.name}, np.:\n- Warunki przyjęcia na magazyn (np. tylko pełne lub szczelnie zabezpieczone worki)...\n- Dopuszczalny stan (np. max 1 miesiąc od otwarcia, brak zbryleń)...\n- Kiedy traktować jako odpad/złom do utylizacji...`
+                                                        }
                                                         className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
-                                                            (rulesTab === "BOSS" ? canManageBossRules : canManageWarehouseRules)
+                                                            (rulesTab === "BOSS" ? canManageBossRules : rulesTab === "WAREHOUSE" ? canManageWarehouseRules : canManageNoProtocolRules)
                                                                 ? "border-slate-300 focus:ring-2 focus:ring-amber-500 bg-white"
                                                                 : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
                                                         }`}
@@ -5418,33 +5475,43 @@ export default function InventoryPage() {
                                             <div className="space-y-4">
                                                 <div className="pb-3 border-b border-slate-100">
                                                     <h3 className="text-base sm:text-lg font-black text-slate-900 flex items-center gap-2">
-                                                        <span>📋</span> Ogólne Zasady Działu: Pozostałości Budowlane
+                                                        <span>📋</span> {rulesTab === "NO_PROTOCOL" ? "Reguły i Wytyczne AI dla Zwrotów Bez Protokołu" : "Ogólne Zasady Działu: Pozostałości Budowlane"}
                                                     </h3>
                                                     <p className="text-xs text-slate-500 mt-0.5">
-                                                        Te zasady są nadrzędne i obowiązują dla wszystkich zwracanych z budowy materiałów i odpadów.
+                                                        {rulesTab === "NO_PROTOCOL"
+                                                            ? "Te wytyczne sterują asystentem głosowym na placu: AI dopytuje o brakujące dane (budowa, kierowca) oraz sprawdza zasady odbioru."
+                                                            : "Te zasady są nadrzędne i obowiązują dla wszystkich zwracanych z budowy materiałów i odpadów."}
                                                     </p>
                                                 </div>
 
                                                 <div className="space-y-1.5">
                                                     <div className="flex items-center justify-between text-xs">
                                                         <label className="font-bold text-slate-800">
-                                                            Ogólna wytyczna {rulesTab === "BOSS" ? "Dyrekcji (Szefa)" : "Magazynu"}:
+                                                            Ogólna wytyczna {rulesTab === "BOSS" ? "Dyrekcji (Szefa)" : rulesTab === "WAREHOUSE" ? "Magazynu" : "Zwrotów Bez Protokołu"}:
                                                         </label>
-                                                        {(rulesTab === "BOSS" ? bossRulesMeta.updatedAt : warehouseRulesMeta.updatedAt) && (
-                                                            <span className="text-[11px] text-slate-400">
-                                                                Ostatnia zmiana: <strong>{rulesTab === "BOSS" ? bossRulesMeta.updatedBy : warehouseRulesMeta.updatedBy}</strong> ({rulesTab === "BOSS" ? bossRulesMeta.updatedAt : warehouseRulesMeta.updatedAt})
-                                                            </span>
-                                                        )}
+                                                        {(() => {
+                                                            const meta = rulesTab === "BOSS" ? bossRulesMeta : rulesTab === "WAREHOUSE" ? warehouseRulesMeta : noProtocolRulesMeta;
+                                                            if (!meta?.updatedAt) return null;
+                                                            return (
+                                                                <span className="text-[11px] text-slate-400">
+                                                                    Ostatnia zmiana: <strong>{meta.updatedBy || "Użytkownik"}</strong> ({meta.updatedAt})
+                                                                </span>
+                                                            );
+                                                        })()}
                                                     </div>
 
                                                     <textarea
                                                         value={getCurrentRuleValue()}
                                                         onChange={(e) => updateCurrentCategoryRule(e.target.value)}
-                                                        disabled={rulesTab === "BOSS" ? !canManageBossRules : !canManageWarehouseRules}
+                                                        disabled={rulesTab === "BOSS" ? !canManageBossRules : rulesTab === "WAREHOUSE" ? !canManageWarehouseRules : !canManageNoProtocolRules}
                                                         rows={7}
-                                                        placeholder={`Wpisz ogólne zasady wspólne dla wszystkich resztek, np.:\n- Wszystkie materiały muszą być posegregowane i zabezpieczone przed deszczem.\n- Odpady niebezpieczne (farby, rozpuszczalniki) zgłaszać z oznaczeniem utylizacji.\n- Każda zwracana resztka ma być zważona lub policzona w miarę możliwości.`}
+                                                        placeholder={
+                                                            rulesTab === "NO_PROTOCOL"
+                                                                ? `Wpisz ogólne zasady wspólne dla zwrotów bez protokołu, np.:\n- Wymagane podanie nazwy budowy źródłowej i nazwiska kierowcy.\n- Jeśli magazynier podaje deski/drewno – AI pyta, czy są pospinane i posegregowane.\n- Przy braku spełnienia reguł AI odnotowuje zastrzeżenia magazyniera w uwagach zwrotu.`
+                                                                : `Wpisz ogólne zasady wspólne dla wszystkich resztek, np.:\n- Wszystkie materiały muszą być posegregowane i zabezpieczone przed deszczem.\n- Odpady niebezpieczne (farby, rozpuszczalniki) zgłaszać z oznaczeniem utylizacji.\n- Każda zwracana resztka ma być zważona lub policzona w miarę możliwości.`
+                                                        }
                                                         className={`w-full p-4 rounded-2xl border text-sm leading-relaxed outline-none transition font-sans ${
-                                                            (rulesTab === "BOSS" ? canManageBossRules : canManageWarehouseRules)
+                                                            (rulesTab === "BOSS" ? canManageBossRules : rulesTab === "WAREHOUSE" ? canManageWarehouseRules : canManageNoProtocolRules)
                                                                 ? "border-slate-300 focus:ring-2 focus:ring-amber-500 bg-white"
                                                                 : "border-slate-200 bg-slate-100 text-slate-600 cursor-not-allowed"
                                                         }`}
@@ -5454,9 +5521,9 @@ export default function InventoryPage() {
                                         )}
 
                                         {/* Komunikat o braku uprawnień */}
-                                        {((rulesTab === "BOSS" && !canManageBossRules) || (rulesTab === "WAREHOUSE" && !canManageWarehouseRules)) && (
+                                        {((rulesTab === "BOSS" && !canManageBossRules) || (rulesTab === "WAREHOUSE" && !canManageWarehouseRules) || (rulesTab === "NO_PROTOCOL" && !canManageNoProtocolRules)) && (
                                             <p className="text-xs text-amber-800 bg-amber-50 p-3 rounded-xl border border-amber-200">
-                                                🔒 Tryb podglądu. Nie posiadasz uprawnienia do edycji wytycznych dla roli: <strong>{rulesTab === "BOSS" ? "Szef / Dyrekcja" : "Magazyn"}</strong>.
+                                                🔒 Tryb podglądu. Nie posiadasz uprawnienia do edycji wytycznych dla roli: <strong>{rulesTab === "BOSS" ? "Szef / Dyrekcja" : rulesTab === "WAREHOUSE" ? "Magazyn" : "Zwroty Bez Protokołu"}</strong>.
                                             </p>
                                         )}
                                     </div>
@@ -5476,7 +5543,7 @@ export default function InventoryPage() {
                                     >
                                         Zamknij
                                     </button>
-                                    {(canManageBossRules || canManageWarehouseRules) && (
+                                    {(canManageBossRules || canManageWarehouseRules || canManageNoProtocolRules) && (
                                         <button
                                             type="button"
                                             onClick={handleSaveRules}

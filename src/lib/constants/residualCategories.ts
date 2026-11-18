@@ -192,4 +192,10 @@ export interface ResidualRulesDocument {
     // Reguły per kategoria (klucz to id kategorii, np. "kleje", "pustaki")
     bossCategoryRules?: Record<string, string>;
     warehouseCategoryRules?: Record<string, string>;
+
+    // Reguły zwrotów bez protokołu (dla asystenta głosowego placu)
+    noProtocolRules?: string;
+    noProtocolUpdatedAt?: string;
+    noProtocolUpdatedBy?: string;
+    noProtocolCategoryRules?: Record<string, string>;
 }

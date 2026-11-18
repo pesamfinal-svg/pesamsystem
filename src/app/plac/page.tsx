@@ -182,6 +182,31 @@ export default function PlacPage() {
             </div>
           </Link>
 
+          {/* Kafelek: Zgłoś Zwrot Bez Protokołu (Głosowy Asystent AI) */}
+          <Link
+            href="/plac/zwrot-bez-protokolu"
+            className="group relative block rounded-3xl border border-indigo-500/40 bg-gradient-to-br from-indigo-500/20 via-slate-900 to-slate-950 p-5 min-h-[170px] shadow-lg hover:border-indigo-400 active:scale-[0.98] transition flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-4xl" aria-hidden="true">🎙️</div>
+                <span className="text-[10px] uppercase font-black tracking-wider bg-indigo-500/20 border border-indigo-400/40 text-indigo-300 px-2 py-0.5 rounded-full">
+                  AI Głosowe
+                </span>
+              </div>
+              <h3 className="text-lg font-black text-indigo-400 group-hover:text-indigo-300 transition">
+                Zgłoś Zwrot Bez Protokołu
+              </h3>
+              <p className="mt-1 text-xs text-slate-300 leading-relaxed">
+                Aplikacja rozmawia na głos z magazynierem: dopytuje o budowę, kierowcę i sprawdza pospinanie desek oraz reguły
+              </p>
+            </div>
+            <div className="mt-4 inline-flex items-center gap-1.5 self-start rounded-xl bg-indigo-600 hover:bg-indigo-500 px-3.5 py-2 text-xs font-black text-white shadow">
+              <span>Zgłoś zwrot głosowo</span>
+              <span>→</span>
+            </div>
+          </Link>
+
           {/* Kafelek 4: Inwentaryzacja */}
           <Link
             href="/plac/inwentaryzacja"
@@ -205,7 +230,7 @@ export default function PlacPage() {
           {/* Kafelek 5: Archiwum Tarnów */}
           <Link
             href="/plac/tarnow"
-            className="group relative block rounded-3xl border border-rose-500/40 bg-gradient-to-br from-rose-500/15 via-slate-900 to-slate-950 p-5 min-h-[170px] shadow-lg hover:border-rose-400 active:scale-[0.98] transition flex flex-col justify-between sm:col-span-2"
+            className="group relative block rounded-3xl border border-rose-500/40 bg-gradient-to-br from-rose-500/15 via-slate-900 to-slate-950 p-5 min-h-[170px] shadow-lg hover:border-rose-400 active:scale-[0.98] transition flex flex-col justify-between"
           >
             <div>
               <div className="text-4xl mb-2" aria-hidden="true">🗂️</div>
