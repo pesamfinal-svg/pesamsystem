@@ -329,6 +329,12 @@ export default function ProtocolsHub() {
         detectedItems: string[];
         recommendations: string;
     } | null>(null);
+
+    // Stany dla Zwrotów Bez Protokołu (Zgłoszeń Głosowych z placu)
+    const [voiceReturns, setVoiceReturns] = useState<any[]>([]);
+    const [isLoadingVoiceReturns, setIsLoadingVoiceReturns] = useState(false);
+    const [isVoiceReturnsModalOpen, setIsVoiceReturnsModalOpen] = useState(false);
+    const [selectedVoiceReturnForPreview, setSelectedVoiceReturnForPreview] = useState<any | null>(null);
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
         inventoryName: string;
@@ -1512,8 +1518,100 @@ export default function ProtocolsHub() {
     // -------------------------------------------------------------------------
     // WPROWADŹ ZWROT Z PAPIERU
     // -------------------------------------------------------------------------
+    const fetchVoiceReturns = async () => {
+        setIsLoadingVoiceReturns(true);
+        try {
+            const items: any[] = [];
+            const seenIds = new Set<string>();
+
+            // 1. Z dedykowanej kolekcji returns_without_protocol
+            try {
+                const snap1 = await getDocs(query(collection(db, "returns_without_protocol"), limit(40)));
+                snap1.docs.forEach(d => {
+                    seenIds.add(d.id);
+                    items.push({ docId: d.id, ...d.data() });
+                });
+            } catch (e) {
+                console.warn("Błąd pobierania returns_without_protocol:", e);
+            }
+
+            // 2. Ze szkiców w protocols z isWithoutProtocol: true
+            try {
+                const q2 = query(collection(db, "protocols"), where("isWithoutProtocol", "==", true), limit(40));
+                const snap2 = await getDocs(q2);
+                snap2.docs.forEach(d => {
+                    if (!seenIds.has(d.id)) {
+                        seenIds.add(d.id);
+                        items.push({ docId: d.id, ...d.data() });
+                    }
+                });
+            } catch (_) {}
+
+            items.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+            setVoiceReturns(items);
+            if (items.length > 0) {
+                setSelectedVoiceReturnForPreview(items[0]);
+            }
+        } catch (err) {
+            console.error("Błąd pobierania zgłoszeń głosowych bez protokołu:", err);
+        } finally {
+            setIsLoadingVoiceReturns(false);
+        }
+    };
+
+    const importVoiceReturnToPaperForm = (vr: any) => {
+        if (!vr) return;
+
+        // 1. Ustaw źródło dokumentu na brak protokołu
+        setPaperDocSource("BRAK_PROTOKOLU");
+
+        // 2. Ustaw numer dokumentu / uwagi
+        const refText = vr.driverName 
+            ? `Kierowca: ${vr.driverName} (${vr.protocolId || "ZBP"})`
+            : (vr.protocolId || "Zwrot z głosu");
+        setPaperDocReference(refText);
+
+        // 3. Dopasuj budowę jeśli rozpoznano
+        if (vr.siteName) {
+            const cleanSite = vr.siteName.toLowerCase().trim();
+            const matchedSite = sites.find(s => 
+                s.name.toLowerCase().includes(cleanSite) || cleanSite.includes(s.name.toLowerCase())
+            );
+            if (matchedSite) {
+                setPaperReturnSiteId(matchedSite.id);
+            }
+        }
+
+        // 4. Zaimportuj pozycje do koszyka zwrotu papierowego
+        if (Array.isArray(vr.items) && vr.items.length > 0) {
+            const newCartItems: PaperReturnCartItem[] = vr.items.map((it: any, idx: number) => ({
+                cartItemId: `${Date.now()}_vr_${idx}`,
+                isManual: true,
+                isPermanent: false,
+                name: it.name || "Materiał ze zgłoszenia głosowego",
+                type: "BULK",
+                inventoryNumber: "Z_GŁOSU",
+                unit: it.unit || "szt.",
+                maxQty: 999999,
+                declaredQty: Number(it.returnQty || it.quantity) || 1,
+                receivedQty: Number(it.returnQty || it.quantity) || 1,
+                finalStatus: it.declaredStatus?.includes("USZKODZ") ? "uszkodzone" : "sprawne",
+                notes: it.ruleNotes || (it.rulesCompliant ? "Zgodne z regułami z głosu" : "Zgłoszone głosowo bez protokołu"),
+                isReturningMainItem: true,
+                category: it.category || "Inne Materiały, Drewno i Odpady",
+                subcategory: it.subcategory || "",
+                storageLocation: it.storageLocation || ""
+            }));
+
+            setPaperReturnCart(prev => [...prev, ...newCartItems]);
+        }
+
+        setIsVoiceReturnsModalOpen(false);
+    };
+
     const openPaperReturnModal = async () => {
         await fetchPendingProtocols();
+        fetchVoiceReturns();
         setPaperReturnActiveTab("UNIQUE");
         setReturnPhotos([]);
         setIsPaperReturnModalOpen(true);
@@ -5151,11 +5249,75 @@ export default function ProtocolsHub() {
                                     >
                                         🤖 PESAM AI: Weryfikacja Aktywna (Kliknij po szczegóły)
                                     </button>
+
+                                    {/* Przycisk podglądu zwrotów głosowych z placu */}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            fetchVoiceReturns();
+                                            setIsVoiceReturnsModalOpen(true);
+                                        }}
+                                        className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm border cursor-pointer active:scale-95 ${
+                                            voiceReturns.length > 0
+                                                ? "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-500 animate-pulse"
+                                                : "bg-indigo-100 hover:bg-indigo-200 text-indigo-900 border-indigo-300"
+                                        }`}
+                                        title="Pokaż protokoły i materiały zgłoszone głosowo z placu"
+                                    >
+                                        <span>🎙️</span>
+                                        <span>Zgłoszenia z głosu {voiceReturns.length > 0 ? `(${voiceReturns.length})` : ""}</span>
+                                    </button>
                                 </div>
                                 <p className="text-sm text-orange-600 mt-1">Przepisz fizyczny dokument. Protokół od razu zostanie zaakceptowany i sprzęt wróci na magazyn.</p>
                             </div>
                             <button onClick={closeModal} className="text-4xl text-orange-400 hover:text-orange-800 leading-none">&times;</button>
                         </div>
+
+                        {/* Baner informacyjny o nagraniach głosowych z placu */}
+                        {voiceReturns.length > 0 && (
+                            <div className="bg-gradient-to-r from-indigo-900 via-indigo-950 to-slate-900 border-b border-indigo-700/60 px-6 py-2.5 flex items-center justify-between text-xs text-indigo-100 gap-3">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                    <span className="text-xl animate-bounce">🎙️</span>
+                                    <div className="min-w-0">
+                                        <span className="font-black text-amber-300 mr-1.5 uppercase tracking-wide">
+                                            Zgłoszenia z placu bez protokołu:
+                                        </span>
+                                        <span className="text-slate-200">
+                                            Magazynierzy zgłosili głosowo <strong>{voiceReturns.length}</strong> {voiceReturns.length === 1 ? "zwrot" : "zwroty"}.
+                                        </span>
+                                        {paperReturnSiteId && (() => {
+                                            const currentSite = sites.find(s => s.id === paperReturnSiteId);
+                                            if (!currentSite) return null;
+                                            const matchCount = voiceReturns.filter(vr => 
+                                                vr.siteName && (
+                                                    vr.siteName.toLowerCase().includes(currentSite.name.toLowerCase()) ||
+                                                    currentSite.name.toLowerCase().includes(vr.siteName.toLowerCase())
+                                                )
+                                            ).length;
+                                            if (matchCount > 0) {
+                                                return (
+                                                    <span className="ml-2 bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 px-2 py-0.5 rounded-full font-bold text-[10px]">
+                                                        ✓ {matchCount} pasuje do wybranej budowy: {currentSite.name}
+                                                    </span>
+                                                );
+                                            }
+                                            return null;
+                                        })()}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        fetchVoiceReturns();
+                                        setIsVoiceReturnsModalOpen(true);
+                                    }}
+                                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-black px-3.5 py-1.5 rounded-xl shadow-md text-xs transition active:scale-95 flex items-center gap-1.5 shrink-0"
+                                >
+                                    <span>👁️ Zobacz nagrania głosowe</span>
+                                    <span>→</span>
+                                </button>
+                            </div>
+                        )}
                         <div className="flex-1 flex overflow-hidden">
                             {/* LEWA STRONA */}
                             <div className="w-[45%] border-r flex flex-col bg-white">
@@ -5294,6 +5456,21 @@ export default function ProtocolsHub() {
                                 <div className="flex justify-between items-center px-4 py-2.5 bg-slate-100 border-b border-slate-200">
                                     <span className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Koszyk Zwrotu</span>
                                     <div className="flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                fetchVoiceReturns();
+                                                setIsVoiceReturnsModalOpen(true);
+                                            }}
+                                            className={`px-3 py-1.5 rounded-lg text-[11px] font-black transition shadow-sm border flex items-center gap-1 active:scale-95 ${
+                                                voiceReturns.length > 0
+                                                    ? "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-500 animate-pulse"
+                                                    : "bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border-indigo-200"
+                                            }`}
+                                            title="Podgląd zgłoszeń głosowych z placu bez protokołu"
+                                        >
+                                            <span>🎙️</span> Z głosu {voiceReturns.length > 0 && `(${voiceReturns.length})`}
+                                        </button>
                                         <label className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1.5 rounded-lg text-[11px] font-bold transition shadow-sm border border-orange-200 cursor-pointer flex items-center gap-1">
                                             📸 Zdjęcia {returnPhotos.length > 0 && `(${returnPhotos.length})`}
                                             <input type="file" multiple accept="image/*" onChange={handlePhotoSelect} className="hidden" />
@@ -5884,6 +6061,282 @@ export default function ProtocolsHub() {
                             <button
                                 type="button"
                                 onClick={() => setIsDriverDraftsModalOpen(false)}
+                                className="px-5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
+                            >
+                                Zamknij
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL: PODGLĄD ZGŁOSZEŃ GŁOSOWYCH Z PLACU (ZWROTY BEZ PROTOKOŁU) */}
+            {isVoiceReturnsModalOpen && (
+                <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-3 sm:p-6 animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl h-[88vh] flex flex-col overflow-hidden border-2 border-indigo-300">
+                        {/* Nagłówek okna */}
+                        <div className="p-5 bg-gradient-to-r from-indigo-900 via-indigo-950 to-slate-900 text-white flex justify-between items-center shrink-0">
+                            <div className="flex items-center gap-3 min-w-0">
+                                <span className="text-3xl p-2 bg-indigo-500/20 border border-indigo-400/30 rounded-2xl shrink-0" aria-hidden="true">
+                                    🎙️
+                                </span>
+                                <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <h2 className="text-lg sm:text-xl font-black text-indigo-300 tracking-tight">
+                                            Zgłoszenia Głosowe z Placu (Zwroty Bez Protokołu)
+                                        </h2>
+                                        <span className="text-[10px] bg-indigo-500/30 text-indigo-200 border border-indigo-400/40 px-2 py-0.5 rounded-full font-bold">
+                                            {voiceReturns.length} {voiceReturns.length === 1 ? "nagranie" : "nagrań"}
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-indigo-200/80 mt-0.5 truncate">
+                                        Podgląd materiałów, stanu pospinania według reguł oraz transkrypcji rozmowy magazyniera z AI
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                    type="button"
+                                    onClick={fetchVoiceReturns}
+                                    disabled={isLoadingVoiceReturns}
+                                    className="px-3 py-1.5 rounded-xl border border-indigo-700/60 bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 text-xs font-bold transition flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
+                                >
+                                    <span>🔄</span>
+                                    <span className="hidden sm:inline">Odśwież</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsVoiceReturnsModalOpen(false)}
+                                    className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-lg font-bold transition"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Zawartość: 2 kolumny (Lista zgłoszeń + Szczegóły wybranego) */}
+                        <div className="flex-1 flex overflow-hidden bg-slate-100">
+                            {isLoadingVoiceReturns ? (
+                                <div className="flex-1 flex items-center justify-center text-slate-400 font-bold animate-pulse text-sm">
+                                    Wczytywanie nagrań głosowych z bazy...
+                                </div>
+                            ) : voiceReturns.length === 0 ? (
+                                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-3">
+                                    <span className="text-5xl">📭</span>
+                                    <h3 className="text-base font-black text-slate-700">Brak oczekujących zgłoszeń głosowych</h3>
+                                    <p className="text-xs text-slate-500 max-w-md">
+                                        Gdy pracownik placu użyje kafelka <strong>&bdquo;Zgłoś Zwrot Bez Protokołu&rdquo;</strong> w telefonie, jego nagranie i spis materiałów pojawią się w tym miejscu.
+                                    </p>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* Lewa kolumna: Lista nagrań */}
+                                    <div className="w-full sm:w-[38%] border-r border-slate-200 bg-white flex flex-col overflow-y-auto p-3 space-y-2.5">
+                                        <div className="text-[10px] font-black uppercase tracking-wider text-slate-400 px-1">
+                                            Wybierz zgłoszenie do podglądu ({voiceReturns.length}):
+                                        </div>
+                                        {voiceReturns.map((vr) => {
+                                            const isSelected = selectedVoiceReturnForPreview?.docId === vr.docId || selectedVoiceReturnForPreview?.protocolId === vr.protocolId;
+                                            const itemsCount = vr.items?.length || 0;
+                                            const hasViolations = (vr.items || []).some((it: any) => it.rulesCompliant === false || it.isSecured === false);
+
+                                            return (
+                                                <div
+                                                    key={vr.docId || vr.protocolId}
+                                                    onClick={() => setSelectedVoiceReturnForPreview(vr)}
+                                                    className={`p-3.5 rounded-2xl border transition cursor-pointer text-left flex flex-col gap-2 ${
+                                                        isSelected
+                                                            ? "bg-indigo-50/90 border-indigo-500 ring-2 ring-indigo-400/30 shadow-md"
+                                                            : "bg-slate-50 hover:bg-slate-100 border-slate-200"
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center justify-between">
+                                                        <span className="font-mono text-xs font-black text-indigo-700">
+                                                            {vr.protocolId || "ZBP/..."}
+                                                        </span>
+                                                        <span className="text-[10px] text-slate-400 font-mono">
+                                                            {vr.date} {vr.time}
+                                                        </span>
+                                                    </div>
+
+                                                    <div className="space-y-0.5 text-xs">
+                                                        <div className="font-bold text-slate-800 flex items-center gap-1.5 truncate">
+                                                            <span>🏗️</span>
+                                                            <span className="truncate">{vr.siteName || "Brak budowy"}</span>
+                                                        </div>
+                                                        <div className="text-slate-600 text-[11px] flex items-center gap-1.5 truncate">
+                                                            <span>🚚</span>
+                                                            <span className="truncate">Kierowca: {vr.driverName || "Nieokreślony"}</span>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-200/60">
+                                                        <span className="font-bold text-slate-500">
+                                                            📦 {itemsCount} {itemsCount === 1 ? "pozycja" : "pozycji"}
+                                                        </span>
+                                                        {hasViolations ? (
+                                                            <span className="text-[9px] bg-red-100 text-red-800 font-black px-2 py-0.5 rounded-full border border-red-200">
+                                                                ⚠️ Naruszenie reguł
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-[9px] bg-emerald-100 text-emerald-800 font-black px-2 py-0.5 rounded-full border border-emerald-200">
+                                                                ✓ Zgodne z regułami
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Prawa kolumna: Szczegóły wybranego zgłoszenia */}
+                                    <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50">
+                                        {selectedVoiceReturnForPreview ? (
+                                            <div className="space-y-4">
+                                                {/* Karta podsumowania nagrania */}
+                                                <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                                                    <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-100">
+                                                        <div>
+                                                            <div className="flex items-center gap-2">
+                                                                <h3 className="font-mono font-black text-indigo-700 text-base">
+                                                                    {selectedVoiceReturnForPreview.protocolId}
+                                                                </h3>
+                                                                <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-full">
+                                                                    Zgłoszone głosowo
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-[11px] text-slate-400 mt-0.5">
+                                                                Zarejestrowano: {selectedVoiceReturnForPreview.date} o {selectedVoiceReturnForPreview.time} przez <strong>{selectedVoiceReturnForPreview.createdByName || "Magazynier"}</strong>
+                                                            </p>
+                                                        </div>
+
+                                                        {/* Przycisk wstawienia do koszyka */}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => importVoiceReturnToPaperForm(selectedVoiceReturnForPreview)}
+                                                            className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs rounded-xl shadow-md transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                                                        >
+                                                            <span>📥</span>
+                                                            <span>Wstaw do koszyka tego zwrotu</span>
+                                                        </button>
+                                                    </div>
+
+                                                    {/* Dane budowy i kierowcy */}
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                                                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                                                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Budowa:</span>
+                                                            <span className="font-black text-slate-800 text-sm">{selectedVoiceReturnForPreview.siteName || "Nieokreślona"}</span>
+                                                        </div>
+                                                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                                                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Kierowca / Zdający:</span>
+                                                            <span className="font-black text-slate-800 text-sm">{selectedVoiceReturnForPreview.driverName || "Nieokreślony"}</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Lista pozycji ze statusem reguł */}
+                                                <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2.5">
+                                                    <div className="flex items-center justify-between">
+                                                        <h4 className="font-black text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                                                            <span>📦</span>
+                                                            <span>Pozycje zgłoszone z głosu ({selectedVoiceReturnForPreview.items?.length || 0}):</span>
+                                                        </h4>
+                                                    </div>
+
+                                                    <div className="space-y-2">
+                                                        {(selectedVoiceReturnForPreview.items || []).map((it: any, idx: number) => {
+                                                            const isCompliant = it.rulesCompliant !== false && it.isSecured !== false;
+                                                            return (
+                                                                <div
+                                                                    key={idx}
+                                                                    className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex flex-col gap-1.5 text-xs"
+                                                                >
+                                                                    <div className="flex items-center justify-between">
+                                                                        <span className="font-bold text-slate-900 text-sm">
+                                                                            • {it.name}
+                                                                        </span>
+                                                                        <span className="font-mono font-black text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-lg">
+                                                                            {it.returnQty || it.quantity} {it.unit || "szt."}
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="flex items-center justify-between text-[11px] flex-wrap gap-1">
+                                                                        <span className="text-slate-500">Kategoria: {it.category}</span>
+                                                                        {isCompliant ? (
+                                                                            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                                                                                ✓ Zgodne z regułami
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full border border-red-200">
+                                                                                ⚠️ Niepospinane / Naruszenie reguły
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    {it.ruleNotes && (
+                                                                        <p className="text-[11px] text-slate-600 bg-white p-2 rounded-lg border border-slate-200/80 italic">
+                                                                            {it.ruleNotes}
+                                                                        </p>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+
+                                                {/* Transkrypcja rozmowy z asystentem AI */}
+                                                {selectedVoiceReturnForPreview.aiConversationTranscript && (
+                                                    <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2">
+                                                        <h4 className="font-black text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                                                            <span>💬</span>
+                                                            <span>Zapis rozmowy z telefonem (Transkrypcja AI):</span>
+                                                        </h4>
+                                                        <div className="bg-slate-900 text-slate-100 p-3.5 rounded-xl font-mono text-xs leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">
+                                                            {selectedVoiceReturnForPreview.aiConversationTranscript}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Zdjęcia ładunku jeśli dołączono */}
+                                                {Array.isArray(selectedVoiceReturnForPreview.photoUrls) && selectedVoiceReturnForPreview.photoUrls.length > 0 && (
+                                                    <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2">
+                                                        <h4 className="font-black text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                                                            <span>📸</span>
+                                                            <span>Zdjęcia ładunku z telefonu ({selectedVoiceReturnForPreview.photoUrls.length}):</span>
+                                                        </h4>
+                                                        <div className="flex gap-2.5 overflow-x-auto pb-1">
+                                                            {selectedVoiceReturnForPreview.photoUrls.map((pUrl: string, pIdx: number) => (
+                                                                <a
+                                                                    key={pIdx}
+                                                                    href={pUrl}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    className="w-20 h-20 rounded-xl overflow-hidden border border-slate-300 hover:opacity-80 transition shrink-0 block"
+                                                                    title="Kliknij, aby otworzyć zdjęcie w pełnym rozmiarze"
+                                                                >
+                                                                    <img src={pUrl} alt={`Foto ${pIdx + 1}`} className="w-full h-full object-cover" />
+                                                                </a>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="h-full flex items-center justify-center text-slate-400 text-xs">
+                                                Wybierz zgłoszenie z listy po lewej stronie.
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Stopka okna */}
+                        <div className="p-4 bg-white border-t border-slate-200 flex justify-between items-center">
+                            <span className="text-xs text-slate-500">
+                                Możesz podejrzeć nagranie lub zaimportować jego pozycje bezpośrednio do koszyka zwrotu papierowego.
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setIsVoiceReturnsModalOpen(false)}
                                 className="px-5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
                             >
                                 Zamknij
