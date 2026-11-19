@@ -42,6 +42,7 @@ export async function POST(req: Request) {
         let warehouseRules = "";
         let noProtocolRules = "";
         let noProtocolCategoryRules: Record<string, string> = {};
+        let configuredBypassCode = "jebacto";
 
         try {
             const rulesSnap = await adminDb.doc("settings/residual_rules").get();
@@ -54,6 +55,15 @@ export async function POST(req: Request) {
             }
         } catch (e) {
             console.warn("Błąd pobierania residual_rules w API chatu:", e);
+        }
+
+        try {
+            const sysSnap = await adminDb.doc("settings/system").get();
+            if (sysSnap.exists) {
+                configuredBypassCode = sysSnap.data()?.noProtocolBypassCode || "jebacto";
+            }
+        } catch (e) {
+            console.warn("Błąd pobierania settings/system:", e);
         }
 
         // 2. Pobierz aktualne kategorie
@@ -167,7 +177,12 @@ BEZWZGLĘDNE REGUŁY ZWROTU BEZ PROTOKOŁU PESAM:
    Jeśli materiały są niepospinane, nieposegregowane, uszkodzone lub wystąpił podejrzany przerzut:
    - Ustaw 'shouldPromptPhoto: true' oraz 'requiresPhoto: true' dla danej pozycji!
    - Powiedz: "Uwaga, reguły składowania zostały naruszone. Zrób teraz telefonem zdjęcie jako dowód do protokołu."
-8. PODSUMOWANIE I ZATWIERDZENIE:
+8. KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
+   Skonfigurowany kod wyłączający alert e-mail w systemie to: "${configuredBypassCode}".
+   Jeśli magazynier powie hasło "${configuredBypassCode}", "kod ${configuredBypassCode}" lub "pomiń maila":
+   - Ustaw w drafcie pole 'bypassCode': "${configuredBypassCode}".
+   - Powiedz krótko: "Kod zabezpieczający został przyjęty. Powiadomienie e-mail nie zostanie wysłane."
+9. PODSUMOWANIE I ZATWIERDZENIE:
    Gdy mamy budowę, kierowcę, powód i zweryfikowane pozycje:
    Powiedz: "Mamy komplet danych dla zwrotu z budowy [Budowa]. Czy zatwierdzasz zapis w systemie?".
 
@@ -325,6 +340,10 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                                 shouldPromptPhoto: {
                                     type: Type.BOOLEAN,
                                     description: "True jeśli w tej turze aplikacja na telefonie powinna wyraźnie wymusić zrobienie zdjęcia"
+                                },
+                                bypassCode: {
+                                    type: Type.STRING,
+                                    description: "Kod zabezpieczający wyłączający wysyłkę e-maila (np. jebacto)"
                                 }
                             },
                             required: ["siteName", "driver", "items", "missingFields", "isReadyToSave"]
@@ -368,6 +387,12 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
         const finalReason = (modelReason && modelReason !== 'brak' && modelReason !== 'undefined')
             ? modelReason
             : knownReason;
+
+        const modelBypass = parsed.draft?.bypassCode?.trim();
+        const hasBypassWord = userMessage.toLowerCase().includes(configuredBypassCode.toLowerCase());
+        const finalBypass = (modelBypass && modelBypass !== 'brak' && modelBypass !== 'undefined')
+            ? modelBypass
+            : (hasBypassWord ? configuredBypassCode : (currentDraft?.bypassCode || ""));
 
         const finalSiteId = parsed.draft?.siteId || matchedSite?.id || currentDraft?.siteId || "";
 
@@ -434,7 +459,8 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                 items: finalItems,
                 missingFields,
                 isReadyToSave: isReady,
-                shouldPromptPhoto
+                shouldPromptPhoto,
+                bypassCode: finalBypass
             },
             quickReplies: Array.isArray(parsed.quickReplies) && parsed.quickReplies.length > 0
                 ? parsed.quickReplies

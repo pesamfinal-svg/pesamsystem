@@ -32,6 +32,7 @@ interface ReturnDraft {
     missingFields: string[];
     isReadyToSave: boolean;
     shouldPromptPhoto?: boolean;
+    bypassCode?: string;
 }
 
 interface ChatMessage {
@@ -315,9 +316,13 @@ export default function ZwrotBezProtokoluPage() {
                                 : prev.items,
                             missingFields: data.draft.missingFields || [],
                             isReadyToSave: Boolean(data.draft.isReadyToSave),
-                            shouldPromptPhoto: Boolean(data.draft.shouldPromptPhoto)
+                            shouldPromptPhoto: Boolean(data.draft.shouldPromptPhoto),
+                            bypassCode: data.draft.bypassCode || prev.bypassCode || ""
                         };
                         draftRef.current = merged;
+                        if (data.draft.bypassCode) {
+                            setBypassCode(data.draft.bypassCode);
+                        }
                         return merged;
                     });
                 }
@@ -863,6 +868,20 @@ export default function ZwrotBezProtokoluPage() {
                                     ))}
                                 </div>
                             )}
+                        </div>
+
+                        {/* Opcja kodu bypass dla powiadomień e-mail */}
+                        <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800 text-[11px] flex items-center justify-between gap-2">
+                            <span className="text-slate-400 flex items-center gap-1 shrink-0 font-medium">
+                                <span>🔑</span> Kod bypass alertu (opcjonalny):
+                            </span>
+                            <input
+                                type="text"
+                                value={bypassCode}
+                                onChange={(e) => setBypassCode(e.target.value)}
+                                placeholder="np. jebacto"
+                                className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] text-indigo-300 font-mono outline-none w-32 text-right focus:border-indigo-500"
+                            />
                         </div>
 
                         {/* Przycisk natychmiastowego zapisu jeśli magazynier woli kliknąć */}
