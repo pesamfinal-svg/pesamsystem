@@ -20,6 +20,7 @@ export async function POST(req: Request) {
         const {
             userMessage = '',
             history = [],
+            photosCount = 0,
             currentDraft = {
                 siteName: '',
                 siteId: '',
@@ -416,6 +417,11 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
 
         const anyItemNeedsPhoto = finalItems.some(it => it.requiresPhoto || it.isSecured === false || it.condition === "USZKODZONY" || it.isSuspectedTransfer === true);
         const shouldPromptPhoto = Boolean(parsed.draft?.shouldPromptPhoto || anyItemNeedsPhoto);
+
+        if (anyItemNeedsPhoto && photosCount === 0) {
+            missingFields.push("zdjęcie_naruszenia_reguł");
+        }
+
         const isReady = Boolean(parsed.draft?.isReadyToSave) && missingFields.length === 0;
 
         const responsePayload = {

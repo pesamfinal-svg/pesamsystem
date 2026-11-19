@@ -67,6 +67,7 @@ export default function ZwrotBezProtokoluPage() {
 
     // Stany wejścia i mowy
     const [inputText, setInputText] = useState("");
+    const [bypassCode, setBypassCode] = useState("");
     const [isListening, setIsListening] = useState(false);
     const [isThinking, setIsThinking] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
@@ -284,7 +285,8 @@ export default function ZwrotBezProtokoluPage() {
                 body: JSON.stringify({
                     userMessage: userText,
                     history: updatedMessages.slice(-10).map(m => ({ role: m.role, content: m.content })),
-                    currentDraft: draftRef.current
+                    currentDraft: draftRef.current,
+                    photosCount: photos.length
                 })
             });
 
@@ -378,6 +380,23 @@ export default function ZwrotBezProtokoluPage() {
     // Zapis kompletnego zwrotu do bazy Firestore
     const handleSaveReturn = async (overrideDraft?: ReturnDraft) => {
         const finalDraft = overrideDraft || draft;
+
+        // BEZWZGLĘDNA BLOKADA ZAPISU BEZ ZDJĘCIA GDY ZŁAMANO REGUŁY
+        const needsPhoto = Boolean(
+            finalDraft.shouldPromptPhoto ||
+            (finalDraft.items || []).some(i => i.requiresPhoto || i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer)
+        );
+
+        if (needsPhoto && photos.length === 0) {
+            speakText("Zatrzymano zapis. Zgodnie z regułami PESAM, przed zatwierdzeniem musisz wykonać zdjęcie niepospinanych materiałów lub uszkodzeń.");
+            setTimeout(() => {
+                try {
+                    fileInputRef.current?.click();
+                } catch {}
+            }, 600);
+            return;
+        }
+
         setIsUploading(true);
 
         try {
@@ -454,9 +473,29 @@ export default function ZwrotBezProtokoluPage() {
                 id: docRef.id
             });
 
-            setSavedDocId(protocolPayload.protocolId);
+                            setSavedDocId(protocolPayload.protocolId);
             setIsSavedSuccess(true);
             speakText(`Zwrot bez protokołu numer ${protocolPayload.protocolId} został pomyślnie zapisany w systemie.`);
+
+            // 3. Wysłanie alertu e-mail jeśli zdefiniowano odbiorców w ustawieniach
+            try {
+                fetch("/api/plac/zwrot-bez-protokolu/alert-email", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        protocolId: protocolPayload.protocolId,
+                        siteName: finalDraft.siteName || "Nieokreślona",
+                        driverName: finalDraft.driver || "Nieokreślony",
+                        reasonForNoProtocol: finalDraft.reasonForNoProtocol || "Brak informacji",
+                        items: protocolItems,
+                        photoUrls: uploadedUrls,
+                        aiConversationTranscript: protocolPayload.aiConversationTranscript,
+                        bypassCode: bypassCode.trim()
+                    })
+                }).catch(e => console.warn("Błąd wysyłania alertu e-mail:", e));
+            } catch (errEmail) {
+                console.warn("Błąd triggera maila:", errEmail);
+            }
         } catch (err: any) {
             console.error("Błąd zapisu zwrotu:", err);
             alert("Błąd zapisu w bazie danych: " + (err?.message || err));
@@ -964,6 +1003,31 @@ export default function ZwrotBezProtokoluPage() {
                             </button>
                         </form>
                     </div>
+
+                    {/* PŁYWAJĄCY PRZYCISK APARATU - ZAWSZE WIDOCZNY GDY WYMAGANE JEST ZDJĘCIE */}
+                    {(draft.shouldPromptPhoto || draft.items.some(i => i.requiresPhoto || i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer)) && photos.length === 0 && (
+                        <div className="fixed bottom-3 left-3 right-3 z-50 max-w-xl mx-auto animate-bounce">
+                            <div
+                                onClick={() => fileInputRef.current?.click()}
+                                className="cursor-pointer bg-gradient-to-r from-red-600 via-amber-600 to-yellow-500 text-white p-3.5 rounded-2xl shadow-2xl shadow-red-950/80 border-2 border-yellow-300 flex items-center justify-between gap-3 active:scale-95 transition"
+                            >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                    <span className="text-3xl shrink-0">📸</span>
+                                    <div className="min-w-0">
+                                        <h4 className="font-black text-xs uppercase tracking-wide text-white leading-tight">
+                                            WYMAGANE ZDJĘCIE JAKO DOWÓD!
+                                        </h4>
+                                        <p className="text-[10px] font-bold text-yellow-200 leading-tight mt-0.5 truncate">
+                                            Dotknij tutaj, aby natychmiast otworzyć aparat
+                                        </p>
+                                    </div>
+                                </div>
+                                <span className="px-3 py-1.5 rounded-xl bg-slate-950 text-yellow-300 font-black text-xs shrink-0 shadow flex items-center gap-1">
+                                    📷 Aparat
+                                </span>
+                            </div>
+                        </div>
+                    )}
                 </main>
             )}
         </div>

@@ -19,6 +19,8 @@ interface SystemSettings {
     isCloseoutSandboxMode: boolean; // Przełącznik trybu testowego
     residualAlertRecipients: string[]; // Lista maili do alertów o naruszeniu reguł zwrotu AI
     capacityAlertRecipients?: string[]; // Lista maili do alertów o zapełnieniu stref magazynowych (JPP)
+    noProtocolEmailRecipients?: string[]; // Lista maili do alertów o zwrotach bez protokołu i przerzutach
+    noProtocolBypassCode?: string; // Kod zabezpieczający bypass (np. "jebacto")
 }
 
 export default function SettingsPage() {
@@ -36,13 +38,16 @@ export default function SettingsPage() {
         notifyDirectorOnInitiate: false,
         isCloseoutSandboxMode: true, // Domyślnie włączony dla bezpieczeństwa testów
         residualAlertRecipients: [],
-        capacityAlertRecipients: []
+        capacityAlertRecipients: [],
+        noProtocolEmailRecipients: [],
+        noProtocolBypassCode: "jebacto"
     });
     const [newEmail, setNewEmail] = useState("");
     const [newCloseoutEmail, setNewCloseoutEmail] = useState("");
     const [newCloseoutAdditionalEmail, setNewCloseoutAdditionalEmail] = useState("");
     const [newResidualAlertEmail, setNewResidualAlertEmail] = useState("");
     const [newCapacityAlertEmail, setNewCapacityAlertEmail] = useState("");
+    const [newNoProtocolEmail, setNewNoProtocolEmail] = useState("");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
 
@@ -73,7 +78,9 @@ export default function SettingsPage() {
                         notifyDirectorOnInitiate: data.notifyDirectorOnInitiate || false,
                         isCloseoutSandboxMode: data.isCloseoutSandboxMode !== undefined ? data.isCloseoutSandboxMode : true,
                         residualAlertRecipients: data.residualAlertRecipients || [],
-                        capacityAlertRecipients: data.capacityAlertRecipients || []
+                        capacityAlertRecipients: data.capacityAlertRecipients || [],
+                        noProtocolEmailRecipients: data.noProtocolEmailRecipients || [],
+                        noProtocolBypassCode: data.noProtocolBypassCode || "jebacto"
                     });
                 }
             } catch (e) {
@@ -169,6 +176,23 @@ export default function SettingsPage() {
 
     const handleRemoveCapacityAlertEmail = (emailToRemove: string) => {
         setSettings(prev => ({ ...prev, capacityAlertRecipients: (prev.capacityAlertRecipients || []).filter(email => email !== emailToRemove) }));
+    };
+
+    const handleAddNoProtocolEmail = (e: React.FormEvent) => {
+        e.preventDefault();
+        const email = newNoProtocolEmail.trim().toLowerCase();
+        if (!email) return;
+
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) return alert("Wprowadź poprawny adres e-mail!");
+        if (settings.noProtocolEmailRecipients?.includes(email)) return alert("Ten e-mail jest już na liście!");
+
+        setSettings(prev => ({ ...prev, noProtocolEmailRecipients: [...(prev.noProtocolEmailRecipients || []), email] }));
+        setNewNoProtocolEmail("");
+    };
+
+    const handleRemoveNoProtocolEmail = (emailToRemove: string) => {
+        setSettings(prev => ({ ...prev, noProtocolEmailRecipients: (prev.noProtocolEmailRecipients || []).filter(email => email !== emailToRemove) }));
     };
 
     const handleSaveSettings = async () => {
@@ -440,6 +464,73 @@ export default function SettingsPage() {
                             {(!settings.capacityAlertRecipients || settings.capacityAlertRecipients.length === 0) && (
                                 <p className="text-xs text-slate-400 italic">Brak zdefiniowanych odbiorców alertów o zapełnieniu stref magazynowych.</p>
                             )}
+                        </div>
+                    </div>
+
+                    {/* NOWOŚĆ: SEKCJA POWIADOMIEŃ O ZWROTACH BEZ PROTOKOŁU I PRZERZUTACH SPRZĘTU (AI PLAC) */}
+                    <div className="space-y-4 pt-6 border-t">
+                        <div className="border-b pb-2 flex items-center justify-between">
+                            <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                                <span>🎙️</span> Powiadomienia o Zwrotach Bez Protokołu i Przerzutach Sprzętu (AI Plac)
+                            </h3>
+                            <span className="text-[10px] bg-indigo-100 text-indigo-800 font-bold px-2 py-0.5 rounded-full">
+                                Alert e-mail
+                            </span>
+                        </div>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            Adresy e-mail, na które system wyśle natychmiastowe szczegółowe powiadomienie, gdy na placu zostanie przyjęty zwrot <b>bez fizycznego protokołu z budowy</b>, z niepospinanymi materiałami lub w razie <b>wykrycia podejrzenia nieoficjalnego przerzutu sprzętu</b> między budowami.
+                        </p>
+                        <form onSubmit={handleAddNoProtocolEmail} className="flex gap-3">
+                            <input
+                                type="text"
+                                placeholder="np. dyrektor@pesam.pl lub szef@pesam.pl"
+                                value={newNoProtocolEmail}
+                                onChange={e => setNewNoProtocolEmail(e.target.value)}
+                                className="flex-1 p-3 border-2 rounded-xl text-sm outline-none focus:border-indigo-500 font-bold bg-slate-50"
+                            />
+                            <button
+                                type="submit"
+                                className="bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs px-6 rounded-xl shadow-md transition cursor-pointer"
+                            >
+                                + Dodaj do listy
+                            </button>
+                        </form>
+                        <div className="flex flex-wrap gap-2 pt-2">
+                            {(settings.noProtocolEmailRecipients || []).map(email => (
+                                <span
+                                    key={email}
+                                    className="bg-indigo-50 text-indigo-800 border border-indigo-200 text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-2 shadow-sm"
+                                >
+                                    {email}
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRemoveNoProtocolEmail(email)}
+                                        className="text-red-500 hover:text-red-700 text-sm font-black cursor-pointer"
+                                    >
+                                        &times;
+                                    </button>
+                                </span>
+                            ))}
+                            {(!settings.noProtocolEmailRecipients || settings.noProtocolEmailRecipients.length === 0) && (
+                                <p className="text-xs text-slate-400 italic">Brak zdefiniowanych odbiorców alertów o zwrotach bez protokołu.</p>
+                            )}
+                        </div>
+
+                        {/* KOD ZABEZPIECZAJĄCY (BYPASS) */}
+                        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2 mt-3">
+                            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                                🔑 Kod zabezpieczający pomijający wysyłkę e-mail (Bypass Code)
+                            </label>
+                            <input
+                                type="text"
+                                value={settings.noProtocolBypassCode || "jebacto"}
+                                onChange={e => setSettings({ ...settings, noProtocolBypassCode: e.target.value })}
+                                placeholder="np. jebacto"
+                                className="w-full sm:w-1/2 p-2.5 border-2 rounded-xl text-sm font-mono font-bold bg-white outline-none focus:border-indigo-500 text-indigo-900"
+                            />
+                            <p className="text-[11px] text-slate-500 leading-relaxed">
+                                Wpisanie tego hasła (np. <code>{settings.noProtocolBypassCode || "jebacto"}</code>) podczas rejestracji lub zatwierdzania zwrotu wstrzyma automatyczne wysłanie alertu e-mail na powyższe adresy (przydatne przy testach lub uzasadnionych wyjątkach).
+                            </p>
                         </div>
                     </div>
 

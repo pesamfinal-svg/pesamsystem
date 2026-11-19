@@ -334,6 +334,7 @@ export default function ProtocolsHub() {
     const [voiceReturns, setVoiceReturns] = useState<any[]>([]);
     const [isLoadingVoiceReturns, setIsLoadingVoiceReturns] = useState(false);
     const [isVoiceReturnsModalOpen, setIsVoiceReturnsModalOpen] = useState(false);
+    const [isVoiceModalMinimized, setIsVoiceModalMinimized] = useState(false);
     const [selectedVoiceReturnForPreview, setSelectedVoiceReturnForPreview] = useState<any | null>(null);
     const [investigationData, setInvestigationData] = useState<{
         inventoryId: string;
@@ -1559,6 +1560,39 @@ export default function ProtocolsHub() {
         }
     };
 
+    const handleDeleteVoiceReturn = async (vr: any) => {
+        if (!vr) return;
+        const confirmDelete = window.confirm(
+            `Czy na pewno chcesz usunąć zgłoszenie głosowe ${vr.protocolId || ""}? Ta operacja jest nieodwracalna.`
+        );
+        if (!confirmDelete) return;
+
+        try {
+            const targetId = vr.docId || vr.id;
+            if (targetId) {
+                try {
+                    await deleteDoc(doc(db, "returns_without_protocol", targetId));
+                } catch (e) {
+                    console.warn("Błąd usuwania z returns_without_protocol:", e);
+                }
+                try {
+                    await deleteDoc(doc(db, "protocols", targetId));
+                } catch (e) {
+                    console.warn("Błąd usuwania z protocols:", e);
+                }
+            }
+
+            setVoiceReturns(prev => prev.filter(item => item.docId !== targetId && item.protocolId !== vr.protocolId));
+            if (selectedVoiceReturnForPreview?.docId === targetId || selectedVoiceReturnForPreview?.protocolId === vr.protocolId) {
+                setSelectedVoiceReturnForPreview(null);
+            }
+            alert(`Zgłoszenie ${vr.protocolId || ""} zostało pomyślnie usunięte.`);
+        } catch (err: any) {
+            console.error("Błąd usuwania zgłoszenia:", err);
+            alert("Nie udało się usunąć zgłoszenia: " + (err?.message || err));
+        }
+    };
+
     const importVoiceReturnToPaperForm = (vr: any) => {
         if (!vr) return;
 
@@ -1572,41 +1606,90 @@ export default function ProtocolsHub() {
         setPaperDocReference(refText);
 
         // 3. Dopasuj budowę jeśli rozpoznano
+        let targetSiteId = paperReturnSiteId;
         if (vr.siteName) {
             const cleanSite = vr.siteName.toLowerCase().trim();
             const matchedSite = sites.find(s => 
                 s.name.toLowerCase().includes(cleanSite) || cleanSite.includes(s.name.toLowerCase())
             );
             if (matchedSite) {
+                targetSiteId = matchedSite.id;
                 setPaperReturnSiteId(matchedSite.id);
             }
         }
 
-        // 4. Zaimportuj pozycje do koszyka zwrotu papierowego
+        // 4. Zaimportuj pozycje do koszyka zwrotu papierowego z inteligentnym dopasowaniem do katalogu
         if (Array.isArray(vr.items) && vr.items.length > 0) {
-            const newCartItems: PaperReturnCartItem[] = vr.items.map((it: any, idx: number) => ({
-                cartItemId: `${Date.now()}_vr_${idx}`,
-                isManual: true,
-                isPermanent: false,
-                name: it.name || "Materiał ze zgłoszenia głosowego",
-                type: "BULK",
-                inventoryNumber: "Z_GŁOSU",
-                unit: it.unit || "szt.",
-                maxQty: 999999,
-                declaredQty: Number(it.returnQty || it.quantity) || 1,
-                receivedQty: Number(it.returnQty || it.quantity) || 1,
-                finalStatus: it.declaredStatus?.includes("USZKODZ") ? "uszkodzone" : "sprawne",
-                notes: it.ruleNotes || (it.rulesCompliant ? "Zgodne z regułami z głosu" : "Zgłoszone głosowo bez protokołu"),
-                isReturningMainItem: true,
-                category: it.category || "Inne Materiały, Drewno i Odpady",
-                subcategory: it.subcategory || "",
-                storageLocation: it.storageLocation || ""
-            }));
+            const newCartItems: PaperReturnCartItem[] = vr.items.map((it: any, idx: number) => {
+                const cleanNr = it.inventoryNumber ? it.inventoryNumber.toString().trim().toLowerCase() : "";
+                const cleanName = normalizeString(it.name || "");
 
-            setPaperReturnCart(prev => [...prev, ...newCartItems]);
+                const invMatch = inventory.find(inv => {
+                    if (cleanNr && inv.inventoryNumber && inv.inventoryNumber.toString().trim().toLowerCase() === cleanNr) {
+                        return true;
+                    }
+                    if (cleanName && normalizeString(inv.name) === cleanName) {
+                        return true;
+                    }
+                    return false;
+                });
+
+                if (invMatch) {
+                    const isUnique = invMatch.type === "UNIQUE";
+                    return {
+                        cartItemId: `${Date.now()}_vr_${idx}`,
+                        inventoryId: invMatch.id,
+                        name: invMatch.name,
+                        type: invMatch.type || (isUnique ? "UNIQUE" : "BULK"),
+                        inventoryNumber: invMatch.inventoryNumber || it.inventoryNumber || "",
+                        unit: invMatch.unit || it.unit || "szt.",
+                        maxQty: isUnique ? 1 : (invMatch.allocations?.[targetSiteId] || 999999),
+                        declaredQty: Number(it.returnQty || it.quantity) || 1,
+                        receivedQty: Number(it.returnQty || it.quantity) || 1,
+                        finalStatus: (it.declaredStatus?.includes("USZKODZ") || it.condition === "USZKODZONY") ? "uszkodzone" : "sprawne",
+                        notes: it.ruleNotes || (it.rulesCompliant ? "Zgodne z regułami z głosu" : "Zgłoszone głosowo bez protokołu"),
+                        isReturningMainItem: true,
+                        category: invMatch.category || it.category || "Inne",
+                        subcategory: invMatch.subcategory || it.subcategory || "",
+                        storageLocation: it.storageLocation || "",
+                        isManual: false,
+                        isPermanent: invMatch.isPermanent || false,
+                        isResidual: false,
+                        accessories: ((invMatch as any).accessories || [])
+                    };
+                }
+
+                // Wpis ręczny / resztki jeśli brak w katalogu
+                return {
+                    cartItemId: `${Date.now()}_vr_${idx}`,
+                    isManual: true,
+                    isPermanent: false,
+                    isResidual: true,
+                    name: it.name || "Materiał ze zgłoszenia głosowego",
+                    type: it.type || "BULK",
+                    inventoryNumber: it.inventoryNumber || "Z_GŁOSU",
+                    unit: it.unit || "szt.",
+                    maxQty: 999999,
+                    declaredQty: Number(it.returnQty || it.quantity) || 1,
+                    receivedQty: Number(it.returnQty || it.quantity) || 1,
+                    finalStatus: (it.declaredStatus?.includes("USZKODZ") || it.condition === "USZKODZONY") ? "uszkodzone" : "sprawne",
+                    notes: it.ruleNotes || (it.rulesCompliant ? "Zgodne z regułami z głosu" : "Zgłoszone głosowo bez protokołu"),
+                    isReturningMainItem: true,
+                    category: it.category || "Inne Materiały, Drewno i Odpady",
+                    subcategory: it.subcategory || "",
+                    storageLocation: it.storageLocation || ""
+                };
+            });
+
+            setPaperReturnCart(prev => {
+                const existingKeys = new Set(prev.map(p => `${p.name}_${p.inventoryNumber}`));
+                const filteredNew = newCartItems.filter(n => !existingKeys.has(`${n.name}_${n.inventoryNumber}`));
+                return [...prev, ...filteredNew];
+            });
         }
 
         setIsVoiceReturnsModalOpen(false);
+        setIsVoiceModalMinimized(false);
     };
 
     const openPaperReturnModal = async () => {
@@ -6070,8 +6153,54 @@ export default function ProtocolsHub() {
                 </div>
             )}
 
+            {/* PŁYWAJĄCY ZMINIMALIZOWANY PASEK ZGŁOSZEŃ GŁOSOWYCH */}
+            {isVoiceReturnsModalOpen && isVoiceModalMinimized && (
+                <div className="fixed bottom-6 right-6 z-[90] bg-slate-900/95 text-white p-3.5 rounded-2xl shadow-2xl border-2 border-indigo-500 backdrop-blur-md flex items-center gap-3 animate-slide-up max-w-lg">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="text-2xl shrink-0">🎙️</span>
+                        <div className="min-w-0 text-left">
+                            <div className="flex items-center gap-2">
+                                <strong className="text-indigo-400 font-mono text-xs">{selectedVoiceReturnForPreview?.protocolId || "ZBP"}</strong>
+                                <span className="text-[10px] bg-purple-950 text-purple-300 border border-purple-700/60 px-1.5 py-0.2 rounded font-bold">Z głosu</span>
+                            </div>
+                            <p className="text-[11px] text-slate-300 truncate">
+                                {selectedVoiceReturnForPreview?.siteName} ({selectedVoiceReturnForPreview?.items?.length || 0} poz.)
+                            </p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => importVoiceReturnToPaperForm(selectedVoiceReturnForPreview)}
+                            className="px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs rounded-xl shadow active:scale-95 transition"
+                        >
+                            📥 Wstaw
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setIsVoiceModalMinimized(false)}
+                            className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl border border-slate-700 transition"
+                            title="Rozwiń pełny podgląd"
+                        >
+                            🗖 Rozwiń
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setIsVoiceReturnsModalOpen(false);
+                                setIsVoiceModalMinimized(false);
+                            }}
+                            className="w-7 h-7 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center font-bold"
+                            title="Zamknij"
+                        >
+                            ✕
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* MODAL: PODGLĄD ZGŁOSZEŃ GŁOSOWYCH Z PLACU (ZWROTY BEZ PROTOKOŁU) */}
-            {isVoiceReturnsModalOpen && (
+            {isVoiceReturnsModalOpen && !isVoiceModalMinimized && (
                 <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-3 sm:p-6 animate-fade-in">
                     <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl h-[88vh] flex flex-col overflow-hidden border-2 border-indigo-300">
                         {/* Nagłówek okna */}
@@ -6106,7 +6235,19 @@ export default function ProtocolsHub() {
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => setIsVoiceReturnsModalOpen(false)}
+                                    onClick={() => setIsVoiceModalMinimized(true)}
+                                    className="px-3 py-1.5 rounded-xl border border-indigo-700/60 bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 text-xs font-bold transition flex items-center gap-1.5 active:scale-95"
+                                    title="Zwiń do małego paska, aby widzieć formularz zwrotu"
+                                >
+                                    <span>🗕</span>
+                                    <span className="hidden sm:inline">Zwiń</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setIsVoiceReturnsModalOpen(false);
+                                        setIsVoiceModalMinimized(false);
+                                    }}
                                     className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center text-lg font-bold transition"
                                 >
                                     ✕
@@ -6210,15 +6351,39 @@ export default function ProtocolsHub() {
                                                             </p>
                                                         </div>
 
-                                                        {/* Przycisk wstawienia do koszyka */}
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => importVoiceReturnToPaperForm(selectedVoiceReturnForPreview)}
-                                                            className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs rounded-xl shadow-md transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
-                                                        >
-                                                            <span>📥</span>
-                                                            <span>Wstaw do koszyka tego zwrotu</span>
-                                                        </button>
+                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                            {/* Przycisk wstawienia do koszyka */}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => importVoiceReturnToPaperForm(selectedVoiceReturnForPreview)}
+                                                                className="px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-xs rounded-xl shadow-md transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                                                            >
+                                                                <span>📥</span>
+                                                                <span>Wstaw do koszyka</span>
+                                                            </button>
+
+                                                            {/* Przycisk zwinięcia do paska */}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setIsVoiceModalMinimized(true)}
+                                                                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-xl border border-indigo-200 transition active:scale-95 flex items-center gap-1 cursor-pointer"
+                                                                title="Zwiń do małego paska, aby widzieć formularz zwrotu"
+                                                            >
+                                                                <span>🗕</span>
+                                                                <span>Zwiń</span>
+                                                            </button>
+
+                                                            {/* Przycisk usunięcia zgłoszenia */}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleDeleteVoiceReturn(selectedVoiceReturnForPreview)}
+                                                                className="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 font-bold text-xs rounded-xl border border-red-200 transition active:scale-95 flex items-center gap-1 cursor-pointer"
+                                                                title="Usuń trwale to zgłoszenie z systemu"
+                                                            >
+                                                                <span>🗑️</span>
+                                                                <span>Usuń</span>
+                                                            </button>
+                                                        </div>
                                                     </div>
 
                                                     {/* Dane budowy, kierowcy i powodu braku protokołu */}
