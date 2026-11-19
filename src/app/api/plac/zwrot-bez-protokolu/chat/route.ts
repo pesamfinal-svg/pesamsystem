@@ -18,7 +18,7 @@ export async function POST(req: Request) {
     try {
         const body = await req.json();
         const {
-            userMessage,
+            userMessage = '',
             history = [],
             currentDraft = {
                 siteName: '',
@@ -79,6 +79,10 @@ export async function POST(req: Request) {
             return `Kategoria "${cat.name}" (${cat.id}):\nWytyczna: ${catRule}`;
         }).filter(Boolean).join("\n\n");
 
+        const knownSite = currentDraft?.siteName?.trim() || "";
+        const knownDriver = currentDraft?.driver?.trim() || "";
+        const knownItems: any[] = Array.isArray(currentDraft?.items) ? currentDraft.items : [];
+
         const systemInstruction = `
 Jesteś inteligentnym, profesjonalnym i uprzejmym Głosowym Asystentem Magazynu firmy PESAM.
 Twój rozmówca to magazynier na placu budowlanym, który zgłasza zwrot materiałów lub sprzętu przywieziony z budowy BEZ PAPIEROWEGO PROTOKOŁU ZWROTU.
@@ -86,46 +90,49 @@ Twój rozmówca to magazynier na placu budowlanym, który zgłasza zwrot materia
 BARDZO WAŻNE - FORMAT ODPOWIEDZI:
 Twoja odpowiedź w polu "speechReply" ZOSTANIE ODCZYTANA NA GŁOS PRZEZ SYNTEZATOR MOWY W TELEFONIE MAGAZYNIERA (Text-To-Speech).
 - Pisz czystym tekstem, BEZ GWIAZDEK, bez formatowania Markdown (#, **, * itp.), bez list punktowanych!
-- Mów naturalnie, po polsku, profesjonalnie, zwięźle (maksymalnie 1-3 krótkie zdania).
-- Magazynier ma zajęte lub brudne ręce na placu, więc dialog musi być płynny, dynamiczny i konkretny.
+- Mów naturalnie, po polsku, profesjonalnie, zwięźle (maksymalnie 1-2 krótkie, konkretne zdania).
+- Magazynier ma zajęte ręce, więc dialog musi być dynamiczny.
 
-WYMAGANE DANE DO SKOMPLETOWANIA ZWROTU BEZ PROTOKOŁU:
-1. BUDOWA: Skąd pochodzi ten zwrot (np. nazwa inwestycji / budowy). Znane przykładowe budowy w systemie: ${siteNames.slice(0, 15).join(', ')}.
-2. KIEROWCA: Imię i nazwisko kierowcy lub firmy transportowej, która przywiozła towar na plac.
-3. PRZEDMIOTY I ILOŚĆ: Wymienione materiały, resztki lub osprzęt (np. kubik desek, 10 worków kleju, 5 stempli).
-4. WERYFIKACJA REGUŁ ZWROTÓW BEZ PROTOKOŁU:
-   Sprawdź reguły zwrotów bez protokołu poniżej!
-   - ZASADA DESEK / DREWNA: Jeśli w zgłoszeniu pojawia się drewno lub deski (np. "kubik desek", "deski szalunkowe"), zgodnie z regułami deski MUSZĄ być pospinane taśmami i posegregowane według długości! Jeśli magazynier o tym nie wspomniał, MUSISZ WPROST ZAPYTAĆ: "Czy deski są pospinane i posegregowane według reguł?".
-   - ZASADA INNYCH KATEGORII: Sprawdź poniższe reguły kategorii. Jeśli materiał podlega specyficznej regule, a brak o tym wzmianki, dopytaj magazyniera.
+STAN WIEDZY KTÓRY JUŻ POSIADASZ (BĄDŹ ŚWIADOMY CO JUŻ ZOSTAŁO POWIEDZIANE):
+- Budowa źródłowa: ${knownSite ? `USTALONA: "${knownSite}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK - zapytaj o budowę jeśli nie padła w tej wypowiedzi"}
+- Kierowca / Zdający: ${knownDriver ? `USTALONY: "${knownDriver}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK - zapytaj o kierowcę jeśli nie padł w tej wypowiedzi"}
+- Zarejestrowane dotąd pozycje: ${knownItems.length > 0 ? JSON.stringify(knownItems) : "Brak pozycji - wyodrębnij z wypowiedzi"}
+
+ŻELAZNA ZASADA PAMIĘCI I KONTYNUACJI:
+1. JEŚLI BUDOWA JEST JUŻ USTALONA: NIGDY WIĘCEJ O NIĄ NIE PYTAJ! W polu draft.siteName zawsze przepisz "${knownSite || ""}".
+2. JEŚLI KIEROWCA JEST JUŻ USTALONY: NIGDY WIĘCEJ O NIEGO NIE PYTAJ! W polu draft.driver zawsze przepisz "${knownDriver || ""}".
+3. JEŚLI PRZEDMIOTY ZOSTAŁY JUŻ ZGŁOSZONE (np. deski), a teraz magazynier odpowiada na pytanie o pospinanie lub podaje budowę/kierowcę:
+   - ZACHOWAJ dotychczasowe przedmioty w 'draft.items'!
+   - Nie pytaj ponownie "co przyjechało", tylko odnotuj odpowiedź!
+4. REGUŁA DLA DESEK / DREWNA:
+   Jeśli zgłoszono drewno/deski, a nie ustalono jeszcze czy są spięte:
+   Zapytaj TYLKO: "Czy deski są pospinane taśmą i posegregowane według reguł?".
+   Gdy magazynier odpowie "tak, są spięte" lub podobnie:
+   Zaktualizuj 'isSecured: true', 'isRuleCompliant: true' i przejdź do podsumowania! NIE PYTAJ PONOWNIE o budowę ani kierowcę jeśli już ich znasz!
+5. PODSUMOWANIE I POTWIERDZENIE ZAPISU:
+   Gdy mamy: budowę, kierowcę i zweryfikowane pozycje:
+   Powiedz: "Mamy komplet: zwrot z budowy [Budowa], kierowca [Kierowca], [Pozycje]. Czy zatwierdzasz zapisanie w systemie?".
+   Jeśli magazynier potwierdzi ("tak", "zapisz", "zatwierdź"): ustaw 'readyToSave: true' i powiedz: "Zwrot został zatwierdzony i jest zapisywany w systemie.".
 
 AKTUALNE REGUŁY ZWROTÓW BEZ PROTOKOŁU W PESAM:
-Ogólne zasady zwrotów bez protokołu:
 """${noProtocolRules || "Wymagane podanie budowy źródłowej i kierowcy. Wszystkie deski i drewno szalunkowe muszą być pospinane taśmami stalowymi lub PET i posegregowane według wymiaru. W razie braku spięcia lub uszkodzeń odnotować zastrzeżenie."}"""
 
 ${formattedCategoryRules ? `Reguły dla poszczególnych kategorii:\n${formattedCategoryRules}\n` : ''}
 
 ${bossRules ? `Dodatkowe wytyczne Dyrekcji:\n"""${bossRules}"""\n` : ''}
-
-ZASADY PROWADZENIA ROZMOWY:
-1. Przeanalizuj dotychczasowy stan szkicu (currentDraft) oraz nową wypowiedź magazyniera.
-2. Zaktualizuj pola w 'draft':
-   - Jeśli magazynier podał budowę -> zapisz w 'siteName'.
-   - Jeśli podał kierowcę -> zapisz w 'driver'.
-   - Jeśli wymienił przedmioty -> wyodrębnij je do 'items' z kategorią, nazwą, ilością i jednostką (np. 1 m³, 10 szt.).
-   - Jeśli magazynier odpowiedział na pytanie o pospinanie desek / segregację / stan -> zaktualizuj 'isSecured' (true/false), 'isRuleCompliant' i wpisz komentarz w 'ruleNotes' (np. "Deski pospinane taśmą i posegregowane").
-3. Jeśli czegoś brakuje:
-   - Dopytaj o to w 'speechReply' w przyjazny, konkretny sposób (np. "Przyjąłem kubik desek. Z jakiej budowy pochodzi ten zwrot i kto go przywiózł? Czy deski są pospinane i posegregowane?").
-4. Jeśli WSZYSTKIE dane są zebrane (jest budowa, jest kierowca, pozycje są zweryfikowane pod kątem reguł):
-   - W 'speechReply' podsumuj zwrot i zapytaj o zatwierdzenie: "Mamy wszystkie dane: zwrot z budowy [Budowa], kierowca [Kierowca], [Pozycje]. Czy zatwierdzasz zapisanie zwrotu w systemie?".
-   - Jeśli magazynier potwierdzi ("tak", "zapisz", "zgadzam się", "zatwierdź"): ustaw 'readyToSave: true' oraz w speechReply potwierdź: "Zwrot został zatwierdzony i jest zapisywany w systemie.".
-5. Wygeneruj 2-4 intuicyjne szybkie odpowiedzi ("quickReplies"), które magazynier może kliknąć jednym palcem (np. "Tak, są pospinane", "Niepospinane (luzem)", "Budowa Wielicka", "Zatwierdź zwrot").
+Znane budowy w systemie: ${siteNames.slice(0, 15).join(', ')}.
 `;
 
+        // Formatowanie historii rozmowy
+        const cleanHistory = (Array.isArray(history) ? history : [])
+            .filter((h: any) => h && h.content && h.content !== userMessage)
+            .map((h: any) => `${h.role === 'user' ? 'Magazynier' : 'Asystent AI'}: "${h.content}"`);
+
         const conversationContext = [
-            `Stan bieżący szkicu: ${JSON.stringify(currentDraft)}`,
-            ...history.map((h: any) => `${h.role === 'user' ? 'Magazynier' : 'Asystent'}: ${h.content}`),
-            `Nowa wypowiedź magazyniera: "${userMessage}"`
-        ].join('\n\n');
+            `FAKTY Z DOTYCHCZASOWEGO SZKICU:\n- Budowa: "${knownSite || 'brak'}"\n- Kierowca: "${knownDriver || 'brak'}"\n- Pozycje: ${JSON.stringify(knownItems)}`,
+            cleanHistory.length > 0 ? `HISTORIA POPRZEDNICH WYPOWIEDZI:\n${cleanHistory.join('\n')}` : '',
+            `NAJNOWSZA WYPOWIEDŹ MAGAZYNIERA TERAZ: "${userMessage}"`
+        ].filter(Boolean).join('\n\n');
 
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
@@ -139,14 +146,14 @@ ZASADY PROWADZENIA ROZMOWY:
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.2,
+                temperature: 0.1,
                 responseMimeType: "application/json",
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
                         speechReply: {
                             type: Type.STRING,
-                            description: "Zwięzła, naturalna odpowiedź bez markdown przeznaczona do odczytania na głos przez syntezator mowy (1-3 zdania)."
+                            description: "Zwięzła, naturalna odpowiedź bez markdown przeznaczona do odczytania na głos przez syntezator mowy (1-2 zdania)."
                         },
                         draft: {
                             type: Type.OBJECT,
@@ -154,15 +161,15 @@ ZASADY PROWADZENIA ROZMOWY:
                             properties: {
                                 siteName: {
                                     type: Type.STRING,
-                                    description: "Nazwa budowy źródłowej lub puste jeśli jeszcze nie podano"
+                                    description: "Nazwa budowy źródłowej (zachowaj jeśli już była ustalona)"
                                 },
                                 driver: {
                                     type: Type.STRING,
-                                    description: "Imię i nazwisko kierowcy / transportu lub puste jeśli nie podano"
+                                    description: "Imię i nazwisko kierowcy (zachowaj jeśli już było ustalone)"
                                 },
                                 items: {
                                     type: Type.ARRAY,
-                                    description: "Lista zwracanych pozycji",
+                                    description: "Lista zwracanych pozycji (zawsze zachowaj wcześniej dodane pozycje i zaktualizuj ich stan)",
                                     items: {
                                         type: Type.OBJECT,
                                         properties: {
@@ -210,22 +217,85 @@ ZASADY PROWADZENIA ROZMOWY:
         });
 
         const rawJson = response.text?.trim() || "{}";
-        let parsed;
+        let parsed: any;
         try {
             parsed = JSON.parse(rawJson);
         } catch {
-            // Awaryjne parsowanie gdyby wystąpiły znaki formatowania
             const cleaned = rawJson.replace(/```json/g, '').replace(/```/g, '').trim();
             parsed = JSON.parse(cleaned);
         }
 
-        return NextResponse.json(parsed);
+        // =========================================================================
+        // ŻELAZNA OCHRONA PAMIĘCI (STATE MERGING GUARANTEE)
+        // Nigdy nie pozwalamy modelowi wyzerować wcześniej zdobytej wiedzy!
+        // =========================================================================
+        const modelSite = parsed.draft?.siteName?.trim();
+        const modelDriver = parsed.draft?.driver?.trim();
+
+        const finalSiteName = (modelSite && modelSite !== 'brak' && modelSite !== 'undefined')
+            ? modelSite
+            : knownSite;
+
+        const finalDriver = (modelDriver && modelDriver !== 'brak' && modelDriver !== 'undefined')
+            ? modelDriver
+            : knownDriver;
+
+        // Łączenie pozycji
+        let finalItems: any[] = [];
+        const modelItems: any[] = Array.isArray(parsed.draft?.items) ? parsed.draft.items : [];
+
+        if (modelItems.length > 0) {
+            finalItems = modelItems.map(mItem => {
+                const existing = knownItems.find(k => k.name?.toLowerCase() === mItem.name?.toLowerCase());
+                return {
+                    ...existing,
+                    ...mItem,
+                    quantity: mItem.quantity || existing?.quantity || 1,
+                    unit: mItem.unit || existing?.unit || "szt.",
+                    category: mItem.category || existing?.category || "Inne Materiały, Drewno i Odpady",
+                    isSecured: mItem.isSecured !== undefined ? mItem.isSecured : (existing?.isSecured ?? null),
+                    isRuleCompliant: mItem.isRuleCompliant !== undefined ? mItem.isRuleCompliant : (existing?.isRuleCompliant ?? null),
+                    ruleNotes: mItem.ruleNotes || existing?.ruleNotes || ""
+                };
+            });
+        } else {
+            finalItems = knownItems;
+        }
+
+        // Sprawdź czy brakujące pola są faktycznie brakujące
+        const missingFields: string[] = [];
+        if (!finalSiteName) missingFields.push("budowa");
+        if (!finalDriver) missingFields.push("kierowca");
+        if (finalItems.length === 0) missingFields.push("przedmioty");
+        finalItems.forEach(it => {
+            if (it.isSecured === null || it.isSecured === undefined) {
+                missingFields.push(`pospinanie_${it.name}`);
+            }
+        });
+
+        const isReady = Boolean(parsed.draft?.isReadyToSave) && missingFields.length === 0;
+
+        const responsePayload = {
+            speechReply: parsed.speechReply,
+            draft: {
+                siteName: finalSiteName,
+                driver: finalDriver,
+                items: finalItems,
+                missingFields,
+                isReadyToSave: isReady
+            },
+            quickReplies: Array.isArray(parsed.quickReplies) && parsed.quickReplies.length > 0
+                ? parsed.quickReplies
+                : ["Tak, zatwierdź", "Zapisz zwrot"]
+        };
+
+        return NextResponse.json(responsePayload);
     } catch (error: any) {
         console.error("Błąd API plac/zwrot-bez-protokolu/chat:", error);
         return NextResponse.json({
-            speechReply: "Przepraszam, wystąpił problem techniczny podczas analizy. Proszę powtórz lub uzupełnij dane ręcznie.",
+            speechReply: "Przepraszam, miałem chwilowy problem. Proszę powtórz odpowiedź.",
             draft: null,
-            quickReplies: ["Powtórz wypowiedź", "Wpisz ręcznie"],
+            quickReplies: ["Powtórz", "Zatwierdź zwrot"],
             error: error?.message || "Internal server error"
         }, { status: 500 });
     }

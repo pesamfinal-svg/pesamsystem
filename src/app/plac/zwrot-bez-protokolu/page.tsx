@@ -77,6 +77,10 @@ export default function ZwrotBezProtokoluPage() {
     handsFreeRef.current = handsFree;
     const isAudioEnabledRef = useRef<boolean>(isAudioEnabled);
     isAudioEnabledRef.current = isAudioEnabled;
+    const draftRef = useRef<ReturnDraft>(draft);
+    draftRef.current = draft;
+    const messagesRef = useRef<ChatMessage[]>(messages);
+    messagesRef.current = messages;
 
     // Inicjalizacja asystenta po wejściu
     useEffect(() => {
@@ -249,7 +253,8 @@ export default function ZwrotBezProtokoluPage() {
             timestamp: new Date().toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" })
         };
 
-        const updatedMessages = [...messages, userMsg];
+        const updatedMessages = [...messagesRef.current, userMsg];
+        messagesRef.current = updatedMessages;
         setMessages(updatedMessages);
         setInputText("");
         setIsThinking(true);
@@ -260,8 +265,8 @@ export default function ZwrotBezProtokoluPage() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     userMessage: userText,
-                    history: updatedMessages.slice(-6).map(m => ({ role: m.role, content: m.content })),
-                    currentDraft: draft
+                    history: updatedMessages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+                    currentDraft: draftRef.current
                 })
             });
 
@@ -274,14 +279,24 @@ export default function ZwrotBezProtokoluPage() {
                     content: data.speechReply,
                     timestamp: new Date().toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" })
                 };
-                setMessages(prev => [...prev, assistantMsg]);
+                const newMsgList = [...messagesRef.current, assistantMsg];
+                messagesRef.current = newMsgList;
+                setMessages(newMsgList);
 
                 if (data.draft) {
-                    setDraft(prev => ({
-                        ...prev,
-                        ...data.draft,
-                        items: data.draft.items || prev.items
-                    }));
+                    setDraft(prev => {
+                        const merged: ReturnDraft = {
+                            siteName: data.draft.siteName?.trim() || prev.siteName || "",
+                            driver: data.draft.driver?.trim() || prev.driver || "",
+                            items: (Array.isArray(data.draft.items) && data.draft.items.length > 0)
+                                ? data.draft.items
+                                : prev.items,
+                            missingFields: data.draft.missingFields || [],
+                            isReadyToSave: Boolean(data.draft.isReadyToSave)
+                        };
+                        draftRef.current = merged;
+                        return merged;
+                    });
                 }
 
                 if (Array.isArray(data.quickReplies) && data.quickReplies.length > 0) {
@@ -293,7 +308,7 @@ export default function ZwrotBezProtokoluPage() {
 
                 // Jeśli AI ustaliło, że zwrot jest gotowy do zapisu i magazynier potwierdził
                 if (data.draft?.isReadyToSave) {
-                    handleSaveReturn(data.draft);
+                    handleSaveReturn(draftRef.current);
                 }
             }
         } catch (err: any) {
@@ -414,25 +429,27 @@ export default function ZwrotBezProtokoluPage() {
         photoPreviews.forEach(p => URL.revokeObjectURL(p));
         setPhotos([]);
         setPhotoPreviews([]);
-        setDraft({
+        const initialDraft: ReturnDraft = {
             siteName: "",
             driver: "",
             items: [],
             missingFields: ["budowa", "kierowca"],
             isReadyToSave: false
-        });
+        };
+        draftRef.current = initialDraft;
+        setDraft(initialDraft);
         setSavedDocId(null);
         setIsSavedSuccess(false);
 
         const restartText = "Rozpoczynamy nowy zwrot bez protokołu. Słucham, co przyjechało na plac?";
-        setMessages([
-            {
-                id: `restart_${Date.now()}`,
-                role: "assistant",
-                content: restartText,
-                timestamp: new Date().toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" })
-            }
-        ]);
+        const restartMsg: ChatMessage = {
+            id: `restart_${Date.now()}`,
+            role: "assistant",
+            content: restartText,
+            timestamp: new Date().toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" })
+        };
+        messagesRef.current = [restartMsg];
+        setMessages([restartMsg]);
         speakText(restartText);
     };
 
