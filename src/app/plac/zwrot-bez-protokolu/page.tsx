@@ -218,6 +218,12 @@ export default function ZwrotBezProtokoluPage() {
             recognition.onresult = (event: any) => {
                 const transcript = event.results[0][0].transcript;
                 if (transcript && transcript.trim()) {
+                    const clean = transcript.trim().toLowerCase();
+                    if (clean.includes("aparat") || clean.includes("zrób zdjęcie") || clean.includes("fotka") || clean.includes("zdjęcie")) {
+                        try {
+                            fileInputRef.current?.click();
+                        } catch {}
+                    }
                     handleSendMessage(transcript.trim());
                 }
             };
@@ -320,6 +326,17 @@ export default function ZwrotBezProtokoluPage() {
 
                 // Aplikacja mówi do magazyniera
                 speakText(data.speechReply);
+
+                // Jeśli AI nakazuje zrobienie zdjęcia (np. złamana reguła lub uszkodzenie):
+                if (data.draft?.shouldPromptPhoto && photos.length === 0) {
+                    setTimeout(() => {
+                        try {
+                            fileInputRef.current?.click();
+                        } catch (e) {
+                            console.warn("Autostart aparatu zablokowany przez przeglądarkę (wymaga dotknięcia):", e);
+                        }
+                    }, 600);
+                }
 
                 // Jeśli AI ustaliło, że zwrot jest gotowy do zapisu i magazynier potwierdził
                 if (data.draft?.isReadyToSave) {
@@ -658,21 +675,32 @@ export default function ZwrotBezProtokoluPage() {
                             </div>
                         </div>
 
-                        {/* Wymóg wykonania zdjęcia przy złamaniu reguł */}
+                        {/* Wymóg wykonania zdjęcia przy złamaniu reguł - Wielki przycisk 1-tap */}
                         {(draft.shouldPromptPhoto || draft.items.some(i => i.requiresPhoto || i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer)) && photos.length === 0 && (
-                            <div className="bg-amber-500/10 border-2 border-amber-500/50 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
-                                <div className="text-xs text-amber-200">
-                                    <span className="font-black text-amber-400 block flex items-center gap-1">
-                                        <span>📸</span> WYMAGANE ZDJĘCIE JAKO DOWÓD!
-                                    </span>
-                                    Wykryto niepospinane materiały, uszkodzenie lub rozbieżność.
+                            <div
+                                onClick={() => fileInputRef.current?.click()}
+                                className="cursor-pointer bg-gradient-to-r from-amber-600 via-amber-500 to-yellow-500 text-slate-950 p-4 rounded-3xl shadow-xl shadow-amber-950/40 flex items-center justify-between gap-3 animate-pulse active:scale-95 transition border-2 border-yellow-300"
+                            >
+                                <div className="flex items-center gap-3 min-w-0">
+                                    <span className="text-3xl animate-bounce shrink-0">📸</span>
+                                    <div className="min-w-0">
+                                        <h4 className="font-black text-sm uppercase tracking-wide text-slate-950 leading-tight">
+                                            Dotknij, aby zrobić zdjęcie
+                                        </h4>
+                                        <p className="text-[11px] font-bold text-amber-950 leading-tight mt-0.5 truncate">
+                                            Wykryto naruszenie reguł lub uszkodzenie – aparat gotowy
+                                        </p>
+                                    </div>
                                 </div>
                                 <button
                                     type="button"
-                                    onClick={() => fileInputRef.current?.click()}
-                                    className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shrink-0 flex items-center gap-1.5 shadow-md active:scale-95 transition"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        fileInputRef.current?.click();
+                                    }}
+                                    className="px-3.5 py-2 rounded-2xl bg-slate-950 hover:bg-slate-900 text-amber-300 font-black text-xs shrink-0 flex items-center gap-1.5 shadow-md active:scale-90 transition"
                                 >
-                                    <span>📷</span> Zrób zdjęcie
+                                    <span>📷</span> Aparat
                                 </button>
                             </div>
                         )}
