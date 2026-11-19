@@ -6221,8 +6221,8 @@ export default function ProtocolsHub() {
                                                         </button>
                                                     </div>
 
-                                                    {/* Dane budowy i kierowcy */}
-                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                                                    {/* Dane budowy, kierowcy i powodu braku protokołu */}
+                                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
                                                         <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
                                                             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Budowa:</span>
                                                             <span className="font-black text-slate-800 text-sm">{selectedVoiceReturnForPreview.siteName || "Nieokreślona"}</span>
@@ -6231,7 +6231,24 @@ export default function ProtocolsHub() {
                                                             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Kierowca / Zdający:</span>
                                                             <span className="font-black text-slate-800 text-sm">{selectedVoiceReturnForPreview.driverName || "Nieokreślony"}</span>
                                                         </div>
+                                                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                                                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Powód braku protokołu:</span>
+                                                            <span className="font-bold text-indigo-700 text-xs">{selectedVoiceReturnForPreview.reasonForNoProtocol || "Nie określono"}</span>
+                                                        </div>
                                                     </div>
+
+                                                    {/* Alert o podejrzeniu przerzutu między budowami */}
+                                                    {Boolean(selectedVoiceReturnForPreview.isSuspectedTransfer || (selectedVoiceReturnForPreview.items || []).some((i: any) => i.isSuspectedTransfer)) && (
+                                                        <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex items-center gap-2.5 text-xs text-amber-900">
+                                                            <span className="text-base">⚠️</span>
+                                                            <div>
+                                                                <strong className="font-black">Wykryto podejrzenie przerzutu sprzętu między budowami bez protokołu!</strong>
+                                                                <p className="text-[11px] text-amber-800 mt-0.5">
+                                                                    Część zwracanego sprzętu nie figurowała na stanie budowy {selectedVoiceReturnForPreview.siteName} w systemie.
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                 </div>
 
                                                 {/* Lista pozycji ze statusem reguł */}
@@ -6245,15 +6262,33 @@ export default function ProtocolsHub() {
 
                                                     <div className="space-y-2">
                                                         {(selectedVoiceReturnForPreview.items || []).map((it: any, idx: number) => {
-                                                            const isCompliant = it.rulesCompliant !== false && it.isSecured !== false;
+                                                            const isCompliant = it.rulesCompliant !== false && it.isSecured !== false && !it.isSuspectedTransfer;
                                                             return (
                                                                 <div
                                                                     key={idx}
-                                                                    className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex flex-col gap-1.5 text-xs"
+                                                                    className={`p-3 rounded-xl border flex flex-col gap-1.5 text-xs ${
+                                                                        it.isSuspectedTransfer
+                                                                            ? "bg-amber-50/50 border-amber-300"
+                                                                            : "bg-slate-50 border-slate-200"
+                                                                    }`}
                                                                 >
                                                                     <div className="flex items-center justify-between">
-                                                                        <span className="font-bold text-slate-900 text-sm">
-                                                                            • {it.name}
+                                                                        <span className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                                                            <span>•</span> {it.name}
+                                                                            {it.inventoryNumber && (
+                                                                                <span className="text-[10px] font-mono font-bold bg-cyan-100 text-cyan-800 border border-cyan-300 px-2 py-0.5 rounded-md">
+                                                                                    Nr mag: {it.inventoryNumber}
+                                                                                </span>
+                                                                            )}
+                                                                            {it.condition && (
+                                                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                                                                                    it.condition === "SPRAWNY"
+                                                                                        ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+                                                                                        : "bg-red-100 text-red-800 border-red-300"
+                                                                                }`}>
+                                                                                    {it.condition}
+                                                                                </span>
+                                                                            )}
                                                                         </span>
                                                                         <span className="font-mono font-black text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-lg">
                                                                             {it.returnQty || it.quantity} {it.unit || "szt."}
@@ -6261,15 +6296,22 @@ export default function ProtocolsHub() {
                                                                     </div>
                                                                     <div className="flex items-center justify-between text-[11px] flex-wrap gap-1">
                                                                         <span className="text-slate-500">Kategoria: {it.category}</span>
-                                                                        {isCompliant ? (
-                                                                            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200">
-                                                                                ✓ Zgodne z regułami
-                                                                            </span>
-                                                                        ) : (
-                                                                            <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full border border-red-200">
-                                                                                ⚠️ Niepospinane / Naruszenie reguły
-                                                                            </span>
-                                                                        )}
+                                                                        <div className="flex items-center gap-1.5">
+                                                                            {it.isSuspectedTransfer && (
+                                                                                <span className="text-[10px] bg-amber-100 text-amber-900 font-black px-2 py-0.5 rounded-full border border-amber-300">
+                                                                                    ⚠️ Podejrzenie przerzutu
+                                                                                </span>
+                                                                            )}
+                                                                            {isCompliant ? (
+                                                                                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                                                                                    ✓ Zgodne z regułami
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full border border-red-200">
+                                                                                    ⚠️ Naruszenie reguły
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
                                                                     </div>
                                                                     {it.ruleNotes && (
                                                                         <p className="text-[11px] text-slate-600 bg-white p-2 rounded-lg border border-slate-200/80 italic">

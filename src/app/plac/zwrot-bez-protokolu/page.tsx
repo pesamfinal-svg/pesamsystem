@@ -13,17 +13,25 @@ interface ReturnItem {
     quantity: number;
     unit: string;
     category: string;
+    type?: "UNIQUE" | "BULK" | "MATERIAL";
+    inventoryNumber?: string;
+    condition?: "SPRAWNY" | "USZKODZONY" | "";
     isSecured?: boolean | null;
     isRuleCompliant?: boolean | null;
     ruleNotes?: string;
+    isSuspectedTransfer?: boolean;
+    requiresPhoto?: boolean;
 }
 
 interface ReturnDraft {
     siteName: string;
+    siteId?: string;
     driver: string;
+    reasonForNoProtocol?: string;
     items: ReturnItem[];
     missingFields: string[];
     isReadyToSave: boolean;
+    shouldPromptPhoto?: boolean;
 }
 
 interface ChatMessage {
@@ -41,15 +49,19 @@ export default function ZwrotBezProtokoluPage() {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [draft, setDraft] = useState<ReturnDraft>({
         siteName: "",
+        siteId: "",
         driver: "",
+        reasonForNoProtocol: "",
         items: [],
         missingFields: ["budowa", "kierowca"],
-        isReadyToSave: false
+        isReadyToSave: false,
+        shouldPromptPhoto: false
     });
     const [quickReplies, setQuickReplies] = useState<string[]>([
         "Zapisz zwrot: kubik desek",
         "Budowa Wielicka",
         "Kierowca Jan Kowalski",
+        "Brak czasu na budowie na papier",
         "Deski są pospinane i posegregowane"
     ]);
 
@@ -287,12 +299,15 @@ export default function ZwrotBezProtokoluPage() {
                     setDraft(prev => {
                         const merged: ReturnDraft = {
                             siteName: data.draft.siteName?.trim() || prev.siteName || "",
+                            siteId: data.draft.siteId || prev.siteId || "",
                             driver: data.draft.driver?.trim() || prev.driver || "",
+                            reasonForNoProtocol: data.draft.reasonForNoProtocol?.trim() || prev.reasonForNoProtocol || "",
                             items: (Array.isArray(data.draft.items) && data.draft.items.length > 0)
                                 ? data.draft.items
                                 : prev.items,
                             missingFields: data.draft.missingFields || [],
-                            isReadyToSave: Boolean(data.draft.isReadyToSave)
+                            isReadyToSave: Boolean(data.draft.isReadyToSave),
+                            shouldPromptPhoto: Boolean(data.draft.shouldPromptPhoto)
                         };
                         draftRef.current = merged;
                         return merged;
@@ -378,12 +393,18 @@ export default function ZwrotBezProtokoluPage() {
                 returnQty: Number(it.quantity) || 1,
                 unit: it.unit || "szt.",
                 category: it.category || "Inne Materiały, Drewno i Odpady",
-                declaredStatus: it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY / POSEGREGOWANY",
-                rulesCompliant: it.isRuleCompliant !== false,
+                type: it.type || (it.inventoryNumber ? "UNIQUE" : "BULK"),
+                inventoryNumber: it.inventoryNumber || "",
+                condition: it.condition || (it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY"),
+                declaredStatus: it.condition || (it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY / POSEGREGOWANY"),
+                rulesCompliant: it.isRuleCompliant !== false && !it.isSuspectedTransfer,
                 ruleNotes: it.ruleNotes || (it.isSecured ? "Zgodne: pospinane i posegregowane" : "Zwrot bez protokołu"),
-                type: "BULK",
+                isSuspectedTransfer: Boolean(it.isSuspectedTransfer),
+                requiresPhoto: Boolean(it.requiresPhoto),
                 isResidual: true
             }));
+
+            const hasSuspectedTransfer = protocolItems.some(it => it.isSuspectedTransfer);
 
             // Dokument dla kolekcji protocols (zgodność z całym systemem PESAM)
             const protocolPayload = {
@@ -392,7 +413,10 @@ export default function ZwrotBezProtokoluPage() {
                 isWithoutProtocol: true,
                 status: "SZKIC_KIEROWCY", // Gotowy do ostatecznego zatwierdzenia w protokołach
                 siteName: finalDraft.siteName || "Budowa nieokreślona (do weryfikacji)",
+                siteId: finalDraft.siteId || "",
                 driverName: finalDraft.driver || "Kierowca nieokreślony",
+                reasonForNoProtocol: finalDraft.reasonForNoProtocol || "Brak informacji",
+                isSuspectedTransfer: hasSuspectedTransfer,
                 createdByName: creatorName,
                 createdByEmail: user?.email || "",
                 createdAt: timestampIso,
@@ -402,7 +426,7 @@ export default function ZwrotBezProtokoluPage() {
                 photoUrls: uploadedUrls,
                 audioNotes: "Zgłoszono głosowo przez asystenta placu (zwrot bez protokołu)",
                 aiConversationTranscript: messages.map(m => `${m.role === "user" ? "Magazynier" : "AI"}: ${m.content}`).join("\n"),
-                notes: `Zwrot bez protokołu zgłoszony na placu. Budowa: ${finalDraft.siteName || "Brak"}, Kierowca: ${finalDraft.driver || "Brak"}.`
+                notes: `Zwrot bez protokołu z budowy: ${finalDraft.siteName || "Brak"}. Kierowca: ${finalDraft.driver || "Brak"}. Powód braku protokołu: ${finalDraft.reasonForNoProtocol || "Nie określono"}.${hasSuspectedTransfer ? " ⚠️ WYKRYTO PODEJRZENIE PRZERZUTU MIĘDZY BUDOWAMI (brak na stanie budowy)." : ""}`
             };
 
             const docRef = await addDoc(collection(db, "protocols"), protocolPayload);
@@ -431,10 +455,13 @@ export default function ZwrotBezProtokoluPage() {
         setPhotoPreviews([]);
         const initialDraft: ReturnDraft = {
             siteName: "",
+            siteId: "",
             driver: "",
+            reasonForNoProtocol: "",
             items: [],
             missingFields: ["budowa", "kierowca"],
-            isReadyToSave: false
+            isReadyToSave: false,
+            shouldPromptPhoto: false
         };
         draftRef.current = initialDraft;
         setDraft(initialDraft);
@@ -617,6 +644,39 @@ export default function ZwrotBezProtokoluPage() {
                             </div>
                         </div>
 
+                        {/* Pasek powodu braku protokołu */}
+                        <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-2.5 text-xs flex items-center justify-between gap-2">
+                            <div className="text-[10px] font-bold text-slate-400 flex items-center gap-1 shrink-0">
+                                <span>📄</span> Powód braku protokołu:
+                            </div>
+                            <div className="font-medium text-right text-xs truncate">
+                                {draft.reasonForNoProtocol ? (
+                                    <span className="text-indigo-300 font-bold">{draft.reasonForNoProtocol}</span>
+                                ) : (
+                                    <span className="text-amber-400/80 text-[11px] italic">⚠️ Do ustalenia z kierowcą</span>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Wymóg wykonania zdjęcia przy złamaniu reguł */}
+                        {(draft.shouldPromptPhoto || draft.items.some(i => i.requiresPhoto || i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer)) && photos.length === 0 && (
+                            <div className="bg-amber-500/10 border-2 border-amber-500/50 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
+                                <div className="text-xs text-amber-200">
+                                    <span className="font-black text-amber-400 block flex items-center gap-1">
+                                        <span>📸</span> WYMAGANE ZDJĘCIE JAKO DOWÓD!
+                                    </span>
+                                    Wykryto niepospinane materiały, uszkodzenie lub rozbieżność.
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shrink-0 flex items-center gap-1.5 shadow-md active:scale-95 transition"
+                                >
+                                    <span>📷</span> Zrób zdjęcie
+                                </button>
+                            </div>
+                        )}
+
                         {/* Lista rozpoznanych pozycji z weryfikacją reguł */}
                         {draft.items.length > 0 ? (
                             <div className="space-y-2 pt-1">
@@ -626,33 +686,60 @@ export default function ZwrotBezProtokoluPage() {
                                 {draft.items.map((it, idx) => (
                                     <div
                                         key={idx}
-                                        className="bg-slate-950/90 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1.5"
+                                        className={`bg-slate-950/90 border rounded-2xl p-3 flex flex-col gap-1.5 ${
+                                            it.isSuspectedTransfer
+                                                ? "border-amber-500/50 shadow-lg shadow-amber-950/20"
+                                                : "border-slate-800"
+                                        }`}
                                     >
                                         <div className="flex items-center justify-between">
-                                            <span className="font-black text-sm text-white flex items-center gap-1.5">
+                                            <span className="font-black text-sm text-white flex items-center gap-1.5 flex-wrap">
                                                 <span>•</span> {it.name}
+                                                {it.inventoryNumber && (
+                                                    <span className="text-[11px] font-mono text-cyan-400 bg-cyan-950/80 px-2 py-0.5 rounded-md border border-cyan-700/60 font-bold">
+                                                        Nr mag: {it.inventoryNumber}
+                                                    </span>
+                                                )}
                                             </span>
                                             <span className="text-xs font-mono font-bold text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-lg border border-amber-400/20">
                                                 {it.quantity} {it.unit}
                                             </span>
                                         </div>
 
-                                        <div className="flex items-center justify-between text-[11px] text-slate-400 flex-wrap gap-1">
+                                        <div className="flex items-center justify-between text-[11px] text-slate-400 flex-wrap gap-1.5 pt-0.5">
                                             <span className="text-slate-400">Kategoria: {it.category}</span>
-                                            {/* Status pospinania i reguł */}
-                                            {it.isSecured === true ? (
-                                                <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-700/60 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                                                    ✓ Pospinane i posegregowane
-                                                </span>
-                                            ) : it.isSecured === false ? (
-                                                <span className="text-[10px] bg-red-950 text-red-400 border border-red-700/60 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                                                    ⚠️ Niepospinane / Naruszenie reguły
-                                                </span>
-                                            ) : (
-                                                <span className="text-[10px] bg-amber-950 text-amber-300 border border-amber-700/60 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                                                    ❓ Wymaga dopytania o pospinanie
-                                                </span>
-                                            )}
+                                            <div className="flex items-center gap-1 flex-wrap">
+                                                {it.condition === "SPRAWNY" && (
+                                                    <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-700/60 px-2 py-0.5 rounded-full font-bold">
+                                                        ✓ Sprawny
+                                                    </span>
+                                                )}
+                                                {it.condition === "USZKODZONY" && (
+                                                    <span className="text-[10px] bg-red-950 text-red-400 border border-red-700/60 px-2 py-0.5 rounded-full font-bold">
+                                                        ⚠️ Uszkodzony
+                                                    </span>
+                                                )}
+                                                {it.isSecured === true && (
+                                                    <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-700/60 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                                        ✓ Pospinane i posegregowane
+                                                    </span>
+                                                )}
+                                                {it.isSecured === false && (
+                                                    <span className="text-[10px] bg-red-950 text-red-400 border border-red-700/60 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                                        ⚠️ Niepospinane / Naruszenie reguły
+                                                    </span>
+                                                )}
+                                                {it.isSecured === null && !it.condition && (
+                                                    <span className="text-[10px] bg-amber-950 text-amber-300 border border-amber-700/60 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                                        ❓ Wymaga dopytania
+                                                    </span>
+                                                )}
+                                                {it.isSuspectedTransfer && (
+                                                    <span className="text-[10px] bg-amber-950 text-amber-300 border border-amber-600/70 px-2 py-0.5 rounded-full font-black flex items-center gap-1">
+                                                        ⚠️ Podejrzenie przerzutu
+                                                    </span>
+                                                )}
+                                            </div>
                                         </div>
 
                                         {it.ruleNotes && (
