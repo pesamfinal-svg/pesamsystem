@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { collection, addDoc, doc, setDoc, getDocs, query, limit } from "firebase/firestore";
+import { collection, addDoc, doc, setDoc, getDocs, getDoc, query, limit } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase/config";
 
@@ -69,6 +69,10 @@ export default function ZwrotBezProtokoluPage() {
     // Stany wejścia i mowy
     const [inputText, setInputText] = useState("");
     const [bypassCode, setBypassCode] = useState("");
+    const [configuredBypassCode, setConfiguredBypassCode] = useState("jebacto");
+    const [isBypassModalOpen, setIsBypassModalOpen] = useState(false);
+    const [modalBypassInput, setModalBypassInput] = useState("");
+    const [pendingSaveDraft, setPendingSaveDraft] = useState<ReturnDraft | null>(null);
     const [isListening, setIsListening] = useState(false);
     const [isThinking, setIsThinking] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
@@ -98,6 +102,20 @@ export default function ZwrotBezProtokoluPage() {
 
     // Inicjalizacja asystenta po wejściu
     useEffect(() => {
+        // Pobierz aktualny kod zabezpieczający z ustawień systemu
+        const fetchSystemConfig = async () => {
+            try {
+                const sysSnap = await getDoc(doc(db, "settings", "system"));
+                if (sysSnap.exists()) {
+                    const code = sysSnap.data()?.noProtocolBypassCode || "jebacto";
+                    setConfiguredBypassCode(code);
+                }
+            } catch (e) {
+                console.warn("Błąd pobierania ustawień bypass:", e);
+            }
+        };
+        fetchSystemConfig();
+
         // Sprawdź wsparcie mowy w przeglądarce
         if (typeof window !== "undefined") {
             const hasSynthesis = "speechSynthesis" in window;
@@ -382,9 +400,11 @@ export default function ZwrotBezProtokoluPage() {
         });
     };
 
-    // Zapis kompletnego zwrotu do bazy Firestore
-    const handleSaveReturn = async (overrideDraft?: ReturnDraft) => {
-        const finalDraft = overrideDraft || draft;
+    // Zgłoszenie chęci zapisu zwrotu:
+    // 1. Sprawdzenie blokady braku zdjęć przy naruszeniu reguł
+    // 2. Wymuszone zapytanie i wyświetlenie okna kodu zabezpieczającego (bypass e-mail)
+    const handleSaveReturn = (overrideDraft?: ReturnDraft) => {
+        const finalDraft = overrideDraft || draftRef.current || draft;
 
         // BEZWZGLĘDNA BLOKADA ZAPISU BEZ ZDJĘCIA GDY ZŁAMANO REGUŁY
         const needsPhoto = Boolean(
@@ -402,6 +422,16 @@ export default function ZwrotBezProtokoluPage() {
             return;
         }
 
+        // Zawsze otwieramy modal z pytaniem o kod zabezpieczający jebacto
+        setPendingSaveDraft(finalDraft);
+        setModalBypassInput(bypassCode || finalDraft.bypassCode || configuredBypassCode);
+        setIsBypassModalOpen(true);
+        speakText(`Zanim zapiszemy zwrot: czy chcesz podać kod zabezpieczający ${configuredBypassCode} blokujący wysyłkę e-maila, czy zatwierdzamy z wysyłką powiadomienia?`);
+    };
+
+    // Właściwy zapis do bazy Firestore z wybranym kodem bypass
+    const executeActualSave = async (targetDraft: ReturnDraft, effectiveBypassCode: string) => {
+        setIsBypassModalOpen(false);
         setIsUploading(true);
 
         try {
@@ -428,7 +458,7 @@ export default function ZwrotBezProtokoluPage() {
                 : (user?.email || "Magazynier");
 
             // Formatowanie pozycji
-            const protocolItems = (finalDraft.items || []).map((it, idx) => ({
+            const protocolItems = (targetDraft.items || []).map((it, idx) => ({
                 dbId: `item_${Date.now()}_${idx}`,
                 name: it.name,
                 returnQty: Number(it.quantity) || 1,
@@ -453,10 +483,10 @@ export default function ZwrotBezProtokoluPage() {
                 type: "RETURN",
                 isWithoutProtocol: true,
                 status: "SZKIC_KIEROWCY", // Gotowy do ostatecznego zatwierdzenia w protokołach
-                siteName: finalDraft.siteName || "Budowa nieokreślona (do weryfikacji)",
-                siteId: finalDraft.siteId || "",
-                driverName: finalDraft.driver || "Kierowca nieokreślony",
-                reasonForNoProtocol: finalDraft.reasonForNoProtocol || "Brak informacji",
+                siteName: targetDraft.siteName || "Budowa nieokreślona (do weryfikacji)",
+                siteId: targetDraft.siteId || "",
+                driverName: targetDraft.driver || "Kierowca nieokreślony",
+                reasonForNoProtocol: targetDraft.reasonForNoProtocol || "Brak informacji",
                 isSuspectedTransfer: hasSuspectedTransfer,
                 createdByName: creatorName,
                 createdByEmail: user?.email || "",
@@ -467,7 +497,7 @@ export default function ZwrotBezProtokoluPage() {
                 photoUrls: uploadedUrls,
                 audioNotes: "Zgłoszono głosowo przez asystenta placu (zwrot bez protokołu)",
                 aiConversationTranscript: messages.map(m => `${m.role === "user" ? "Magazynier" : "AI"}: ${m.content}`).join("\n"),
-                notes: `Zwrot bez protokołu z budowy: ${finalDraft.siteName || "Brak"}. Kierowca: ${finalDraft.driver || "Brak"}. Powód braku protokołu: ${finalDraft.reasonForNoProtocol || "Nie określono"}.${hasSuspectedTransfer ? " ⚠️ WYKRYTO PODEJRZENIE PRZERZUTU MIĘDZY BUDOWAMI (brak na stanie budowy)." : ""}`
+                notes: `Zwrot bez protokołu z budowy: ${targetDraft.siteName || "Brak"}. Kierowca: ${targetDraft.driver || "Brak"}. Powód braku protokołu: ${targetDraft.reasonForNoProtocol || "Nie określono"}.${hasSuspectedTransfer ? " ⚠️ WYKRYTO PODEJRZENIE PRZERZUTU MIĘDZY BUDOWAMI (brak na stanie budowy)." : ""}`
             };
 
             const docRef = await addDoc(collection(db, "protocols"), protocolPayload);
@@ -478,9 +508,15 @@ export default function ZwrotBezProtokoluPage() {
                 id: docRef.id
             });
 
-                            setSavedDocId(protocolPayload.protocolId);
+            setSavedDocId(protocolPayload.protocolId);
             setIsSavedSuccess(true);
-            speakText(`Zwrot bez protokołu numer ${protocolPayload.protocolId} został pomyślnie zapisany w systemie.`);
+            setBypassCode(effectiveBypassCode.trim());
+
+            if (effectiveBypassCode.trim()) {
+                speakText(`Zwrot bez protokołu numer ${protocolPayload.protocolId} został zapisany. Użyto kodu zabezpieczającego, alert e-mail został wyłączony.`);
+            } else {
+                speakText(`Zwrot bez protokołu numer ${protocolPayload.protocolId} został pomyślnie zapisany w systemie i wysłano alert.`);
+            }
 
             // 3. Wysłanie alertu e-mail jeśli zdefiniowano odbiorców w ustawieniach
             try {
@@ -489,13 +525,13 @@ export default function ZwrotBezProtokoluPage() {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         protocolId: protocolPayload.protocolId,
-                        siteName: finalDraft.siteName || "Nieokreślona",
-                        driverName: finalDraft.driver || "Nieokreślony",
-                        reasonForNoProtocol: finalDraft.reasonForNoProtocol || "Brak informacji",
+                        siteName: targetDraft.siteName || "Nieokreślona",
+                        driverName: targetDraft.driver || "Nieokreślony",
+                        reasonForNoProtocol: targetDraft.reasonForNoProtocol || "Brak informacji",
                         items: protocolItems,
                         photoUrls: uploadedUrls,
                         aiConversationTranscript: protocolPayload.aiConversationTranscript,
-                        bypassCode: bypassCode.trim()
+                        bypassCode: effectiveBypassCode.trim()
                     })
                 }).catch(e => console.warn("Błąd wysyłania alertu e-mail:", e));
             } catch (errEmail) {
@@ -873,15 +909,34 @@ export default function ZwrotBezProtokoluPage() {
                         {/* Opcja kodu bypass dla powiadomień e-mail */}
                         <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800 text-[11px] flex items-center justify-between gap-2">
                             <span className="text-slate-400 flex items-center gap-1 shrink-0 font-medium">
-                                <span>🔑</span> Kod bypass alertu (opcjonalny):
+                                <span>🔑</span> Kod bypass alertu:
                             </span>
-                            <input
-                                type="text"
-                                value={bypassCode}
-                                onChange={(e) => setBypassCode(e.target.value)}
-                                placeholder="np. jebacto"
-                                className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] text-indigo-300 font-mono outline-none w-32 text-right focus:border-indigo-500"
-                            />
+                            {bypassCode ? (
+                                <div className="flex items-center gap-1.5">
+                                    <span className="bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 font-mono font-bold px-2 py-0.5 rounded text-[10px]">
+                                        🛡️ {bypassCode} (pomiń e-mail)
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => setBypassCode("")}
+                                        className="text-slate-500 hover:text-red-400 text-xs px-1"
+                                        title="Usuń kod bypass"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-slate-500">Alert e-mail włączony</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => setBypassCode(configuredBypassCode)}
+                                        className="bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-indigo-300 border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] font-mono transition"
+                                    >
+                                        + Użyj {configuredBypassCode}
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
                         {/* Przycisk natychmiastowego zapisu jeśli magazynier woli kliknąć */}
@@ -1044,6 +1099,92 @@ export default function ZwrotBezProtokoluPage() {
                                 <span className="px-3 py-1.5 rounded-xl bg-slate-950 text-yellow-300 font-black text-xs shrink-0 shadow flex items-center gap-1">
                                     📷 Aparat
                                 </span>
+                            </div>
+                        </div>
+                    )}
+                    {/* MODAL WYMOGU DECYZJI O KODZIE ZABEZPIECZAJĄCYM PRZED ZAPISEM */}
+                    {isBypassModalOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+                            <div className="w-full max-w-md bg-slate-900 border-2 border-indigo-500/50 rounded-3xl p-5 shadow-2xl space-y-4">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-2xl shrink-0">
+                                        🔐
+                                    </div>
+                                    <div>
+                                        <h3 className="text-base font-black text-white">
+                                            Kod Zabezpieczający (Alert E-mail)
+                                        </h3>
+                                        <p className="text-xs text-indigo-300 font-semibold">
+                                            Potwierdzenie zapisu zwrotu bez protokołu
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-950/70 rounded-2xl p-3.5 border border-slate-800 text-xs text-slate-300 leading-relaxed space-y-2">
+                                    <p>
+                                        Zgodnie z regułami PESAM, zwrot bez protokołu zostanie zarejestrowany w systemie oraz wyśle alert e-mail do kierownictwa.
+                                    </p>
+                                    <p className="font-bold text-amber-300">
+                                        Czy chcesz podać autoryzowany kod zabezpieczający (<code className="bg-slate-800 px-1.5 py-0.5 rounded text-amber-200 font-mono">{configuredBypassCode}</code>), aby pominąć wysyłkę e-maila?
+                                    </p>
+                                </div>
+
+                                {/* Pole wpisania kodu */}
+                                <div className="space-y-1.5">
+                                    <label className="text-[11px] font-black uppercase tracking-wider text-slate-400">
+                                        Kod zabezpieczający bypass:
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="text"
+                                            value={modalBypassInput}
+                                            onChange={(e) => setModalBypassInput(e.target.value)}
+                                            placeholder={`np. ${configuredBypassCode}`}
+                                            className="flex-1 bg-slate-950 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm font-mono font-bold text-indigo-300 outline-none"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setModalBypassInput(configuredBypassCode)}
+                                            className="px-3 py-2 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 font-black text-xs active:scale-95 transition"
+                                        >
+                                            Wpisz {configuredBypassCode}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Przyciski decyzyjne */}
+                                <div className="space-y-2 pt-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const codeToUse = modalBypassInput.trim() || configuredBypassCode;
+                                            executeActualSave(pendingSaveDraft || draft, codeToUse);
+                                        }}
+                                        disabled={isUploading}
+                                        className="w-full py-3 px-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-xs uppercase tracking-wider shadow-lg active:scale-95 transition flex items-center justify-center gap-2"
+                                    >
+                                        <span>🛡️ Zapisz z kodem (Pomiń alert e-mail)</span>
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            executeActualSave(pendingSaveDraft || draft, "");
+                                        }}
+                                        disabled={isUploading}
+                                        className="w-full py-2.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-black text-xs uppercase tracking-wider active:scale-95 transition flex items-center justify-center gap-2"
+                                    >
+                                        <span>✉️ Zapisz bez kodu (Wyślij alert e-mail)</span>
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsBypassModalOpen(false)}
+                                        className="w-full py-2 text-center text-xs font-bold text-slate-400 hover:text-white transition"
+                                    >
+                                        ✕ Anuluj i wróć do edycji
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     )}

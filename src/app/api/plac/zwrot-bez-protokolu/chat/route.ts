@@ -177,14 +177,21 @@ BEZWZGLĘDNE REGUŁY ZWROTU BEZ PROTOKOŁU PESAM:
    Jeśli materiały są niepospinane, nieposegregowane, uszkodzone lub wystąpił podejrzany przerzut:
    - Ustaw 'shouldPromptPhoto: true' oraz 'requiresPhoto: true' dla danej pozycji!
    - Powiedz: "Uwaga, reguły składowania zostały naruszone. Zrób teraz telefonem zdjęcie jako dowód do protokołu."
-8. KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
+8. OBOWIĄZKOWE PYTANIE O KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
    Skonfigurowany kod wyłączający alert e-mail w systemie to: "${configuredBypassCode}".
-   Jeśli magazynier powie hasło "${configuredBypassCode}", "kod ${configuredBypassCode}" lub "pomiń maila":
-   - Ustaw w drafcie pole 'bypassCode': "${configuredBypassCode}".
-   - Powiedz krótko: "Kod zabezpieczający został przyjęty. Powiadomienie e-mail nie zostanie wysłane."
+   Kluczowa zasada: ZANIM zwrot zostanie zapisany, gdy mamy już zebrane wszystkie dane (budowa, kierowca, powód, pozycje), MUSISZ zapytać magazyniera o kod zabezpieczający:
+   "Mamy komplet danych dla zwrotu z budowy [Budowa]. Czy chcesz podać kod zabezpieczający blokujący wysyłkę e-maila (np. ${configuredBypassCode}), czy zatwierdzamy i wysyłamy powiadomienie do kierownictwa?".
+   Ustaw quickReplies: ["Podaj kod ${configuredBypassCode}", "Wyślij powiadomienie e-mail"].
+
+   - Jeśli magazynier poda kod "${configuredBypassCode}", powie "kod ${configuredBypassCode}", "pomiń maila" lub kliknie "Podaj kod ${configuredBypassCode}":
+     Ustaw w drafcie pole 'bypassCode': "${configuredBypassCode}" oraz 'isReadyToSave: true'.
+     Powiedz krótko: "Przyjąłem kod zabezpieczający ${configuredBypassCode}. Powiadomienie e-mail nie zostanie wysłane. Zapisuję zwrot w systemie."
+   
+   - Jeśli magazynier odpowie "nie", "bez kodu", "wyślij", "wyślij maila", "zatwierdź" lub odmówi podania kodu:
+     Ustaw w drafcie pole 'bypassCode': "" oraz 'isReadyToSave: true'.
+     Powiedz krótko: "Rozumiem, zatwierdzam zwrot i wysyłam powiadomienie e-mail do kierownictwa."
 9. PODSUMOWANIE I ZATWIERDZENIE:
-   Gdy mamy budowę, kierowcę, powód i zweryfikowane pozycje:
-   Powiedz: "Mamy komplet danych dla zwrotu z budowy [Budowa]. Czy zatwierdzasz zapis w systemie?".
+   Jeśli kod zabezpieczający został już ustalony, zatwierdź zapis.
 
 Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
 `;
@@ -230,7 +237,23 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
             } else if (brokenRulesItem) {
                 dynamicGuidance = `Wykryto naruszenie reguł (${brokenRulesItem.name}). Nakaz magazynierowi: "Proszę zrób teraz telefonem zdjęcie jako dowód naruszenia reguły". Ustaw shouldPromptPhoto: true.`;
             } else {
-                dynamicGuidance = `MAMY KOMPLET DANYCH (Budowa: ${knownSite}, Kierowca: ${knownDriver}, Pozycje zweryfikowane). Podsumuj zwięźle i zapytaj o zatwierdzenie zapisu.`;
+                const lowerMsg = userMessage.toLowerCase();
+                const codeMentioned = lowerMsg.includes(configuredBypassCode.toLowerCase()) || 
+                                      lowerMsg.includes("pomiń") || 
+                                      lowerMsg.includes("bez kodu") || 
+                                      lowerMsg.includes("wyślij") || 
+                                      Boolean(currentDraft?.bypassCode);
+
+                if (!codeMentioned) {
+                    dynamicGuidance = `MAMY KOMPLET DANYCH (Budowa: ${knownSite}, Kierowca: ${knownDriver}, Pozycje zweryfikowane).
+OBOWIĄZKOWO ZAPYTAJ O KOD ZABEZPIECZAJĄCY:
+Zapytaj magazyniera: "Mamy komplet danych dla zwrotu z budowy ${knownSite}. Czy chcesz podać kod zabezpieczający blokujący wysyłkę e-maila (np. ${configuredBypassCode}), czy zatwierdzamy i wysyłamy powiadomienie do kierownictwa?".
+Ustaw isReadyToSave: false.
+Ustaw quickReplies: ["Podaj kod ${configuredBypassCode}", "Wyślij powiadomienie e-mail"].`;
+                } else {
+                    dynamicGuidance = `KOD ZABEZPIECZAJĄCY ZOSTAŁ OKREŚLONY (wartość: ${lowerMsg.includes(configuredBypassCode.toLowerCase()) ? configuredBypassCode : (currentDraft?.bypassCode || 'brak')}).
+Podsumuj zwrot i potwierdź zapis w systemie. Ustaw isReadyToSave: true.`;
+                }
             }
         }
 
@@ -462,6 +485,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                 shouldPromptPhoto,
                 bypassCode: finalBypass
             },
+            configuredBypassCode,
             quickReplies: Array.isArray(parsed.quickReplies) && parsed.quickReplies.length > 0
                 ? parsed.quickReplies
                 : ["Tak, zatwierdź", "Zapisz zwrot"]
