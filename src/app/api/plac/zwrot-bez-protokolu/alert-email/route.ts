@@ -5,7 +5,8 @@ import nodemailer from 'nodemailer';
 
 interface AlertItem {
     name: string;
-    quantity: number;
+    quantity?: number;
+    returnQty?: number;
     unit?: string;
     category?: string;
     inventoryNumber?: string;
@@ -25,6 +26,7 @@ interface AlertEmailPayload {
     photoUrls?: string[];
     aiConversationTranscript?: string;
     bypassCode?: string;
+    suggestedNewRule?: string;
 }
 
 export async function POST(req: Request) {
@@ -38,7 +40,8 @@ export async function POST(req: Request) {
             items = [],
             photoUrls = [],
             aiConversationTranscript = "",
-            bypassCode = ""
+            bypassCode = "",
+            suggestedNewRule = ""
         } = body;
 
         // 1. Pobierz konfigurację powiadomień z settings/system
@@ -88,7 +91,10 @@ export async function POST(req: Request) {
 
         const subject = `🚨 [PESAM PLAC] Zwrot Bez Protokołu · ${protocolId} · Budowa: ${siteName || "Nieznana"} · Kierowca: ${driverName || "Nieznany"}${hasTransfer ? " ⚠️ [PODEJRZENIE PRZERZUTU]" : ""}`;
 
-        const rowsHtml = items.map((it, idx) => `
+        const rowsHtml = items.map((it, idx) => {
+            const rawQty = it.quantity ?? it.returnQty;
+            const itemQty = (typeof rawQty === 'number' && !isNaN(rawQty) && rawQty > 0) ? rawQty : (Number(rawQty) > 0 ? Number(rawQty) : 1);
+            return `
             <tr style="border-bottom:1px solid #e2e8f0; background-color: ${idx % 2 === 0 ? '#fff' : '#f8fafc'};">
                 <td style="padding:10px 12px; font-weight:bold; color:#1e293b;">
                     ${it.name}
@@ -99,7 +105,7 @@ export async function POST(req: Request) {
                     ${it.category || "Inne"}
                 </td>
                 <td style="padding:10px 12px; color:#1e293b; font-weight:bold; text-align:center;">
-                    ${it.quantity} ${it.unit || "szt."}
+                    ${itemQty} ${it.unit || "szt."}
                 </td>
                 <td style="padding:10px 12px; font-size:11px;">
                     ${it.condition ? `<b style="color:${it.condition === 'USZKODZONY' ? '#dc2626' : '#16a34a'};">${it.condition}</b><br/>` : ''}
@@ -107,7 +113,8 @@ export async function POST(req: Request) {
                     <span style="color:#64748b; font-style:italic;">${it.ruleNotes || "-"}</span>
                 </td>
             </tr>
-        `).join("");
+        `;
+        }).join("");
 
         const photosHtml = photoUrls && photoUrls.length > 0
             ? `
@@ -177,6 +184,20 @@ export async function POST(req: Request) {
                         ` : ''}
                     </table>
                 </div>
+
+                ${suggestedNewRule ? `
+                <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:14px; padding:14px 18px; margin-top:16px;">
+                    <div style="color:#1d4ed8; font-weight:900; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">
+                        💡 NOWA REGUŁA / ZGŁOSZENIE PROCEDURALNE OD MAGAZYNIERA (AI):
+                    </div>
+                    <div style="color:#1e3a8a; font-size:13px; font-weight:bold;">
+                        "${suggestedNewRule}"
+                    </div>
+                    <div style="color:#64748b; font-size:11px; margin-top:4px;">
+                        Asystent AI zarejestrował tę uwagę z dialogu. Reguła została zaktualizowana w Ustawieniach Reguł Magazynu.
+                    </div>
+                </div>
+                ` : ''}
 
                 <div style="background:#ffffff; margin-top:16px; border-radius:14px; border:1px solid #e2e8f0; overflow:hidden;">
                     <div style="padding:12px 16px; background:#f1f5f9; border-bottom:1px solid #e2e8f0; font-weight:bold; font-size:12px; color:#334155; text-transform:uppercase;">

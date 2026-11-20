@@ -34,6 +34,7 @@ interface ReturnDraft {
     shouldPromptPhoto?: boolean;
     bypassCode?: string;
     bypassAttempts?: number;
+    suggestedNewRule?: string;
 }
 
 interface ChatMessage {
@@ -325,7 +326,8 @@ export default function ZwrotBezProtokoluPage() {
                             // Przekaż licznik błędnych prób kodu z serwera
                             bypassAttempts: typeof data.draft.bypassAttempts === 'number'
                                 ? data.draft.bypassAttempts
-                                : (prev.bypassAttempts || 0)
+                                : (prev.bypassAttempts || 0),
+                            suggestedNewRule: data.draft.suggestedNewRule || prev.suggestedNewRule || ""
                         };
                         draftRef.current = merged;
                         if (data.draft.bypassCode) {
@@ -367,7 +369,8 @@ export default function ZwrotBezProtokoluPage() {
                         isReadyToSave: true,
                         shouldPromptPhoto: false,
                         bypassCode: data.draft.bypassCode || "",
-                        bypassAttempts: typeof data.draft.bypassAttempts === 'number' ? data.draft.bypassAttempts : 0
+                        bypassAttempts: typeof data.draft.bypassAttempts === 'number' ? data.draft.bypassAttempts : 0,
+                        suggestedNewRule: data.draft.suggestedNewRule || draftRef.current?.suggestedNewRule || ""
                     };
                     executeActualSave(draftToSave, draftToSave.bypassCode || "");
                 }
@@ -467,22 +470,27 @@ export default function ZwrotBezProtokoluPage() {
                 : (user?.email || "Magazynier");
 
             // Formatowanie pozycji
-            const protocolItems = (targetDraft.items || []).map((it, idx) => ({
-                dbId: `item_${Date.now()}_${idx}`,
-                name: it.name,
-                returnQty: Number(it.quantity) || 1,
-                unit: it.unit || "szt.",
-                category: it.category || "Inne Materiały, Drewno i Odpady",
-                type: it.type || (it.inventoryNumber ? "UNIQUE" : "BULK"),
-                inventoryNumber: it.inventoryNumber || "",
-                condition: it.condition || (it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY"),
-                declaredStatus: it.condition || (it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY / POSEGREGOWANY"),
-                rulesCompliant: it.isRuleCompliant !== false && !it.isSuspectedTransfer,
-                ruleNotes: it.ruleNotes || (it.isSecured ? "Zgodne: pospinane i posegregowane" : "Zwrot bez protokołu"),
-                isSuspectedTransfer: Boolean(it.isSuspectedTransfer),
-                requiresPhoto: Boolean(it.requiresPhoto),
-                isResidual: true
-            }));
+            const protocolItems = (targetDraft.items || []).map((it, idx) => {
+                const rawQty = it.quantity !== undefined && it.quantity !== null ? Number(it.quantity) : Number((it as any).returnQty);
+                const validQty = (!isNaN(rawQty) && rawQty > 0) ? rawQty : 1;
+                return {
+                    dbId: `item_${Date.now()}_${idx}`,
+                    name: it.name,
+                    quantity: validQty,
+                    returnQty: validQty,
+                    unit: it.unit || "szt.",
+                    category: it.category || "Inne Materiały, Drewno i Odpady",
+                    type: it.type || (it.inventoryNumber ? "UNIQUE" : "BULK"),
+                    inventoryNumber: it.inventoryNumber || "",
+                    condition: it.condition || (it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY"),
+                    declaredStatus: it.condition || (it.isSecured === false ? "USZKODZONY / NIEPOSPINANY" : "SPRAWNY / POSEGREGOWANY"),
+                    rulesCompliant: it.isRuleCompliant !== false && !it.isSuspectedTransfer,
+                    ruleNotes: it.ruleNotes || (it.isSecured ? "Zgodne: pospinane i posegregowane" : "Zwrot bez protokołu"),
+                    isSuspectedTransfer: Boolean(it.isSuspectedTransfer),
+                    requiresPhoto: Boolean(it.requiresPhoto),
+                    isResidual: true
+                };
+            });
 
             const hasSuspectedTransfer = protocolItems.some(it => it.isSuspectedTransfer);
 
@@ -540,7 +548,8 @@ export default function ZwrotBezProtokoluPage() {
                         items: protocolItems,
                         photoUrls: uploadedUrls,
                         aiConversationTranscript: protocolPayload.aiConversationTranscript,
-                        bypassCode: effectiveBypassCode.trim()
+                        bypassCode: effectiveBypassCode.trim(),
+                        suggestedNewRule: targetDraft.suggestedNewRule || ""
                     })
                 }).catch(e => console.warn("Błąd wysyłania alertu e-mail:", e));
             } catch (errEmail) {

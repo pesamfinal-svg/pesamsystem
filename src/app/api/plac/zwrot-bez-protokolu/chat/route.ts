@@ -14,6 +14,55 @@ const ai = new GoogleGenAI({
 
 export const maxDuration = 60;
 
+function parsePolishQuantity(text: string): number | null {
+    if (!text) return null;
+    const clean = text.toLowerCase().trim();
+    // Szukaj cyfry w tekście
+    const digitMatch = clean.match(/\d+(\s*,\s*\d+)?/);
+    if (digitMatch) {
+        const val = parseFloat(digitMatch[0].replace(',', '.'));
+        if (!isNaN(val) && val > 0) return val;
+    }
+    const polishNumbers: Record<string, number> = {
+        "jeden": 1, "jedna": 1, "jedno": 1, "jednej": 1, "jednego": 1,
+        "dwa": 2, "dwie": 2, "dwóch": 2, "dwoje": 2,
+        "trzy": 3, "trzech": 3, "troje": 3,
+        "cztery": 4, "czterech": 4, "czworo": 4,
+        "pięć": 5, "piec": 5, "pięciu": 5, "pieciu": 5,
+        "sześć": 6, "szesc": 6, "sześciu": 6, "szesciu": 6,
+        "siedem": 7, "siedmiu": 7,
+        "osiem": 8, "ośmiu": 8, "osmiu": 8,
+        "dziewięć": 9, "dziewiec": 9, "dziewięciu": 9, "dziewieciu": 9,
+        "dziesięć": 10, "dziesiec": 10, "dziesięciu": 10, "dziesieciu": 10,
+        "jedenaście": 11, "jedenascie": 11,
+        "dwanaście": 12, "dwanascie": 12,
+        "trzynaście": 13, "trzynascie": 13,
+        "czternaście": 14, "czternascie": 14,
+        "piętnaście": 15, "pietnascie": 15,
+        "szesnaście": 16, "szesnascie": 16,
+        "siedemnaście": 17, "siedemnascie": 17,
+        "osiemnaście": 18, "osiemnascie": 18,
+        "dziewiętnaście": 19, "dziewietnascie": 19,
+        "dwadzieścia": 20, "dwadziescia": 20,
+        "trzydzieści": 30, "trzydziesci": 30,
+        "czterdzieści": 40, "czterdziesci": 40,
+        "pięćdziesiąt": 50, "piecdziesiat": 50,
+        "sześćdziesiąt": 60, "szescdziesiat": 60,
+        "siedemdziesiąt": 70, "siedemdziesiat": 70,
+        "osiemdziesiąt": 80, "osiemdziesiat": 80,
+        "dziewięćdziesiąt": 90, "dziewiecdziesiat": 90,
+        "sto": 100, "dwieście": 200, "dwiescie": 200
+    };
+    // Rozbij tekst na słowa z uwzględnieniem polskich znaków diakrytycznych
+    const words = clean.split(/[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]+/).filter(Boolean);
+    for (const w of words) {
+        if (polishNumbers[w] !== undefined) {
+            return polishNumbers[w];
+        }
+    }
+    return null;
+}
+
 export async function POST(req: Request) {
     try {
         const body = await req.json();
@@ -145,8 +194,8 @@ export async function POST(req: Request) {
         }).filter(Boolean).join("\n\n");
 
         const systemInstruction = `
-Jesteś profesjonalnym Asystentem Magazynu firmy PESAM obsługującym ZWROTY BEZ PROTOKOŁU.
-Twój rozmówca to magazynier na placu budowlanym przyjmujący zwrot z budowy.
+Jesteś profesjonalnym Asystentem Magazynu firmy PESAM obsługującym ZWROTY BEZ PROTOKOŁU (ZBP).
+Twój rozmówca to magazynier na placu budowlanym przyjmujący materiały lub sprzęt bez protokołu.
 
 BARDZO WAŻNE - FORMAT ODPOWIEDZI:
 Twoja odpowiedź w polu "speechReply" ZOSTANIE ODCZYTANA NA GŁOS przez syntezator mowy (Text-To-Speech).
@@ -160,13 +209,29 @@ STAN WIEDZY KTÓRY JUŻ POSIADASZ:
 - Powód braku protokołu: ${knownReason ? `USTALONY: "${knownReason}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK"}
 - Zarejestrowane pozycje: ${knownItems.length > 0 ? JSON.stringify(knownItems) : "Brak"}
 
-BEZWZGLĘDNE REGUŁY ZWROTU BEZ PROTOKOŁU PESAM:
-1. PROTOKÓŁ JEST WYMAGANY: Jeśli brak – zapytaj: "Dlaczego kierownik lub kierowca nie wystawił protokołu?".
-2. ELEKTRONARZĘDZIA / MASZYNY (UNIQUE): Każde musi mieć numer magazynowy. Zapytaj jeśli nie padł!
-3. STAN TECHNICZNY URZĄDZEŃ: Muszą mieć określony stan — sprawne lub uszkodzone.
-4. RUSZTOWANIA / OSPRZĘT (BULK): Muszą być przeliczone — zapytaj o dokładną ilość.
-5. POZOSTAŁOŚCI I MATERIAŁY: Muszą być pospinane taśmami i posegregowane.
-6. WYKRYWANIE PRZERZUTÓW MIĘDZY BUDOWAMI:
+AKTYWNE REGUŁY ZWROTÓW W SYSTEMIE PESAM (z bazy Firestore):
+${noProtocolRules || "Brak dodatkowych reguł tekstowych."}
+
+${formattedCategoryRules ? `WYTYCZNE DLA KATEGORII:\n${formattedCategoryRules}` : ""}
+
+SZCZEGÓŁOWE ZASADY PROCEDURY ZWROTU BEZ PROTOKOŁU:
+1. SAM BRAK PROTOKOŁU JEST NARUSZENIEM: Zawsze ustal dlaczego kierownik/kierowca nie wystawił protokołu.
+2. PALETY (EUROPALETY, JEDNORAZOWE, MIESZANKI):
+   BEZWZGLĘDNY ZAKAZ ZWÓZKI PALET NA BAZĘ! Palet nie zwozi się na magazyn.
+   Każdy zwrot palet na plac traktuj ZAWSZE jako NARUSZENIE REGUŁ:
+   - Ustaw: isRuleCompliant: false, requiresPhoto: true.
+   - Jeśli magazynier podał, że palety są uszkodzone ("uszkodzona część"), ustaw condition: "USZKODZONY".
+   - W ruleNotes wpisz RZECZYWISTY POWÓD ZGŁOSZONY PRZEZ MAGAZYNIERA: "Zwózka palet na bazę (zakaz zwózki palet na magazyn). Uszkodzona część palet." (lub dokładnie to co podał magazynier).
+   - BEZWZGLĘDNY ZAKAZ wpisywania "brak segregacji i spięcia taśmą" dla palet!
+3. WIARYGODNOŚĆ RULENOTES (ŻELAZNA ZASADA):
+   Pole 'ruleNotes' musi precyzyjnie opisywać rzeczywisty powód naruszenia lub stan podany przez magazyniera (np. uszkodzenia, pęknięcia, brak numeru seryjnego, zwózka zabronionego materiału). Zakaz wklejania szablonowych tekstów niezwiązanych ze zgłoszeniem!
+4. ILOŚCI (QUANTITY):
+   Gdy magazynier podaje liczbę sztuk słownie (np. "dziewięć", "dwie", "pięć") lub cyfrą (np. "9"), bezwzględnie przekonwertuj to na liczbę w polu 'quantity' (np. 9). Nigdy nie zostawiaj pustej ilości.
+5. ELEKTRONARZĘDZIA / MASZYNY (UNIQUE): Każde musi mieć numer magazynowy. Zapytaj jeśli nie padł!
+6. STAN TECHNICZNY: Musi być określony stan — SPRAWNY lub USZKODZONY.
+7. RUSZTOWANIA / OSPRZĘT (BULK): Muszą być przeliczone — zapytaj o dokładną ilość.
+8. POZOSTAŁOŚCI I MATERIAŁY: Jeśli to materiały sypkie/resztki, zapytaj czy są zabezpieczone do składowania.
+9. WYKRYWANIE PRZERZUTÓW MIĘDZY BUDOWAMI:
    Wykaz sprzętu na tej budowie w systemie:
    """
    ${siteEquipmentSummary}
@@ -174,21 +239,14 @@ BEZWZGLĘDNE REGUŁY ZWROTU BEZ PROTOKOŁU PESAM:
    Jeśli zgłoszony sprzęt NIE FIGURUJE na powyższej liście:
    - Ustaw 'isSuspectedTransfer: true', 'ruleNotes: "Podejrzenie nieoficjalnego przerzutu między budowami"'.
    - Powiedz: "Uwaga, tego sprzętu nie ma w wykazie tej budowy. Zaznaczam podejrzenie przerzutu."
-7. NAKAZ ZDJĘCIA PRZY ZŁAMANIU REGUŁ:
-   Przy niepospinanych, uszkodzonych lub podejrzanych przedmiotach:
-   - Ustaw 'shouldPromptPhoto: true' oraz 'requiresPhoto: true' dla danej pozycji.
-   - Powiedz: "Zrób telefonem zdjęcie jako dowód naruszenia reguły."
-8. KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
-   WAŻNE: NIE ZNASZ KODU i NIGDY go nie wymieniaj ani nie sugeruj.
-   Gdy masz KOMPLET DANYCH (budowa, kierowca, powód, wszystkie pozycje zweryfikowane):
-   Zapytaj WYŁĄCZNIE: "Podaj kod zabezpieczający jeśli chcesz pominąć wysyłkę do dyrekcji. Albo zatwierdź bez kodu."
-   Ustaw quickReplies: ["Zatwierdź — wyślij do dyrekcji", "Mam kod"].
-   Ustaw isReadyToSave: false i czekaj na odpowiedź.
-   - Jeśli magazynier poda COKOLWIEK jako kod (dowolny ciąg znaków): ustaw bypassCode równe temu co podał — backend zweryfikuje poprawność.
-   - Jeśli powie "nie", "bez kodu", "zatwierdź", "wyślij": ustaw bypassCode: "" oraz isReadyToSave: true.
-   - Jeśli podał wcześniej błędny kod (bypassAttempts >= 1): poinformuj "Błędny kod, spróbuj ponownie lub zatwierdź z wysyłką."
-   - Jeśli bypassAttempts >= 3: ustaw isReadyToSave: true, bypassCode: "". Powiedz: "Zatwierdzam z wysyłką do dyrekcji."
-9. PODSUMOWANIE: Po ustaleniu kodu lub decyzji zatwierdź zapis.
+10. NAKAZ ZDJĘCIA PRZY ZŁAMANIU REGUŁ:
+    Przy niepospinanych, uszkodzonych, zabronionych (palety) lub podejrzanych przedmiotach:
+    - Ustaw 'shouldPromptPhoto: true' oraz 'requiresPhoto: true' dla danej pozycji.
+    - Powiedz: "Zrób telefonem zdjęcie jako dowód naruszenia reguły."
+11. WYKRYWANIE NOWYCH REGUŁ (suggestedNewRule):
+    Jeśli magazynier w rozmowie ujawnia nową regułę lub zakaz obowiązujący na budowie/magazynie (np. "kierownik zakazał zwożenia...", "tego nie wolno oddawać na bazę"), wyodrębnij to w polu 'suggestedNewRule' w drafcie!
+12. KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
+    NIE ZNASZ KODU i NIGDY go nie wymieniaj ani nie sugeruj.
 
 Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
 `;
@@ -209,24 +267,47 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
         } else if (knownItems.length === 0) {
             dynamicGuidance = `KROK 4: Budowa ("${knownSite}"), kierowca ("${knownDriver}") i powód są już znani. Zapytaj co dokładnie przyjechało na plac.`;
         } else {
+            const lastAssistantMsg = (Array.isArray(history) ? history : [])
+                .filter((h: any) => h && h.role === 'assistant')
+                .pop()?.content || "";
+
+            // Jeśli magazynier podał ilość w odpowiedzi na pytanie o sztuki / ilość
+            const extractedQty = parsePolishQuantity(userMessage);
+            const isAnsweringQuantity = /ile|ilo[sś][cć]|sztuk/i.test(lastAssistantMsg);
+
+            let activeItems = [...knownItems];
+            if (extractedQty && (isAnsweringQuantity || activeItems.some(i => !i.quantity || i.quantity <= 1))) {
+                activeItems = activeItems.map((item, idx) => {
+                    if (idx === activeItems.length - 1 || !item.quantity || item.quantity <= 1) {
+                        return { ...item, quantity: extractedQty };
+                    }
+                    return item;
+                });
+            }
+
             // Sprawdzenie stanu poszczególnych pozycji
-            const uniqueWithoutNr = knownItems.find(i =>
+            const uniqueWithoutNr = activeItems.find(i =>
                 (i.type === "UNIQUE" || (i.category && i.category.toLowerCase().includes("narzędz")) || (i.name && /młot|wiertark|agregat|szlifierk|betoniark|zagęszczark|poziomic|pilark/i.test(i.name))) &&
                 !i.inventoryNumber
             );
-            const itemWithoutCondition = knownItems.find(i =>
+            const itemWithoutCondition = activeItems.find(i =>
                 (i.type === "UNIQUE" || (i.category && i.category.toLowerCase().includes("narzędz")) || /agregat|betoniark|młot|wiertark|maszyn|szlifierk/i.test(i.name)) &&
                 !i.condition
             );
-            const unverifiedSecured = knownItems.find(i =>
-                i.type !== "UNIQUE" && (i.isSecured === null || i.isSecured === undefined)
+            const itemWithoutQuantity = activeItems.find(i =>
+                i.quantity === undefined || i.quantity === null || isNaN(Number(i.quantity)) || Number(i.quantity) <= 0
             );
-            const brokenRulesItem = knownItems.find(i =>
-                (i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer === true) && !i.requiresPhoto
+            const unverifiedSecured = activeItems.find(i =>
+                i.type !== "UNIQUE" && !/palet/i.test(i.name || "") && (i.isSecured === null || i.isSecured === undefined)
+            );
+            const brokenRulesItem = activeItems.find(i =>
+                (i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer === true || /palet/i.test(i.name || "")) && !i.requiresPhoto
             );
 
             if (uniqueWithoutNr) {
                 dynamicGuidance = `Elektronarzędzie / maszyna "${uniqueWithoutNr.name}" wymaga numeru magazynowego. Zapytaj WYŁĄCZNIE: "Jaki jest numer magazynowy dla: ${uniqueWithoutNr.name}?".`;
+            } else if (itemWithoutQuantity) {
+                dynamicGuidance = `Pozycja "${itemWithoutQuantity.name}" nie ma ustalonej ilości. Zapytaj WYŁĄCZNIE: "Ile sztuk ${itemWithoutQuantity.name} przyjechało do zwrotu?".`;
             } else if (itemWithoutCondition) {
                 dynamicGuidance = `Sprzęt "${itemWithoutCondition.name}" wymaga określenia stanu technicznego. Zapytaj: "Czy ${itemWithoutCondition.name} jest sprawne, czy uszkodzone?".`;
             } else if (unverifiedSecured) {
@@ -239,10 +320,6 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                 // Wszystkie dane zwrotu są już zebrane i zweryfikowane!
                 // AI nie zna kodu — backend decyduje deterministycznie w 100%.
                 // =========================================================================
-                const lastAssistantMsg = (Array.isArray(history) ? history : [])
-                    .filter((h: any) => h && h.role === 'assistant')
-                    .pop()?.content || "";
-
                 const isCodePhaseActive = /kod zabezpieczaj|pomin[aą][cć] wysy[lł]k|zatwierd[zź] bez kodu|kod/i.test(lastAssistantMsg);
                 const previousAttempts = Number(currentDraft?.bypassAttempts) || 0;
                 const userInput = userMessage.toLowerCase().trim();
@@ -265,7 +342,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                                 siteId: matchedSite?.id || currentDraft?.siteId || "",
                                 driver: knownDriver,
                                 reasonForNoProtocol: knownReason,
-                                items: knownItems,
+                                items: activeItems,
                                 missingFields: [],
                                 isReadyToSave: true,
                                 shouldPromptPhoto: false,
@@ -292,7 +369,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                                 siteId: matchedSite?.id || currentDraft?.siteId || "",
                                 driver: knownDriver,
                                 reasonForNoProtocol: knownReason,
-                                items: knownItems,
+                                items: activeItems,
                                 missingFields: [],
                                 isReadyToSave: true,
                                 shouldPromptPhoto: false,
@@ -313,7 +390,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                                 siteId: matchedSite?.id || currentDraft?.siteId || "",
                                 driver: knownDriver,
                                 reasonForNoProtocol: knownReason,
-                                items: knownItems,
+                                items: activeItems,
                                 missingFields: [],
                                 isReadyToSave: true,
                                 shouldPromptPhoto: false,
@@ -330,7 +407,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                                 siteId: matchedSite?.id || currentDraft?.siteId || "",
                                 driver: knownDriver,
                                 reasonForNoProtocol: knownReason,
-                                items: knownItems,
+                                items: activeItems,
                                 missingFields: [],
                                 isReadyToSave: false,
                                 shouldPromptPhoto: false,
@@ -349,7 +426,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                             siteId: matchedSite?.id || currentDraft?.siteId || "",
                             driver: knownDriver,
                             reasonForNoProtocol: knownReason,
-                            items: knownItems,
+                            items: activeItems,
                             missingFields: [],
                             isReadyToSave: false,
                             shouldPromptPhoto: false,
@@ -472,6 +549,10 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                                 bypassCode: {
                                     type: Type.STRING,
                                     description: "Dokładnie to co powiedział/wpisał użytkownik jako kod — backend zweryfikuje poprawność. Nie modyfikuj, nie uzupełniaj."
+                                },
+                                suggestedNewRule: {
+                                    type: Type.STRING,
+                                    description: "Nowa reguła lub zakaz dotyczący zwózki/magazynu, jeśli magazynier wspomniał o nowej zasadzie (np. 'Nie zwozimy palet na bazę')"
                                 }
                             },
                             required: ["siteName", "driver", "items", "missingFields", "isReadyToSave"]
@@ -545,29 +626,80 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
         let finalItems: any[] = [];
         const modelItems: any[] = Array.isArray(parsed.draft?.items) ? parsed.draft.items : [];
 
+        // Bezpieczne wyodrębnienie ilości z wypowiedzi magazyniera (np. "dziewięć", "9")
+        const extractedQty = parsePolishQuantity(userMessage);
+
         if (modelItems.length > 0) {
             finalItems = modelItems.map(mItem => {
-                const existing = knownItems.find(k => k.name?.toLowerCase() === mItem.name?.toLowerCase());
-                const requiresPhoto = mItem.requiresPhoto ?? (mItem.isSecured === false || mItem.condition === "USZKODZONY" || mItem.isSuspectedTransfer === true || (existing?.requiresPhoto ?? false));
+                const existing = knownItems.find(k => 
+                    k.name?.toLowerCase() === mItem.name?.toLowerCase() ||
+                    (k.name && mItem.name && (k.name.toLowerCase().includes(mItem.name.toLowerCase()) || mItem.name.toLowerCase().includes(k.name.toLowerCase())))
+                ) || (modelItems.length === 1 && knownItems.length === 1 ? knownItems[0] : undefined);
+
+                const isPallet = /palet/i.test(mItem.name || "") || (existing?.name && /palet/i.test(existing.name));
+                const requiresPhoto = mItem.requiresPhoto ?? (mItem.isSecured === false || mItem.condition === "USZKODZONY" || mItem.isSuspectedTransfer === true || isPallet || (existing?.requiresPhoto ?? false));
+
+                let resolvedQty = (typeof mItem.quantity === 'number' && mItem.quantity > 0) ? mItem.quantity : undefined;
+                if (!resolvedQty && extractedQty) resolvedQty = extractedQty;
+                if (!resolvedQty && existing?.quantity) resolvedQty = existing.quantity;
+                if (!resolvedQty) resolvedQty = 1;
+
+                // Precyzyjne reguły dla palet (zakaz zwózki na bazę + uszkodzenia)
+                let finalCondition = mItem.condition || existing?.condition || (isPallet ? "USZKODZONY" : "");
+                let finalRuleNotes = mItem.ruleNotes || existing?.ruleNotes || "";
+                let finalIsCompliant = mItem.isRuleCompliant !== undefined ? mItem.isRuleCompliant : (isPallet ? false : (existing?.isRuleCompliant ?? null));
+
+                if (isPallet) {
+                    finalIsCompliant = false;
+                    if (!finalRuleNotes || finalRuleNotes.includes("brak segregacji")) {
+                        finalRuleNotes = "Zwózka palet na bazę (zakaz zwózki palet na magazyn). Uszkodzona część palet.";
+                    }
+                }
 
                 return {
                     ...existing,
                     ...mItem,
-                    quantity: mItem.quantity || existing?.quantity || 1,
+                    quantity: resolvedQty,
                     unit: mItem.unit || existing?.unit || "szt.",
-                    category: mItem.category || existing?.category || "Inne Materiały, Drewno i Odpady",
+                    category: mItem.category || existing?.category || (isPallet ? "Materiały" : "Inne Materiały, Drewno i Odpady"),
                     type: mItem.type || existing?.type || "MATERIAL",
                     inventoryNumber: mItem.inventoryNumber || existing?.inventoryNumber || "",
-                    condition: mItem.condition || existing?.condition || "",
-                    isSecured: mItem.isSecured !== undefined ? mItem.isSecured : (existing?.isSecured ?? null),
-                    isRuleCompliant: mItem.isRuleCompliant !== undefined ? mItem.isRuleCompliant : (existing?.isRuleCompliant ?? null),
-                    ruleNotes: mItem.ruleNotes || existing?.ruleNotes || "",
+                    condition: finalCondition,
+                    isSecured: isPallet ? false : (mItem.isSecured !== undefined ? mItem.isSecured : (existing?.isSecured ?? null)),
+                    isRuleCompliant: finalIsCompliant,
+                    ruleNotes: finalRuleNotes,
                     isSuspectedTransfer: mItem.isSuspectedTransfer !== undefined ? mItem.isSuspectedTransfer : (existing?.isSuspectedTransfer ?? false),
                     requiresPhoto: Boolean(requiresPhoto)
                 };
             });
-        } else {
-            finalItems = knownItems;
+        } else if (knownItems.length > 0) {
+            finalItems = knownItems.map(kItem => {
+                if (extractedQty && (!kItem.quantity || kItem.quantity === 1)) {
+                    return { ...kItem, quantity: extractedQty };
+                }
+                return kItem;
+            });
+        }
+
+        // Auto-zapis nowo wykrytej reguły przez AI (np. z wypowiedzi magazyniera)
+        const suggestedRule = parsed.draft?.suggestedNewRule?.trim() || "";
+        if (suggestedRule && suggestedRule.length > 5) {
+            try {
+                const rulesRef = adminDb.doc("settings/residual_rules");
+                const snap = await rulesRef.get();
+                const currentRules = snap.data()?.noProtocolRules || "";
+                if (!currentRules.toLowerCase().includes(suggestedRule.toLowerCase())) {
+                    const updatedRules = `${currentRules}\n- NOWA REGUŁA (AI): ${suggestedRule}`;
+                    await rulesRef.update({
+                        noProtocolRules: updatedRules,
+                        noProtocolUpdatedAt: new Date().toLocaleString("pl-PL"),
+                        noProtocolUpdatedBy: "AI Asystent (z rozmowy na placu)"
+                    });
+                    console.log(`[AutoRule] Dopisano nową regułę do settings/residual_rules: "${suggestedRule}"`);
+                }
+            } catch (ruleErr) {
+                console.warn("Błąd auto-zapisu reguły:", ruleErr);
+            }
         }
 
         // Sprawdź czy brakujące pola są faktycznie brakujące
@@ -605,7 +737,8 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                 isReadyToSave: isReady || forceSaveAfterMaxAttempts,
                 shouldPromptPhoto,
                 bypassCode: finalBypass,
-                bypassAttempts: newBypassAttempts
+                bypassAttempts: newBypassAttempts,
+                suggestedNewRule: suggestedRule
             },
             // Nie zwracamy configuredBypassCode do frontendu — bezpieczeństwo
             quickReplies: Array.isArray(parsed.quickReplies) && parsed.quickReplies.length > 0
