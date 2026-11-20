@@ -29,7 +29,8 @@ export async function POST(req: Request) {
                 items: [],
                 missingFields: [],
                 isReadyToSave: false,
-                shouldPromptPhoto: false
+                shouldPromptPhoto: false,
+                bypassAttempts: 0
             }
         } = body;
 
@@ -144,54 +145,50 @@ export async function POST(req: Request) {
         }).filter(Boolean).join("\n\n");
 
         const systemInstruction = `
-Jesteś inteligentnym, profesjonalnym i uprzejmym Głosowym Asystentem Magazynu firmy PESAM.
-Twój rozmówca to magazynier na placu budowlanym, który przyjmuje zwrot materiałów lub sprzętu przywieziony z budowy BEZ PAPIEROWEGO PROTOKOŁU ZWROTU.
+Jesteś profesjonalnym Asystentem Magazynu firmy PESAM obsługującym ZWROTY BEZ PROTOKOŁU.
+Twój rozmówca to magazynier na placu budowlanym przyjmujący zwrot z budowy.
 
 BARDZO WAŻNE - FORMAT ODPOWIEDZI:
-Twoja odpowiedź w polu "speechReply" ZOSTANIE ODCZYTANA NA GŁOS PRZEZ SYNTEZATOR MOWY W TELEFONIE MAGAZYNIERA (Text-To-Speech).
-- Pisz czystym tekstem, BEZ GWIAZDEK, bez formatowania Markdown (#, **, * itp.), bez list punktowanych!
-- Mów naturalnie, po polsku, profesjonalnie, zwięźle (maksymalnie 1-2 krótkie, konkretne zdania).
-- Magazynier ma zajęte ręce, więc dialog musi być dynamiczny.
+Twoja odpowiedź w polu "speechReply" ZOSTANIE ODCZYTANA NA GŁOS przez syntezator mowy (Text-To-Speech).
+- Pisz czystym tekstem, BEZ GWIAZDEK, bez formatowania Markdown, bez list punktowanych!
+- Zadawaj JEDNO konkretne pytanie na raz. Maksymalnie 1-2 zdania.
+- Zero small-talk. Zero powitań. Tylko konkretne pytania i potwierdzenia.
 
-STAN WIEDZY KTÓRY JUŻ POSIADASZ (BĄDŹ ŚWIADOMY CO JUŻ ZOSTAŁO POWIEDZIANE):
-- Budowa źródłowa: ${knownSite ? `USTALONA: "${knownSite}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK - zapytaj o budowę jeśli nie padła w tej wypowiedzi"}
-- Kierowca / Zdający: ${knownDriver ? `USTALONY: "${knownDriver}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK - zapytaj o kierowcę jeśli nie padł w tej wypowiedzi"}
-- Powód braku protokołu: ${knownReason ? `USTALONY: "${knownReason}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK - dopytaj dlaczego kierownik/kierowca nie wystawił protokołu"}
-- Zarejestrowane dotąd pozycje: ${knownItems.length > 0 ? JSON.stringify(knownItems) : "Brak pozycji - wyodrębnij z wypowiedzi"}
+STAN WIEDZY KTÓRY JUŻ POSIADASZ:
+- Budowa źródłowa: ${knownSite ? `USTALONA: "${knownSite}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK"}
+- Kierowca / Zdający: ${knownDriver ? `USTALONY: "${knownDriver}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK"}
+- Powód braku protokołu: ${knownReason ? `USTALONY: "${knownReason}" (BEZWZGLĘDNY ZAKAZ PYTANIA PONOWNIE!)` : "BRAK"}
+- Zarejestrowane pozycje: ${knownItems.length > 0 ? JSON.stringify(knownItems) : "Brak"}
 
 BEZWZGLĘDNE REGUŁY ZWROTU BEZ PROTOKOŁU PESAM:
-1. PROTOKÓŁ JEST WYMAGANY: Powinien go wystawić kierownik budowy lub kierowca. Jeśli brak – zapytaj: "Dlaczego kierownik lub kierowca nie wystawił protokołu?".
-2. ELEKTRONARZĘDZIA / MASZYNY (UNIQUE): Każde elektronarzędzie lub urządzenie musi mieć podany numer magazynowy (np. nr 1, nr 9). Zawsze zapytaj o numer magazynowy, jeśli nie padł!
-3. STAN TECHNICZNY URZĄDZEŃ: Przedmioty i urządzenia muszą mieć określony stan (sprawne lub uszkodzone).
-4. RUSZTOWANIA / OSPRZĘT (BULK): Muszą być przeliczone – zapytaj o dokładną liczbę sztuk.
-5. POZOSTAŁOŚCI I MATERIAŁY (DREWNO, RESZTKI): Muszą być zabezpieczone, pospinane taśmami i posegregowane do składowania.
+1. PROTOKÓŁ JEST WYMAGANY: Jeśli brak – zapytaj: "Dlaczego kierownik lub kierowca nie wystawił protokołu?".
+2. ELEKTRONARZĘDZIA / MASZYNY (UNIQUE): Każde musi mieć numer magazynowy. Zapytaj jeśli nie padł!
+3. STAN TECHNICZNY URZĄDZEŃ: Muszą mieć określony stan — sprawne lub uszkodzone.
+4. RUSZTOWANIA / OSPRZĘT (BULK): Muszą być przeliczone — zapytaj o dokładną ilość.
+5. POZOSTAŁOŚCI I MATERIAŁY: Muszą być pospinane taśmami i posegregowane.
 6. WYKRYWANIE PRZERZUTÓW MIĘDZY BUDOWAMI:
-   Poniżej znajduje się wykaz sprzętu zarejestrowany w systemie na tej budowie:
+   Wykaz sprzętu na tej budowie w systemie:
    """
    ${siteEquipmentSummary}
    """
-   Jeśli magazynier zgłasza sprzęt (zwłaszcza elektronarzędzie/maszynę z numerem mag), którego NIE MA na powyższej liście sprzętu tej budowy:
-   - Odnotuj: 'isSuspectedTransfer: true', 'ruleNotes: "Podejrzenie nieoficjalnego przerzutu między budowami (brak na stanie budowy w systemie)"'.
-   - Poinformuj magazyniera: "Uwaga, tego sprzętu nie ma w wykazie tej budowy. Zaznaczam podejrzenie przerzutu między budowami."
-7. NAKAZ ZROBIENIA ZDJĘCIA PRZY ZŁAMANIU REGUŁ:
-   Jeśli materiały są niepospinane, nieposegregowane, uszkodzone lub wystąpił podejrzany przerzut:
-   - Ustaw 'shouldPromptPhoto: true' oraz 'requiresPhoto: true' dla danej pozycji!
-   - Powiedz: "Uwaga, reguły składowania zostały naruszone. Zrób teraz telefonem zdjęcie jako dowód do protokołu."
-8. OBOWIĄZKOWE PYTANIE O KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
-   Skonfigurowany kod wyłączający alert e-mail w systemie to: "${configuredBypassCode}".
-   Kluczowa zasada: ZANIM zwrot zostanie zapisany, gdy mamy już zebrane wszystkie dane (budowa, kierowca, powód, pozycje), MUSISZ zapytać magazyniera o kod zabezpieczający:
-   "Mamy komplet danych dla zwrotu z budowy [Budowa]. Czy chcesz podać kod zabezpieczający blokujący wysyłkę e-maila (np. ${configuredBypassCode}), czy zatwierdzamy i wysyłamy powiadomienie do kierownictwa?".
-   Ustaw quickReplies: ["Podaj kod ${configuredBypassCode}", "Wyślij powiadomienie e-mail"].
-
-   - Jeśli magazynier poda kod "${configuredBypassCode}", powie "kod ${configuredBypassCode}", "pomiń maila" lub kliknie "Podaj kod ${configuredBypassCode}":
-     Ustaw w drafcie pole 'bypassCode': "${configuredBypassCode}" oraz 'isReadyToSave: true'.
-     Powiedz krótko: "Przyjąłem kod zabezpieczający ${configuredBypassCode}. Powiadomienie e-mail nie zostanie wysłane. Zapisuję zwrot w systemie."
-   
-   - Jeśli magazynier odpowie "nie", "bez kodu", "wyślij", "wyślij maila", "zatwierdź" lub odmówi podania kodu:
-     Ustaw w drafcie pole 'bypassCode': "" oraz 'isReadyToSave: true'.
-     Powiedz krótko: "Rozumiem, zatwierdzam zwrot i wysyłam powiadomienie e-mail do kierownictwa."
-9. PODSUMOWANIE I ZATWIERDZENIE:
-   Jeśli kod zabezpieczający został już ustalony, zatwierdź zapis.
+   Jeśli zgłoszony sprzęt NIE FIGURUJE na powyższej liście:
+   - Ustaw 'isSuspectedTransfer: true', 'ruleNotes: "Podejrzenie nieoficjalnego przerzutu między budowami"'.
+   - Powiedz: "Uwaga, tego sprzętu nie ma w wykazie tej budowy. Zaznaczam podejrzenie przerzutu."
+7. NAKAZ ZDJĘCIA PRZY ZŁAMANIU REGUŁ:
+   Przy niepospinanych, uszkodzonych lub podejrzanych przedmiotach:
+   - Ustaw 'shouldPromptPhoto: true' oraz 'requiresPhoto: true' dla danej pozycji.
+   - Powiedz: "Zrób telefonem zdjęcie jako dowód naruszenia reguły."
+8. KOD ZABEZPIECZAJĄCY (BYPASS E-MAIL):
+   WAŻNE: NIE ZNASZ KODU i NIGDY go nie wymieniaj ani nie sugeruj.
+   Gdy masz KOMPLET DANYCH (budowa, kierowca, powód, wszystkie pozycje zweryfikowane):
+   Zapytaj WYŁĄCZNIE: "Podaj kod zabezpieczający jeśli chcesz pominąć wysyłkę do dyrekcji. Albo zatwierdź bez kodu."
+   Ustaw quickReplies: ["Zatwierdź — wyślij do dyrekcji", "Mam kod"].
+   Ustaw isReadyToSave: false i czekaj na odpowiedź.
+   - Jeśli magazynier poda COKOLWIEK jako kod (dowolny ciąg znaków): ustaw bypassCode równe temu co podał — backend zweryfikuje poprawność.
+   - Jeśli powie "nie", "bez kodu", "zatwierdź", "wyślij": ustaw bypassCode: "" oraz isReadyToSave: true.
+   - Jeśli podał wcześniej błędny kod (bypassAttempts >= 1): poinformuj "Błędny kod, spróbuj ponownie lub zatwierdź z wysyłką."
+   - Jeśli bypassAttempts >= 3: ustaw isReadyToSave: true, bypassCode: "". Powiedz: "Zatwierdzam z wysyłką do dyrekcji."
+9. PODSUMOWANIE: Po ustaleniu kodu lub decyzji zatwierdź zapis.
 
 Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
 `;
@@ -237,22 +234,36 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
             } else if (brokenRulesItem) {
                 dynamicGuidance = `Wykryto naruszenie reguł (${brokenRulesItem.name}). Nakaz magazynierowi: "Proszę zrób teraz telefonem zdjęcie jako dowód naruszenia reguły". Ustaw shouldPromptPhoto: true.`;
             } else {
-                const lowerMsg = userMessage.toLowerCase();
-                const codeMentioned = lowerMsg.includes(configuredBypassCode.toLowerCase()) || 
-                                      lowerMsg.includes("pomiń") || 
-                                      lowerMsg.includes("bez kodu") || 
-                                      lowerMsg.includes("wyślij") || 
-                                      Boolean(currentDraft?.bypassCode);
+                // Faza pytania o kod zabezpieczający — AI NIE zna kodu, tylko pyta ogólnie
+                const previousAttempts = Number(currentDraft?.bypassAttempts) || 0;
+                const userInput = userMessage.toLowerCase().trim();
+                
+                // Wykryj jawną rezygnację z kodu (bez próby podania kodu)
+                const userDeclinedCode = userInput.includes("wyślij") || 
+                                         userInput.includes("bez kodu") || 
+                                         userInput.includes("zatwierdź") ||
+                                         userInput.includes("wyslij") ||
+                                         userInput.includes("zatwierdz");
 
-                if (!codeMentioned) {
+                // Wykryj czy użytkownik próbował podać jakikolwiek kod (jest coś w bypassCode z drafta)
+                const bypassAttempted = Boolean(currentDraft?.bypassCode && currentDraft.bypassCode !== "");
+
+                if (previousAttempts >= 3) {
+                    // Po 3 błędnych próbach — zapis z wysyłką
+                    dynamicGuidance = `PRZEKROCZONO LIMIT PRÓB KODU (${previousAttempts} błędne próby). Poinformuj: "Przekroczono limit prób. Zatwierdzam zwrot z wysyłką do dyrekcji." Ustaw isReadyToSave: true, bypassCode: "".`;
+                } else if (userDeclinedCode) {
+                    dynamicGuidance = `Użytkownik rezygnuje z kodu — zatwierdź z wysyłką. Ustaw isReadyToSave: true, bypassCode: "". Powiedz: "Zatwierdzam, wysyłam powiadomienie do dyrekcji."`;
+                } else if (!bypassAttempted) {
+                    // Jeszcze nie pytano o kod — zapytaj po raz pierwszy (BEZ ujawniania kodu!)
                     dynamicGuidance = `MAMY KOMPLET DANYCH (Budowa: ${knownSite}, Kierowca: ${knownDriver}, Pozycje zweryfikowane).
-OBOWIĄZKOWO ZAPYTAJ O KOD ZABEZPIECZAJĄCY:
-Zapytaj magazyniera: "Mamy komplet danych dla zwrotu z budowy ${knownSite}. Czy chcesz podać kod zabezpieczający blokujący wysyłkę e-maila (np. ${configuredBypassCode}), czy zatwierdzamy i wysyłamy powiadomienie do kierownictwa?".
+ZAPYTAJ MAGAZYNIERA O KOD ZABEZPIECZAJĄCY (nie podawaj żadnej wartości kodu!):
+Powiedz dokładnie: "Podaj kod zabezpieczający jeśli chcesz pominąć wysyłkę do dyrekcji. Albo zatwierdź bez kodu."
 Ustaw isReadyToSave: false.
-Ustaw quickReplies: ["Podaj kod ${configuredBypassCode}", "Wyślij powiadomienie e-mail"].`;
+Ustaw quickReplies: ["Zatwierdź — wyślij do dyrekcji", "Mam kod"].`;
                 } else {
-                    dynamicGuidance = `KOD ZABEZPIECZAJĄCY ZOSTAŁ OKREŚLONY (wartość: ${lowerMsg.includes(configuredBypassCode.toLowerCase()) ? configuredBypassCode : (currentDraft?.bypassCode || 'brak')}).
-Podsumuj zwrot i potwierdź zapis w systemie. Ustaw isReadyToSave: true.`;
+                    // Użytkownik podał kod (bypassCode != "") — backend sprawdzi poprawność, AI potwierdza
+                    dynamicGuidance = `Użytkownik podał kod zabezpieczający. Backend zweryfikuje jego poprawność.
+Powiedz: "Przyjąłem. Sprawdzam kod i zapisuję zwrot." Ustaw isReadyToSave: true i zachowaj wartość bypassCode jaką podał użytkownik.`;
                 }
             }
         }
@@ -366,7 +377,7 @@ Podsumuj zwrot i potwierdź zapis w systemie. Ustaw isReadyToSave: true.`;
                                 },
                                 bypassCode: {
                                     type: Type.STRING,
-                                    description: "Kod zabezpieczający wyłączający wysyłkę e-maila (np. jebacto)"
+                                    description: "Dokładnie to co powiedział/wpisał użytkownik jako kod — backend zweryfikuje poprawność. Nie modyfikuj, nie uzupełniaj."
                                 }
                             },
                             required: ["siteName", "driver", "items", "missingFields", "isReadyToSave"]
@@ -411,11 +422,28 @@ Podsumuj zwrot i potwierdź zapis w systemie. Ustaw isReadyToSave: true.`;
             ? modelReason
             : knownReason;
 
-        const modelBypass = parsed.draft?.bypassCode?.trim();
-        const hasBypassWord = userMessage.toLowerCase().includes(configuredBypassCode.toLowerCase());
-        const finalBypass = (modelBypass && modelBypass !== 'brak' && modelBypass !== 'undefined')
-            ? modelBypass
-            : (hasBypassWord ? configuredBypassCode : (currentDraft?.bypassCode || ""));
+        const modelBypass = parsed.draft?.bypassCode?.trim() || "";
+
+        // =========================================================================
+        // WALIDACJA KODU ZABEZPIECZAJĄCEGO PO STRONIE SERWERA
+        // AI nie zna kodu — tylko przekazuje co powiedział użytkownik.
+        // Backend decyduje czy kod jest poprawny.
+        // =========================================================================
+        const previousAttempts = Number(currentDraft?.bypassAttempts) || 0;
+
+        // Sprawdź czy użytkownik podał cokolwiek jako kod (AI zapisuje to w bypassCode)
+        const userProvidedCode = modelBypass !== "" && modelBypass !== "brak" && modelBypass !== "undefined";
+        
+        // Zweryfikuj poprawność po stronie serwera
+        const isCodeCorrect = userProvidedCode && modelBypass === configuredBypassCode;
+        
+        // Zlicz błędne próby (tylko gdy podano niepusty, niepoprawny kod)
+        const newBypassAttempts = userProvidedCode && !isCodeCorrect
+            ? previousAttempts + 1
+            : previousAttempts;
+
+        // Ustal finalny kod: tylko jeśli backend potwierdził poprawność
+        const finalBypass = isCodeCorrect ? configuredBypassCode : (currentDraft?.bypassCode === configuredBypassCode ? configuredBypassCode : "");
 
         const finalSiteId = parsed.draft?.siteId || matchedSite?.id || currentDraft?.siteId || "";
 
@@ -472,6 +500,9 @@ Podsumuj zwrot i potwierdź zapis w systemie. Ustaw isReadyToSave: true.`;
 
         const isReady = Boolean(parsed.draft?.isReadyToSave) && missingFields.length === 0;
 
+        // Po 3 błędnych próbach kodu — wymuś zapis z wysyłką e-mail
+        const forceSaveAfterMaxAttempts = newBypassAttempts >= 3 && !isCodeCorrect;
+
         const responsePayload = {
             speechReply: parsed.speechReply,
             draft: {
@@ -481,11 +512,12 @@ Podsumuj zwrot i potwierdź zapis w systemie. Ustaw isReadyToSave: true.`;
                 reasonForNoProtocol: finalReason,
                 items: finalItems,
                 missingFields,
-                isReadyToSave: isReady,
+                isReadyToSave: isReady || forceSaveAfterMaxAttempts,
                 shouldPromptPhoto,
-                bypassCode: finalBypass
+                bypassCode: finalBypass,
+                bypassAttempts: newBypassAttempts
             },
-            configuredBypassCode,
+            // Nie zwracamy configuredBypassCode do frontendu — bezpieczeństwo
             quickReplies: Array.isArray(parsed.quickReplies) && parsed.quickReplies.length > 0
                 ? parsed.quickReplies
                 : ["Tak, zatwierdź", "Zapisz zwrot"]

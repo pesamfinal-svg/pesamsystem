@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth/AuthContext";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import PlacVoiceHub from "@/components/plac/PlacVoiceHub";
 
 type ModalInfo = {
   title: string;
@@ -110,15 +111,12 @@ export default function PlacPage() {
 
       {/* Main Content */}
       <main className="max-w-xl mx-auto w-full p-4 flex-1 space-y-4">
-        {/* Welcome Card */}
-        <section className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-950 p-5 shadow-lg">
-          <h2 className="text-xl font-black text-white">
-            Cześć, {userName} 👋
-          </h2>
-          <p className="mt-1 text-xs text-slate-400">
-            Wybierz moduł operacyjny z poniższego menu kafelkowego:
-          </p>
-        </section>
+        {/* Globalny Hub Głosowego Asystenta AI Multi-Agent (Google A2A) */}
+        <PlacVoiceHub
+          userName={userName}
+          userId={user?.uid}
+          userEmail={user?.email || ""}
+        />
 
         {/* 4 Duże Kafelki Menu */}
         <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">

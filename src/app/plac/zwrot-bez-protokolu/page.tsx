@@ -33,6 +33,7 @@ interface ReturnDraft {
     isReadyToSave: boolean;
     shouldPromptPhoto?: boolean;
     bypassCode?: string;
+    bypassAttempts?: number;
 }
 
 interface ChatMessage {
@@ -56,20 +57,19 @@ export default function ZwrotBezProtokoluPage() {
         items: [],
         missingFields: ["budowa", "kierowca"],
         isReadyToSave: false,
-        shouldPromptPhoto: false
+        shouldPromptPhoto: false,
+        bypassAttempts: 0
     });
     const [quickReplies, setQuickReplies] = useState<string[]>([
-        "Zapisz zwrot: kubik desek",
+        "Budowa Tuchów",
         "Budowa Wielicka",
-        "Kierowca Jan Kowalski",
-        "Brak czasu na budowie na papier",
-        "Deski są pospinane i posegregowane"
+        "Budowa CZP",
+        "Budowa Tarnów"
     ]);
 
     // Stany wejścia i mowy
     const [inputText, setInputText] = useState("");
     const [bypassCode, setBypassCode] = useState("");
-    const [configuredBypassCode, setConfiguredBypassCode] = useState("jebacto");
     const [isBypassModalOpen, setIsBypassModalOpen] = useState(false);
     const [modalBypassInput, setModalBypassInput] = useState("");
     const [pendingSaveDraft, setPendingSaveDraft] = useState<ReturnDraft | null>(null);
@@ -102,40 +102,26 @@ export default function ZwrotBezProtokoluPage() {
 
     // Inicjalizacja asystenta po wejściu
     useEffect(() => {
-        // Pobierz aktualny kod zabezpieczający z ustawień systemu
-        const fetchSystemConfig = async () => {
-            try {
-                const sysSnap = await getDoc(doc(db, "settings", "system"));
-                if (sysSnap.exists()) {
-                    const code = sysSnap.data()?.noProtocolBypassCode || "jebacto";
-                    setConfiguredBypassCode(code);
-                }
-            } catch (e) {
-                console.warn("Błąd pobierania ustawień bypass:", e);
-            }
-        };
-        fetchSystemConfig();
-
         // Sprawdź wsparcie mowy w przeglądarce
         if (typeof window !== "undefined") {
             const hasSynthesis = "speechSynthesis" in window;
             const hasRecognition = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
             setIsSpeechSupported(hasSynthesis || hasRecognition);
 
-            // Powitanie asystenta
-            const welcomeText = "Cześć! Jestem asystentem placu. Zgłoś zwrot bez protokołu – powiedz co przyjmujesz, a ja dopytam o budowę, kierowcę i sprawdzę reguły.";
+            // Pierwsze konkretne pytanie zamiast powitania
+            const openingText = "Podaj nazwę budowy, z której przyjechał zwrot.";
             setMessages([
                 {
-                    id: "welcome",
+                    id: "opening",
                     role: "assistant",
-                    content: welcomeText,
+                    content: openingText,
                     timestamp: new Date().toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" })
                 }
             ]);
 
-            // Odczytaj powitanie na głos jeśli audio włączone
+            // Odczytaj pierwsze pytanie na głos
             if (isAudioEnabled) {
-                speakText(welcomeText);
+                speakText(openingText);
             }
         }
 
@@ -335,7 +321,11 @@ export default function ZwrotBezProtokoluPage() {
                             missingFields: data.draft.missingFields || [],
                             isReadyToSave: Boolean(data.draft.isReadyToSave),
                             shouldPromptPhoto: Boolean(data.draft.shouldPromptPhoto),
-                            bypassCode: data.draft.bypassCode || prev.bypassCode || ""
+                            bypassCode: data.draft.bypassCode || prev.bypassCode || "",
+                            // Przekaż licznik błędnych prób kodu z serwera
+                            bypassAttempts: typeof data.draft.bypassAttempts === 'number'
+                                ? data.draft.bypassAttempts
+                                : (prev.bypassAttempts || 0)
                         };
                         draftRef.current = merged;
                         if (data.draft.bypassCode) {
@@ -422,11 +412,11 @@ export default function ZwrotBezProtokoluPage() {
             return;
         }
 
-        // Zawsze otwieramy modal z pytaniem o kod zabezpieczający jebacto
+        // Zawsze pytamy o kod zabezpieczający przed zatwierdzeniem
         setPendingSaveDraft(finalDraft);
-        setModalBypassInput(bypassCode || finalDraft.bypassCode || configuredBypassCode);
+        setModalBypassInput(bypassCode || finalDraft.bypassCode || "");
         setIsBypassModalOpen(true);
-        speakText(`Zanim zapiszemy zwrot: czy chcesz podać kod zabezpieczający ${configuredBypassCode} blokujący wysyłkę e-maila, czy zatwierdzamy z wysyłką powiadomienia?`);
+        speakText("Zanim zapiszemy zwrot: czy chcesz podać kod zabezpieczający blokujący wysyłkę e-maila do dyrekcji, czy zatwierdzamy z wysyłką powiadomienia?");
     };
 
     // Właściwy zapis do bazy Firestore z wybranym kodem bypass
@@ -558,14 +548,15 @@ export default function ZwrotBezProtokoluPage() {
             items: [],
             missingFields: ["budowa", "kierowca"],
             isReadyToSave: false,
-            shouldPromptPhoto: false
+            shouldPromptPhoto: false,
+            bypassAttempts: 0
         };
         draftRef.current = initialDraft;
         setDraft(initialDraft);
         setSavedDocId(null);
         setIsSavedSuccess(false);
 
-        const restartText = "Rozpoczynamy nowy zwrot bez protokołu. Słucham, co przyjechało na plac?";
+        const restartText = "Podaj nazwę budowy, z której przyjechał zwrot.";
         const restartMsg: ChatMessage = {
             id: `restart_${Date.now()}`,
             role: "assistant",
@@ -927,13 +918,16 @@ export default function ZwrotBezProtokoluPage() {
                                 </div>
                             ) : (
                                 <div className="flex items-center gap-2">
-                                    <span className="text-[10px] text-slate-500">Alert e-mail włączony</span>
+                                    <span className="text-[10px] text-slate-500">Powiadomienie do dyrekcji aktywne</span>
                                     <button
                                         type="button"
-                                        onClick={() => setBypassCode(configuredBypassCode)}
+                                        onClick={() => {
+                                            setModalBypassInput("");
+                                            setIsBypassModalOpen(true);
+                                        }}
                                         className="bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-indigo-300 border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] font-mono transition"
                                     >
-                                        + Użyj {configuredBypassCode}
+                                        🔐 Podaj kod
                                     </button>
                                 </div>
                             )}
@@ -1122,33 +1116,26 @@ export default function ZwrotBezProtokoluPage() {
 
                                 <div className="bg-slate-950/70 rounded-2xl p-3.5 border border-slate-800 text-xs text-slate-300 leading-relaxed space-y-2">
                                     <p>
-                                        Zgodnie z regułami PESAM, zwrot bez protokołu zostanie zarejestrowany w systemie oraz wyśle alert e-mail do kierownictwa.
+                                        Zgodnie z regułami PESAM, zwrot bez protokołu zostanie zarejestrowany w systemie oraz domyślnie wyśle alert e-mail do kierownictwa.
                                     </p>
                                     <p className="font-bold text-amber-300">
-                                        Czy chcesz podać autoryzowany kod zabezpieczający (<code className="bg-slate-800 px-1.5 py-0.5 rounded text-amber-200 font-mono">{configuredBypassCode}</code>), aby pominąć wysyłkę e-maila?
+                                        Jeśli posiadasz kod autoryzacyjny, podaj go poniżej, aby zablokować powiadomienie do dyrekcji.
                                     </p>
                                 </div>
 
                                 {/* Pole wpisania kodu */}
                                 <div className="space-y-1.5">
                                     <label className="text-[11px] font-black uppercase tracking-wider text-slate-400">
-                                        Kod zabezpieczający bypass:
+                                        Kod zabezpieczający:
                                     </label>
                                     <div className="flex gap-2">
                                         <input
-                                            type="text"
+                                            type="password"
                                             value={modalBypassInput}
                                             onChange={(e) => setModalBypassInput(e.target.value)}
-                                            placeholder={`np. ${configuredBypassCode}`}
+                                            placeholder="Wpisz kod zabezpieczający..."
                                             className="flex-1 bg-slate-950 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm font-mono font-bold text-indigo-300 outline-none"
                                         />
-                                        <button
-                                            type="button"
-                                            onClick={() => setModalBypassInput(configuredBypassCode)}
-                                            className="px-3 py-2 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 font-black text-xs active:scale-95 transition"
-                                        >
-                                            Wpisz {configuredBypassCode}
-                                        </button>
                                     </div>
                                 </div>
 
@@ -1157,13 +1144,13 @@ export default function ZwrotBezProtokoluPage() {
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            const codeToUse = modalBypassInput.trim() || configuredBypassCode;
+                                            const codeToUse = modalBypassInput.trim();
                                             executeActualSave(pendingSaveDraft || draft, codeToUse);
                                         }}
                                         disabled={isUploading}
                                         className="w-full py-3 px-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-xs uppercase tracking-wider shadow-lg active:scale-95 transition flex items-center justify-center gap-2"
                                     >
-                                        <span>🛡️ Zapisz z kodem (Pomiń alert e-mail)</span>
+                                        <span>🛡️ Zatwierdź z kodem</span>
                                     </button>
 
                                     <button
@@ -1174,7 +1161,7 @@ export default function ZwrotBezProtokoluPage() {
                                         disabled={isUploading}
                                         className="w-full py-2.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-black text-xs uppercase tracking-wider active:scale-95 transition flex items-center justify-center gap-2"
                                     >
-                                        <span>✉️ Zapisz bez kodu (Wyślij alert e-mail)</span>
+                                        <span>✉️ Zatwierdź bez kodu (Wyślij alert do dyrekcji)</span>
                                     </button>
 
                                     <button
