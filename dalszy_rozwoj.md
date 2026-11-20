@@ -136,9 +136,9 @@ flowchart TD
 
 | Etap | Zakres | Status |
 |:---|:---|:---:|
-| **Etap 1 (FIX)** | Poprawka asystenta zwrotu bez protokołu: usunięcie powitania, natychmiastowe pytanie o budowę, backendowa walidacja kodu, limit 3 prób, brak wycieku kodu na UI/głosowo. | ✅ **UKOŃCZONY** |
-| **Etap 2 (A2A Registry)** | Utworzenie rejestru współpracowników (`src/lib/agents/registry.ts`) oraz modeli kart agentów (`Agent Cards`). Instalacja `@a2a-js/sdk`. | 🟡 W toku |
-| **Etap 3 (A2A Agents)** | Implementacja wyspecjalizowanych agentów A2A: Koszty Budowy (`expense`), Sprzęt (`equipment`), Zamówienia (`orders`). | ⏳ Następny |
-| **Etap 4 (Orchestrator)** | Endpoint `/api/plac/ai-orchestrator` — Mózg routujący zapytania przez klienta A2A do właściwych agentów. | ⏳ Następny |
-| **Etap 5 (Hub UI na /plac)** | Integracja UI na `/plac` z mikrofonem, dynamicznymi kartami wyników i zachowaniem istniejących kafelków. | ⏳ Następny |
-| **Etap 6 (Weryfikacja)** | Testy scenariuszy mobilnych, walidacja nagrań mowy, weryfikacja zapisów w Firestore. | ⏳ Końcowy |
+| **Etap 1 (FIX)** | Poprawka asystenta zwrotu bez protokołu: usunięcie powitania, natychmiastowe pytanie o budowę, backendowa deterministyczna walidacja kodu, limit 3 prób, brak zapętleń przy decyzji "bez kodu", bezpośredni zapis. | ✅ **UKOŃCZONY** |
+| **Etap 2 (A2A Registry)** | Utworzenie rejestru współpracowników (`src/lib/agents/registry.ts`) oraz modeli kart agentów (`Agent Cards`). Instalacja `@a2a-js/sdk`. | ✅ **UKOŃCZONY** |
+| **Etap 3 (A2A Agents)** | Implementacja wyspecjalizowanych agentów A2A: Koszty Budowy (`expense`), Sprzęt (`equipment`), Zamówienia (`orders`). | ✅ **UKOŃCZONY** |
+| **Etap 4 (Orchestrator)** | Endpoint `/api/plac/ai-orchestrator` — Mózg routujący zapytania przez klienta A2A do właściwych agentów. | ✅ **UKOŃCZONY** |
+| **Etap 5 (Hub UI na /plac)** | Integracja UI na `/plac` (`PlacVoiceHub`) z mikrofonem, dynamicznymi kartami wyników i zachowaniem istniejących kafelków. | ✅ **UKOŃCZONY** |
+| **Etap 6 (Weryfikacja)** | Testy scenariuszy mobilnych, walidacja kodu bypass (3 próby / bez kodu / poprawny kod), weryfikacja routingu A2A, build produkcyjny. | ✅ **UKOŃCZONY** |

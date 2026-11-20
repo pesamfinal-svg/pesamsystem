@@ -219,7 +219,7 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
                 !i.condition
             );
             const unverifiedSecured = knownItems.find(i =>
-                i.isSecured === null || i.isSecured === undefined
+                i.type !== "UNIQUE" && (i.isSecured === null || i.isSecured === undefined)
             );
             const brokenRulesItem = knownItems.find(i =>
                 (i.isSecured === false || i.condition === "USZKODZONY" || i.isSuspectedTransfer === true) && !i.requiresPhoto
@@ -234,36 +234,130 @@ Znane budowy w systemie: ${sites.map(s => s.name).slice(0, 20).join(', ')}.
             } else if (brokenRulesItem) {
                 dynamicGuidance = `Wykryto naruszenie reguł (${brokenRulesItem.name}). Nakaz magazynierowi: "Proszę zrób teraz telefonem zdjęcie jako dowód naruszenia reguły". Ustaw shouldPromptPhoto: true.`;
             } else {
-                // Faza pytania o kod zabezpieczający — AI NIE zna kodu, tylko pyta ogólnie
+                // =========================================================================
+                // DETERMINISTYCZNY AUTOMAT FAZY KODU ZABEZPIECZAJĄCEGO (BYPASS ALERTU E-MAIL)
+                // Wszystkie dane zwrotu są już zebrane i zweryfikowane!
+                // AI nie zna kodu — backend decyduje deterministycznie w 100%.
+                // =========================================================================
+                const lastAssistantMsg = (Array.isArray(history) ? history : [])
+                    .filter((h: any) => h && h.role === 'assistant')
+                    .pop()?.content || "";
+
+                const isCodePhaseActive = /kod zabezpieczaj|pomin[aą][cć] wysy[lł]k|zatwierd[zź] bez kodu|kod/i.test(lastAssistantMsg);
                 const previousAttempts = Number(currentDraft?.bypassAttempts) || 0;
                 const userInput = userMessage.toLowerCase().trim();
-                
-                // Wykryj jawną rezygnację z kodu (bez próby podania kodu)
-                const userDeclinedCode = userInput.includes("wyślij") || 
-                                         userInput.includes("bez kodu") || 
-                                         userInput.includes("zatwierdź") ||
-                                         userInput.includes("wyslij") ||
-                                         userInput.includes("zatwierdz");
 
-                // Wykryj czy użytkownik próbował podać jakikolwiek kod (jest coś w bypassCode z drafta)
-                const bypassAttempted = Boolean(currentDraft?.bypassCode && currentDraft.bypassCode !== "");
+                // Wykryj każdą formę rezygnacji z kodu / zgody na wysyłkę do dyrekcji
+                const isDeclineCode = (
+                    /(bez|brak|nie\s+mam|pomi[nń]|olej).*kod/i.test(userInput) ||
+                    /(wy[sś]l|kierownictw|dyrekcj|zarz[aą]d)/i.test(userInput) ||
+                    /(zatwierd[zź]|zapisz|zapisuj|tak|potwierd[zź]|gotowe|koniec)/i.test(userInput) ||
+                    userInput === "nie" || userInput === "bez" || userInput === "nie mam" || userInput === "brak"
+                );
 
-                if (previousAttempts >= 3) {
-                    // Po 3 błędnych próbach — zapis z wysyłką
-                    dynamicGuidance = `PRZEKROCZONO LIMIT PRÓB KODU (${previousAttempts} błędne próby). Poinformuj: "Przekroczono limit prób. Zatwierdzam zwrot z wysyłką do dyrekcji." Ustaw isReadyToSave: true, bypassCode: "".`;
-                } else if (userDeclinedCode) {
-                    dynamicGuidance = `Użytkownik rezygnuje z kodu — zatwierdź z wysyłką. Ustaw isReadyToSave: true, bypassCode: "". Powiedz: "Zatwierdzam, wysyłam powiadomienie do dyrekcji."`;
-                } else if (!bypassAttempted) {
-                    // Jeszcze nie pytano o kod — zapytaj po raz pierwszy (BEZ ujawniania kodu!)
-                    dynamicGuidance = `MAMY KOMPLET DANYCH (Budowa: ${knownSite}, Kierowca: ${knownDriver}, Pozycje zweryfikowane).
-ZAPYTAJ MAGAZYNIERA O KOD ZABEZPIECZAJĄCY (nie podawaj żadnej wartości kodu!):
-Powiedz dokładnie: "Podaj kod zabezpieczający jeśli chcesz pominąć wysyłkę do dyrekcji. Albo zatwierdź bez kodu."
-Ustaw isReadyToSave: false.
-Ustaw quickReplies: ["Zatwierdź — wyślij do dyrekcji", "Mam kod"].`;
+                if (isCodePhaseActive) {
+                    if (isDeclineCode) {
+                        // Użytkownik rezygnuje z kodu — zapisujemy z powiadomieniem do dyrekcji
+                        return NextResponse.json({
+                            speechReply: "Zatwierdzam zwrot. Wysyłam powiadomienie do dyrekcji.",
+                            draft: {
+                                siteName: knownSite,
+                                siteId: matchedSite?.id || currentDraft?.siteId || "",
+                                driver: knownDriver,
+                                reasonForNoProtocol: knownReason,
+                                items: knownItems,
+                                missingFields: [],
+                                isReadyToSave: true,
+                                shouldPromptPhoto: false,
+                                bypassCode: "",
+                                bypassAttempts: previousAttempts
+                            },
+                            quickReplies: ["Zapisano zwrot"]
+                        });
+                    }
+
+                    // Użytkownik podał próbę kodu
+                    const candidateCode = userMessage.trim()
+                        .replace(/^(m[oó]j\s+)?(kod|has[lł]o)(\s+to)?\s*[:=-]?\s*/i, '')
+                        .trim();
+
+                    const isCodeCorrect = candidateCode.toLowerCase() === configuredBypassCode.toLowerCase();
+
+                    if (isCodeCorrect) {
+                        // Poprawny kod — zatwierdzamy z wyłączonym alertem
+                        return NextResponse.json({
+                            speechReply: "Kod zabezpieczający poprawny. Zatwierdzam zwrot bez wysyłania alertu do dyrekcji.",
+                            draft: {
+                                siteName: knownSite,
+                                siteId: matchedSite?.id || currentDraft?.siteId || "",
+                                driver: knownDriver,
+                                reasonForNoProtocol: knownReason,
+                                items: knownItems,
+                                missingFields: [],
+                                isReadyToSave: true,
+                                shouldPromptPhoto: false,
+                                bypassCode: configuredBypassCode,
+                                bypassAttempts: previousAttempts
+                            },
+                            quickReplies: ["Zapisano zwrot"]
+                        });
+                    }
+
+                    // Błędny kod
+                    const newAttempts = previousAttempts + 1;
+                    if (newAttempts >= 3) {
+                        return NextResponse.json({
+                            speechReply: "Przekroczono limit prób kodu. Zatwierdzam zwrot z wysyłką powiadomienia do dyrekcji.",
+                            draft: {
+                                siteName: knownSite,
+                                siteId: matchedSite?.id || currentDraft?.siteId || "",
+                                driver: knownDriver,
+                                reasonForNoProtocol: knownReason,
+                                items: knownItems,
+                                missingFields: [],
+                                isReadyToSave: true,
+                                shouldPromptPhoto: false,
+                                bypassCode: "",
+                                bypassAttempts: newAttempts
+                            },
+                            quickReplies: ["Zapisano zwrot"]
+                        });
+                    } else {
+                        return NextResponse.json({
+                            speechReply: `Błędny kod zabezpieczający. Próba ${newAttempts} z 3. Podaj poprawny kod lub powiedz "zatwierdź bez kodu".`,
+                            draft: {
+                                siteName: knownSite,
+                                siteId: matchedSite?.id || currentDraft?.siteId || "",
+                                driver: knownDriver,
+                                reasonForNoProtocol: knownReason,
+                                items: knownItems,
+                                missingFields: [],
+                                isReadyToSave: false,
+                                shouldPromptPhoto: false,
+                                bypassCode: "",
+                                bypassAttempts: newAttempts
+                            },
+                            quickReplies: ["Zatwierdź — wyślij do dyrekcji", "Mam kod"]
+                        });
+                    }
                 } else {
-                    // Użytkownik podał kod (bypassCode != "") — backend sprawdzi poprawność, AI potwierdza
-                    dynamicGuidance = `Użytkownik podał kod zabezpieczający. Backend zweryfikuje jego poprawność.
-Powiedz: "Przyjąłem. Sprawdzam kod i zapisuję zwrot." Ustaw isReadyToSave: true i zachowaj wartość bypassCode jaką podał użytkownik.`;
+                    // Pierwsze wejście w fazę kodu — pytamy magazyniera
+                    return NextResponse.json({
+                        speechReply: "Podaj kod zabezpieczający jeśli chcesz pominąć wysyłkę do dyrekcji. Albo zatwierdź bez kodu.",
+                        draft: {
+                            siteName: knownSite,
+                            siteId: matchedSite?.id || currentDraft?.siteId || "",
+                            driver: knownDriver,
+                            reasonForNoProtocol: knownReason,
+                            items: knownItems,
+                            missingFields: [],
+                            isReadyToSave: false,
+                            shouldPromptPhoto: false,
+                            bypassCode: "",
+                            bypassAttempts: 0
+                        },
+                        quickReplies: ["Zatwierdź — wyślij do dyrekcji", "Mam kod"]
+                    });
                 }
             }
         }
@@ -492,11 +586,7 @@ Powiedz: "Przyjąłem. Sprawdzam kod i zapisuję zwrot." Ustaw isReadyToSave: tr
         });
 
         const anyItemNeedsPhoto = finalItems.some(it => it.requiresPhoto || it.isSecured === false || it.condition === "USZKODZONY" || it.isSuspectedTransfer === true);
-        const shouldPromptPhoto = Boolean(parsed.draft?.shouldPromptPhoto || anyItemNeedsPhoto);
-
-        if (anyItemNeedsPhoto && photosCount === 0) {
-            missingFields.push("zdjęcie_naruszenia_reguł");
-        }
+        const shouldPromptPhoto = Boolean(parsed.draft?.shouldPromptPhoto || (anyItemNeedsPhoto && photosCount === 0));
 
         const isReady = Boolean(parsed.draft?.isReadyToSave) && missingFields.length === 0;
 

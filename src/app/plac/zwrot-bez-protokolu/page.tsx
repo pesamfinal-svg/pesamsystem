@@ -353,9 +353,23 @@ export default function ZwrotBezProtokoluPage() {
                     }, 600);
                 }
 
-                // Jeśli AI ustaliło, że zwrot jest gotowy do zapisu i magazynier potwierdził
+                // Jeśli AI ustaliło, że zwrot jest gotowy do zapisu i decyzja o kodzie zapadła
                 if (data.draft?.isReadyToSave) {
-                    handleSaveReturn(draftRef.current);
+                    const draftToSave: ReturnDraft = {
+                        siteName: data.draft.siteName?.trim() || draftRef.current?.siteName || "",
+                        siteId: data.draft.siteId || draftRef.current?.siteId || "",
+                        driver: data.draft.driver?.trim() || draftRef.current?.driver || "",
+                        reasonForNoProtocol: data.draft.reasonForNoProtocol?.trim() || draftRef.current?.reasonForNoProtocol || "",
+                        items: (Array.isArray(data.draft.items) && data.draft.items.length > 0)
+                            ? data.draft.items
+                            : (draftRef.current?.items || []),
+                        missingFields: [],
+                        isReadyToSave: true,
+                        shouldPromptPhoto: false,
+                        bypassCode: data.draft.bypassCode || "",
+                        bypassAttempts: typeof data.draft.bypassAttempts === 'number' ? data.draft.bypassAttempts : 0
+                    };
+                    executeActualSave(draftToSave, draftToSave.bypassCode || "");
                 }
             }
         } catch (err: any) {
@@ -412,11 +426,16 @@ export default function ZwrotBezProtokoluPage() {
             return;
         }
 
-        // Zawsze pytamy o kod zabezpieczający przed zatwierdzeniem
+        // Jeśli kod bypass jest już podany lub ustalony w drafcie
+        if (finalDraft.bypassCode) {
+            executeActualSave(finalDraft, finalDraft.bypassCode);
+            return;
+        }
+
+        // Zapytaj o kod w modalu przy ręcznym kliknięciu przycisku zapisu
         setPendingSaveDraft(finalDraft);
         setModalBypassInput(bypassCode || finalDraft.bypassCode || "");
         setIsBypassModalOpen(true);
-        speakText("Zanim zapiszemy zwrot: czy chcesz podać kod zabezpieczający blokujący wysyłkę e-maila do dyrekcji, czy zatwierdzamy z wysyłką powiadomienia?");
     };
 
     // Właściwy zapis do bazy Firestore z wybranym kodem bypass
