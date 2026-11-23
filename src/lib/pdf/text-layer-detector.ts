@@ -127,7 +127,8 @@ export function detectDocumentTextLayer(
         }
 
         // Ekstrakcja strumieni (stream ... endstream)
-        const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+        // Uwaga: po słowie "stream" może być \r\n, \n, lub spacje przed newline (PDF spec §7.3.8)
+        const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)\r?\nendstream/g;
         let match: RegExpExecArray | null;
 
         while ((match = streamRegex.exec(rawString)) !== null) {
@@ -137,8 +138,14 @@ export function detectDocumentTextLayer(
             // Próba dekompresji FlateDecode (standard w 98% PDF-ów z ERP)
             try {
                 const streamBuffer = Buffer.from(rawStream, 'binary');
-                const decompressed = zlib.inflateSync(streamBuffer);
-                streamContent = decompressed.toString('utf-8');
+                // Próba inflate (FlateDecode), potem inflateRaw jako fallback
+                let decompressed: Buffer;
+                try {
+                    decompressed = zlib.inflateSync(streamBuffer);
+                } catch {
+                    decompressed = zlib.inflateRawSync(streamBuffer);
+                }
+                streamContent = decompressed.toString('latin1'); // latin1 zachowuje bajty 1:1
             } catch {
                 // Jeśli nie był skompresowany lub błąd zlib, bierzemy surowy tekst
                 streamContent = rawStream;
@@ -166,17 +173,53 @@ export function detectDocumentTextLayer(
                 }
             }
 
+            // Obsługa hex-encoded text: <4142...> Tj lub [<4142>] TJ (custom encoding/ToUnicode)
+            const hexMatchTj = streamContent.match(/<([0-9a-fA-F]{4,})>\s*Tj/g);
+            if (hexMatchTj) {
+                for (const t of hexMatchTj) {
+                    const hex = t.replace(/^</, '').replace(/>\s*Tj$/, '');
+                    try {
+                        const decoded = Buffer.from(hex, 'hex').toString('latin1');
+                        const printable = decoded.replace(/[^\x20-\x7E]/g, '');
+                        if (printable.trim().length > 1) extractedTexts.push(printable.trim());
+                    } catch { /* ignoruj błędy dekodowania */ }
+                }
+            }
+
+            const hexMatchTJ = streamContent.match(/\[([^\]]*<[0-9a-fA-F]{4,}>[^\]]*)\]\s*TJ/g);
+            if (hexMatchTJ) {
+                for (const t of hexMatchTJ) {
+                    const hexParts = t.match(/<([0-9a-fA-F]{4,})>/g);
+                    if (hexParts) {
+                        const decoded = hexParts.map(h => {
+                            try { return Buffer.from(h.slice(1, -1), 'hex').toString('latin1').replace(/[^\x20-\x7E]/g, ''); } catch { return ''; }
+                        }).join('');
+                        if (decoded.trim().length > 1) extractedTexts.push(decoded.trim());
+                    }
+                }
+            }
+
             // Jeśli znaleźliśmy już wystarczająco dużo tekstu, nie musimy mielić całego gigantycznego pliku
             if (extractedTexts.length > 50) break;
         }
 
-        // Dodatkowe sprawdzenie surowego bufora na wypadek nieskompresowanego tekstu
+        // Fallback 1: nieskompresowany tekst bezpośrednio w surowym PDF
         if (extractedTexts.length === 0) {
             const plainTextMatches = rawString.match(/\(([a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ.,\-_/ ]{4,})\)\s*Tj/g);
             if (plainTextMatches) {
                 for (const t of plainTextMatches.slice(0, 30)) {
                     extractedTexts.push(t.replace(/[()]/g, '').trim());
                 }
+            }
+        }
+
+        // Fallback 2: szukaj ciągów czytelnego ASCII >= 4 znaki bezpośrednio w buforze PDF
+        // (niektóre ERP-y osadzają tekst bez kompresji poza strumieniami)
+        if (extractedTexts.length === 0) {
+            const asciiMatches = rawString.match(/[A-Za-z0-9 .,\-\/]{5,}/g);
+            if (asciiMatches) {
+                const meaningful = asciiMatches.filter(s => /[A-Za-z]{3,}/.test(s));
+                for (const s of meaningful.slice(0, 30)) extractedTexts.push(s.trim());
             }
         }
     } catch (err) {
@@ -195,8 +238,10 @@ export function detectDocumentTextLayer(
     const docNumberMatch = combinedText.match(/(?:WZ|WZT|FA|FV)[0-9A-Z/\-_]{3,25}/i);
 
     // KRYTERIUM DECYZJI:
-    // Plik ma cyfrową warstwę tekstową, jeśli znaleziono czcionki i >= 20 znaków alfanumerycznych tekstu
-    const hasTextLayer = alnumCount >= 20;
+    // Plik ma warstwę tekstową gdy:
+    // - wyciągnięto >= 10 znaków alfanumerycznych, LUB
+    // - są zdefiniowane czcionki (/Font) + choć 5 znaków (tekst encoded w custom encoding)
+    const hasTextLayer = alnumCount >= 10 || (hasFonts && alnumCount >= 5);
 
     const executionTimeMs = Math.round((performance.now() - startTime) * 100) / 100;
 
