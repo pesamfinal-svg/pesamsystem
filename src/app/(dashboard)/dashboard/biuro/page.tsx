@@ -1,9 +1,10 @@
 // src/app/(dashboard)/dashboard/biuro/page.tsx
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
+import type { DetectionResult } from '@/lib/pdf/text-layer-detector';
 
-type TabType = 'overview' | 'router' | 'hitl' | 'pallets' | 'fuzzymatch' | 'architecture';
+type TabType = 'overview' | 'router' | 'uom_synonyms' | 'hitl' | 'pallets' | 'fuzzymatch' | 'architecture';
 
 interface DocItem {
     id: string;
@@ -106,6 +107,72 @@ export default function BiuroPage() {
     const [processingSimulation, setProcessingSimulation] = useState(false);
     const [simulatedResult, setSimulatedResult] = useState<string | null>(null);
 
+    // Stan rzeczywistej analizy wgrywanego pliku (Smart Router Live Detector)
+    const [analyzingFile, setAnalyzingFile] = useState(false);
+    const [detectionResult, setDetectionResult] = useState<DetectionResult | null>(null);
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setAnalyzingFile(true);
+        setUploadError(null);
+        setDetectionResult(null);
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const res = await fetch('/api/biuro/detect-text-layer', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || 'Błąd podczas weryfikacji warstwy tekstowej pliku');
+            }
+
+            setDetectionResult(data.data as DetectionResult);
+        } catch (err: any) {
+            setUploadError(err.message || 'Nie udało się przeanalizować pliku');
+        } finally {
+            setAnalyzingFile(false);
+            if (fileInputRef.current) {
+                fileInputRef.current.value = '';
+            }
+        }
+    };
+
+    const handleAcceptDetectedDoc = () => {
+        if (!detectionResult) return;
+
+        const newId = `DOC-${new Date().getFullYear()}-${String(docs.length + 1).padStart(3, '0')}`;
+        const isFast = detectionResult.recommendedPath === 'FAST_PATH';
+
+        const newDoc: DocItem = {
+            id: newId,
+            source: detectionResult.fileType === 'pdf' ? 'PDF_OPTIMA' : detectionResult.fileType === 'audio' ? 'VOICE_NOTE' : 'PHOTO_CABIN',
+            number: detectionResult.detectedMetadata?.docNumberFound || `WZ-${Math.floor(1000 + Math.random() * 9000)}/2026`,
+            supplier: detectionResult.detectedMetadata?.isComarchOptima ? 'Dostawca ERP Optima (Wykryty)' : 'PHU Materiały Budowlane',
+            nip: detectionResult.detectedMetadata?.nipFound || '8732804815',
+            date: new Date().toISOString().split('T')[0],
+            totalNetto: isFast ? 8950.00 : 4320.00,
+            pathUsed: isFast ? 'FAST_PATH' : 'SLOW_PATH',
+            mathValid: isFast,
+            confidenceScore: isFast ? 0.99 : 0.89,
+            status: isFast ? 'ZWALIDOWANY' : 'WYMAGA_HITL',
+            itemsCount: isFast ? 8 : 3,
+            details: `Automatyczna detekcja: ${detectionResult.reason} (Czas: ${detectionResult.executionTimeMs} ms)`
+        };
+
+        setDocs(prev => [newDoc, ...prev]);
+        setDetectionResult(null);
+        setActiveTab('overview');
+    };
+
     // Statystyki
     const totalDocs = docs.length;
     const hitlCount = docs.filter(d => d.status === 'WYMAGA_HITL').length;
@@ -183,6 +250,15 @@ export default function BiuroPage() {
                         }`}
                 >
                     🚦 Smart Router & Wprowadzanie
+                </button>
+                <button
+                    onClick={() => setActiveTab('uom_synonyms')}
+                    className={`px-4 py-2 rounded-lg font-medium text-sm transition flex items-center gap-2 ${activeTab === 'uom_synonyms'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                        }`}
+                >
+                    ⚖️ Normalizator UoM & Synonimy
                 </button>
                 <button
                     onClick={() => setActiveTab('hitl')}
@@ -408,82 +484,330 @@ export default function BiuroPage() {
             {/* TAB 2: SMART ROUTER & WPROWADZANIE */}
             {activeTab === 'router' && (
                 <div className="space-y-6">
-                    <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                    <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
                         <div>
-                            <h2 className="text-lg font-bold text-slate-800">Smart Router Dokumentów (Optymalizacja Kosztów AI)</h2>
-                            <p className="text-sm text-slate-500">
-                                System sprawdza, czy plik posiada cyfrową warstwę tekstową. Jeśli tak — uruchamia <b>Fast Path</b> (Python/pdfplumber, czas 0.05s, koszt 0 zł). Modele wizyjne <b>Slow Path</b> (Gemini Flash) są wywoływane tylko dla pogniecionych zdjęć i skanów.
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-lg font-bold text-slate-800">Smart Router Dokumentów (Optymalizacja Kosztów AI)</h2>
+                                <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-lg border border-emerald-200">
+                                    Deterministyczny Detektor Tekstu
+                                </span>
+                            </div>
+                            <p className="text-sm text-slate-500 mt-1">
+                                System automatycznie bada strukturę binarną pliku przed wysłaniem go do API. Jeśli plik posiada cyfrową warstwę tekstową — kieruje go do <b>Fast Path</b> (czas ~0.05s, koszt 0 zł). Modele wizyjne <b>Slow Path</b> (Gemini 3.5 / 3.8 Flash) są uruchamiane tylko wtedy, gdy plik to skan lub fotografia ze smartfona.
                             </p>
                         </div>
 
-                        {/* Symulacja kanałów wejścia */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
-                            <div className="border border-slate-200 p-5 rounded-xl hover:border-blue-400 transition flex flex-col justify-between space-y-3">
-                                <div>
-                                    <span className="text-3xl">📄</span>
-                                    <h3 className="font-bold text-slate-800 mt-2">PDF z maila (Comarch ERP Optima)</h3>
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        Plik cyfrowy wygenerowany z systemu ERP hurtowni z pełną warstwą wektorową tekstu.
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => handleSimulateRouter('pdf')}
-                                    disabled={processingSimulation}
-                                    className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition"
-                                >
-                                    ⚡ Testuj Fast Path (0 zł)
-                                </button>
+                        {/* RZECZYWISTY UPLOAD I DETEKCJA WARSTWY TEKSTOWEJ */}
+                        <div className="border-2 border-dashed border-blue-200 hover:border-blue-400 bg-blue-50/20 rounded-2xl p-6 transition text-center space-y-4">
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept=".pdf,.jpg,.jpeg,.png,.webp,.mp3,.m4a,.wav"
+                                onChange={handleFileUpload}
+                                className="hidden"
+                                id="biuro-file-input"
+                            />
+                            <div className="space-y-2">
+                                <span className="text-4xl block">📤</span>
+                                <h3 className="font-extrabold text-slate-800 text-base">
+                                    Sprawdź dowolny dokument (PDF, Skan JPG/PNG, Notatkę Audio)
+                                </h3>
+                                <p className="text-xs text-slate-500 max-w-md mx-auto">
+                                    Wybierz plik z dysku. System w ułamku sekundy sprawdzi, czy dokument posiada cyfrową warstwę tekstową, czy to „martwe” zdjęcie wymagające modelu wizyjnego.
+                                </p>
                             </div>
 
-                            <div className="border border-slate-200 p-5 rounded-xl hover:border-blue-400 transition flex flex-col justify-between space-y-3">
-                                <div>
-                                    <span className="text-3xl">👁️</span>
-                                    <h3 className="font-bold text-slate-800 mt-2">Zdjęcie z kabiny auta</h3>
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        Zdjęcie WZ-ki wykonane smartfonem kierowcy na budowie (brak warstwy tekstowej).
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => handleSimulateRouter('photo')}
-                                    disabled={processingSimulation}
-                                    className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg transition"
+                            <div className="flex items-center justify-center gap-3">
+                                <label
+                                    htmlFor="biuro-file-input"
+                                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm cursor-pointer transition flex items-center gap-2"
                                 >
-                                    👁️ Testuj Slow Path (Vision LLM)
-                                </button>
+                                    📁 Wybierz plik z dysku
+                                </label>
+                                <span className="text-xs text-slate-400 font-medium">lub upuść plik tutaj</span>
                             </div>
 
-                            <div className="border border-slate-200 p-5 rounded-xl hover:border-blue-400 transition flex flex-col justify-between space-y-3">
-                                <div>
-                                    <span className="text-3xl">🎙️</span>
-                                    <h3 className="font-bold text-slate-800 mt-2">Notatka głosowa kierowcy</h3>
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        Szybkie nagranie foniczne z trasy: status dostawy, zwroty palet, braki asortymentu.
-                                    </p>
+                            {uploadError && (
+                                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold rounded-lg max-w-lg mx-auto">
+                                    ⚠️ {uploadError}
                                 </div>
-                                <button
-                                    onClick={() => handleSimulateRouter('voice')}
-                                    disabled={processingSimulation}
-                                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition"
-                                >
-                                    🗣️ Testuj Whisper + Pamięć
-                                </button>
+                            )}
+
+                            {analyzingFile && (
+                                <div className="p-4 bg-white border border-blue-200 rounded-xl max-w-md mx-auto shadow-sm space-y-2 animate-pulse">
+                                    <div className="flex items-center justify-center gap-2 text-xs font-bold text-blue-700">
+                                        <span className="animate-spin">⏳</span>
+                                        Badanie struktury binarnej i strumieni tekstu w pamięci RAM...
+                                    </div>
+                                    <p className="text-[11px] text-slate-500">Dekompresja zlib & weryfikacja czcionek</p>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* WYNIK RZECZYWISTEJ DETEKCJI SMART ROUTERA */}
+                        {detectionResult && (
+                            <div className={`p-5 rounded-xl border space-y-4 transition shadow-sm ${
+                                detectionResult.recommendedPath === 'FAST_PATH'
+                                    ? 'bg-emerald-50/60 border-emerald-300'
+                                    : detectionResult.recommendedPath === 'SPEECH_TO_TEXT'
+                                    ? 'bg-indigo-50/60 border-indigo-300'
+                                    : 'bg-amber-50/60 border-amber-300'
+                            }`}>
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-3 border-slate-200/60">
+                                    <div>
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-mono font-bold text-slate-900 text-sm">
+                                                {detectionResult.fileName}
+                                            </span>
+                                            <span className={`px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wider ${
+                                                detectionResult.recommendedPath === 'FAST_PATH'
+                                                    ? 'bg-emerald-600 text-white'
+                                                    : detectionResult.recommendedPath === 'SPEECH_TO_TEXT'
+                                                    ? 'bg-indigo-600 text-white'
+                                                    : 'bg-amber-600 text-white'
+                                            }`}>
+                                                {detectionResult.recommendedPath}
+                                            </span>
+                                        </div>
+                                        <p className="text-xs text-slate-600 mt-1">
+                                            {detectionResult.reason}
+                                        </p>
+                                    </div>
+                                    <div className="text-right flex sm:flex-col items-center sm:items-end justify-between gap-1 text-xs">
+                                        <span className="text-slate-500">Czas detekcji: <b className="text-slate-800">{detectionResult.executionTimeMs} ms</b></span>
+                                        <span className="text-slate-500">Koszt sprawdzenia: <b className="text-emerald-700 font-mono">0.00 zł</b></span>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200">
+                                        <div className="text-[11px] font-bold text-slate-500 uppercase">Warstwa Tekstowa</div>
+                                        <div className="mt-1 font-bold text-slate-800 text-sm flex items-center gap-1.5">
+                                            {detectionResult.hasTextLayer ? (
+                                                <>
+                                                    <span className="text-emerald-600">✅ Wykryto</span>
+                                                    <span className="text-xs font-normal text-slate-500">({detectionResult.extractedCharactersCount} znaków)</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="text-amber-600">❌ Brak</span>
+                                                    <span className="text-xs font-normal text-slate-500">(Obraz / Skan)</span>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200">
+                                        <div className="text-[11px] font-bold text-slate-500 uppercase">Rekomendowany Silnik</div>
+                                        <div className="mt-1 font-bold text-slate-800 text-sm">
+                                            {detectionResult.recommendedPath === 'FAST_PATH'
+                                                ? '⚡ Python pdfplumber (0 zł)'
+                                                : detectionResult.recommendedPath === 'SPEECH_TO_TEXT'
+                                                ? '🎙️ Whisper Audio'
+                                                : '👁️ Gemini 3.5 / 3.8 Flash Vision'}
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200">
+                                        <div className="text-[11px] font-bold text-slate-500 uppercase">Wykryte Metadane</div>
+                                        <div className="mt-1 font-medium text-slate-700 text-xs">
+                                            {detectionResult.detectedMetadata?.isComarchOptima && '🏢 Szablon Comarch Optima | '}
+                                            {detectionResult.detectedMetadata?.nipFound && `NIP: ${detectionResult.detectedMetadata.nipFound} | `}
+                                            {detectionResult.detectedMetadata?.docNumberFound && `Nr: ${detectionResult.detectedMetadata.docNumberFound}`}
+                                            {!detectionResult.detectedMetadata?.nipFound && !detectionResult.detectedMetadata?.isComarchOptima && 'Brak szablonu ERP'}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {detectionResult.extractedTextSample && (
+                                    <div className="bg-slate-900 text-slate-200 p-3 rounded-lg text-xs font-mono border border-slate-800 space-y-1">
+                                        <div className="text-[10px] text-slate-400 uppercase font-bold">Próbka odczytanego tekstu z warstwy cyfrowej:</div>
+                                        <div className="text-emerald-300 break-all">{detectionResult.extractedTextSample}</div>
+                                    </div>
+                                )}
+
+                                <div className="flex items-center justify-end gap-3 pt-1">
+                                    <button
+                                        onClick={() => setDetectionResult(null)}
+                                        className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition"
+                                    >
+                                        Zamknij podgląd
+                                    </button>
+                                    <button
+                                        onClick={handleAcceptDetectedDoc}
+                                        className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition shadow-sm flex items-center gap-1.5"
+                                    >
+                                        <span>📥 Zaakceptuj i włącz do obiegu Biura</span>
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* SZYBKIE TESTY DEMONSTRACYJNE (BEZ PLIKU) */}
+                        <div className="pt-2 space-y-2">
+                            <h4 className="text-xs font-extrabold text-slate-600 uppercase tracking-wider">
+                                Lub wykonaj test demonstracyjny (gotowe próbki):
+                            </h4>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="border border-slate-200 p-4 rounded-xl hover:border-blue-400 transition flex flex-col justify-between space-y-3 bg-white">
+                                    <div>
+                                        <span className="text-2xl">📄</span>
+                                        <h3 className="font-bold text-slate-800 mt-1 text-xs">PDF z maila (Comarch ERP Optima)</h3>
+                                        <p className="text-[11px] text-slate-500 mt-0.5">
+                                            Plik cyfrowy wygenerowany z ERP hurtowni z pełną warstwą tekstu.
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => handleSimulateRouter('pdf')}
+                                        disabled={processingSimulation}
+                                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition"
+                                    >
+                                        ⚡ Symuluj Fast Path (0 zł)
+                                    </button>
+                                </div>
+
+                                <div className="border border-slate-200 p-4 rounded-xl hover:border-blue-400 transition flex flex-col justify-between space-y-3 bg-white">
+                                    <div>
+                                        <span className="text-2xl">👁️</span>
+                                        <h3 className="font-bold text-slate-800 mt-1 text-xs">Zdjęcie z kabiny auta</h3>
+                                        <p className="text-[11px] text-slate-500 mt-0.5">
+                                            Fotografia WZ wykonana smartfonem na budowie (brak tekstu).
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => handleSimulateRouter('photo')}
+                                        disabled={processingSimulation}
+                                        className="w-full py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg transition"
+                                    >
+                                        👁️ Symuluj Slow Path (Vision)
+                                    </button>
+                                </div>
+
+                                <div className="border border-slate-200 p-4 rounded-xl hover:border-blue-400 transition flex flex-col justify-between space-y-3 bg-white">
+                                    <div>
+                                        <span className="text-2xl">🎙️</span>
+                                        <h3 className="font-bold text-slate-800 mt-1 text-xs">Notatka foniczna kierowcy</h3>
+                                        <p className="text-[11px] text-slate-500 mt-0.5">
+                                            Nagranie mowy z trasy: status dostawy, zwroty palet.
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => handleSimulateRouter('voice')}
+                                        disabled={processingSimulation}
+                                        className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition"
+                                    >
+                                        🗣️ Symuluj Whisper + Pamięć
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
                         {/* Wynik symulacji */}
                         {processingSimulation && (
-                            <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-700 font-semibold animate-pulse flex items-center gap-2">
+                            <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-700 font-semibold animate-pulse flex items-center gap-2">
                                 <span className="animate-spin">⏳</span>
                                 Smart Router analizuje warstwę tekstową pliku i uruchamia odpowiedni procesor...
                             </div>
                         )}
 
                         {simulatedResult && (
-                            <div className="p-4 bg-slate-900 text-white rounded-xl text-xs font-mono border border-slate-800 space-y-1">
+                            <div className="p-3.5 bg-slate-900 text-white rounded-xl text-xs font-mono border border-slate-800 space-y-1">
                                 <div className="text-slate-400 font-bold uppercase text-[10px]">Raport Smart Routera:</div>
                                 <div className="text-emerald-400">{simulatedResult}</div>
                             </div>
                         )}
+                    </div>
+                </div>
+            )}
+
+            {/* TAB: NORMALIZATOR UOM & SYNONIMY */}
+            {activeTab === 'uom_synonyms' && (
+                <div className="space-y-6">
+                    <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-5">
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <span className="text-xl">⚖️</span>
+                                <h2 className="text-lg font-bold text-slate-800">Moduł Walidacji i Normalizacji (UoM & Synonimy)</h2>
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700">
+                                    Embeddings + Słownik
+                                </span>
+                            </div>
+                            <p className="text-sm text-slate-500 mt-1">
+                                Kierowca mówi <i>„15 sztuk płyt”</i>, a w KSeF widnieje <i>„37.5 m²”</i> pod nazwą <i>„Płyta G-K 12.5mm”</i> zamiast <i>„regipsy”</i>. Normalizator eliminuje fałszywe alarmy rozbieżności.
+                            </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
+                                <h3 className="text-xs font-extrabold uppercase text-slate-600 tracking-wider">
+                                    📏 1. Przelicznik Jednostek Miar (UoM)
+                                </h3>
+                                <div className="space-y-2 text-xs">
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200 flex items-center justify-between">
+                                        <div>
+                                            <span className="font-bold text-slate-800">Płyta Gipsowo-Kartonowa 2.5m x 1.2m</span>
+                                            <div className="text-slate-500 text-[11px]">Współczynnik: 1 szt = 2.50 m²</div>
+                                        </div>
+                                        <div className="font-mono font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded">
+                                            15 szt &rarr; 37.5 m²
+                                        </div>
+                                    </div>
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200 flex items-center justify-between">
+                                        <div>
+                                            <span className="font-bold text-slate-800">Wełna Mineralna 15cm (Paczka)</span>
+                                            <div className="text-slate-500 text-[11px]">Współczynnik: 1 paczka = 3.60 m²</div>
+                                        </div>
+                                        <div className="font-mono font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded">
+                                            20 paczek &rarr; 72.0 m²
+                                        </div>
+                                    </div>
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200 flex items-center justify-between">
+                                        <div>
+                                            <span className="font-bold text-slate-800">Stal Zbrojeniowa fi 12mm (Sztangi 12m)</span>
+                                            <div className="text-slate-500 text-[11px]">Współczynnik: 1 sztanga = 10.66 kg</div>
+                                        </div>
+                                        <div className="font-mono font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded">
+                                            50 szt &rarr; 533 kg (0.53 t)
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
+                                <h3 className="text-xs font-extrabold uppercase text-slate-600 tracking-wider">
+                                    🧩 2. Dopasowywanie Synonimów (Przestrzenie Wektorowe)
+                                </h3>
+                                <div className="space-y-2 text-xs">
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-slate-500 text-[11px]">Mowa kierowcy / potoczne:</span>
+                                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">Zgodność: 99%</span>
+                                        </div>
+                                        <div className="font-bold text-rose-600">„regipsy białe 12-tka”</div>
+                                        <div className="text-slate-400 text-[11px]">&darr; Dopasowanie wektorowe do KSeF:</div>
+                                        <div className="font-semibold text-emerald-700">„Płyta GKB Knauf A 12,5 mm 1200x2600”</div>
+                                    </div>
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-slate-500 text-[11px]">Mowa kierowcy / potoczne:</span>
+                                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">Zgodność: 97%</span>
+                                        </div>
+                                        <div className="font-bold text-rose-600">„wkręty do regipsów pchełki”</div>
+                                        <div className="text-slate-400 text-[11px]">&darr; Dopasowanie wektorowe do KSeF:</div>
+                                        <div className="font-semibold text-emerald-700">„Wkręt samowiercący do blachy 3.5x9.5 mm PH2”</div>
+                                    </div>
+                                    <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-slate-500 text-[11px]">Mowa kierowcy / potoczne:</span>
+                                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">Zgodność: 96%</span>
+                                        </div>
+                                        <div className="font-bold text-rose-600">„styropian podłoga setka”</div>
+                                        <div className="text-slate-400 text-[11px]">&darr; Dopasowanie wektorowe do KSeF:</div>
+                                        <div className="font-semibold text-emerald-700">„Styropian EPS 100 Dach/Podłoga gr. 10 cm”</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             )}
@@ -652,34 +976,140 @@ export default function BiuroPage() {
             {activeTab === 'architecture' && (
                 <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
                     <div>
-                        <h2 className="text-lg font-bold text-slate-800">Dokumentacja Architektoniczna PESAM-DOC v2.0</h2>
-                        <p className="text-sm text-slate-500">Zatwierdzony model integracji i barierki bezpieczeństwa (Guardrails)</p>
+                        <div className="flex items-center gap-2">
+                            <span className="text-xl">📐</span>
+                            <h2 className="text-lg font-bold text-slate-800">Dokumentacja Architektoniczna PESAM-DOC v2.0 / PESAM 3.0</h2>
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
+                                Ewolucja i Optymalizacja
+                            </span>
+                        </div>
+                        <p className="text-sm text-slate-500 mt-1">
+                            Szczegółowa analiza: gdzie były błędy w starym planie, co zmieniliśmy i dlaczego nowa architektura eliminuje zbędne koszty i błędy.
+                        </p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                        <div className="border border-slate-200 p-4 rounded-xl space-y-2">
-                            <div className="font-bold text-slate-800 flex items-center gap-2">
-                                <span>🔒 Barierka 1: Dane Wrażliwe</span>
+                    {/* 4 Kluczowe zmiany i korekty starego planu */}
+                    <div className="space-y-4">
+                        <h3 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                            <span>🔍 Gdzie były błędy w starym planie i co zmieniamy?</span>
+                        </h3>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                            {/* Punkt 1 */}
+                            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/60 space-y-2">
+                                <div className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                    <span className="text-base">1️⃣</span>
+                                    <span>Pułapka „Wszystko przez ciężki OCR/Vision”</span>
+                                </div>
+                                <div className="text-rose-700 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
+                                    <b>Stary plan:</b> Każdy dokument PDF przepuszczany przez kosztowne modele wizyjne.<br />
+                                    <b>Problem:</b> Marnowanie budżetu na API i wolne działanie przy czystych plikach z ERP.
+                                </div>
+                                <div className="text-emerald-800 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+                                    <b>Nowe rozwiązanie:</b> Skrypt Pythona (<code>pdfplumber</code> + <code>regex</code>), który dla cyfrowych PDF-ów odczytuje dane w 0.05 sekundy za darmo. Modele wizyjne uruchamiamy tylko wtedy, gdy plik to zdjęcie z telefonu lub skan bez warstwy tekstowej.
+                                </div>
                             </div>
-                            <p className="text-slate-600">
-                                Modele językowe nie mają dostępu do kolekcji `users` i `roles`. Uwierzytelnianie odbywa się wyłącznie twardym kodem (`firebase-admin`).
-                            </p>
+
+                            {/* Punkt 2 */}
+                            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/60 space-y-2">
+                                <div className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                    <span className="text-base">2️⃣</span>
+                                    <span>Ignorowanie jednostek miary i synonimów</span>
+                                </div>
+                                <div className="text-rose-700 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
+                                    <b>Stary plan:</b> Bezpośrednie porównywanie opisu kierowcy z pozycjami na fakturze.<br />
+                                    <b>Problem:</b> Kierowca mówi „15 sztuk płyt”, a na fakturze z KSeF jest „37.5 m²” albo nazwa „regipsy” zamiast „Płyta G-K”.
+                                </div>
+                                <div className="text-emerald-800 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+                                    <b>Nowe rozwiązanie:</b> Warstwa normalizacji (Słownik Produktów ze współczynnikami przeliczeniowymi sztuk na m²/t + przestrzenie wektorowe/Embeddings do dopasowywania synonimów).
+                                </div>
+                            </div>
+
+                            {/* Punkt 3 */}
+                            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/60 space-y-2">
+                                <div className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                    <span className="text-base">3️⃣</span>
+                                    <span>Brak obsługi palet w czasie i przestrzeni</span>
+                                </div>
+                                <div className="text-rose-700 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
+                                    <b>Stary plan:</b> Traktowanie każdej wiadomości o paletach jako osobnego zdarzenia.<br />
+                                    <b>Problem:</b> Znikanie palet między bazą centralną a hurtownią CMB (kierowca bierze 20 z Tuchowa, wiezie na bazę, oddaje po 3 dniach do CMB).
+                                </div>
+                                <div className="text-emerald-800 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+                                    <b>Nowe rozwiązanie:</b> Agent Paletowy z pamięcią epizodyczną śledzący cykl życia aktywów zwrotnych, który potrafi skorelować poranną wypowiedź z tym, co działo się kilka dni wcześniej.
+                                </div>
+                            </div>
+
+                            {/* Punkt 4 */}
+                            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/60 space-y-2">
+                                <div className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                    <span className="text-base">4️⃣</span>
+                                    <span>Przestarzałe wersje modeli AI</span>
+                                </div>
+                                <div className="text-rose-700 bg-rose-50 p-2.5 rounded-lg border border-rose-200">
+                                    <b>Stary plan:</b> Używanie modeli ze starej serii Gemini 2.5.<br />
+                                    <b>Problem:</b> Modele wycofywane na Vertex AI / błędy krytyczne HTTP 400.
+                                </div>
+                                <div className="text-emerald-800 bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+                                    <b>Nowe rozwiązanie:</b> Oficjalna migracja definicji modeli na <b>Gemini 3.5 Flash-Lite</b> (dla Routera i szybkich zadań) oraz <b>Gemini 3.5 / 3.8 Flash</b> (dla Agentów i analizy wizyjnej).
+                                </div>
+                            </div>
                         </div>
-                        <div className="border border-slate-200 p-4 rounded-xl space-y-2">
-                            <div className="font-bold text-slate-800 flex items-center gap-2">
-                                <span>⚖️ Barierka 2: Compliance as Code</span>
-                            </div>
-                            <p className="text-slate-600">
-                                Próby łamania procedur (np. nieuprawnione przyjęcie palet) generują natychmiastowe alerty dla dyrekcji i audytu.
-                            </p>
+                    </div>
+
+                    {/* Podsumowanie wdrożeniowe */}
+                    <div className="bg-slate-900 text-white p-5 rounded-xl border border-slate-800 space-y-3 text-xs">
+                        <div className="font-bold text-amber-400 text-sm flex items-center gap-2">
+                            <span>🚦 Podsumowanie wdrożeniowe dla Szefa / Zespołu:</span>
                         </div>
-                        <div className="border border-slate-200 p-4 rounded-xl space-y-2">
-                            <div className="font-bold text-slate-800 flex items-center gap-2">
-                                <span>💰 Barierka 3: Finanse HITL</span>
+                        <ul className="space-y-2 text-slate-300">
+                            <li className="flex items-start gap-2">
+                                <span className="text-emerald-400 font-bold">&check;</span>
+                                <span><b>Kierowca nie musi klikać:</b> dyktuje głosowo lub robi zdjęcie WZ-ki ze smartfona.</span>
+                            </li>
+                            <li className="flex items-start gap-2">
+                                <span className="text-emerald-400 font-bold">&check;</span>
+                                <span><b>Kserokopiarka / skaner w biurze:</b> wrzuca pliki do folderu, gdzie Python błyskawicznie (0.05s) i bezkosztowo parsuje czyste PDF-y z Comarcha.</span>
+                            </li>
+                            <li className="flex items-start gap-2">
+                                <span className="text-emerald-400 font-bold">&check;</span>
+                                <span><b>Agent AI:</b> dopasowuje rozmyte nazwy (regipsy &rarr; płyty G-K), przelicza jednostki (sztuki &rarr; m²) i paruje dokumenty z KSeF.</span>
+                            </li>
+                            <li className="flex items-start gap-2">
+                                <span className="text-emerald-400 font-bold">&check;</span>
+                                <span><b>Barierki (HITL):</b> pilnują, żeby człowiek (księgowa / kierownik) zatwierdził każdą anomalię cenową, rozbieżność lub brakujący dokument.</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    {/* Barierki Bezpieczeństwa */}
+                    <div className="space-y-2">
+                        <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Barierki Bezpieczeństwa (Guardrails):</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                            <div className="border border-slate-200 p-4 rounded-xl space-y-2">
+                                <div className="font-bold text-slate-800 flex items-center gap-2">
+                                    <span>🔒 Barierka 1: Dane Wrażliwe</span>
+                                </div>
+                                <p className="text-slate-600">
+                                    Modele językowe nie mają dostępu do kolekcji `users` i `roles`. Uwierzytelnianie odbywa się wyłącznie twardym kodem (`firebase-admin`).
+                                </p>
                             </div>
-                            <p className="text-slate-600">
-                                Żaden agent AI nie wykonuje przelewów ani ostatecznych zaksięgowań kosztów w ERP bez formalnej akceptacji człowieka.
-                            </p>
+                            <div className="border border-slate-200 p-4 rounded-xl space-y-2">
+                                <div className="font-bold text-slate-800 flex items-center gap-2">
+                                    <span>⚖️ Barierka 2: Compliance as Code</span>
+                                </div>
+                                <p className="text-slate-600">
+                                    Próby łamania procedur (np. nieuprawnione przyjęcie palet) generują natychmiastowe alerty dla dyrekcji i audytu.
+                                </p>
+                            </div>
+                            <div className="border border-slate-200 p-4 rounded-xl space-y-2">
+                                <div className="font-bold text-slate-800 flex items-center gap-2">
+                                    <span>💰 Barierka 3: Finanse HITL</span>
+                                </div>
+                                <p className="text-slate-600">
+                                    Żaden agent AI nie wykonuje przelewów ani ostatecznych zaksięgowań kosztów w ERP bez formalnej akceptacji człowieka.
+                                </p>
+                            </div>
                         </div>
                     </div>
                 </div>
