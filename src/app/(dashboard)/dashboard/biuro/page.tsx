@@ -3,8 +3,9 @@
 
 import { useState, useRef } from 'react';
 import type { DetectionResult } from '@/lib/pdf/text-layer-detector';
+import WzDriverVerifier from '@/components/biuro/WzDriverVerifier';
 
-type TabType = 'overview' | 'router' | 'uom_synonyms' | 'hitl' | 'pallets' | 'fuzzymatch' | 'architecture';
+type TabType = 'overview' | 'router' | 'uom_synonyms' | 'hitl' | 'pallets' | 'fuzzymatch' | 'verify_wz' | 'architecture';
 
 interface DocItem {
     id: string;
