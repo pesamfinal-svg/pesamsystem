@@ -4,9 +4,10 @@
 import { useState, useRef } from 'react';
 import AgentObservabilityConsole from '@/components/biuro/AgentObservabilityConsole';
 import WzDriverVerifier from '@/components/biuro/WzDriverVerifier';
+import Module2ReconcilerPanel from '@/components/biuro/Module2ReconcilerPanel';
 import type { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
 
-type TabType = 'ingest_lab' | 'verify_wz' | 'architecture';
+type TabType = 'ingest_lab' | 'module2' | 'verify_wz' | 'architecture';
 
 export default function BiuroPage() {
     const [activeTab, setActiveTab] = useState<TabType>('ingest_lab');
@@ -137,23 +138,36 @@ export default function BiuroPage() {
                 </div>
             </div>
 
-            {/* ── NAWIGACJA ZAKŁADEK (TYLKO 3 KONKRETNE) ── */}
+            {/* ── NAWIGACJA ZAKŁADEK ── */}
             <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-2">
                 <button
                     onClick={() => setActiveTab('ingest_lab')}
-                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 ${
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 cursor-pointer ${
                         activeTab === 'ingest_lab'
                             ? 'bg-blue-600 text-white shadow-sm'
                             : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
                     }`}
                 >
                     <span>🔬</span>
-                    <span>Laboratorium Ingestii & Observability</span>
+                    <span>Moduł 1: Brama Ingestii & Observability</span>
+                </button>
+
+                <button
+                    onClick={() => setActiveTab('module2')}
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 cursor-pointer ${
+                        activeTab === 'module2'
+                            ? 'bg-emerald-600 text-white shadow-sm'
+                            : 'bg-white text-slate-700 hover:bg-emerald-50 hover:text-emerald-700 border border-emerald-200'
+                    }`}
+                >
+                    <span>🧠</span>
+                    <span>Moduł 2: Mózg Logistyczno-Finansowy (Dual-Unit)</span>
+                    <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 text-[10px] font-mono rounded">NOWOŚĆ</span>
                 </button>
 
                 <button
                     onClick={() => setActiveTab('verify_wz')}
-                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 ${
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 cursor-pointer ${
                         activeTab === 'verify_wz'
                             ? 'bg-blue-600 text-white shadow-sm'
                             : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
@@ -165,14 +179,14 @@ export default function BiuroPage() {
 
                 <button
                     onClick={() => setActiveTab('architecture')}
-                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 ${
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 cursor-pointer ${
                         activeTab === 'architecture'
                             ? 'bg-blue-600 text-white shadow-sm'
                             : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
                     }`}
                 >
                     <span>📐</span>
-                    <span>Architektura Modułu A2A</span>
+                    <span>Architektura A2A</span>
                 </button>
             </div>
 
@@ -263,20 +277,49 @@ export default function BiuroPage() {
 
                     {/* KONSOLA AGENT OBSERVABILITY (PO ODCZYCIE) */}
                     {currentPayload && (
-                        <AgentObservabilityConsole
-                            payload={currentPayload}
-                            a2aMeta={a2aMeta}
-                        />
+                        <>
+                            <div className="p-4 bg-emerald-950/50 border border-emerald-500/40 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                                <div>
+                                    <div className="font-bold text-white text-sm flex items-center gap-2">
+                                        <span>🚀</span> Gotowy zunifikowany payload z Modułu 1 ({currentPayload.document.number || 'Dokument'})
+                                    </div>
+                                    <p className="text-xs text-slate-300 mt-0.5">
+                                        Przejdź do Modułu 2, aby wykonać normalizację dwutorową (Tor RAW &harr; Tor NORMALIZED), audyt głosu kierowcy i uzgodnienie z KSeF.
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveTab('module2')}
+                                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shrink-0 cursor-pointer shadow-lg shadow-emerald-950/50"
+                                >
+                                    <span>Otwórz w Module 2</span>
+                                    <span>&rarr;</span>
+                                </button>
+                            </div>
+
+                            <AgentObservabilityConsole
+                                payload={currentPayload}
+                                a2aMeta={a2aMeta}
+                            />
+                        </>
                     )}
                 </div>
             )}
 
-            {/* ── TAB 2: WERYFIKACJA WZ Z GŁOSEM KIEROWCY ── */}
+            {/* ── TAB 2: MODUŁ 2 - MÓZG LOGISTYCZNO-FINANSOWY (DUAL-UNIT & KSEF) ── */}
+            {activeTab === 'module2' && (
+                <Module2ReconcilerPanel
+                    initialPayload={currentPayload}
+                    onPayloadChange={(p) => setCurrentPayload(p)}
+                />
+            )}
+
+            {/* ── TAB 3: WERYFIKACJA WZ Z GŁOSEM KIEROWCY ── */}
             {activeTab === 'verify_wz' && (
                 <WzDriverVerifier />
             )}
 
-            {/* ── TAB 3: DOKUMENTACJA ARCHITEKTURY A2A ── */}
+            {/* ── TAB 4: DOKUMENTACJA ARCHITEKTURY A2A ── */}
             {activeTab === 'architecture' && (
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
                     <div>
