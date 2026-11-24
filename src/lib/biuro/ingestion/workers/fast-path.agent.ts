@@ -21,15 +21,17 @@ export class FastPathWorkerAgent {
     // 1. Ekstrakcja pełnego tekstu ze strumieni FlateDecode (koszt: 0 zł)
     const { fullText } = extractFullTextFromPdf(buffer);
 
-    // 2. Strukturyzacja tabeli za pomocą szybkiego, taniego modelu text-only (Gemini Flash-Lite)
-    const prompt = `Poniżej znajduje się tekst wyekstrahowany z cyfrowego dokumentu budowlanego/magazynowego (np. WZ z Comarch ERP) o nazwie "${fileName}".
+    // 2. Strukturyzacja tabeli za pomocą modelu text-only (Gemini Flash)
+    const prompt = `Jesteś Agentem Fast-Path w systemie PESAM. Poniżej znajduje się tekst wyekstrahowany z cyfrowego dokumentu budowlanego WZ o nazwie "${fileName}".
 Twoim zadaniem jest zamienić ten tekst w zunifikowaną strukturę JSON.
 
-ZASADY:
+WAŻNE ZASADY PARSOWANIA TABELI:
+- W tekście wyciągniętym z PDF kolejność kolumn w wierszu może być przestawiona ze względu na pozycjonowanie bloków w PDF (np. wartość netto może pojawić się przed ceną, a ilość i lp obok).
+- Dokładnie powiąż: Lp, Nazwę towaru, Ilość, Jednostkę (szt, opak, mb), Cenę netto i Wartość netto (ilość * cena).
+- Wyciągnij WSZYSTKIE pozycje tabeli. Zwróć szczególną uwagę na sumę nagłówka dokumentu (Suma netto i brutto na dole). Suma wartości netto wszystkich pozycji MUSI być równa sumie netto dokumentu!
 - NIP: same cyfry bez kresek (np. "8722410651").
 - Liczby: separator dziesiętny to kropka.
-- target_site_hint: szukaj w polach "Opis", "Budowa", "Miejsce dostawy", "Plac".
-- Jeśli brakuje cen (WZ ilościowe) -> wstaw null lub 0.
+- target_site_hint: szukaj w polach "Opis", "Budowa", "Miejsce dostawy", "Plac budowy".
 
 TEKST DOKUMENTU:
 ---
@@ -37,7 +39,7 @@ ${fullText.slice(0, 15000)}
 ---`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-lite',
+      model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         temperature: 0.1,
