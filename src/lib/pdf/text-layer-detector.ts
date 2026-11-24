@@ -127,8 +127,8 @@ export function detectDocumentTextLayer(
         }
 
         // Ekstrakcja strumieni (stream ... endstream)
-        // Uwaga: po słowie "stream" może być \r\n, \n, lub spacje przed newline (PDF spec §7.3.8)
-        const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)\r?\nendstream/g;
+        // Uwaga: po słowie "stream" i przed "endstream" mogą być spacje, tabulatory lub newline (PDF spec §7.3.8)
+        const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)[\r\n\s]*endstream/g;
         let match: RegExpExecArray | null;
 
         while ((match = streamRegex.exec(rawString)) !== null) {

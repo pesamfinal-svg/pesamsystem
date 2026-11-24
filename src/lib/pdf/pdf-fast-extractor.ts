@@ -16,7 +16,7 @@ export interface ExtractedPdfText {
 export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
     const startTime = performance.now();
     const rawString = buffer.toString('binary');
-    const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)\r?\nendstream/g;
+    const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)[\r\n\s]*endstream/g;
 
     const pageTexts: string[] = [];
     let match: RegExpExecArray | null;
@@ -37,11 +37,6 @@ export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
             streamContent = decompressed.toString('latin1');
         } catch {
             streamContent = rawStream;
-        }
-
-        // Sprawdzenie czy strumień zawiera operatory tekstowe PDF
-        if (!streamContent.includes('BT') && !streamContent.includes(' Tj') && !streamContent.includes(' TJ')) {
-            continue; // pomijamy strumienie graficzne/strukturalne
         }
 
         const tokens: string[] = [];
@@ -78,9 +73,9 @@ export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
         }
 
         if (tokens.length > 0) {
-            // Próba rekonstrukcji linii na podstawie operatorów Td/Tm (przejście wiersza)
-            const pageText = reconstructLines(streamContent, tokens);
-            pageTexts.push(pageText);
+            // Bezpieczne łączenie tokenów w czytelną treść wierszy
+            const simpleJoined = tokens.join(' ');
+            pageTexts.push(simpleJoined);
         }
     }
 

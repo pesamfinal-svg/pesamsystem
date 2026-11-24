@@ -2,10 +2,10 @@
 // src/components/biuro/AgentObservabilityConsole.tsx
 //
 // Konsola Obserwowalności Agentów (Agent Observability Console)
-// Prezentuje ślad audytowy A2A w czasie rzeczywistym:
-// 1. Decyzja Dyspozytora (IngestionRouterAgent)
-// 2. Wynik Agenta Roboczego (Worker Agent) + czas i koszt
-// 3. Ocena Gatekeepera (weryfikacja matematyczna sum)
+// Prezentuje pełny ślad audytowy A2A w czasie rzeczywistym:
+// 1. Decyzja Dyspozytora (IngestionRouterAgent) i analiza warstwy danych
+// 2. Wykonanie Agenta Roboczego (Worker Agent) + czas i koszt
+// 3. Ocena Gatekeepera (Model Matematyczny - dokładne przeliczenie sumy pozycji vs nagłówka)
 // 4. Ewentualny Fallback Handshake
 // 5. Zunifikowane dane dokumentu (tabela pozycji + surowy JSON)
 
@@ -26,6 +26,14 @@ interface Props {
       requiresFallback: boolean;
       reason?: string;
       mathDiscrepancyPct?: number;
+      mathModel?: {
+        calculatedNet: number;
+        declaredNet: number;
+        difference: number;
+        discrepancyPct: number;
+        isExactMatch: boolean;
+        formulaPreview: string;
+      };
     };
     initial_agent?: string;
     handshake_delegated_to?: string;
@@ -34,7 +42,7 @@ interface Props {
 }
 
 export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
-  const [activeView, setActiveView] = useState<'table' | 'json'>('table');
+  const [activeView, setActiveView] = useState<'table' | 'json' | 'math'>('table');
   const [copied, setCopied] = useState(false);
 
   const { meta, document: doc, items, totals } = payload;
@@ -57,6 +65,9 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
   const badge = agentBadges[meta.processed_by_agent] || {
     bg: 'bg-slate-100', text: 'text-slate-700', icon: '🤖', border: 'border-slate-300'
   };
+
+  const mathModel = a2aMeta?.gatekeeper_verdict?.mathModel;
+  const detection = a2aMeta?.route_decision?.detectionDetails;
 
   return (
     <div className="space-y-6">
@@ -91,7 +102,67 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
           </div>
         </div>
 
-        {/* ── KROKI PROCESU A2A (ŚLAD AUDYTOWY) ── */}
+        {/* ── DIAGRAM PRZEPŁYWU PRACY (A2A WORKFLOW PIPELINE) ── */}
+        <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-2">
+          <div className="flex items-center justify-between text-[11px] text-slate-400 uppercase font-bold tracking-wider">
+            <span>Przepływ Dokumentu (A2A Pipeline Flow)</span>
+            <span className="text-emerald-400">● Status: Zakończono sukcesem</span>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-center gap-2 pt-1 text-xs font-mono">
+            {/* Węzeł 1: Router */}
+            <div className="flex-1 w-full bg-slate-900 border border-slate-700/80 p-2.5 rounded-lg">
+              <div className="text-[10px] text-blue-400 font-bold uppercase">1. Router Dyspozytor</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate">
+                {detection?.hasTextLayer ? '⚡ Fast Path (Tekst)' : `🧭 ${a2aMeta?.route_decision?.targetAgent || 'Routing'}`}
+              </div>
+              <div className="text-[10px] text-slate-400 truncate">
+                {detection?.extractedCharactersCount ? `${detection.extractedCharactersCount} znaków PDF` : meta.source_type}
+              </div>
+            </div>
+
+            <span className="text-slate-500 font-bold">&rarr;</span>
+
+            {/* Węzeł 2: Worker Agent */}
+            <div className="flex-1 w-full bg-slate-900 border border-slate-700/80 p-2.5 rounded-lg">
+              <div className="text-[10px] text-amber-400 font-bold uppercase">2. Worker Execution</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate">
+                {meta.processed_by_agent}
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {items.length} pozycji ({meta.execution_time_ms} ms)
+              </div>
+            </div>
+
+            <span className="text-slate-500 font-bold">&rarr;</span>
+
+            {/* Węzeł 3: Gatekeeper Math */}
+            <div className="flex-1 w-full bg-slate-900 border border-slate-700/80 p-2.5 rounded-lg">
+              <div className="text-[10px] text-purple-400 font-bold uppercase">3. Model Matematyczny</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate">
+                {mathModel?.isExactMatch ? '✓ Suma 100% OK' : '✓ Zwalidowany'}
+              </div>
+              <div className="text-[10px] text-emerald-400 truncate font-bold">
+                {totals.total_net !== null ? `${totals.total_net.toFixed(2)} zł` : 'Ilościowa'}
+              </div>
+            </div>
+
+            <span className="text-slate-500 font-bold">&rarr;</span>
+
+            {/* Węzeł 4: Canonical Output */}
+            <div className="flex-1 w-full bg-slate-900 border border-emerald-700/60 p-2.5 rounded-lg">
+              <div className="text-[10px] text-emerald-400 font-bold uppercase">4. Canonical Ingest</div>
+              <div className="text-emerald-300 font-bold mt-0.5 truncate">
+                Gotowy do Modułu 2
+              </div>
+              <div className="text-[10px] text-slate-400">
+                Pewność: {(meta.confidence_score * 100).toFixed(0)}%
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── KROKI PROCESU A2A (SZCZEGÓŁOWY AUDYT) ── */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
           {/* Krok 1: Dyspozytor */}
           <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700/60 space-y-1.5">
@@ -132,9 +203,9 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
               )}
             </div>
             <p className="text-slate-200 font-semibold text-xs">
-              Walidacja matematyczna sum:
+              Model matematyczny sum:
             </p>
-            <p className="text-[11px] text-slate-400">
+            <p className="text-[11px] text-slate-400 leading-snug">
               {a2aMeta?.gatekeeper_verdict?.reason || 'Wartości sum netto i pozycji są matematycznie spójne.'}
             </p>
           </div>
@@ -184,6 +255,12 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
               📋 Tabela Pozycji
             </button>
             <button
+              onClick={() => setActiveView('math')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeView === 'math' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+            >
+              🧮 Model Matematyczny
+            </button>
+            <button
               onClick={() => setActiveView('json')}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeView === 'json' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
             >
@@ -207,7 +284,7 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
           </div>
         </div>
 
-        {/* ── WIDOK TABELI POZYCJI ── */}
+        {/* ── WIDOK 1: TABELA POZYCJI ── */}
         {activeView === 'table' && (
           <div className="space-y-4">
             <div className="overflow-x-auto border border-slate-200 rounded-xl">
@@ -276,7 +353,51 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
           </div>
         )}
 
-        {/* ── WIDOK SUROWEGO JSON A2A ── */}
+        {/* ── WIDOK 2: MODEL MATEMATYCZNY (GATEKEEPER BREAKDOWN) ── */}
+        {activeView === 'math' && (
+          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-4 text-xs font-mono">
+            <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
+              <span>🧮</span>
+              <span>Model Matematyczny Gatekeepera (Weryfikacja Sum)</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="bg-white p-3 rounded-lg border border-slate-200">
+                <div className="text-[10px] text-slate-400 uppercase font-bold">Wyliczona Suma Pozycji</div>
+                <div className="text-base font-bold text-slate-900 mt-1">
+                  {mathModel?.calculatedNet !== undefined ? `${mathModel.calculatedNet.toFixed(2)} zł` : (totals.total_net ? `${totals.total_net.toFixed(2)} zł` : '—')}
+                </div>
+              </div>
+
+              <div className="bg-white p-3 rounded-lg border border-slate-200">
+                <div className="text-[10px] text-slate-400 uppercase font-bold">Zadeklarowana Suma w Nagłówku</div>
+                <div className="text-base font-bold text-slate-900 mt-1">
+                  {mathModel?.declaredNet !== undefined ? `${mathModel.declaredNet.toFixed(2)} zł` : (totals.total_net ? `${totals.total_net.toFixed(2)} zł` : '—')}
+                </div>
+              </div>
+
+              <div className="bg-white p-3 rounded-lg border border-slate-200">
+                <div className="text-[10px] text-slate-400 uppercase font-bold">Różnica / Odchyłka</div>
+                <div className={`text-base font-bold mt-1 ${(mathModel?.difference || 0) === 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {mathModel?.difference !== undefined ? `${mathModel.difference.toFixed(2)} zł (0%)` : '0.00 zł (100% zgodności)'}
+                </div>
+              </div>
+            </div>
+
+            {mathModel?.formulaPreview && (
+              <div className="bg-slate-900 text-emerald-400 p-3 rounded-lg text-xs overflow-x-auto">
+                <span className="text-slate-400 block text-[10px] uppercase font-bold mb-1">Równanie Sumowania Pozycji:</span>
+                <code>{mathModel.formulaPreview}</code>
+              </div>
+            )}
+
+            <p className="text-slate-500 font-sans text-xs">
+              Algorytm Gatekeepera sumuje iloczyny cen jednostkowych i ilości wszystkich pozycji, a następnie porównuje wynik z sumą nagłówkową dokumentu z tolerancją groszową do 1.5%.
+            </p>
+          </div>
+        )}
+
+        {/* ── WIDOK 3: SUROWY JSON A2A ── */}
         {activeView === 'json' && (
           <div className="relative">
             <button

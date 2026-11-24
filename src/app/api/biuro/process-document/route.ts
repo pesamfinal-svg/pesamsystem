@@ -74,14 +74,17 @@ export async function POST(req: Request) {
         fallbackFrom: 'Agent-FastPath',
         fallbackReason: verdict.reason
       });
+      const fallbackVerdict = GatekeeperAgent.validate(fallbackPayload);
 
       return NextResponse.json({
         success: true,
         data: fallbackPayload,
         a2a_meta: {
+          route_decision: routeDecision,
           initial_agent: 'Agent-FastPath',
           handshake_delegated_to: 'Agent-Vision',
-          reason: verdict.reason
+          reason: verdict.reason,
+          gatekeeper_verdict: fallbackVerdict
         }
       });
     }
