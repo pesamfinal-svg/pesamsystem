@@ -3,7 +3,7 @@
 // Zunifikowany Kontrakt Wyjściowy Modułu 1 (Canonical Ingest Contract)
 // Każdy agent roboczy (KSeF, FastPath, Vision, Audio) zwraca dane w tym samym standardzie.
 
-export type DocumentSourceType = 'KSEF_XML' | 'PDF_DIGITAL' | 'SCAN_VISION' | 'DRIVER_AUDIO';
+export type DocumentSourceType = 'KSEF_XML' | 'KSEF_JSON' | 'PDF_DIGITAL' | 'SCAN_VISION' | 'DRIVER_AUDIO';
 
 export interface CanonicalIngestPayload {
   // Metadane Ingestii (ślad audytowy A2A)

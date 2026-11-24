@@ -24,7 +24,22 @@ export class IngestionRouterAgent {
   static inspect(buffer: Buffer, fileName: string, mimeType?: string): RouteDecision {
     const lowerName = fileName.toLowerCase();
 
-    // 1. Sprawdzenie XML / KSeF
+    // 1. Sprawdzenie JSON (KSeF API / Canonical Payload)
+    const isJson = (
+      mimeType === 'application/json' ||
+      lowerName.endsWith('.json') ||
+      buffer.subarray(0, 50).toString('utf-8').trim().startsWith('{')
+    );
+
+    if (isJson) {
+      return {
+        targetAgent: 'Agent-KSeF',
+        sourceType: 'KSEF_JSON',
+        reason: 'Wykryto ustrukturyzowany strumień JSON (format KSeF API / Canonical Ingest). Kierowany do bezpośredniego parsera danych (0 zł).'
+      };
+    }
+
+    // 2. Sprawdzenie XML / KSeF
     const isXml = (
       mimeType === 'text/xml' ||
       mimeType === 'application/xml' ||

@@ -10,7 +10,65 @@ import { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
 export class KsefWorkerAgent {
   static async process(buffer: Buffer, fileName: string): Promise<CanonicalIngestPayload> {
     const startTime = performance.now();
-    const xmlContent = buffer.toString('utf-8');
+    const rawContent = buffer.toString('utf-8').trim();
+
+    // ── OBSŁUGA JSON (Format KSeF API / Canonical Payload do testów) ──
+    if (rawContent.startsWith('{')) {
+      try {
+        const json = JSON.parse(rawContent);
+        const executionTimeMs = Math.round((performance.now() - startTime) * 100) / 100;
+
+        // Jeśli to już zunifikowany Canonical Ingest Payload (jak z testów lub KSeF API)
+        if (json.document && json.items) {
+          return {
+            meta: {
+              ingest_id: json.meta?.ingest_id || `ING-JSON-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              timestamp: json.meta?.timestamp || new Date().toISOString(),
+              source_type: json.meta?.source_type || 'KSEF_JSON',
+              processed_by_agent: 'Agent-KSeF',
+              fallback_occurred: false,
+              cost_usd: 0.0,
+              confidence_score: 1.0,
+              execution_time_ms: executionTimeMs
+            },
+            document: {
+              type: json.document.type || 'WZ',
+              number: json.document.number || fileName,
+              issue_date: json.document.issue_date || null,
+              seller: {
+                name: json.document.seller?.name || null,
+                nip: json.document.seller?.nip?.replace(/\D/g, '') || null
+              },
+              buyer: {
+                name: json.document.buyer?.name || null,
+                nip: json.document.buyer?.nip?.replace(/\D/g, '') || null
+              },
+              target_site_hint: json.document.target_site_hint || null
+            },
+            items: (json.items || []).map((it: any, index: number) => ({
+              lp: it.lp || index + 1,
+              raw_name: it.raw_name || it.name || `Pozycja ${index + 1}`,
+              quantity: typeof it.quantity === 'number' ? it.quantity : parseFloat(String(it.quantity || 1)),
+              raw_unit: it.raw_unit || it.unit || 'szt',
+              unit_price_net: it.unit_price_net ?? null,
+              total_net: it.total_net ?? null,
+              vat_rate: it.vat_rate ?? null
+            })),
+            totals: {
+              total_net: json.totals?.total_net ?? null,
+              total_vat: json.totals?.total_vat ?? null,
+              total_gross: json.totals?.total_gross ?? null,
+              currency: (json.totals?.currency || 'PLN') as 'PLN' | 'EUR'
+            }
+          };
+        }
+      } catch (e) {
+        console.warn('[KsefWorkerAgent] Nie udało się sparsować jako JSON, próba XML...', e);
+      }
+    }
+
+    // ── OBSŁUGA XML KSeF ──
+    const xmlContent = rawContent;
 
     const parser = new XMLParser({
       ignoreAttributes: false,
