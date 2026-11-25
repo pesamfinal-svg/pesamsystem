@@ -50,9 +50,11 @@ export class DimensionalDiscoveryAgent {
       return regexResult;
     }
 
-    // KROK 2: Analiza semantyczna z modelem Gemini Flash dla nietypowych nazw
+    // KROK 2: Analiza semantyczna z modelem Gemini Flash dla nietypowych nazw (z limitem czasu 6s)
     try {
-      const llmResult = await this.discoverFromLlm(rawName, rawUnit, vendorNip);
+      const llmPromise = this.discoverFromLlm(rawName, rawUnit, vendorNip);
+      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000));
+      const llmResult = await Promise.race([llmPromise, timeoutPromise]);
       if (llmResult) {
         return llmResult;
       }
@@ -210,6 +212,32 @@ export class DimensionalDiscoveryAgent {
           operation: 'MULTIPLY',
         },
         confidence_score: 0.95,
+        is_high_confidence: true,
+        source: 'REGEX_DETERMINISTIC',
+      };
+    }
+
+    // ── 5. Narzędzia, taśmy, wiertła, piany, silikony (1 szt = 1 szt) -> szt ──
+    if (
+      upper.includes('TAŚMA') || upper.includes('TASMA') ||
+      upper.includes('WIERTŁO') || upper.includes('WIERTLO') ||
+      upper.includes('PIANA') || upper.includes('SILIKON') ||
+      upper.includes('AKRYL') || upper.includes('NÓŻ') || upper.includes('NOZ') ||
+      upper.includes('TUSZ') || upper.includes('FOLIA') || upper.includes('RĘKAWIC')
+    ) {
+      return {
+        vendor_nip: vendorNip,
+        vendor_raw_name: rawName,
+        vendor_invoiced_unit: rawUnit || 'szt',
+        canonical_product_id: `MAT-SZT-${rawName.replace(/[^A-Z0-9]/gi, '').slice(0, 12).toUpperCase()}`,
+        canonical_name: rawName,
+        pesam_accounting_unit: 'szt',
+        conversion_rule: {
+          multiplier: 1.0,
+          formula: `1 ${rawUnit || 'szt'} = 1 szt`,
+          operation: 'STATIC',
+        },
+        confidence_score: 0.96,
         is_high_confidence: true,
         source: 'REGEX_DETERMINISTIC',
       };

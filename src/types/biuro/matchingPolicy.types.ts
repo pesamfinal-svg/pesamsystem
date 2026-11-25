@@ -6,6 +6,7 @@
 export interface BiuroMatchingPolicy {
   // Progi i tolerancje dla Weryfikacji Głosu Kierowcy
   voice_rules: {
+    require_driver_note_for_auto_approve: boolean; // Czy notatka głosowa jest wymagana do auto-akceptacji WZ
     require_checksum_match: boolean;             // Czy włączać test sumy wierszy
     max_row_count_discrepancy: number;          // Dopuszczalna różnica wierszy (np. 0 = ścisła, 1, 2, 3 pozycje)
     allow_missing_row_count_declaration: boolean; // Czy zezwalać na brak podania liczby pozycji, jeśli kotwica się zgadza
@@ -36,6 +37,7 @@ export interface BiuroMatchingPolicy {
 
 export const DEFAULT_BIURO_MATCHING_POLICY: BiuroMatchingPolicy = {
   voice_rules: {
+    require_driver_note_for_auto_approve: true,
     require_checksum_match: true,
     max_row_count_discrepancy: 1, // Domyślnie dopuszczamy +/- 1 pozycję drobnicy
     allow_missing_row_count_declaration: true, // Jeśli kierowca podał tylko kotwicę (np. 6 płyt OSB), nie blokujemy

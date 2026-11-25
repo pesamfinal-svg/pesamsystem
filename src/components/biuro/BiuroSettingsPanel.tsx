@@ -87,6 +87,14 @@ export default function BiuroSettingsPanel({ onPolicyUpdated }: BiuroSettingsPan
 
     // Przypadek 1: Brak nagrania kierowcy
     if (!simHasAudio) {
+      if (!policy.voice_rules.require_driver_note_for_auto_approve) {
+        return {
+          verdict: 'AUTO_RECONCILED',
+          statusText: '✅ ZATWIERDZENIE AUTOMATYCZNE',
+          badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+          explanation: 'W ustawieniach wyłączono wymóg notatki głosowej kierowcy. Dokument WZ zostaje automatycznie zatwierdzony.',
+        };
+      }
       if (simWzNet <= noAudioLimit) {
         return {
           verdict: 'AUTO_RECONCILED',
@@ -208,6 +216,30 @@ export default function BiuroSettingsPanel({ onPolicyUpdated }: BiuroSettingsPan
             </div>
 
             <div className="space-y-4 text-xs">
+              {/* Reguła 0: Czy notatka głosowa jest w ogóle wymagana */}
+              <div className="p-4 bg-indigo-50/70 rounded-xl border border-indigo-200 flex items-center justify-between gap-4">
+                <div>
+                  <label className="font-bold text-indigo-950 text-xs block">
+                    Wymagaj potwierdzenia w notatce głosowej kierowcy do automatycznej akceptacji WZ
+                  </label>
+                  <span className="text-[11px] text-indigo-800/80">
+                    Jeśli włączone: brak nagrania powyżej limitu kwotowego blokuje WZ do akceptacji przez człowieka. Jeśli wyłączone: WZ bez nagrania przechodzą z automatu.
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={policy.voice_rules.require_driver_note_for_auto_approve ?? true}
+                  onChange={(e) => setPolicy({
+                    ...policy,
+                    voice_rules: {
+                      ...policy.voice_rules,
+                      require_driver_note_for_auto_approve: e.target.checked
+                    }
+                  })}
+                  className="w-5 h-5 accent-indigo-600 rounded cursor-pointer shrink-0"
+                />
+              </div>
+
               {/* Reguła 1: Próg kwotowy bez nagrania */}
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -555,19 +587,21 @@ export default function BiuroSettingsPanel({ onPolicyUpdated }: BiuroSettingsPan
             </div>
 
             {/* Wynik symulatora */}
-            <div className="p-4 bg-slate-950/90 rounded-xl border border-indigo-500/40 space-y-2">
-              <span className="text-[10px] font-mono text-slate-400 uppercase font-bold block">
-                Werdykt Mózgu PESAM na Żywo:
-              </span>
-              <div className="flex items-center justify-between">
-                <span className={`px-2.5 py-1 rounded-lg text-xs font-bold border font-mono ${simResult.badgeClass}`}>
-                  {simResult.statusText}
+            <div className="p-4 bg-slate-950/90 rounded-xl border border-indigo-500/40 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-mono text-slate-400 uppercase font-bold">
+                  Werdykt Mózgu PESAM na Żywo:
                 </span>
-                <span className="text-[11px] font-mono text-slate-400">
-                  Status: <b>{simResult.verdict}</b>
+                <span className="text-[10px] font-mono text-slate-400">
+                  <b>{simResult.verdict}</b>
                 </span>
               </div>
-              <p className="text-[11px] text-slate-300 leading-snug pt-1">
+              <div>
+                <span className={`inline-block px-2.5 py-1 rounded-lg text-xs font-bold border font-mono ${simResult.badgeClass}`}>
+                  {simResult.statusText}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-snug">
                 {simResult.explanation}
               </p>
             </div>

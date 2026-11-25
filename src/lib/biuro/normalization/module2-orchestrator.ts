@@ -11,7 +11,7 @@
 // Zgodny ze specyfikacją biuro-ai.md §Część 1/3 i §5
 
 import { db } from '@/lib/firebase/config';
-import { doc, setDoc, collection, getDocs } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, getDocs } from 'firebase/firestore';
 import { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
 import { ReconciledDelivery, ReconciledItem, ReconciledStatus, FinancialSummary } from '@/types/biuro/reconciledDelivery.types';
 import { BiuroMatchingPolicy, DEFAULT_BIURO_MATCHING_POLICY } from '@/types/biuro/matchingPolicy.types';
@@ -38,7 +38,21 @@ export class Module2Orchestrator {
    */
   static async process(params: Module2ExecutionParams): Promise<ReconciledDelivery> {
     const startTime = performance.now();
-    const { canonicalPayload, driverAudioNote, policy = DEFAULT_BIURO_MATCHING_POLICY, persistToFirestore = true } = params;
+    const { canonicalPayload, driverAudioNote, persistToFirestore = true } = params;
+
+    // Pobierz aktualną politykę z Firestore jeśli nie przekazano jawnie
+    let policy = params.policy;
+    if (!policy) {
+      try {
+        const policySnap = await getDoc(doc(db, 'settings', 'biuro_matching_policy'));
+        if (policySnap.exists()) {
+          policy = policySnap.data() as BiuroMatchingPolicy;
+        }
+      } catch {
+        // ignore
+      }
+      if (!policy) policy = DEFAULT_BIURO_MATCHING_POLICY;
+    }
 
     const vendorNip = (canonicalPayload.document.seller.nip || '').replace(/\D/g, '');
     const vendorName = canonicalPayload.document.seller.name || 'NIEZNANY DOSTAWCA';
@@ -90,53 +104,49 @@ export class Module2Orchestrator {
       policy,
     });
 
-    // ── 2. PODAGENCI POZYCJI: VENDOR MEMORY + DIMENSIONAL DISCOVERY + DUAL UNIT ──
-    const reconciledItems: ReconciledItem[] = [];
+    // ── 2. PODAGENCI POZYCJI (RÓWNOLEGLE DLA MAKSYMALNEJ SZYBKOŚCI) ──
     let requiresHitlLearning = false;
 
-    for (const rawItem of canonicalPayload.items) {
-      // Krok 2a: Próba trafienia w pamięć profilu dostawcy (Fast Cache: 0 ms, 0 zł)
-      let vendorRule = await VendorMemoryAgent.lookupItem(vendorNip, rawItem.raw_name);
-      let discoveredGeometry = null;
+    const reconciledItems: ReconciledItem[] = await Promise.all(
+      canonicalPayload.items.map(async (rawItem) => {
+        let vendorRule = await VendorMemoryAgent.lookupItem(vendorNip, rawItem.raw_name);
+        let discoveredGeometry = null;
 
-      // Krok 2b: Jeśli brak wpisu -> Odkrywanie Geometrii
-      if (!vendorRule) {
-        discoveredGeometry = await DimensionalDiscoveryAgent.discover({
-          rawName: rawItem.raw_name,
-          rawUnit: rawItem.raw_unit,
-          vendorNip,
-        });
+        if (!vendorRule) {
+          discoveredGeometry = await DimensionalDiscoveryAgent.discover({
+            rawName: rawItem.raw_name,
+            rawUnit: rawItem.raw_unit,
+            vendorNip,
+          });
 
-        // Autonomiczna Pętla Samouczenia: jeśli pewność >= 0.95, zapisz na stałe
-        if (discoveredGeometry.is_high_confidence && vendorNip) {
-          await VendorMemoryAgent.saveLearnedRule({
-            vendor_nip: vendorNip,
-            vendor_raw_name: rawItem.raw_name,
-            clean_lookup_key: VendorMemoryAgent.cleanKey(rawItem.raw_name),
-            vendor_invoiced_unit: rawItem.raw_unit,
-            canonical_product_id: discoveredGeometry.canonical_product_id,
-            canonical_name: discoveredGeometry.canonical_name,
-            pesam_accounting_unit: discoveredGeometry.pesam_accounting_unit,
-            conversion_rule: discoveredGeometry.conversion_rule,
-            confidence_score: discoveredGeometry.confidence_score,
-            learned_source: 'AUTO_GEOMETRY_DISCOVERY',
-            usage_count: 1,
-            last_used_at: new Date().toISOString(),
-          }, vendorName);
-        } else if (!discoveredGeometry.is_high_confidence) {
-          requiresHitlLearning = true;
+          const minConf = policy?.auto_learning?.confidence_threshold ?? 0.95;
+          if (discoveredGeometry.confidence_score >= minConf && vendorNip) {
+            await VendorMemoryAgent.saveLearnedRule({
+              vendor_nip: vendorNip,
+              vendor_raw_name: rawItem.raw_name,
+              clean_lookup_key: VendorMemoryAgent.cleanKey(rawItem.raw_name),
+              vendor_invoiced_unit: rawItem.raw_unit,
+              canonical_product_id: discoveredGeometry.canonical_product_id,
+              canonical_name: discoveredGeometry.canonical_name,
+              pesam_accounting_unit: discoveredGeometry.pesam_accounting_unit,
+              conversion_rule: discoveredGeometry.conversion_rule,
+              confidence_score: discoveredGeometry.confidence_score,
+              learned_source: 'AUTO_GEOMETRY_DISCOVERY',
+              usage_count: 1,
+              last_used_at: new Date().toISOString(),
+            }, vendorName);
+          } else if (discoveredGeometry.confidence_score < minConf) {
+            requiresHitlLearning = true;
+          }
         }
-      }
 
-      // Krok 2c: Podagent Reprezentacji Dwutorowej + Agent Matematyk
-      const itemRecord = DualUnitEngine.processItem({
-        raw: rawItem,
-        vendorRule,
-        discoveredGeometry,
-      });
-
-      reconciledItems.push(itemRecord);
-    }
+        return DualUnitEngine.processItem({
+          raw: rawItem,
+          vendorRule,
+          discoveredGeometry,
+        });
+      })
+    );
 
     // ── 3. PODSUMOWANIE FINANSOWE (Agent Matematyk) ──
     const mathTotals = DeterministicMathEngine.calculateTotals(
@@ -150,16 +160,19 @@ export class Module2Orchestrator {
 
     // ── 4. STATUS KOŃCOWY (Reconciliation Verdict & Granular Policy) ──
     let status: ReconciledStatus = 'AUTO_RECONCILED';
+    const requireDriverNote = policy.voice_rules.require_driver_note_for_auto_approve ?? true;
     const lowValueThreshold = policy.voice_rules.auto_approve_without_driver_note_below_pln ?? 300.0;
     const isUnderThreshold = mathTotals.totalNet <= lowValueThreshold;
+    const hasAudioText = Boolean(driverAudioNote?.text && driverAudioNote.text.trim().length > 0);
 
     if (!driverAudit.is_physically_confirmed) {
-      if (isUnderThreshold) {
-        // WZ poniżej progu kwotowego (np. <= 300 zł) jest auto-zatwierdzana mimo braku lub niezgodności głosu kierowcy
+      if (!hasAudioText && !requireDriverNote) {
+        status = 'AUTO_RECONCILED';
+        driverAudit.verdict_reason = '✅ AUTO_RECONCILED: W ustawieniach wyłączono wymóg notatki głosowej kierowcy.';
+      } else if (isUnderThreshold) {
         status = 'AUTO_RECONCILED';
         driverAudit.verdict_reason = `✅ AUTO_RECONCILED (Polityka progowa): Kwota WZ (${mathTotals.totalNet.toFixed(2)} zł) mieści się w limicie ${lowValueThreshold.toFixed(2)} zł. Przyjęto z automatu bez głosu kierowcy.`;
       } else {
-        // WZ powyżej progu kwotowego bez głosu wymaga potwierdzenia człowieka
         status = 'PENDING_HITL_VOICE';
         driverAudit.verdict_reason = `⚠️ PENDING_HITL_VOICE: Wartość WZ (${mathTotals.totalNet.toFixed(2)} zł) przekracza limit ${lowValueThreshold.toFixed(2)} zł przy braku potwierdzonego meldunku. Wymagane zatwierdzenie.`;
       }
