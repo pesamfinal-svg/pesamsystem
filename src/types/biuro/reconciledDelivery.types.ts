@@ -92,6 +92,12 @@ export interface ReconciledDelivery {
       name: string;
     };
     target_site: string;
+    target_site_id?: string | null;
+  };
+  manager_signature?: {
+    is_signed: boolean;
+    signed_at?: string;
+    signed_by?: string;
   };
   driver_audit: DriverAuditInfo;
   items: ReconciledItem[];

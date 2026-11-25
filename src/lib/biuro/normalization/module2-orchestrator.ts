@@ -11,7 +11,7 @@
 // Zgodny ze specyfikacją biuro-ai.md §Część 1/3 i §5
 
 import { db } from '@/lib/firebase/config';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, collection, getDocs } from 'firebase/firestore';
 import { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
 import { ReconciledDelivery, ReconciledItem, ReconciledStatus, FinancialSummary } from '@/types/biuro/reconciledDelivery.types';
 import { BiuroMatchingPolicy, DEFAULT_BIURO_MATCHING_POLICY } from '@/types/biuro/matchingPolicy.types';
@@ -44,7 +44,34 @@ export class Module2Orchestrator {
     const vendorName = canonicalPayload.document.seller.name || 'NIEZNANY DOSTAWCA';
     const buyerNip = (canonicalPayload.document.buyer.nip || '8720004013').replace(/\D/g, '');
     const buyerName = canonicalPayload.document.buyer.name || 'PESAM SPÓŁKA Z O.O. SP. K.';
-    const targetSite = canonicalPayload.document.target_site_hint || 'PLAC CENTRALNY';
+    const rawSiteHint = canonicalPayload.document.target_site_hint || '';
+
+    // ── 0. DOPASOWANIE DO LISTY BUDÓW Z FIRESTORE (sites) ──
+    let matchedSiteId: string | null = null;
+    let matchedSiteName: string = rawSiteHint || 'Nie przypisano';
+
+    try {
+      const sitesSnap = await getDocs(collection(db, 'sites'));
+      const activeSites = sitesSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+      const hintTokens = rawSiteHint.toUpperCase().split(/[\s,/-]+/).filter(t => t.length > 2);
+
+      if (hintTokens.length > 0 && activeSites.length > 0) {
+        let bestScore = 0;
+        for (const site of activeSites) {
+          const siteText = `${site.name || ''} ${site.location || ''}`.toUpperCase();
+          const score = hintTokens.filter(t => siteText.includes(t)).length;
+          if (score > bestScore) {
+            bestScore = score;
+            matchedSiteId = site.id;
+            matchedSiteName = site.name || site.location;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[Module2Orchestrator] Sites lookup warning:', err);
+    }
+
+    const targetSite = matchedSiteName;
 
     // ── 1. PODAGENT WERYFIKACJI KOTWICY (VoiceAnchorMatcher) ──
     const driverAudit = VoiceAnchorMatcher.verify({
@@ -95,7 +122,7 @@ export class Module2Orchestrator {
             learned_source: 'AUTO_GEOMETRY_DISCOVERY',
             usage_count: 1,
             last_used_at: new Date().toISOString(),
-          });
+          }, vendorName);
         } else if (!discoveredGeometry.is_high_confidence) {
           requiresHitlLearning = true;
         }
@@ -171,6 +198,10 @@ export class Module2Orchestrator {
           name: buyerName,
         },
         target_site: targetSite,
+        target_site_id: matchedSiteId,
+      },
+      manager_signature: {
+        is_signed: false,
       },
       driver_audit: driverAudit,
       items: reconciledItems,

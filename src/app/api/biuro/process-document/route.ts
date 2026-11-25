@@ -31,7 +31,7 @@ export const maxDuration = 60;
 export async function POST(req: Request) {
   try {
     let finalPayload: CanonicalIngestPayload;
-    let driverNoteText = 'CMB na Kielce, 7 pozycji na kwicie, w tym 6 płyt OSB.';
+    let driverNoteText = '';
     let routeDecision: any = null;
     let gatekeeperVerdict: any = null;
 
