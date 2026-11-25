@@ -3,12 +3,13 @@
 
 import { useState, useRef, useEffect } from 'react';
 import AgentObservabilityConsole from '@/components/biuro/AgentObservabilityConsole';
+import BiuroSettingsPanel from '@/components/biuro/BiuroSettingsPanel';
 import type { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
 import type { ReconciledDelivery } from '@/types/biuro/reconciledDelivery.types';
 import type { VendorCatalogItem } from '@/types/biuro/vendorCatalog.types';
 import { sanitizePolishErpArtifacts } from '@/lib/pdf/pdf-fast-extractor';
 
-type MainTab = 'ingest_lab' | 'saved_wz' | 'vendors' | 'materials_catalog' | 'architecture';
+type MainTab = 'ingest_lab' | 'saved_wz' | 'vendors' | 'materials_catalog' | 'settings' | 'architecture';
 
 export default function BiuroPage() {
     const [activeTab, setActiveTab] = useState<MainTab>('ingest_lab');
@@ -392,6 +393,19 @@ export default function BiuroPage() {
                 >
                     <span>📐</span>
                     <span>4. Słownik Towarów & Reguł Normalizacji</span>
+                </button>
+
+                <button
+                    onClick={() => setActiveTab('settings')}
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 cursor-pointer ${
+                        activeTab === 'settings'
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : 'bg-white text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 border border-indigo-200'
+                    }`}
+                >
+                    <span>⚙️</span>
+                    <span>5. Ustawienia & Reguły Decyzyjne</span>
+                    <span className="px-1.5 py-0.2 bg-indigo-100 text-indigo-800 text-[10px] font-mono rounded">NOWOŚĆ</span>
                 </button>
 
                 <button
@@ -789,7 +803,12 @@ export default function BiuroPage() {
                 </div>
             )}
 
-            {/* ── WIDOK 5: DOKUMENTACJA ARCHITEKTURY A2A ── */}
+            {/* ── WIDOK 5: USTAWIENIA & REGUŁY DECYZYJNE (NOWOŚĆ) ── */}
+            {activeTab === 'settings' && (
+                <BiuroSettingsPanel />
+            )}
+
+            {/* ── WIDOK 6: DOKUMENTACJA ARCHITEKTURY A2A ── */}
             {activeTab === 'architecture' && (
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
                     <div>

@@ -53,6 +53,10 @@ export async function POST(req: Request) {
         ...DEFAULT_BIURO_MATCHING_POLICY.approvals,
         ...(policy.approvals || {}),
       },
+      auto_learning: {
+        ...DEFAULT_BIURO_MATCHING_POLICY.auto_learning,
+        ...(policy.auto_learning || {}),
+      },
     };
 
     const policyDocRef = doc(db, 'settings', 'biuro_matching_policy');

@@ -1,9 +1,11 @@
 // src/lib/biuro/normalization/voice-anchor.matcher.ts
 //
 // Podagent Weryfikacji Kotwicy (Checksum & Anchor Matcher)
-// Implementuje 4-sekundową procedurę meldunku SOP:
-// [Dostawca] -> [Budowa] -> [Liczba pozycji z kwitu] -> [Jeden główny towar + ilość]
-// Zgodny ze specyfikacją biuro-ai.md §Część 3/3
+// Implementuje procedurę meldunku SOP z pełną konfigurowalnością tolerancji:
+// - Tolerancja różnicy liczby wierszy (np. +/- 0, 1, 2, 3 pozycje)
+// - Obsługa braku deklaracji liczby pozycji
+// - Tolerancja ilościowa towaru kotwiczącego (+/- X%)
+// - Próg drobnicy montażowej
 
 import { DriverAuditInfo } from '@/types/biuro/reconciledDelivery.types';
 import { BiuroMatchingPolicy, DEFAULT_BIURO_MATCHING_POLICY } from '@/types/biuro/matchingPolicy.types';
@@ -18,6 +20,7 @@ export interface VoiceAnchorInput {
     name: string;
     quantity: number;
     unit?: string;
+    total_net?: number | null;
   }>;
   wzVendorName?: string;
   wzVendorNip?: string;
@@ -47,7 +50,6 @@ export class VoiceAnchorMatcher {
     if (lineCountMatch) {
       result.declaredLineCount = parseInt(lineCountMatch[1], 10);
     } else {
-      // Słownie
       const wordMap: Record<string, number> = {
         'jedna': 1, 'jeden': 1, 'dwa': 2, 'dwie': 2, 'trzy': 3, 'cztery': 4,
         'pięć': 5, 'piec': 5, 'sześć': 6, 'szesc': 6, 'siedem': 7, 'osiem': 8,
@@ -61,7 +63,7 @@ export class VoiceAnchorMatcher {
       }
     }
 
-    // 2. Wykrycie towaru kotwiczącego: np. "w tym 6 płyt OSB", "6 płyt osb", "w tym 27 profili", "w tym 6 sztuk płyt"
+    // 2. Wykrycie towaru kotwiczącego: np. "w tym 6 płyt OSB", "6 płyt osb", "w tym 27 profili"
     const anchorMatch = raw.match(/(?:w tym|w tym jest|oraz|głównie|glownie)?\s*(\d+(?:[.,]\d+)?)\s*(?:szt\.?|sztuk|płyt|plyt|opakowań|opak|paczek|metrów|mb|rolek)?\s+([A-Za-z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ -]{3,35})/i)
       || raw.match(/(\d+(?:[.,]\d+)?)\s+([A-Za-z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ -]{3,35})/i);
 
@@ -87,7 +89,7 @@ export class VoiceAnchorMatcher {
   }
 
   /**
-   * Główna procedura weryfikacji sumy kontrolnej i kotwicy
+   * Główna procedura weryfikacji sumy kontrolnej i kotwicy z uwzględnieniem konfigurowalnych tolerancji
    */
   static verify(input: VoiceAnchorInput): DriverAuditInfo {
     const { driverText, driverAudioRef, driverName, wzItems, wzVendorName, wzTargetSite, policy = DEFAULT_BIURO_MATCHING_POLICY } = input;
@@ -141,8 +143,21 @@ export class VoiceAnchorMatcher {
       };
     }
 
-    // ── KROK 1: Suma Kontrolna Wierszy (Checksum Test) ──
-    const lineCountMatched = declaredLineCount !== undefined ? declaredLineCount === actualLineCount : true;
+    // ── KROK 1: Suma Kontrolna Wierszy z Konfigurowalną Tolerancją ──
+    const maxDiscrepancy = policy.voice_rules.max_row_count_discrepancy ?? 1;
+    const allowMissingCount = policy.voice_rules.allow_missing_row_count_declaration ?? true;
+
+    let lineCountMatched = true;
+    let lineCountDifference = 0;
+
+    if (declaredLineCount !== undefined) {
+      lineCountDifference = Math.abs(actualLineCount - declaredLineCount);
+      lineCountMatched = lineCountDifference <= maxDiscrepancy;
+    } else {
+      // Kierowca nie podał liczby wierszy
+      lineCountMatched = allowMissingCount;
+    }
+
     if (policy.voice_rules.require_checksum_match && declaredLineCount !== undefined && !lineCountMatched) {
       return {
         verification_method: 'CHECKSUM_AND_ANCHOR',
@@ -152,12 +167,13 @@ export class VoiceAnchorMatcher {
         line_count_matched: false,
         driver_audio_ref: driverAudioRef,
         driver_audio_text: driverText,
-        verdict_reason: `⚠️ ALERT HITL: Błąd Sumy Kontrolnej. Kierowca zadeklarował ${declaredLineCount} pozycji, a na dokumencie WZ jest ${actualLineCount} wierszy!`,
+        verdict_reason: `⚠️ ALERT HITL: Przekroczono dopuszczalną tolerancję wierszy. Kierowca podał ${declaredLineCount} pozycji, na WZ jest ${actualLineCount} (różnica: ${lineCountDifference} wierszy, dozwolone maks: ${maxDiscrepancy}).`,
         driver_name: driverName,
       };
     }
 
-    // ── KROK 2: Test Towaru Kotwiczącego (Anchor Item Test) ──
+    // ── KROK 2: Test Towaru Kotwiczącego z Tolerancją Ilościową ──
+    const anchorTolerancePct = policy.voice_rules.anchor_quantity_tolerance_pct ?? 5.0;
     let anchorMatched = false;
     let anchorItemFoundName: string | undefined;
 
@@ -167,13 +183,15 @@ export class VoiceAnchorMatcher {
 
       for (const item of wzItems) {
         const itemUpper = item.name.toUpperCase();
-        // Sprawdź czy nazwa pozycji na WZ zawiera kluczowe słowa z kotwicy (np. "OSB", "PROFIL")
         const isNameMatch = anchorTokens.some(token => itemUpper.includes(token));
 
         if (isNameMatch) {
           anchorItemFoundName = item.name;
-          // Sprawdź ilość z dopuszczalną tolerancją (np. 6 == 6)
-          const isQtyMatch = DeterministicMathEngine.verifyQuantityMatch(parsed.anchorItemQuantity, item.quantity);
+          const isQtyMatch = DeterministicMathEngine.verifyQuantityMatch(
+            parsed.anchorItemQuantity,
+            item.quantity,
+            anchorTolerancePct
+          );
           if (isQtyMatch) {
             anchorMatched = true;
             break;
@@ -192,16 +210,30 @@ export class VoiceAnchorMatcher {
           anchor_quantity_matched: false,
           driver_audio_ref: driverAudioRef,
           driver_audio_text: driverText,
-          verdict_reason: `⚠️ ALERT HITL: Rozbieżność Towaru Kotwiczącego. Kierowca podał: "${parsed.anchorItemQuantity}x ${parsed.anchorItemName}", na kwicie WZ brak zgodnej ilości dla tej pozycji!`,
+          verdict_reason: `⚠️ ALERT HITL: Rozbieżność Towaru Kotwiczącego. Kierowca zgłosił: "${parsed.anchorItemQuantity}x ${parsed.anchorItemName}", na kwicie WZ brak zgodnej pozycji w tolerancji ${anchorTolerancePct}%.`,
           driver_name: driverName,
         };
       }
     } else {
-      // Jeśli kierowca nie podał kotwicy, ale liczba wierszy się zgadza
       anchorMatched = true;
     }
 
-    // ── KROK 3: Sukces - Przyjęcie Potwierdzone (AUTO_VERIFIED) ──
+    // ── KROK 3: Sukces z Raportem Zastosowanych Reguł Tolerancji ──
+    const summaryNotes: string[] = [];
+    if (declaredLineCount !== undefined) {
+      if (declaredLineCount === actualLineCount) {
+        summaryNotes.push(`Suma wierszy zgodna co do sztuki (${actualLineCount})`);
+      } else {
+        summaryNotes.push(`Różnica ${lineCountDifference} wierszy mieści się w tolerancji ±${maxDiscrepancy}`);
+      }
+    } else if (allowMissingCount) {
+      summaryNotes.push('Pominięto brak liczby wierszy (zgodnie z polityką)');
+    }
+
+    if (parsed.anchorItemName) {
+      summaryNotes.push(`Kotwica: ${parsed.anchorItemQuantity || ''} ${parsed.anchorItemName || ''} potwierdzona`);
+    }
+
     return {
       verification_method: 'CHECKSUM_AND_ANCHOR',
       is_physically_confirmed: true,
@@ -212,7 +244,7 @@ export class VoiceAnchorMatcher {
       anchor_quantity_matched: true,
       driver_audio_ref: driverAudioRef,
       driver_audio_text: driverText,
-      verdict_reason: `✅ AUTO_VERIFIED: Przyjęcie towaru potwierdzone głosem kierowcy (Suma wierszy: ${actualLineCount}, Kotwica: ${parsed.anchorItemQuantity || ''} ${parsed.anchorItemName || ''} zgodna).`,
+      verdict_reason: `✅ AUTO_VERIFIED: Przyjęcie towaru potwierdzone głosem (${summaryNotes.join(', ')}).`,
       driver_name: driverName,
     };
   }

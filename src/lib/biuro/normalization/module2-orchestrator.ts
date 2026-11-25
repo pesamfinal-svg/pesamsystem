@@ -121,10 +121,21 @@ export class Module2Orchestrator {
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const reconciliationId = `REC-${dateStr}-${cleanDocRef || 'DOC'}-001`;
 
-    // ── 4. STATUS KOŃCOWY (Reconciliation Verdict) ──
+    // ── 4. STATUS KOŃCOWY (Reconciliation Verdict & Granular Policy) ──
     let status: ReconciledStatus = 'AUTO_RECONCILED';
-    if (driverAudioNote?.text && !driverAudit.is_physically_confirmed) {
-      status = 'PENDING_HITL_VOICE';
+    const lowValueThreshold = policy.voice_rules.auto_approve_without_driver_note_below_pln ?? 300.0;
+    const isUnderThreshold = mathTotals.totalNet <= lowValueThreshold;
+
+    if (!driverAudit.is_physically_confirmed) {
+      if (isUnderThreshold) {
+        // WZ poniżej progu kwotowego (np. <= 300 zł) jest auto-zatwierdzana mimo braku lub niezgodności głosu kierowcy
+        status = 'AUTO_RECONCILED';
+        driverAudit.verdict_reason = `✅ AUTO_RECONCILED (Polityka progowa): Kwota WZ (${mathTotals.totalNet.toFixed(2)} zł) mieści się w limicie ${lowValueThreshold.toFixed(2)} zł. Przyjęto z automatu bez głosu kierowcy.`;
+      } else {
+        // WZ powyżej progu kwotowego bez głosu wymaga potwierdzenia człowieka
+        status = 'PENDING_HITL_VOICE';
+        driverAudit.verdict_reason = `⚠️ PENDING_HITL_VOICE: Wartość WZ (${mathTotals.totalNet.toFixed(2)} zł) przekracza limit ${lowValueThreshold.toFixed(2)} zł przy braku potwierdzonego meldunku. Wymagane zatwierdzenie.`;
+      }
     } else if (requiresHitlLearning) {
       status = 'PENDING_HITL_LEARNING';
     }
