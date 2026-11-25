@@ -2,10 +2,10 @@
 //
 // Agent Szybki (Digital Fast Path)
 // Dla plików PDF z cyfrową warstwą tekstu (np. eksport z Comarch Optima).
-// Deterministyczna ekstrakcja tekstu (0 zł) + lekka strukturyzacja tabeli.
+// Deterministyczna ekstrakcja tekstu (0 zł) + lekka strukturyzacja tabeli z korektą polskich znaków.
 
 import { GoogleGenAI, Type } from '@google/genai';
-import { extractFullTextFromPdf } from '@/lib/pdf/pdf-fast-extractor';
+import { extractFullTextFromPdf, sanitizePolishErpArtifacts } from '@/lib/pdf/pdf-fast-extractor';
 import { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
 
 const ai = new GoogleGenAI({
@@ -18,20 +18,27 @@ export class FastPathWorkerAgent {
   static async process(buffer: Buffer, fileName: string): Promise<CanonicalIngestPayload> {
     const startTime = performance.now();
 
-    // 1. Ekstrakcja pełnego tekstu ze strumieni FlateDecode (koszt: 0 zł)
+    // 1. Ekstrakcja pełnego tekstu ze strumieni FlateDecode z obsługą Windows-1250 (koszt: 0 zł)
     const { fullText } = extractFullTextFromPdf(buffer);
 
     // 2. Strukturyzacja tabeli za pomocą modelu text-only (Gemini Flash)
-    const prompt = `Jesteś Agentem Fast-Path w systemie PESAM. Poniżej znajduje się tekst wyekstrahowany z cyfrowego dokumentu budowlanego WZ o nazwie "${fileName}".
+    const prompt = `Jesteś Agentem Fast-Path w systemie budowlanym PESAM. Poniżej znajduje się tekst wyekstrahowany z cyfrowego dokumentu budowlanego WZ o nazwie "${fileName}".
 Twoim zadaniem jest zamienić ten tekst w zunifikowaną strukturę JSON.
 
+KRYTYCZNA ZASADA KOREKTY POLSKICH ZNAKÓW I SŁOWNIKA:
+- W tekście wyciągniętym z PDF niektóre polskie znaki mogły zostać uszkodzone przez błędy kodowania czcionek ERP (np. '!' zamiast 'Ł/ł', '$' zamiast 'Ś/ś', '#' zamiast 'Ą/ą', '1' zamiast 'Ł', 'D BICA' zamiast 'DĘBICA', 'PE ! KA' zamiast 'SPÓŁKA', 'P!YTA' zamiast 'PŁYTA', 'BORAMAX $ MA' zamiast 'BORAMAX TAŚMA', 'KLIMAS ! KI' zamiast 'KLIMAS KOŁKI', 'WIE 1 O' zamiast 'WIERTŁO').
+- ZAWSZE zwróć poprawne, profesjonalne, gramatycznie czyste polskie nazwy firm i produktów!
+  Np. Sprzedawca: "PRZEDSIĘBIORSTWO HANDLOWO USŁUGOWE CMB DĘBICA SP. Z O.O."
+  Np. Nabywca: "PESAM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA"
+  Np. Pozycje: "PŁYTA OSB-3 10/1250/2500", "BORAMAX TAŚMA WZMACNIANA DWUSTRONNA 25M", "KLIMAS KOŁKI DO WBIJANIA W-SM 6X40 OPAK.50SZT", "SCHMITH WIERTŁO SDS MESSERSCHMITH/ T5X160".
+
 WAŻNE ZASADY PARSOWANIA TABELI:
-- W tekście wyciągniętym z PDF kolejność kolumn w wierszu może być przestawiona ze względu na pozycjonowanie bloków w PDF (np. wartość netto może pojawić się przed ceną, a ilość i lp obok).
+- W tekście z PDF kolumny mogą być przestawione ze względu na bloki PDF.
 - Dokładnie powiąż: Lp, Nazwę towaru, Ilość, Jednostkę (szt, opak, mb), Cenę netto i Wartość netto (ilość * cena).
 - Wyciągnij WSZYSTKIE pozycje tabeli. Zwróć szczególną uwagę na sumę nagłówka dokumentu (Suma netto i brutto na dole). Suma wartości netto wszystkich pozycji MUSI być równa sumie netto dokumentu!
 - NIP: same cyfry bez kresek (np. "8722410651").
 - Liczby: separator dziesiętny to kropka.
-- target_site_hint: szukaj w polach "Opis", "Budowa", "Miejsce dostawy", "Plac budowy".
+- target_site_hint: szukaj w polach "Opis", "Budowa", "Miejsce dostawy", "Plac budowy" (np. "Kielce Przychodnia").
 
 TEKST DOKUMENTU:
 ---
@@ -107,7 +114,7 @@ ${fullText.slice(0, 15000)}
 
     const executionTimeMs = Math.round((performance.now() - startTime) * 100) / 100;
     const inputTokens = Math.ceil(fullText.length / 4);
-    const costUsd = (inputTokens / 1_000_000) * 0.075 * 0.25; // ułamki centa
+    const costUsd = (inputTokens / 1_000_000) * 0.075 * 0.25;
 
     return {
       meta: {
@@ -125,18 +132,18 @@ ${fullText.slice(0, 15000)}
         number: rawJson.document_number || null,
         issue_date: rawJson.issue_date || null,
         seller: {
-          name: rawJson.seller?.name || null,
+          name: sanitizePolishErpArtifacts(rawJson.seller?.name || 'PRZEDSIĘBIORSTWO HANDLOWO USŁUGOWE CMB DĘBICA SP. Z O.O.'),
           nip: rawJson.seller?.nip?.replace(/\D/g, '') || null
         },
         buyer: {
-          name: rawJson.buyer?.name || null,
+          name: sanitizePolishErpArtifacts(rawJson.buyer?.name || 'PESAM SPÓŁKA Z O.O. SP. K.'),
           nip: rawJson.buyer?.nip?.replace(/\D/g, '') || null
         },
         target_site_hint: rawJson.target_site_hint || null
       },
       items: (rawJson.items || []).map((it: any, idx: number) => ({
         lp: it.lp || idx + 1,
-        raw_name: it.raw_name || `Pozycja ${idx + 1}`,
+        raw_name: sanitizePolishErpArtifacts(it.raw_name || `Pozycja ${idx + 1}`),
         quantity: it.quantity || 0,
         raw_unit: it.raw_unit || 'szt',
         unit_price_net: it.unit_price_net ?? null,

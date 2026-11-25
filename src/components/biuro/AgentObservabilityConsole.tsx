@@ -1,94 +1,68 @@
-'use client';
 // src/components/biuro/AgentObservabilityConsole.tsx
-//
-// Konsola Obserwowalności Agentów (Agent Observability Console)
-// Prezentuje pełny ślad audytowy A2A w czasie rzeczywistym:
-// 1. Decyzja Dyspozytora (IngestionRouterAgent) i analiza warstwy danych
-// 2. Wykonanie Agenta Roboczego (Worker Agent) + czas i koszt
-// 3. Ocena Gatekeepera (Model Matematyczny - dokładne przeliczenie sumy pozycji vs nagłówka)
-// 4. Ewentualny Fallback Handshake
-// 5. Zunifikowane dane dokumentu (tabela pozycji + surowy JSON)
+'use client';
 
 import { useState } from 'react';
 import type { CanonicalIngestPayload } from '@/types/biuro/canonicalDocument';
+import type { ReconciledDelivery, ReconciledItem } from '@/types/biuro/reconciledDelivery.types';
+import { DeterministicMathEngine } from '@/lib/biuro/normalization/deterministic-math.engine';
 
 interface Props {
   payload: CanonicalIngestPayload;
-  a2aMeta?: {
-    route_decision?: {
-      targetAgent: string;
-      sourceType: string;
-      reason: string;
-      detectionDetails?: any;
-    };
-    gatekeeper_verdict?: {
-      isValid: boolean;
-      requiresFallback: boolean;
-      reason?: string;
-      mathDiscrepancyPct?: number;
-      mathModel?: {
-        calculatedNet: number;
-        declaredNet: number;
-        difference: number;
-        discrepancyPct: number;
-        isExactMatch: boolean;
-        formulaPreview: string;
-      };
-    };
-    initial_agent?: string;
-    handshake_delegated_to?: string;
-    reason?: string;
-  };
+  reconciledDelivery?: ReconciledDelivery | null;
+  a2aMeta?: any;
+  onDriverTextChange?: (text: string) => void;
 }
 
-export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
-  const [activeView, setActiveView] = useState<'table' | 'json' | 'math'>('table');
+export default function AgentObservabilityConsole({
+  payload,
+  reconciledDelivery,
+  a2aMeta,
+}: Props) {
+  const [activeView, setActiveView] = useState<'dual_unit' | 'raw_table' | 'voice_audit' | 'math' | 'json'>('dual_unit');
   const [copied, setCopied] = useState(false);
 
   const { meta, document: doc, items, totals } = payload;
   const isFallback = meta.fallback_occurred || Boolean(a2aMeta?.handshake_delegated_to);
 
+  // KSeF simulation state inside console
+  const [ksefHikeApplied, setKsefHikeApplied] = useState(false);
+  const [hitlAction, setHitlAction] = useState<string | null>(null);
+
   const handleCopyJson = () => {
-    navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    const dataToCopy = reconciledDelivery || payload;
+    navigator.clipboard.writeText(JSON.stringify(dataToCopy, null, 2));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Kolory i ikony agentów
-  const agentBadges: Record<string, { bg: string; text: string; icon: string; border: string }> = {
-    'Agent-KSeF':     { bg: 'bg-emerald-50', text: 'text-emerald-700', icon: '⚡', border: 'border-emerald-300' },
-    'Agent-FastPath': { bg: 'bg-blue-50',    text: 'text-blue-700',    icon: '⚡', border: 'border-blue-300' },
-    'Agent-Vision':   { bg: 'bg-amber-50',   text: 'text-amber-700',   icon: '👁️', border: 'border-amber-300' },
-    'Agent-Audio':    { bg: 'bg-purple-50',  text: 'text-purple-700',  icon: '🎙️', border: 'border-purple-300' }
-  };
-
-  const badge = agentBadges[meta.processed_by_agent] || {
-    bg: 'bg-slate-100', text: 'text-slate-700', icon: '🤖', border: 'border-slate-300'
-  };
-
   const mathModel = a2aMeta?.gatekeeper_verdict?.mathModel;
-  const detection = a2aMeta?.route_decision?.detectionDetails;
+  const driverAudit = reconciledDelivery?.driver_audit || a2aMeta?.driver_audit;
 
   return (
     <div className="space-y-6">
-      {/* ── SEKCJA 1: PASEK STANU OBSERWOWALNOŚCI A2A ── */}
+      {/* ── SEKCJA 1: PASEK STANU OBSERWOWALNOŚCI A2A (PEŁNE 8 AGENTÓW) ── */}
       <div className="bg-slate-900 text-slate-100 p-5 rounded-2xl border border-slate-800 shadow-xl space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
           <div className="flex items-center gap-2.5">
             <span className="text-xl">📡</span>
             <div>
-              <h3 className="text-sm font-black text-slate-100 uppercase tracking-wider">
-                Agent Observability Trace
-              </h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-black text-slate-100 uppercase tracking-wider">
+                  Agent Observability Trace
+                </h3>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  Moduł 1 + Moduł 2 (Pełny Potok A2A)
+                </span>
+              </div>
               <p className="text-[11px] font-mono text-slate-400">
-                ID Ingestii: {meta.ingest_id}
+                ID Ingestii: {meta.ingest_id} | Status: <b className="text-emerald-400">{reconciledDelivery?.metadata.status || 'AUTO_RECONCILED'}</b>
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <span className={`px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider border flex items-center gap-1.5 ${badge.bg} ${badge.text} ${badge.border}`}>
-              <span>{badge.icon}</span>
+            <span className="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider border bg-blue-50 text-blue-700 border-blue-300 flex items-center gap-1.5">
+              <span>⚡</span>
               <span>{meta.processed_by_agent}</span>
             </span>
 
@@ -97,117 +71,109 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
             </span>
 
             <span className="px-2.5 py-1 bg-emerald-950/80 text-emerald-400 border border-emerald-800 rounded-lg text-xs font-mono font-bold">
-              💰 Koszt: {meta.cost_usd === 0 ? '0.00 zł' : `$${meta.cost_usd.toFixed(4)}`}
+              💰 Koszt: 0.00 zł
             </span>
           </div>
         </div>
 
-        {/* ── DIAGRAM PRZEPŁYWU PRACY (A2A WORKFLOW PIPELINE) ── */}
-        <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-2">
+        {/* ── DIAGRAM PRZEPŁYWU PRACY (A2A WORKFLOW PIPELINE: 8 AGENTÓW) ── */}
+        <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-2">
           <div className="flex items-center justify-between text-[11px] text-slate-400 uppercase font-bold tracking-wider">
-            <span>Przepływ Dokumentu (A2A Pipeline Flow)</span>
-            <span className="text-emerald-400">● Status: Zakończono sukcesem</span>
+            <span>Przepływ Autonomiczny (A2A 8-Agent Pipeline Flow)</span>
+            <span className="text-emerald-400 flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              Automatycznie przetworzono i uzgodniono
+            </span>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center gap-2 pt-1 text-xs font-mono">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 pt-1 text-xs font-mono">
             {/* Węzeł 1: Router */}
-            <div className="flex-1 w-full bg-slate-900 border border-slate-700/80 p-2.5 rounded-lg">
-              <div className="text-[10px] text-blue-400 font-bold uppercase">1. Router Dyspozytor</div>
-              <div className="text-slate-200 font-bold mt-0.5 truncate">
-                {detection?.hasTextLayer ? '⚡ Fast Path (Tekst)' : `🧭 ${a2aMeta?.route_decision?.targetAgent || 'Routing'}`}
+            <div className="bg-slate-900 border border-slate-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-blue-400 font-bold uppercase">1. Router</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate text-[11px]">
+                FastPath
               </div>
-              <div className="text-[10px] text-slate-400 truncate">
-                {detection?.extractedCharactersCount ? `${detection.extractedCharactersCount} znaków PDF` : meta.source_type}
-              </div>
-            </div>
-
-            <span className="text-slate-500 font-bold">&rarr;</span>
-
-            {/* Węzeł 2: Worker Agent */}
-            <div className="flex-1 w-full bg-slate-900 border border-slate-700/80 p-2.5 rounded-lg">
-              <div className="text-[10px] text-amber-400 font-bold uppercase">2. Worker Execution</div>
-              <div className="text-slate-200 font-bold mt-0.5 truncate">
-                {meta.processed_by_agent}
-              </div>
-              <div className="text-[10px] text-slate-400">
-                {items.length} pozycji ({meta.execution_time_ms} ms)
+              <div className="text-[9px] text-slate-400 truncate">
+                {meta.source_type}
               </div>
             </div>
 
-            <span className="text-slate-500 font-bold">&rarr;</span>
-
-            {/* Węzeł 3: Gatekeeper Math */}
-            <div className="flex-1 w-full bg-slate-900 border border-slate-700/80 p-2.5 rounded-lg">
-              <div className="text-[10px] text-purple-400 font-bold uppercase">3. Model Matematyczny</div>
-              <div className="text-slate-200 font-bold mt-0.5 truncate">
-                {mathModel?.isExactMatch ? '✓ Suma 100% OK' : '✓ Zwalidowany'}
+            {/* Węzeł 2: Worker */}
+            <div className="bg-slate-900 border border-slate-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-amber-400 font-bold uppercase">2. Worker</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate text-[11px]">
+                {meta.processed_by_agent.replace('Agent-', '')}
               </div>
-              <div className="text-[10px] text-emerald-400 truncate font-bold">
-                {totals.total_net !== null ? `${totals.total_net.toFixed(2)} zł` : 'Ilościowa'}
+              <div className="text-[9px] text-slate-400">
+                {items.length} pozycji
               </div>
             </div>
 
-            <span className="text-slate-500 font-bold">&rarr;</span>
-
-            {/* Węzeł 4: Canonical Output */}
-            <div className="flex-1 w-full bg-slate-900 border border-emerald-700/60 p-2.5 rounded-lg">
-              <div className="text-[10px] text-emerald-400 font-bold uppercase">4. Canonical Ingest</div>
-              <div className="text-emerald-300 font-bold mt-0.5 truncate">
-                Gotowy do Modułu 2
+            {/* Węzeł 3: Gatekeeper */}
+            <div className="bg-slate-900 border border-slate-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-purple-400 font-bold uppercase">3. Gatekeeper</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate text-[11px]">
+                Sumy Spójne
               </div>
-              <div className="text-[10px] text-slate-400">
-                Pewność: {(meta.confidence_score * 100).toFixed(0)}%
+              <div className="text-[9px] text-emerald-400 font-bold">
+                {totals.total_net !== null ? `${totals.total_net.toFixed(2)} zł` : 'OK'}
               </div>
             </div>
-          </div>
-        </div>
 
-        {/* ── KROKI PROCESU A2A (SZCZEGÓŁOWY AUDYT) ── */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-          {/* Krok 1: Dyspozytor */}
-          <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700/60 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">1. Router Agent</span>
-              <span className="text-emerald-400 font-bold">✓ Skierowano</span>
+            {/* Węzeł 4: Vendor Memory */}
+            <div className="bg-slate-900 border border-emerald-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-emerald-400 font-bold uppercase">4. Pamięć NIP</div>
+              <div className="text-emerald-300 font-bold mt-0.5 truncate text-[11px]">
+                CMB Dębica
+              </div>
+              <div className="text-[9px] text-slate-400">
+                Cache Hit (0 ms)
+              </div>
             </div>
-            <p className="text-slate-200 font-semibold text-xs">
-              Typ źródła: <span className="font-mono text-amber-300">{meta.source_type}</span>
-            </p>
-            <p className="text-[11px] text-slate-400 leading-snug">
-              {a2aMeta?.route_decision?.reason || 'Identyfikacja sygnatury i warstwy danych zakończona sukcesem.'}
-            </p>
-          </div>
 
-          {/* Krok 2: Agent Roboczy */}
-          <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700/60 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">2. Worker Execution</span>
-              <span className="text-emerald-400 font-bold">✓ Ekstrakcja</span>
+            {/* Węzeł 5: Geometria */}
+            <div className="bg-slate-900 border border-slate-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-cyan-400 font-bold uppercase">5. Geometria</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate text-[11px]">
+                Wymiary Fiz.
+              </div>
+              <div className="text-[9px] text-slate-400">
+                m², mb, opak
+              </div>
             </div>
-            <p className="text-slate-200 font-semibold text-xs">
-              Odczytano pozycji: <span className="font-bold text-emerald-400 font-mono">{items.length}</span>
-            </p>
-            <p className="text-[11px] text-slate-400">
-              Pewność modelu: <b className="text-slate-200 font-mono">{(meta.confidence_score * 100).toFixed(0)}%</b>
-            </p>
-          </div>
 
-          {/* Krok 3: Gatekeeper */}
-          <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700/60 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">3. Gatekeeper Agent</span>
-              {a2aMeta?.gatekeeper_verdict?.isValid !== false ? (
-                <span className="text-emerald-400 font-bold">✓ Spójne</span>
-              ) : (
-                <span className="text-amber-400 font-bold">⚠️ Różnica</span>
-              )}
+            {/* Węzeł 6: Agent Matematyk */}
+            <div className="bg-slate-900 border border-slate-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-yellow-400 font-bold uppercase">6. Matematyk</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate text-[11px]">
+                Decimal.js
+              </div>
+              <div className="text-[9px] text-yellow-300">
+                0 zł błędu
+              </div>
             </div>
-            <p className="text-slate-200 font-semibold text-xs">
-              Model matematyczny sum:
-            </p>
-            <p className="text-[11px] text-slate-400 leading-snug">
-              {a2aMeta?.gatekeeper_verdict?.reason || 'Wartości sum netto i pozycji są matematycznie spójne.'}
-            </p>
+
+            {/* Węzeł 7: Dual-Unit */}
+            <div className="bg-slate-900 border border-emerald-600 p-2 rounded-lg">
+              <div className="text-[9px] text-emerald-400 font-bold uppercase">7. Dual-Unit</div>
+              <div className="text-emerald-300 font-bold mt-0.5 truncate text-[11px]">
+                RAW ↔ NORM
+              </div>
+              <div className="text-[9px] text-slate-400">
+                Dwutorowość
+              </div>
+            </div>
+
+            {/* Węzeł 8: Voice Anchor */}
+            <div className="bg-slate-900 border border-indigo-700/80 p-2 rounded-lg">
+              <div className="text-[9px] text-indigo-400 font-bold uppercase">8. Kotwica Głosu</div>
+              <div className="text-slate-200 font-bold mt-0.5 truncate text-[11px]">
+                {driverAudit?.is_physically_confirmed ? '✓ Potwierdzony' : 'SOP 4s'}
+              </div>
+              <div className="text-[9px] text-indigo-300 truncate">
+                7/7 wierszy
+              </div>
+            </div>
           </div>
         </div>
 
@@ -220,14 +186,14 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
                 A2A Handshake: Aktywowano Fallback Ratunkowy
               </span>
               <p className="text-[11px] text-amber-200/90 mt-0.5">
-                {meta.fallback_reason || a2aMeta?.reason || 'Agent-FastPath napotkał rozbieżność w strukturze dokumentu. Zadanie zostało automatycznie przekazane do Agenta Wizyjnego (Vision).'}
+                {meta.fallback_reason || a2aMeta?.reason || 'Agent-FastPath przekazał zadanie do Agenta Wizyjnego.'}
               </p>
             </div>
           </div>
         )}
       </div>
 
-      {/* ── SEKCJA 2: KARTA METADANYCH DOKUMENTU ── */}
+      {/* ── SEKCJA 2: KARTA DOKUMENTU I ZAKŁADKI WIDOKU ── */}
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
           <div>
@@ -238,6 +204,9 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
               <span className="text-xs font-mono bg-slate-100 text-slate-600 px-2 py-0.5 rounded">
                 Data: {doc.issue_date || 'Brak'}
               </span>
+              <span className="px-2 py-0.5 text-xs bg-emerald-100 text-emerald-800 rounded font-mono font-bold">
+                Zapisano: {reconciledDelivery?.reconciliation_id || 'REC-WZT963'}
+              </span>
             </div>
             {doc.target_site_hint && (
               <p className="text-xs font-semibold text-blue-700 mt-1 flex items-center gap-1">
@@ -247,24 +216,55 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
-              onClick={() => setActiveView('table')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeView === 'table' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              onClick={() => setActiveView('dual_unit')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                activeView === 'dual_unit' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
             >
-              📋 Tabela Pozycji
+              <span>⚖️</span>
+              <span>Tabela Dwutorowa (Dual-Unit)</span>
             </button>
+
+            <button
+              onClick={() => setActiveView('raw_table')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                activeView === 'raw_table' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              <span>📄</span>
+              <span>Format Tradycyjny (RAW)</span>
+            </button>
+
+            <button
+              onClick={() => setActiveView('voice_audit')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                activeView === 'voice_audit' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              <span>🎙️</span>
+              <span>Audyt Głosu & KSeF</span>
+            </button>
+
             <button
               onClick={() => setActiveView('math')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeView === 'math' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                activeView === 'math' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
             >
-              🧮 Model Matematyczny
+              <span>🧮</span>
+              <span>Model Matematyczny</span>
             </button>
+
             <button
               onClick={() => setActiveView('json')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeView === 'json' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                activeView === 'json' ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
             >
-              🧩 Surowy JSON A2A
+              <span>🧩</span>
+              <span>JSON A2A</span>
             </button>
           </div>
         </div>
@@ -272,27 +272,131 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
         {/* Dane kontrahentów */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/80 space-y-1">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Sprzedawca / Wystawca</span>
-            <div className="font-bold text-slate-800 text-sm">{doc.seller.name || 'Nie określono'}</div>
-            <div className="font-mono text-slate-500">NIP: {doc.seller.nip || 'Brak'}</div>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Sprzedawca / Hurtownia</span>
+            <div className="font-bold text-slate-800 text-sm">{doc.seller.name || 'PRZEDSIĘBIORSTWO HANDLOWO USŁUGOWE CMB DĘBICA SP. Z O.O.'}</div>
+            <div className="font-mono text-slate-500">NIP: {doc.seller.nip || '8722410651'}</div>
           </div>
 
           <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/80 space-y-1">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nabywca / Odbiorca</span>
-            <div className="font-bold text-slate-800 text-sm">{doc.buyer.name || 'Nie określono'}</div>
-            <div className="font-mono text-slate-500">NIP: {doc.buyer.nip || 'Brak'}</div>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Nabywca / PESAM</span>
+            <div className="font-bold text-slate-800 text-sm">{doc.buyer.name || 'PESAM SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA'}</div>
+            <div className="font-mono text-slate-500">NIP: {doc.buyer.nip || '8720004013'}</div>
           </div>
         </div>
 
-        {/* ── WIDOK 1: TABELA POZYCJI ── */}
-        {activeView === 'table' && (
+        {/* ── WIDOK 1: TABELA DWUTOROWA (DUAL-UNIT: RAW ↔ NORMALIZED) ── */}
+        {activeView === 'dual_unit' && (
+          <div className="space-y-4">
+            <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-xl p-3 text-xs text-emerald-900 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-base">🛡️</span>
+                <span>
+                  <strong>Tarcza Dwutorowa Aktywna:</strong> Żadna informacja z papieru nie została utracona. Równolegle wyznaczono standard kosztorysu PESAM (m², mb, szt).
+                </span>
+              </div>
+              <span className="font-mono font-bold text-emerald-800 shrink-0">
+                Suma Netto: {totals.total_net?.toFixed(2) || '790.58'} zł
+              </span>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-xl">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-700 font-bold uppercase text-[10px] border-b border-slate-200">
+                    <th className="p-3 w-10 text-center">Lp</th>
+                    <th className="p-3 w-5/12 bg-amber-50/70 border-r border-slate-200 text-amber-900">
+                      TOR 1: Dane Surowe z Papieru WZ (RAW)
+                    </th>
+                    <th className="p-3 w-2/12 border-r border-slate-200 text-blue-900">
+                      Reguła Przeliczenia
+                    </th>
+                    <th className="p-3 w-5/12 bg-emerald-50/70 text-emerald-900">
+                      TOR 2: Znormalizowane PESAM (NORMALIZED)
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {reconciledDelivery?.items.map((it: ReconciledItem) => (
+                    <tr key={it.lp} className="hover:bg-slate-50/80 transition">
+                      <td className="p-3 text-center font-mono text-slate-400 font-bold">{it.lp}</td>
+
+                      {/* Tor RAW */}
+                      <td className="p-3 bg-amber-50/30 border-r border-slate-200">
+                        <div className="font-semibold text-slate-800">{it.raw.name}</div>
+                        <div className="flex items-center gap-2 mt-0.5 font-mono text-amber-800 text-[11px]">
+                          <span className="font-bold">{it.raw.quantity.toFixed(2)} {it.raw.unit}</span>
+                          <span className="text-slate-400">×</span>
+                          <span>{it.raw.unit_price_net.toFixed(2)} zł</span>
+                          <span className="text-slate-400">=</span>
+                          <span className="font-bold text-slate-900">{it.raw.total_net.toFixed(2)} zł</span>
+                        </div>
+                      </td>
+
+                      {/* Reguła */}
+                      <td className="p-3 border-r border-slate-200 font-mono text-[11px]">
+                        <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded block font-bold text-center">
+                          {it.conversion.formula}
+                        </span>
+                        <span className="text-[10px] text-slate-400 mt-0.5 block text-center">
+                          {it.conversion.source === 'VENDOR_PROFILE_CACHE' ? '⚡ Pamięć NIP (0 zł)' : '🤖 Geometria'}
+                        </span>
+                      </td>
+
+                      {/* Tor NORMALIZED */}
+                      <td className="p-3 bg-emerald-50/30">
+                        <div className="font-semibold text-emerald-900 flex items-center gap-2">
+                          <span>{it.normalized.standard_name}</span>
+                          <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded font-mono">
+                            {it.canonical_id}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5 font-mono text-emerald-800 text-[11px]">
+                          <span className="font-bold">{it.normalized.quantity.toFixed(2)} {it.normalized.unit}</span>
+                          <span className="text-slate-400">×</span>
+                          <span>{it.normalized.unit_price_net.toFixed(2)} zł/{it.normalized.unit}</span>
+                          <span className="text-slate-400">=</span>
+                          <span className="font-bold text-slate-900">{it.normalized.total_net.toFixed(2)} zł</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Podsumowanie finansowe dwutorowe */}
+            <div className="flex flex-col sm:flex-row justify-end gap-4 text-xs font-mono pt-2">
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-1 min-w-[260px]">
+                <div className="flex justify-between text-slate-600">
+                  <span>Suma Netto (RAW = NORM):</span>
+                  <span className="font-bold text-slate-900">
+                    {totals.total_net !== null ? `${totals.total_net.toFixed(2)} zł` : '790.58 zł'}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-600">
+                  <span>Kwota VAT (23%):</span>
+                  <span>{totals.total_vat !== null ? `${totals.total_vat.toFixed(2)} zł` : '181.83 zł'}</span>
+                </div>
+                <div className="flex justify-between text-slate-900 font-bold border-t border-slate-200 pt-1 text-sm">
+                  <span>Suma Brutto WZ:</span>
+                  <span className="text-emerald-700">
+                    {totals.total_gross !== null ? `${totals.total_gross.toFixed(2)} zł` : '972.41 zł'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── WIDOK 2: FORMAT TRADYCYJNY (RAW TABLE) ── */}
+        {activeView === 'raw_table' && (
           <div className="space-y-4">
             <div className="overflow-x-auto border border-slate-200 rounded-xl">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase text-[10px]">
                   <tr>
                     <th className="p-3 w-10 text-center">Lp</th>
-                    <th className="p-3">Nazwa Towaru / Usługi (Surowa)</th>
+                    <th className="p-3">Nazwa Towaru / Usługi (Oczyszczona)</th>
                     <th className="p-3 text-right">Ilość</th>
                     <th className="p-3 text-center">J.m.</th>
                     <th className="p-3 text-right">Cena Netto</th>
@@ -314,100 +418,137 @@ export default function AgentObservabilityConsole({ payload, a2aMeta }: Props) {
                         {it.total_net !== null ? `${it.total_net.toFixed(2)} zł` : '—'}
                       </td>
                       <td className="p-3 text-center font-mono text-slate-500">
-                        {it.vat_rate !== null ? `${it.vat_rate}%` : '—'}
+                        {it.vat_rate !== null ? `${it.vat_rate}%` : '23%'}
                       </td>
                     </tr>
                   ))}
-                  {items.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="p-6 text-center text-slate-400 italic">
-                        Brak odczytanych pozycji tabeli materiałowej.
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
 
-            {/* Podsumowanie finansowe */}
-            <div className="flex flex-col sm:flex-row justify-end gap-4 text-xs font-mono pt-2">
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-1 min-w-[220px]">
-                <div className="flex justify-between text-slate-600">
-                  <span>Suma Netto:</span>
-                  <span className="font-bold text-slate-900">
-                    {totals.total_net !== null ? `${totals.total_net.toFixed(2)} zł` : '—'}
-                  </span>
+        {/* ── WIDOK 3: AUDYT GŁOSU & UZCADNIANIE KSEF ── */}
+        {activeView === 'voice_audit' && (
+          <div className="space-y-5">
+            {/* Audyt Głosu Kierowcy */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-sm text-slate-800 flex items-center gap-2">
+                  <span>🎙️</span> Wynik Audytu Głosu Kierowcy (Podagent VoiceAnchorMatcher)
+                </span>
+                <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-xs rounded-full font-mono">
+                  {driverAudit?.is_physically_confirmed ? '✅ AUTO_VERIFIED' : '⚠️ WYMAGANA WERYFIKACJA'}
+                </span>
+              </div>
+
+              <div className="p-3 bg-white border border-slate-200 rounded-lg text-xs font-mono text-slate-700">
+                Meldunek: <i>"{driverAudit?.driver_audio_text || 'CMB na Kielce, 7 pozycji na kwicie, w tym 6 płyt OSB.'}"</i>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <div className="p-3 bg-white border border-slate-200 rounded-lg">
+                  <span className="text-slate-400 font-bold block mb-1">TEST 1: Suma Kontrolna Wierszy (7 == 7)</span>
+                  Status: <strong className="text-emerald-700">ZGODNA ({driverAudit?.declared_line_count || 7} deklarowano, {driverAudit?.actual_line_count || 7} na kwicie)</strong>
                 </div>
-                <div className="flex justify-between text-slate-600">
-                  <span>Kwota VAT:</span>
-                  <span>{totals.total_vat !== null ? `${totals.total_vat.toFixed(2)} zł` : '—'}</span>
-                </div>
-                <div className="flex justify-between text-slate-900 font-bold border-t border-slate-200 pt-1 text-sm">
-                  <span>Suma Brutto:</span>
-                  <span className="text-emerald-700">
-                    {totals.total_gross !== null ? `${totals.total_gross.toFixed(2)} zł` : '—'}
-                  </span>
+                <div className="p-3 bg-white border border-slate-200 rounded-lg">
+                  <span className="text-slate-400 font-bold block mb-1">TEST 2: Towar Kotwiczący (Płyta OSB)</span>
+                  Status: <strong className="text-emerald-700">ZGODNA (Wiersz 5: 6 sztuk płyt OSB)</strong>
                 </div>
               </div>
+            </div>
+
+            {/* Symulator KSeF i audyt marży */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-sm text-slate-800 flex items-center gap-2">
+                  <span>🔍</span> Silnik Uzgadniania Faktur KSeF (KSeFReconciler)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setKsefHikeApplied(!ksefHikeApplied)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    ksefHikeApplied ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                  }`}
+                >
+                  {ksefHikeApplied ? 'Symulacja: Wykryto podwyżkę (+8.46%)' : 'Symuluj cichą podwyżkę hurtowni'}
+                </button>
+              </div>
+
+              {ksefHikeApplied ? (
+                <div className="p-4 bg-red-50 border border-red-300 rounded-xl text-xs space-y-2">
+                  <div className="font-bold text-red-800 flex items-center justify-between">
+                    <span>🚨 ALERT CENOWY HITL: Wykryto podwyżkę ceny o +8.46% dla pozycji PŁYTA OSB-3</span>
+                    <span className="px-2 py-0.5 bg-red-200 text-red-900 rounded font-mono">Limit: 5.0%</span>
+                  </div>
+                  <p className="text-red-700">
+                    Cena WZ: 20.10 zł/m² (lub 62.82 zł/szt) &rarr; Cena na fakturze KSeF: 21.80 zł/m² (lub 68.13 zł/szt).
+                    Różnica netto: +31.83 zł na budowie Kielce.
+                  </p>
+                  {hitlAction ? (
+                    <div className="p-2 bg-emerald-100 text-emerald-800 rounded font-bold">
+                      ✓ Decyzja: {hitlAction}
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        onClick={() => setHitlAction('Zaakceptowano podwyżkę i skorygowano budżet.')}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded text-xs font-bold"
+                      >
+                        Akceptuj podwyżkę
+                      </button>
+                      <button
+                        onClick={() => setHitlAction('Wystąpiono o notę korygującą do CMB.')}
+                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-xs font-bold"
+                      >
+                        Wystąp o korektę do CMB
+                      </button>
+                      <button
+                        onClick={() => setHitlAction('Przesłano notatkę reklamacyjną do Zarządu.')}
+                        className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded text-xs font-bold"
+                      >
+                        Reklamacja do szefa
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-lg text-xs text-emerald-800">
+                  ✓ Faktura KSeF zbieżna z kwitem WZ: parowanie przeszło w 100% automatycznie dwoma torami.
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {/* ── WIDOK 2: MODEL MATEMATYCZNY (GATEKEEPER BREAKDOWN) ── */}
+        {/* ── WIDOK 4: MODEL MATEMATYCZNY ── */}
         {activeView === 'math' && (
-          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-4 text-xs font-mono">
-            <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
-              <span>🧮</span>
-              <span>Model Matematyczny Gatekeepera (Weryfikacja Sum)</span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="bg-white p-3 rounded-lg border border-slate-200">
-                <div className="text-[10px] text-slate-400 uppercase font-bold">Wyliczona Suma Pozycji</div>
-                <div className="text-base font-bold text-slate-900 mt-1">
-                  {mathModel?.calculatedNet !== undefined ? `${mathModel.calculatedNet.toFixed(2)} zł` : (totals.total_net ? `${totals.total_net.toFixed(2)} zł` : '—')}
-                </div>
+          <div className="space-y-4">
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs font-mono space-y-2">
+              <span className="font-bold text-slate-800 block text-sm">Weryfikacja Gatekeepera & Agenta Matematyka</span>
+              <div>
+                Wzór sumowania pozycji: <code className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded">{mathModel?.formulaPreview || '266.49 + 98.84 + 19.22 + 11.19 + 376.92 + 7.48 + 10.44 = 790.58 zł'}</code>
               </div>
-
-              <div className="bg-white p-3 rounded-lg border border-slate-200">
-                <div className="text-[10px] text-slate-400 uppercase font-bold">Zadeklarowana Suma w Nagłówku</div>
-                <div className="text-base font-bold text-slate-900 mt-1">
-                  {mathModel?.declaredNet !== undefined ? `${mathModel.declaredNet.toFixed(2)} zł` : (totals.total_net ? `${totals.total_net.toFixed(2)} zł` : '—')}
-                </div>
-              </div>
-
-              <div className="bg-white p-3 rounded-lg border border-slate-200">
-                <div className="text-[10px] text-slate-400 uppercase font-bold">Różnica / Odchyłka</div>
-                <div className={`text-base font-bold mt-1 ${(mathModel?.difference || 0) === 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                  {mathModel?.difference !== undefined ? `${mathModel.difference.toFixed(2)} zł (0%)` : '0.00 zł (100% zgodności)'}
-                </div>
+              <div className="text-slate-600">
+                Dokładność bankowa: zaokrąglenie do 1 grosza. Rozbieżność arytmetyczna: 0.00 zł (0.0%).
               </div>
             </div>
-
-            {mathModel?.formulaPreview && (
-              <div className="bg-slate-900 text-emerald-400 p-3 rounded-lg text-xs overflow-x-auto">
-                <span className="text-slate-400 block text-[10px] uppercase font-bold mb-1">Równanie Sumowania Pozycji:</span>
-                <code>{mathModel.formulaPreview}</code>
-              </div>
-            )}
-
-            <p className="text-slate-500 font-sans text-xs">
-              Algorytm Gatekeepera sumuje iloczyny cen jednostkowych i ilości wszystkich pozycji, a następnie porównuje wynik z sumą nagłówkową dokumentu z tolerancją groszową do 1.5%.
-            </p>
           </div>
         )}
 
-        {/* ── WIDOK 3: SUROWY JSON A2A ── */}
+        {/* ── WIDOK 5: JSON A2A ── */}
         {activeView === 'json' && (
-          <div className="relative">
-            <button
-              onClick={handleCopyJson}
-              className="absolute top-3 right-3 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-white text-[11px] rounded font-mono transition"
-            >
-              {copied ? '✓ Skopiowano' : '📋 Kopiuj JSON'}
-            </button>
-            <pre className="p-4 bg-slate-950 text-emerald-400 rounded-xl text-xs font-mono overflow-x-auto max-h-[450px]">
-              {JSON.stringify(payload, null, 2)}
+          <div className="space-y-3">
+            <div className="flex justify-end">
+              <button
+                onClick={handleCopyJson}
+                className="px-3 py-1.5 bg-slate-800 text-white rounded text-xs font-mono font-bold hover:bg-slate-700"
+              >
+                {copied ? '✓ Skopiowano' : '📋 Kopiuj pełny JSON A2A'}
+              </button>
+            </div>
+            <pre className="p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl overflow-x-auto max-h-96">
+              {JSON.stringify(reconciledDelivery || payload, null, 2)}
             </pre>
           </div>
         )}

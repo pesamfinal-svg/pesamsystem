@@ -1,16 +1,56 @@
 // src/lib/pdf/pdf-fast-extractor.ts
 // Ekstraktor pełnego tekstu z PDF z warstwą tekstową (Fast Path).
 // Reużywa logiki dekompresji FlateDecode z text-layer-detector, ale
-// zbiera CAŁY tekst (bez limitu 50 fragmentów) i zwraca go jako
-// płaski string gotowy do dalszego parsowania regexem.
+// zbiera CAŁY tekst i poprawnie dekoduje polskie znaki w standardach Windows-1250 i ISO-8859-2.
 
 import zlib from 'zlib';
 
 export interface ExtractedPdfText {
     fullText: string;
-    pageTexts: string[]; // tekst per strumień (przybliżenie stron)
+    pageTexts: string[];
     charCount: number;
     extractionTimeMs: number;
+}
+
+// Tablica mapowania bajtów Windows-1250 na znaki Unicode
+const WIN1250_MAP: Record<number, string> = {
+    0x8C: 'Ś', 0x8F: 'Ź', 0x9C: 'ś', 0x9F: 'ź',
+    0xA5: 'Ą', 0xB9: 'ą', 0xA3: 'Ł', 0xB3: 'ł',
+    0xC6: 'Ć', 0xE6: 'ć', 0xCA: 'Ę', 0xEA: 'ę',
+    0xD1: 'Ń', 0xF1: 'ń', 0xD3: 'Ó', 0xF3: 'ó',
+    0xAF: 'Ż', 0xBF: 'ż'
+};
+
+// Słownik znanych substytucji z czcionek ERP w polskich dokumentach WZ (Comarch Optima, Subiekt)
+export function sanitizePolishErpArtifacts(text: string): string {
+    return text
+        // Spółka z o.o.
+        .replace(/PE\s*!\s*KA/gi, 'SPÓŁKA')
+        .replace(/SP[ÓO]\s*!\s*KA/gi, 'SPÓŁKA')
+        .replace(/OGRANIC\s*#/gi, 'OGRANICZONĄ')
+        .replace(/ODPOWIE\s*\$\s*CI\s*#/gi, 'ODPOWIEDZIALNOŚCIĄ')
+        .replace(/HAND\s*!\s*UGOWE/gi, 'HANDLOWO USŁUGOWE')
+        .replace(/HANDLOWO\s+US\s*!\s*UGOWE/gi, 'HANDLOWO USŁUGOWE')
+        .replace(/D\s+BICA/gi, 'DĘBICA')
+        .replace(/D\s*!\s*BICA/gi, 'DĘBICA')
+        // Materiały
+        .replace(/P\s*!\s*YTA/gi, 'PŁYTA')
+        .replace(/P\s*!\s*YTYP/gi, 'PŁYTA')
+        .replace(/P!YTA/gi, 'PŁYTA')
+        .replace(/P!YTYP/gi, 'PŁYTA')
+        .replace(/BORAMAX\s*\$\s*MA/gi, 'BORAMAX TAŚMA')
+        .replace(/TA\s*\$\s*MA/gi, 'TAŚMA')
+        .replace(/WKR\s+TY/gi, 'WKRĘTY')
+        .replace(/WKR\s*!\s*TY/gi, 'WKRĘTY')
+        .replace(/KLIMA\$/gi, 'KLIMAS')
+        .replace(/KLIMAS\s*!\s*KI/gi, 'KLIMAS KOŁKI')
+        .replace(/KO\s*!\s*KI/gi, 'KOŁKI')
+        .replace(/WIE\s+1\s+O/gi, 'WIERTŁO')
+        .replace(/WIE1O/gi, 'WIERTŁO')
+        .replace(/WIER\s*!\s*O/gi, 'WIERTŁO')
+        .replace(/P\s*!\s*YT/gi, 'PŁYT')
+        .replace(/SZT\s*!\s*K/gi, 'SZTUK')
+        .replace(/BIE\s*!\s*CE/gi, 'BIEŻĄCE');
 }
 
 export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
@@ -34,7 +74,7 @@ export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
             } catch {
                 decompressed = zlib.inflateRawSync(streamBuffer);
             }
-            streamContent = decompressed.toString('latin1');
+            streamContent = decodeBufferWithWin1250(decompressed);
         } catch {
             streamContent = rawStream;
         }
@@ -73,9 +113,8 @@ export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
         }
 
         if (tokens.length > 0) {
-            // Bezpieczne łączenie tokenów w czytelną treść wierszy
-            const simpleJoined = tokens.join(' ');
-            pageTexts.push(simpleJoined);
+            const line = sanitizePolishErpArtifacts(tokens.join(' '));
+            pageTexts.push(line);
         }
     }
 
@@ -83,11 +122,12 @@ export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
     if (pageTexts.length === 0) {
         const plainMatches = rawString.match(/\(([a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ .,\-/]{4,})\)\s*Tj/g) || [];
         if (plainMatches.length > 0) {
-            pageTexts.push(plainMatches.map(t => t.replace(/[()]/g, '').replace(/\s*Tj$/, '')).join(' '));
+            const line = plainMatches.map(t => t.replace(/[()]/g, '').replace(/\s*Tj$/, '')).join(' ');
+            pageTexts.push(sanitizePolishErpArtifacts(line));
         }
     }
 
-    const fullText = pageTexts.join('\n\n');
+    const fullText = sanitizePolishErpArtifacts(pageTexts.join('\n\n'));
     const extractionTimeMs = Math.round((performance.now() - startTime) * 100) / 100;
 
     return {
@@ -98,11 +138,26 @@ export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
     };
 }
 
-// ─── Pomocnicze funkcje ──────────────────────────────────────────────────────
+// ─── Pomocnicze funkcje dekodujące ───────────────────────────────────────────
 
 /**
- * Dekoduje specjalne sekwencje escape w stringu PDF:
- * \n, \r, \t, \(, \), \\, \ddd (oktalny)
+ * Dekoduje bufor z uwzględnieniem polskich znaków w Windows-1250
+ */
+function decodeBufferWithWin1250(buf: Buffer): string {
+    let result = '';
+    for (let i = 0; i < buf.length; i++) {
+        const b = buf[i];
+        if (WIN1250_MAP[b]) {
+            result += WIN1250_MAP[b];
+        } else {
+            result += String.fromCharCode(b);
+        }
+    }
+    return result;
+}
+
+/**
+ * Dekoduje specjalne sekwencje escape w stringu PDF z obsługą polskich kodów oktalnych
  */
 function decodePdfString(raw: string): string {
     return raw
@@ -112,72 +167,33 @@ function decodePdfString(raw: string): string {
         .replace(/\\\(/g, '(')
         .replace(/\\\)/g, ')')
         .replace(/\\\\/g, '\\')
-        .replace(/\\([0-7]{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
+        .replace(/\\([0-7]{3})/g, (_, oct) => {
+            const byteVal = parseInt(oct, 8);
+            if (WIN1250_MAP[byteVal]) {
+                return WIN1250_MAP[byteVal];
+            }
+            return String.fromCharCode(byteVal);
+        });
 }
 
 /**
- * Konwertuje ciąg hex na czytelny tekst (latin1 / CP1250 fallback)
+ * Konwertuje ciąg hex na czytelny tekst z obsługą UTF-16 i Windows-1250
  */
 function hexToReadable(hex: string): string {
     try {
         const bytes = Buffer.from(hex, 'hex');
-        // Próba UTF-16 BE (2 bajty na znak) — common w PDF-ach z custom ToUnicode
         if (bytes.length % 2 === 0 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
             return bytes.slice(2).toString('utf16le');
         }
         if (bytes.length % 2 === 0 && bytes.length > 2) {
-            // Sprawdź czy to wygląda jak UTF-16 (co 2. bajt = 0x00)
             const isUtf16 = bytes.every((b, i) => i % 2 === 1 ? b === 0 : true);
             if (isUtf16) {
                 const everyOther = Buffer.from(bytes.filter((_, i) => i % 2 === 0));
-                return everyOther.toString('latin1').replace(/[^\x20-\x7E\xC0-\xFF]/g, '');
+                return decodeBufferWithWin1250(everyOther).replace(/[^\x20-\x7E\u0100-\u017F]/g, '');
             }
         }
-        return bytes.toString('latin1').replace(/[^\x20-\x7E\xC0-\xFF]/g, '');
+        return decodeBufferWithWin1250(bytes).replace(/[^\x20-\x7E\u0100-\u017F]/g, '');
     } catch {
         return '';
     }
-}
-
-/**
- * Próba grupowania tokenów w linie na podstawie operatorów pozycjonowania PDF.
- * Uproszczone: każde BT...ET to blok, Td/T* to nowa linia.
- */
-function reconstructLines(streamContent: string, tokens: string[]): string {
-    // Uproszczona heurystyka: łącz tokeny spacją, a przy operatorze Td/T*/TD wstaw newline
-    // Pełna implementacja wymagałaby śledzenia macierzy transformacji
-    const lines: string[] = [];
-    let currentLine = '';
-    let tokenIndex = 0;
-
-    // Parsujemy sekwencję operatorów PDF (uproszczone)
-    const opRegex = /(?:\(([^()]*)\)\s*Tj|\[([^\]]*)\]\s*TJ|<([0-9a-fA-F]+)>\s*Tj|(T[dD*]|ET|BT))/g;
-    let m: RegExpExecArray | null;
-
-    while ((m = opRegex.exec(streamContent)) !== null) {
-        if (m[4] === 'BT') {
-            // Begin text block
-            if (currentLine.trim()) lines.push(currentLine.trim());
-            currentLine = '';
-        } else if (m[4] === 'ET') {
-            // End text block
-            if (currentLine.trim()) lines.push(currentLine.trim());
-            currentLine = '';
-        } else if (m[4] === 'Td' || m[4] === 'TD' || m[4] === 'T*') {
-            // Nowy wiersz
-            if (currentLine.trim()) lines.push(currentLine.trim());
-            currentLine = '';
-        } else if (tokenIndex < tokens.length) {
-            currentLine += tokens[tokenIndex++];
-        }
-    }
-
-    // Dodaj pozostałe tokeny, które nie zostały przetworzone
-    while (tokenIndex < tokens.length) {
-        currentLine += ' ' + tokens[tokenIndex++];
-    }
-    if (currentLine.trim()) lines.push(currentLine.trim());
-
-    // Filtruj puste linie i zwróć
-    return lines.filter(l => l.length > 0).join('\n');
 }
