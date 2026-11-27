@@ -3,18 +3,18 @@
 // Endpoint do odczytu i zapisu konfiguracji progów tolerancji i weryfikacji (settings/biuro_matching_policy)
 
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase/config';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { adminDb } from '@/lib/firebase/admin';
 import { BiuroMatchingPolicy, DEFAULT_BIURO_MATCHING_POLICY } from '@/types/biuro/matchingPolicy.types';
 
 export const runtime = 'nodejs';
 
+const POLICY_DOC_PATH = 'settings/biuro_matching_policy';
+
 export async function GET() {
   try {
-    const policyDocRef = doc(db, 'settings', 'biuro_matching_policy');
-    const snapshot = await getDoc(policyDocRef);
+    const snapshot = await adminDb.doc(POLICY_DOC_PATH).get();
 
-    if (snapshot.exists()) {
+    if (snapshot.exists) {
       return NextResponse.json({
         success: true,
         data: snapshot.data() as BiuroMatchingPolicy,
@@ -59,8 +59,7 @@ export async function POST(req: Request) {
       },
     };
 
-    const policyDocRef = doc(db, 'settings', 'biuro_matching_policy');
-    await setDoc(policyDocRef, mergedPolicy, { merge: true });
+    await adminDb.doc(POLICY_DOC_PATH).set(mergedPolicy, { merge: true });
 
     return NextResponse.json({
       success: true,
@@ -69,6 +68,9 @@ export async function POST(req: Request) {
     });
   } catch (err: any) {
     console.error('[API /api/biuro/matching-policy POST] Error:', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: err?.message || 'Błąd zapisu ustawień w Firestore.' },
+      { status: 500 }
+    );
   }
 }

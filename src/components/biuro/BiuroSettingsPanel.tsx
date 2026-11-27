@@ -43,11 +43,15 @@ export default function BiuroSettingsPanel({ onPolicyUpdated }: BiuroSettingsPan
   const handleSavePolicy = async () => {
     setIsSaving(true);
     setSaveMessage(null);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
     try {
       const res = await fetch('/api/biuro/matching-policy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(policy),
+        signal: controller.signal,
       });
 
       const text = await res.text();
@@ -59,18 +63,32 @@ export default function BiuroSettingsPanel({ onPolicyUpdated }: BiuroSettingsPan
       }
 
       if (res.ok && json && json.success) {
+        const updatedPolicy = json.data || policy;
+        setPolicy(updatedPolicy);
         setSaveMessage({ text: '✅ Ustawienia i reguły tolerancji zostały trwale zapisane w Firestore.', type: 'success' });
-        if (onPolicyUpdated) onPolicyUpdated(policy);
+        if (onPolicyUpdated) onPolicyUpdated(updatedPolicy);
       } else {
-        setSaveMessage({ text: '⚠️ Ustawienia zastosowano lokalnie w bieżącej sesji.', type: 'success' });
-        if (onPolicyUpdated) onPolicyUpdated(policy);
+        setSaveMessage({
+          text: `❌ Błąd zapisu ustawień: ${json?.error || res.statusText || 'Nieznany błąd serwera'}`,
+          type: 'error',
+        });
       }
-    } catch {
-      setSaveMessage({ text: '⚠️ Zapisano lokalnie w pamięci RAM.', type: 'success' });
-      if (onPolicyUpdated) onPolicyUpdated(policy);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        setSaveMessage({
+          text: '❌ Przekroczono czas oczekiwania na zapis ustawień (timeout).',
+          type: 'error',
+        });
+      } else {
+        setSaveMessage({
+          text: `❌ Błąd połączenia podczas zapisu: ${err?.message || 'Sprawdź sieć lub logi serwera.'}`,
+          type: 'error',
+        });
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsSaving(false);
-      setTimeout(() => setSaveMessage(null), 4000);
+      setTimeout(() => setSaveMessage(null), 6000);
     }
   };
 
@@ -195,7 +213,13 @@ export default function BiuroSettingsPanel({ onPolicyUpdated }: BiuroSettingsPan
         </div>
 
         {saveMessage && (
-          <div className="p-3 bg-emerald-950/80 border border-emerald-500/50 rounded-xl text-emerald-300 text-xs font-mono flex items-center gap-2">
+          <div
+            className={`p-3 rounded-xl text-xs font-mono flex items-center gap-2 border ${
+              saveMessage.type === 'error'
+                ? 'bg-red-950/80 border-red-500/50 text-red-300'
+                : 'bg-emerald-950/80 border-emerald-500/50 text-emerald-300'
+            }`}
+          >
             <span>{saveMessage.text}</span>
           </div>
         )}
