@@ -1,7 +1,9 @@
 // src/lib/pdf/pdf-fast-extractor.ts
 // Ekstraktor pełnego tekstu z PDF z warstwą tekstową (Fast Path).
-// Reużywa logiki dekompresji FlateDecode z text-layer-detector, ale
-// zbiera CAŁY tekst i poprawnie dekoduje polskie znaki w standardach Windows-1250 i ISO-8859-2.
+// Obsługuje:
+//   - FlateDecode + literalne strumienie tekstowe (Tj / TJ)
+//   - CIDFont z tabelą ToUnicode CMap (<hex> Tj / [<hex>] TJ) — format Comarch ERP Optima
+//   - Kodowanie Windows-1250 / latin1
 
 import zlib from 'zlib';
 
@@ -53,72 +55,130 @@ export function sanitizePolishErpArtifacts(text: string): string {
         .replace(/BIE\s*!\s*CE/gi, 'BIEŻĄCE');
 }
 
+// ─── Parsowanie tablic ToUnicode CMap (format CIDFont z Comarch ERP) ────────
+
+/**
+ * Parsuje blok CMap z formatu PDF begincmap...endcmap.
+ * Zwraca mapę: kod_CID (number) → znak Unicode (string).
+ * Format Comarch ERP Optima: <0036> <0053> oznacza CID 0x36 → Unicode U+0053 ('S')
+ */
+function parseCIDMap(cmapText: string): Map<number, string> {
+    const table = new Map<number, string>();
+    const re = /<([0-9a-fA-F]{4})>\s*<([0-9a-fA-F]{4,8})>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(cmapText)) !== null) {
+        const from = parseInt(m[1], 16);
+        const to = parseInt(m[2], 16);
+        table.set(from, String.fromCodePoint(to));
+    }
+    return table;
+}
+
+/**
+ * Dekoduje ciąg hex 4-bajtowych kodów CID za pomocą podanej mapy ToUnicode.
+ */
+function decodeCIDHex(hex: string, cidMap: Map<number, string>): string {
+    let result = '';
+    for (let i = 0; i + 3 < hex.length; i += 4) {
+        const code = parseInt(hex.slice(i, i + 4), 16);
+        result += cidMap.get(code) ?? '';
+    }
+    return result;
+}
+
 export function extractFullTextFromPdf(buffer: Buffer): ExtractedPdfText {
     const startTime = performance.now();
     const rawString = buffer.toString('binary');
-    const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)[\r\n\s]*endstream/g;
 
-    const pageTexts: string[] = [];
-    let match: RegExpExecArray | null;
+    // ── Faza 1: Wyodrębnij i zdekompresuj wszystkie strumienie ───────────────
+    const streamRegex = /stream[ \t]*\r?\n([\s\S]*?)[\r\n]*endstream/g;
+    const decompressedStreams: string[] = [];
+    let m: RegExpExecArray | null;
 
-    while ((match = streamRegex.exec(rawString)) !== null) {
-        const rawStream = match[1];
-        let streamContent = '';
-
-        // Dekompresja FlateDecode
+    while ((m = streamRegex.exec(rawString)) !== null) {
+        const rawStream = m[1];
         try {
-            const streamBuffer = Buffer.from(rawStream, 'binary');
-            let decompressed: Buffer;
-            try {
-                decompressed = zlib.inflateSync(streamBuffer);
-            } catch {
-                decompressed = zlib.inflateRawSync(streamBuffer);
-            }
-            streamContent = decodeBufferWithWin1250(decompressed);
+            const buf = Buffer.from(rawStream, 'binary');
+            let dec: Buffer;
+            try { dec = zlib.inflateSync(buf); }
+            catch { dec = zlib.inflateRawSync(buf); }
+            decompressedStreams.push(dec.toString('latin1'));
         } catch {
-            streamContent = rawStream;
-        }
-
-        const tokens: string[] = [];
-
-        // 1. Operator (tekst) Tj — string literalny
-        const tjMatches = streamContent.match(/\(([^()]*)\)\s*Tj/g) || [];
-        for (const t of tjMatches) {
-            const text = t.replace(/^\(/, '').replace(/\)\s*Tj$/, '');
-            if (text.trim()) tokens.push(decodePdfString(text));
-        }
-
-        // 2. Operator [(tekst) kern (tekst)] TJ — tablicowy
-        const tjArrayMatches = streamContent.match(/\[([^\]]*)\]\s*TJ/g) || [];
-        for (const t of tjArrayMatches) {
-            const inner = t.match(/\(([^()]*)\)/g) || [];
-            const word = inner.map(s => decodePdfString(s.slice(1, -1))).join('');
-            if (word.trim()) tokens.push(word);
-        }
-
-        // 3. Hex <4142...> Tj
-        const hexTjMatches = streamContent.match(/<([0-9a-fA-F]{2,})>\s*Tj/g) || [];
-        for (const t of hexTjMatches) {
-            const hex = t.replace(/^</, '').replace(/>\s*Tj$/, '');
-            const decoded = hexToReadable(hex);
-            if (decoded.trim()) tokens.push(decoded);
-        }
-
-        // 4. [<hex>] TJ
-        const hexTjArrayMatches = streamContent.match(/\[([^\]]*<[0-9a-fA-F]{4,}>[^\]]*)\]\s*TJ/g) || [];
-        for (const t of hexTjArrayMatches) {
-            const hexParts = t.match(/<([0-9a-fA-F]{2,})>/g) || [];
-            const decoded = hexParts.map(h => hexToReadable(h.slice(1, -1))).join('');
-            if (decoded.trim()) tokens.push(decoded);
-        }
-
-        if (tokens.length > 0) {
-            const line = sanitizePolishErpArtifacts(tokens.join(' '));
-            pageTexts.push(line);
+            decompressedStreams.push(rawStream);
         }
     }
 
-    // Fallback: jeśli nic nie znaleźliśmy przez strumienie, szukamy surowego tekstu
+    // ── Faza 2: Zbierz mapy ToUnicode (CMap) — kluczowe dla CIDFont ──────────
+    // Comarch Optima osadza osobny strumień "begincmap...endcmap" dla każdej czcionki.
+    // Mapa: indeks czcionki FNTn → Map<CID, znak>
+    const cidMaps: Map<number, string>[] = [];
+    for (const s of decompressedStreams) {
+        if (s.includes('begincmap')) {
+            cidMaps.push(parseCIDMap(s));
+        }
+    }
+
+    // ── Faza 3: Wyodrębnij tekst ze strumieni treści (BT…ET) ─────────────────
+    const pageTexts: string[] = [];
+
+    for (const streamContent of decompressedStreams) {
+        if (!streamContent.includes('Tj') && !streamContent.includes('TJ')) continue;
+
+        const tokens: string[] = [];
+
+        // Śledź aktywną czcionkę wewnątrz BT…ET bloków
+        const btBlocks = streamContent.match(/BT[\s\S]*?ET/g) || [streamContent];
+
+        for (const block of btBlocks) {
+            // /FNT0, /FNT1, … — indeks mapy CID
+            const fontMatch = block.match(/\/(FNT(\d+))/);
+            const activeCidMapIdx = fontMatch ? parseInt(fontMatch[2], 10) : 0;
+            const activeCidMap = cidMaps[activeCidMapIdx] ?? new Map<number, string>();
+            const hasCidMap = activeCidMap.size > 0;
+
+            // ── CIDFont: <hex> Tj ─────────────────────────────────────────────
+            const hexTjMatches = block.match(/<([0-9a-fA-F]{4,})>\s*Tj/g) || [];
+            for (const t of hexTjMatches) {
+                const hex = t.replace(/^</, '').replace(/>\s*Tj$/, '');
+                const decoded = hasCidMap ? decodeCIDHex(hex, activeCidMap) : hexToReadable(hex);
+                if (decoded.trim()) tokens.push(decoded);
+            }
+
+            // ── CIDFont: [<hex> kern] TJ ──────────────────────────────────────
+            const hexTjArrayMatches = block.match(/\[([^\]]*<[0-9a-fA-F]{4,}>[^\]]*)\]\s*TJ/g) || [];
+            for (const t of hexTjArrayMatches) {
+                const hexParts = t.match(/<([0-9a-fA-F]{4,})>/g) || [];
+                let decoded = '';
+                for (const hp of hexParts) {
+                    const hex = hp.slice(1, -1);
+                    decoded += hasCidMap ? decodeCIDHex(hex, activeCidMap) : hexToReadable(hex);
+                }
+                if (decoded.trim()) tokens.push(decoded);
+            }
+
+            // ── Literalne stringi (tekst) Tj / [(tekst)] TJ ──────────────────
+            // Tylko gdy brak hex — unika duplikatów w mieszanych blokach
+            if (hexTjMatches.length === 0 && hexTjArrayMatches.length === 0) {
+                const tjMatches = block.match(/\(([^()]*)\)\s*Tj/g) || [];
+                for (const t of tjMatches) {
+                    const text = t.replace(/^\(/, '').replace(/\)\s*Tj$/, '');
+                    if (text.trim()) tokens.push(decodePdfString(text));
+                }
+                const tjArrayMatches = block.match(/\[([^\]]*)\]\s*TJ/g) || [];
+                for (const t of tjArrayMatches) {
+                    const inner = t.match(/\(([^()]*)\)/g) || [];
+                    const word = inner.map(s => decodePdfString(s.slice(1, -1))).join('');
+                    if (word.trim()) tokens.push(word);
+                }
+            }
+        }
+
+        if (tokens.length > 0) {
+            pageTexts.push(sanitizePolishErpArtifacts(tokens.join(' ')));
+        }
+    }
+
+    // ── Fallback: surowy tekst bez kompresji (starsze ERP-y, PDFy bez FlateDecode) ──
     if (pageTexts.length === 0) {
         const plainMatches = rawString.match(/\(([a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ .,\-/]{4,})\)\s*Tj/g) || [];
         if (plainMatches.length > 0) {

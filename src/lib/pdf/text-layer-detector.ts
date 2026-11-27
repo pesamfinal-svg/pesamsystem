@@ -173,16 +173,16 @@ export function detectDocumentTextLayer(
                 }
             }
 
-            // Obsługa hex-encoded text: <4142...> Tj lub [<4142>] TJ (custom encoding/ToUnicode)
+        // Obsługa hex-encoded text: <4142...> Tj lub [<4142>] TJ (custom encoding/ToUnicode)
+            // WAŻNE: dla CIDFont z Comarch ERP format to 2-bajtowe kody CID (<0036> = 'S' etc.)
+            // Zamiast dekodować tu mapę, wystarczy policzyć bajty hex jako znaki (1 token hex = 1+ znaki)
             const hexMatchTj = streamContent.match(/<([0-9a-fA-F]{4,})>\s*Tj/g);
             if (hexMatchTj) {
                 for (const t of hexMatchTj) {
                     const hex = t.replace(/^</, '').replace(/>\s*Tj$/, '');
-                    try {
-                        const decoded = Buffer.from(hex, 'hex').toString('latin1');
-                        const printable = decoded.replace(/[^\x20-\x7E]/g, '');
-                        if (printable.trim().length > 1) extractedTexts.push(printable.trim());
-                    } catch { /* ignoruj błędy dekodowania */ }
+                    // Każde 4 hex znaki = 1 kod CID = 1 znak Unicode; dodajemy symbol zastępczy
+                    const charCount = Math.floor(hex.length / 4);
+                    extractedTexts.push('X'.repeat(Math.max(1, charCount)));
                 }
             }
 
@@ -191,10 +191,11 @@ export function detectDocumentTextLayer(
                 for (const t of hexMatchTJ) {
                     const hexParts = t.match(/<([0-9a-fA-F]{4,})>/g);
                     if (hexParts) {
-                        const decoded = hexParts.map(h => {
-                            try { return Buffer.from(h.slice(1, -1), 'hex').toString('latin1').replace(/[^\x20-\x7E]/g, ''); } catch { return ''; }
-                        }).join('');
-                        if (decoded.trim().length > 1) extractedTexts.push(decoded.trim());
+                        let charCount = 0;
+                        for (const h of hexParts) {
+                            charCount += Math.floor((h.length - 2) / 4);
+                        }
+                        extractedTexts.push('X'.repeat(Math.max(1, charCount)));
                     }
                 }
             }
